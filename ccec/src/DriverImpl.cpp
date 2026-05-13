@@ -46,6 +46,7 @@
 #include "ccec/Exception.hpp"
 #include "DriverImpl.hpp"
 #include "ccec/OpCode.hpp"
+#include "factoryImpl/HDMICecHalFactory.h"
 
 using CCEC_OSAL::AutoLock;
 
@@ -86,6 +87,7 @@ void DriverImpl::DriverTransmitCallback(int handle, void *callbackData, int resu
 
 DriverImpl::DriverImpl() : status(CLOSED), nativeHandle(0)
 {
+	mHal = HDMICecHalFactory::Create();
 	CCEC_LOG( LOG_DEBUG, "Creating DriverImpl done\r\n");
 }
 
@@ -108,22 +110,24 @@ DriverImpl::~DriverImpl()
 void DriverImpl::open(void) noexcept(false)
 {
     {AutoLock lock_(mutex);
+		CCEC_LOG( LOG_INFO, "DriverImpl::open invoked\r\n");
 		if (status != CLOSED) {
 			#if 0
 				throw InvalidStateException();
 			#else
+				CCEC_LOG( LOG_INFO, "DriverImpl::open skipped as driver is not CLOSED (status=%d)\r\n", status);
 				return;
 			#endif
 		}
 
-		int err = HdmiCecOpen(&nativeHandle);
+		int err = mHal->open(&nativeHandle, DriverReceiveCallback, DriverTransmitCallback, 0);
+		CCEC_LOG( LOG_INFO, "DriverImpl::open mHal->open returned %d, handle=%d\r\n", err, nativeHandle);
 		if (err !=  HDMI_CEC_IO_SUCCESS) {
 			throw IOException();
 		}
 
-		HdmiCecSetRxCallback(nativeHandle, DriverReceiveCallback, 0);
-		HdmiCecSetTxCallback(nativeHandle, DriverTransmitCallback, 0);
 		status = OPENED;
+		CCEC_LOG( LOG_INFO, "DriverImpl::open completed successfully\r\n");
     }
 }
 
@@ -145,6 +149,7 @@ void  DriverImpl::close(void) noexcept(false)
 
 		int err = HdmiCecClose(nativeHandle);
 		if (err != HDMI_CEC_IO_SUCCESS) {
+            status = CLOSED;
 			throw IOException();
 		}
 
@@ -314,7 +319,6 @@ void DriverImpl::getPhysicalAddress(unsigned int *physicalAddress)
 
 void DriverImpl::removeLogicalAddress(const LogicalAddress &source)
 {
-//	int LA[15] = {0};
     {AutoLock lock_(mutex);
 		if (status != OPENED) {
 			throw InvalidStateException();
@@ -403,7 +407,7 @@ void  DriverImpl::printFrameDetails(const CECFrame &frame)  noexcept(false) {
 	try{
 		frame.getBuffer(&buf, &len);
 		Header header(frame,HEADER_OFFSET);
-		for (int i = 0; i < len; i++) {
+		for (size_t i = 0; i < len; i++) {
 			snprintf(strBuffer + strlen(strBuffer) , (sizeof(strBuffer) - strlen(strBuffer)) ,"%02X ",(uint8_t) *(buf + i));
 		}
 		if (frame.length() > OPCODE_OFFSET) {
@@ -422,3 +426,4 @@ CCEC_END_NAMESPACE
 
 /** @} */
 /** @} */
+

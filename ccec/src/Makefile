@@ -30,11 +30,15 @@ OBJS:= CECFrame.o \
 	LibCCEC.o \
 	OpCode.o \
 	Util.o \
+	factoryImpl/HDMICecHalFactory.o \
+	factoryImpl/vHAL.o \
+	factoryImpl/AidlHAL.o \
 
 INCLUDE = -I.\
 	-I../include	\
 	-I../../osal/include	\
 	-I../drivers/include	\
+	-IfactoryImpl	\
 
 
 CFLAGS+= $(INCLUDE)
@@ -59,3 +63,4 @@ library: $(OBJS)
 clean:
 	@echo "Cleaning the directory..."
 	@$(RM) $(OBJS) install
+
