@@ -144,21 +144,22 @@ android::sp<com::rdk::hal::hdmicec::IHdmiCec> DriverImpl::getAidlService()
 
 void DriverImpl::initAidlService()
 {
+	printf("------- Initializing AIDL HdmiCec service connection ------\r\n");
     // Initialize binder process state if not already done
     android::ProcessState::self()->startThreadPool();
     
     // Get the AIDL service
     sp<android::IServiceManager> sm = defaultServiceManager();
     if (sm != nullptr) {
-
+		printf("Successfully obtained service manager\r\n");
 		// List the available AIDL services
 	    android::Vector<android::String16> services = sm->listServices();
-		CCEC_LOG(LOG_DEBUG, "ServiceManager reports %zu services:\r\n", services.size());
+		printf("ServiceManager reports %zu services\n", services.size());
 
 		for (size_t i = 0; i < services.size(); ++i) {
-        	android::String8 svcName(services[i]);
-        	CCEC_LOG(LOG_DEBUG, "  [%zu] %s\r\n", i, svcName.string());
-    	}
+			android::String8 svcName(services[i]);
+			printf(" [%zu] %s\n", i, svcName.string());
+		}
 
         mAidlService = interface_cast<IHdmiCec>(
             sm->getService(String16(IHdmiCec::serviceName().c_str())));
