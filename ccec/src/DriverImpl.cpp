@@ -51,6 +51,7 @@
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
 #include <utils/String16.h>
+#include <utils/String8.h>
 #include <com/rdk/hal/hdmicec/IHdmiCec.h>
 #include <com/rdk/hal/hdmicec/IHdmiCecController.h>
 #include <com/rdk/hal/hdmicec/IHdmiCecEventListener.h>
@@ -61,6 +62,7 @@
 using CCEC_OSAL::AutoLock;
 using android::sp;
 using android::String16;
+using android::String8;
 using android::defaultServiceManager;
 using android::interface_cast;
 using namespace com::rdk::hal::hdmicec;
@@ -148,6 +150,16 @@ void DriverImpl::initAidlService()
     // Get the AIDL service
     sp<android::IServiceManager> sm = defaultServiceManager();
     if (sm != nullptr) {
+
+		// List the available AIDL services
+	    android::Vector<android::String16> services = sm->listServices();
+		CCEC_LOG(LOG_DEBUG, "ServiceManager reports %zu services:\r\n", services.size());
+
+		for (size_t i = 0; i < services.size(); ++i) {
+        	android::String8 svcName(services[i]);
+        	CCEC_LOG(LOG_DEBUG, "  [%zu] %s\r\n", i, svcName.string());
+    	}
+
         mAidlService = interface_cast<IHdmiCec>(
             sm->getService(String16(IHdmiCec::serviceName().c_str())));
         if (mAidlService == nullptr) {
