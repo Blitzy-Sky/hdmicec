@@ -144,41 +144,32 @@ android::sp<com::rdk::hal::hdmicec::IHdmiCec> DriverImpl::getAidlService()
 
 void DriverImpl::initAidlService()
 {
-	setvbuf(stdout, nullptr, _IONBF, 0); // unbuffered stdout
-	printf("------- Initializing AIDL HdmiCec service connection ------\r\n");
+	printf("------- Initializing AIDL HdmiCec service connection ------\n");
     // Initialize binder process state if not already done
     android::ProcessState::self()->startThreadPool();
     
     // Get the AIDL service
     sp<android::IServiceManager> sm = defaultServiceManager();
     if (sm != nullptr) {
-		print("--------------------1------------------\r\n");
-		printf("Successfully obtained service manager\r\n");
+		printf("Successfully obtained service manager\n");
 		// List the available AIDL services
 	    android::Vector<android::String16> services = sm->listServices();
-		print("--------------------2------------------\r\n");
 		printf("ServiceManager reports %zu services\n", services.size());
-		print("--------------------3------------------\r\n");
-		fflush(stdout);
-		printf("Fetching svcNames from ServiceManager....\n");
+
 		for (size_t i = 0; i < services.size(); ++i) {
 			android::String8 svcName(services[i]);
 			printf(" [%zu] %s\n", i, svcName.string());
-			fflush(stdout);
 		}
 
         mAidlService = interface_cast<IHdmiCec>(
             sm->getService(String16(IHdmiCec::serviceName().c_str())));
         if (mAidlService == nullptr) {
-			print("--------------------4------------------\r\n");
-            CCEC_LOG(LOG_EXP, "Failed to get AIDL HdmiCec service\r\n");
+            CCEC_LOG(LOG_EXP, "Failed to get AIDL HdmiCec service\n");
             throw IOException();
         }
-        CCEC_LOG(LOG_DEBUG, "Successfully obtained AIDL HdmiCec service\r\n");
-		print("--------------------5------------------\r\n");
+        CCEC_LOG(LOG_DEBUG, "Successfully obtained AIDL HdmiCec service\n");
     } else {
-        CCEC_LOG(LOG_EXP, "Failed to get service manager\r\n");
-		print("--------------------6------------------\r\n");
+        CCEC_LOG(LOG_EXP, "Failed to get service manager\n");
         throw IOException();
     }
 }
@@ -602,4 +593,3 @@ CCEC_END_NAMESPACE
 
 /** @} */
 /** @} */
-
