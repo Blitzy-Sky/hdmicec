@@ -189,8 +189,6 @@ void MessageDecoder::decode(const CECFrame &in_)
     }
     catch(InvalidParamException &e)
     {
-	char buffer[128];
-        snprintf(buffer, 128, "MessageDecoder::decode caught %s", e.what());
         t2_event_d("SYST_ERR_CECBusEx",1);
         CCEC_LOG( LOG_EXP, "MessageDecoder::decode caught %s \r\n",e.what());
     }

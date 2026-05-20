@@ -341,8 +341,6 @@ void Bus::send(const CECFrame &frame, int timeout)
 			catch (Exception &e){
 				if( frame.length() > 1)
 				{
-					char buffer[128]={0};
-					snprintf(buffer, 128, "Bus::send exp caught [%s] ", e.what());
 					t2_event_d("HDMI_WARN_CEC_InvalidParamExcptn",1);
 					CCEC_LOG( LOG_EXP, "Bus::send exp caught [%s] \r\n", e.what());
 				}
