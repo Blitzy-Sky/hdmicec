@@ -20,6 +20,8 @@ RM          := rm -rf
 CFLAGS      := -g -fPIC -D_REENTRANT -Wall
 LIBNAME     := RCEC
 LIBNAMEFULL := lib$(LIBNAME).so
+VHAL_LIBNAMEFULL := libvHAL.so
+AIDLHAL_LIBNAMEFULL := libAidlHAL.so
 
 OBJS:= CECFrame.o \
 	Connection.o \
@@ -30,11 +32,39 @@ OBJS:= CECFrame.o \
 	LibCCEC.o \
 	OpCode.o \
 	Util.o \
+	factoryImpl/HDMICecHalFactory.o \
+
+VHAL_OBJ := factoryImpl/vHAL.o
+AIDLHAL_OBJ := factoryImpl/AidlHAL.o
+
+# Calculate AIDL include path relative to workspace
+AIDL_GEN_DIR := $(shell cd ../../.. && pwd)/aidl/rdk-halif-aidl/gen/hdmicec/current
+AIDL_H_DIR := $(AIDL_GEN_DIR)/h
+BINDER_IDL_DIR := $(shell cd ../../.. && pwd)/aidl/rdk-halif-aidl/build-tools/linux_binder_idl
+BINDER_INCLUDE := $(BINDER_IDL_DIR)/android/native/libs/binder/include
+BINDER_NDK_INCLUDE := $(BINDER_IDL_DIR)/android/native/libs/binder/ndk/include_cpp
+BINDER_UTILS_INCLUDE := $(BINDER_IDL_DIR)/android/core/libutils/include
+BINDER_CUTILS_INCLUDE := $(BINDER_IDL_DIR)/android/core/libcutils/include
+BINDER_LOG_INCLUDE := $(BINDER_IDL_DIR)/android/logging/liblog/include
+BINDER_BASE_INCLUDE := $(BINDER_IDL_DIR)/android/libbase/include
+BINDER_BUILD_DIR := $(BINDER_IDL_DIR)/aidl-generator/out
+
+# Calculate include directory path explicitly
+CCEC_INCLUDE_DIR := $(shell cd .. && pwd)/include
 
 INCLUDE = -I.\
-	-I../include	\
+	-I$(CCEC_INCLUDE_DIR)	\
 	-I../../osal/include	\
 	-I../drivers/include	\
+	-IfactoryImpl	\
+	-I$(AIDL_H_DIR)	\
+	-I$(BINDER_INCLUDE)	\
+	-I$(BINDER_NDK_INCLUDE)	\
+	-I$(BINDER_UTILS_INCLUDE)	\
+	-I$(BINDER_CUTILS_INCLUDE)	\
+	-I$(BINDER_LOG_INCLUDE)	\
+	-I$(BINDER_BASE_INCLUDE)	\
+	-I$(BINDER_IDL_DIR)/android/native/include	\
 
 
 CFLAGS+= $(INCLUDE)
@@ -43,14 +73,34 @@ LDFLAGS+= -L$(OPENSOURCE_BASE)/lib
 LDFLAGS+=-L$(GLIB_LIBRARY_PATH)/
 LDFLAGS+=$(GLIBS)
 LDFLAGS += -L. -lpthread
+# Binder libraries - link if they exist
+ifneq ($(wildcard $(BINDER_BUILD_DIR)/libbinder.a),)
+LDFLAGS += -L$(BINDER_BUILD_DIR) -lbinder
+endif
+ifneq ($(wildcard $(BINDER_BUILD_DIR)/libutils.a),)
+LDFLAGS += -L$(BINDER_BUILD_DIR) -lutils
+endif
+ifneq ($(wildcard $(BINDER_BUILD_DIR)/liblog.a),)
+LDFLAGS += -L$(BINDER_BUILD_DIR) -llog
+endif
 
 all: clean library
 	@echo "Build Finished...."
 
-library: $(OBJS)
+library: $(VHAL_LIBNAMEFULL) $(AIDLHAL_LIBNAMEFULL) $(OBJS)
 	@echo "Building $(LIBNAMEFULL) ...."
 	mkdir -p install/lib
-	$(CXX) $(OBJS) $(CFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
+	$(CXX) $(OBJS) $(CFLAGS) -Linstall/lib -lvHAL -lAidlHAL $(LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
+
+$(VHAL_LIBNAMEFULL): $(VHAL_OBJ)
+	@echo "Building $(VHAL_LIBNAMEFULL) ...."
+	mkdir -p install/lib
+	$(CXX) $(VHAL_OBJ) $(CFLAGS) $(LDFLAGS) -shared -o install/lib/$(VHAL_LIBNAMEFULL)
+
+$(AIDLHAL_LIBNAMEFULL): $(AIDLHAL_OBJ)
+	@echo "Building $(AIDLHAL_LIBNAMEFULL) ...."
+	mkdir -p install/lib
+	$(CXX) $(AIDLHAL_OBJ) $(CFLAGS) $(LDFLAGS) -shared -o install/lib/$(AIDLHAL_LIBNAMEFULL)
 
 %.o: %.cpp
 	@echo "Building $@ ...."
@@ -58,4 +108,5 @@ library: $(OBJS)
 
 clean:
 	@echo "Cleaning the directory..."
-	@$(RM) $(OBJS) install
+	@$(RM) $(OBJS) $(VHAL_OBJ) $(AIDLHAL_OBJ) install
+
