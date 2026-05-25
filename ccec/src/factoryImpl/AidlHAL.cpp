@@ -24,7 +24,7 @@
 
 #include "ccec/Util.hpp"
 
-//#include "ccec/drivers/hdmi_cec_driver.h"  --not required---
+#include "ccec/drivers/hdmi_cec_driver.h"
 
 using CCEC_OSAL::AutoLock;
 using android::sp;
