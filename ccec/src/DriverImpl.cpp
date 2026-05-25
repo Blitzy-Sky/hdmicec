@@ -46,6 +46,7 @@
 #include "ccec/Exception.hpp"
 #include "DriverImpl.hpp"
 #include "ccec/OpCode.hpp"
+#include "factoryImpl/HDMICecHalFactory.h"
 
 using CCEC_OSAL::AutoLock;
 
@@ -86,6 +87,7 @@ void DriverImpl::DriverTransmitCallback(int handle, void *callbackData, int resu
 
 DriverImpl::DriverImpl() : status(CLOSED), nativeHandle(0)
 {
+	mHal = HDMICecHalFactory::Create();
 	CCEC_LOG( LOG_DEBUG, "Creating DriverImpl done\r\n");
 }
 
@@ -108,22 +110,24 @@ DriverImpl::~DriverImpl()
 void DriverImpl::open(void) noexcept(false)
 {
     {AutoLock lock_(mutex);
+		CCEC_LOG( LOG_INFO, "DriverImpl::open invoked\r\n");
 		if (status != CLOSED) {
 			#if 0
 				throw InvalidStateException();
 			#else
+				CCEC_LOG( LOG_INFO, "DriverImpl::open skipped as driver is not CLOSED (status=%d)\r\n", status);
 				return;
 			#endif
 		}
 
-		int err = HdmiCecOpen(&nativeHandle);
+		int err = mHal->open(&nativeHandle, DriverReceiveCallback, DriverTransmitCallback, 0);
+		CCEC_LOG( LOG_INFO, "DriverImpl::open mHal->open returned %d, handle=%d\r\n", err, nativeHandle);
 		if (err !=  HDMI_CEC_IO_SUCCESS) {
 			throw IOException();
 		}
 
-		HdmiCecSetRxCallback(nativeHandle, DriverReceiveCallback, 0);
-		HdmiCecSetTxCallback(nativeHandle, DriverTransmitCallback, 0);
 		status = OPENED;
+		CCEC_LOG( LOG_INFO, "DriverImpl::open completed successfully\r\n");
     }
 }
 
@@ -423,3 +427,4 @@ CCEC_END_NAMESPACE
 
 /** @} */
 /** @} */
+
