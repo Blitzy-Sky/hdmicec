@@ -19,6 +19,8 @@
 
 #include "vHAL.h"
 
+#include <cstddef>
+
 #include "ccec/drivers/hdmi_cec_driver.h"
 #include "ccec/Util.hpp"
 
@@ -31,7 +33,7 @@ int vHAL::open(int *handle,
 
     int err = ::HdmiCecOpen(handle);
     if (err != HDMI_CEC_IO_SUCCESS) {
-        CCEC_LOG(LOG_ERR, "vHAL::open failed: HdmiCecOpen returned %d\r\n", err);
+        CCEC_LOG(LOG_ERROR, "vHAL::open failed: HdmiCecOpen returned %d\r\n", err);
         return err;
     }
 
