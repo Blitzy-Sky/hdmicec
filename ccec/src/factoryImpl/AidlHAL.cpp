@@ -19,6 +19,7 @@
 
 #include "AidlHAL.h"
 
+#include <cstddef>
 #include <vector>
 
 #include "ccec/Util.hpp"
@@ -52,4 +53,86 @@ public:
 
     android::binder::Status onStateChanged(State /*oldState*/, State /*newState*/) override {
         return android::binder::Status::ok();
+    }
+
+    android::binder::Status onMessageSent(const std::vector<uint8_t>& /*message*/, SendMessageStatus status) override {
+        if (mTxCb) {
+            int result = (status == SendMessageStatus::ACK_STATE_0) ? HDMI_CEC_IO_SENT_AND_ACKD :
+                         (status == SendMessageStatus::ACK_STATE_1) ? HDMI_CEC_IO_SENT_BUT_NOT_ACKD :
+                                                                      HDMI_CEC_IO_SENT_FAILED;
+            mTxCb(0, mCbData, result);
+        }
+        return android::binder::Status::ok();
+    }
+
+private:
+    HdmiCecRxCallback_t mRxCb;
+    HdmiCecTxCallback_t mTxCb;
+    void *mCbData;
+};
+
+AidlHAL::AidlHAL()
+    : mAidlService(nullptr),
+      mAidlController(nullptr),
+      mEventListener(nullptr)
+{
+}
+
+AidlHAL::~AidlHAL()
+{
+    AutoLock lock_(mAidlMutex);
+    mAidlController = nullptr;
+    mAidlService = nullptr;
+    mEventListener = nullptr;
+}
+
+android::sp<IHdmiCec> AidlHAL::getAidlService()
+{
+    AutoLock lock_(mAidlMutex);
+    if (mAidlService == nullptr) {
+        initAidlService();
+    }
+    return mAidlService;
+}
+
+void AidlHAL::initAidlService()
+{
+    android::ProcessState::self()->startThreadPool();
+
+    sp<android::IServiceManager> sm = defaultServiceManager();
+    if (sm != nullptr) {
+        mAidlService = interface_cast<IHdmiCec>(
+            sm->getService(String16(IHdmiCec::serviceName().c_str())));
+    }
+}
+
+int AidlHAL::open(int *handle,
+                   HdmiCecRxCallback_t rxCb,
+                   HdmiCecTxCallback_t txCb,
+                   void *cbData)
+{
+    CCEC_LOG(LOG_INFO, "AidlHAL::open invoked\r\n");
+
+    android::sp<IHdmiCec> service = getAidlService();
+    if (service == nullptr) {
+        CCEC_LOG(LOG_ERROR, "AidlHAL::open failed: IHdmiCec service unavailable\r\n");
+        return HDMI_CEC_IO_GENERAL_ERROR;
+    }
+
+    mEventListener = new AidlHALEventListener(rxCb, txCb, cbData);
+
+    android::sp<IHdmiCecController> controller;
+    android::binder::Status s = service->open(mEventListener, &controller);
+    if (!s.isOk() || controller == nullptr) {
+        CCEC_LOG(LOG_ERROR, "AidlHAL::open failed: service->open status not OK or controller is null\r\n");
+        return HDMI_CEC_IO_GENERAL_ERROR;
+    }
+
+    mAidlController = controller;
+
+    *handle = 1;  /* Dummy handle — AIDL uses controller object, not int handle */
+    CCEC_LOG(LOG_INFO, "AidlHAL::open completed successfully\r\n");
+    return HDMI_CEC_IO_SUCCESS;
+}
+
 
