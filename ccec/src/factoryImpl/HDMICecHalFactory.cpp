@@ -20,7 +20,8 @@
 #include "HDMICecHalFactory.h"
 
 #include "AidlHAL.h"
-#include "vHAL.h"
+
+//#include "vHAL.h"
 
 #include "ccec/Util.hpp"
 
@@ -31,6 +32,7 @@ bool HDMICecHalFactory::isAidlServiceAvailable()
 {
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable invoked\r\n");
 
+    #if 0
     const char *env = std::getenv("HDMICEC_USE_AIDL_HAL");
     if (env == nullptr) {
         CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable env var is not set\r\n");
@@ -38,7 +40,11 @@ bool HDMICecHalFactory::isAidlServiceAvailable()
     }
 
     const bool available = (std::strcmp(env, "true") == 0);
-    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable env var value='%s', available=%d\r\n", env, available);
+    #endif
+
+    // Hard-coding for testing purpose.
+    const bool available = true;
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable, available=%d\r\n", available);
     return available;
 }
 
@@ -51,8 +57,13 @@ std::unique_ptr<HDMICecHal> HDMICecHalFactory::Create()
         return std::make_unique<AidlHAL>();
     }
 
+    #if 0
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory: HDMICEC_USE_AIDL_HAL not set or false — using legacy vHAL\r\n");
     return std::make_unique<vHAL>();
+    #endif
+
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory: fallback path selected — vHAL disabled, using AidlHAL\r\n");
+    return std::make_unique<AidlHAL>();
 }
 
 

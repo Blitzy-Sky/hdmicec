@@ -36,23 +36,39 @@
 
 using CCEC_OSAL::Mutex;
 
+class AidlHALEventListener;
+
 class AidlHAL : public HDMICecHal {
 public:
     AidlHAL();
     ~AidlHAL() override;
 
-    int open(int *handle,
-             HdmiCecRxCallback_t rxCb,
-             HdmiCecTxCallback_t txCb,
-             void *cbData) override;
+    int open(int *handle) override;
+    int close(int handle) override;
+    int addLogicalAddress(int handle, int logicalAddresses) override;
+    int removeLogicalAddress(int handle, int logicalAddresses) override;
+    int getLogicalAddress(int handle, int *logicalAddress) override;
+    int getPhysicalAddress(int handle, unsigned int *physicalAddress) override;
+    int setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data) override;
+    int setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data) override;
+    int tx(int handle, const unsigned char *buf, int len, int *result) override;
+    int txAsync(int handle, const unsigned char *buf, int len) override;
 
 private:
+    friend class AidlHALEventListener;
+
     android::sp<com::rdk::hal::hdmicec::IHdmiCec> getAidlService();
     void initAidlService();
+    void dispatchRx(unsigned char *buf, int len);
+    void dispatchTx(int result);
 
     android::sp<com::rdk::hal::hdmicec::IHdmiCec> mAidlService;
     android::sp<com::rdk::hal::hdmicec::IHdmiCecController> mAidlController;
     android::sp<com::rdk::hal::hdmicec::IHdmiCecEventListener> mEventListener;
+    HdmiCecRxCallback_t mRxCb;
+    HdmiCecTxCallback_t mTxCb;
+    void* mRxCbData;
+    void* mTxCbData;
     mutable Mutex mAidlMutex;
 };
 

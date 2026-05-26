@@ -20,7 +20,6 @@ RM          := rm -rf
 CFLAGS      := -g -fPIC -D_REENTRANT -Wall
 LIBNAME     := RCEC
 LIBNAMEFULL := lib$(LIBNAME).so
-VHAL_LIBNAMEFULL := libvHAL.so
 AIDLHAL_LIBNAMEFULL := libAidlHAL.so
 
 OBJS:= CECFrame.o \
@@ -34,7 +33,6 @@ OBJS:= CECFrame.o \
 	Util.o \
 	factoryImpl/HDMICecHalFactory.o \
 
-VHAL_OBJ := factoryImpl/vHAL.o
 AIDLHAL_OBJ := factoryImpl/AidlHAL.o
 
 # Calculate AIDL include path relative to workspace
@@ -69,38 +67,35 @@ INCLUDE = -I.\
 
 CFLAGS+= $(INCLUDE)
 
-LDFLAGS+= -L$(OPENSOURCE_BASE)/lib
-LDFLAGS+=-L$(GLIB_LIBRARY_PATH)/
-LDFLAGS+=$(GLIBS)
-LDFLAGS += -L. -lpthread
+COMMON_LDFLAGS+= -L$(OPENSOURCE_BASE)/lib
+COMMON_LDFLAGS+=-L$(GLIB_LIBRARY_PATH)/
+COMMON_LDFLAGS+=$(GLIBS)
+COMMON_LDFLAGS += -L. -lpthread
+
+AIDLHAL_LDFLAGS := $(COMMON_LDFLAGS)
 # Binder libraries - link if they exist
 ifneq ($(wildcard $(BINDER_BUILD_DIR)/libbinder.a),)
-LDFLAGS += -L$(BINDER_BUILD_DIR) -lbinder
+AIDLHAL_LDFLAGS += -L$(BINDER_BUILD_DIR) -lbinder
 endif
 ifneq ($(wildcard $(BINDER_BUILD_DIR)/libutils.a),)
-LDFLAGS += -L$(BINDER_BUILD_DIR) -lutils
+AIDLHAL_LDFLAGS += -L$(BINDER_BUILD_DIR) -lutils
 endif
 ifneq ($(wildcard $(BINDER_BUILD_DIR)/liblog.a),)
-LDFLAGS += -L$(BINDER_BUILD_DIR) -llog
+AIDLHAL_LDFLAGS += -L$(BINDER_BUILD_DIR) -llog
 endif
 
 all: clean library
 	@echo "Build Finished...."
 
-library: $(VHAL_LIBNAMEFULL) $(AIDLHAL_LIBNAMEFULL) $(OBJS)
+library: $(AIDLHAL_LIBNAMEFULL) $(OBJS)
 	@echo "Building $(LIBNAMEFULL) ...."
 	mkdir -p install/lib
-	$(CXX) $(OBJS) $(CFLAGS) -Linstall/lib -lvHAL -lAidlHAL $(LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
-
-$(VHAL_LIBNAMEFULL): $(VHAL_OBJ)
-	@echo "Building $(VHAL_LIBNAMEFULL) ...."
-	mkdir -p install/lib
-	$(CXX) $(VHAL_OBJ) $(CFLAGS) $(LDFLAGS) -shared -o install/lib/$(VHAL_LIBNAMEFULL)
+	$(CXX) $(OBJS) $(CFLAGS) -Linstall/lib -lAidlHAL $(COMMON_LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
 
 $(AIDLHAL_LIBNAMEFULL): $(AIDLHAL_OBJ)
 	@echo "Building $(AIDLHAL_LIBNAMEFULL) ...."
 	mkdir -p install/lib
-	$(CXX) $(AIDLHAL_OBJ) $(CFLAGS) $(LDFLAGS) -shared -o install/lib/$(AIDLHAL_LIBNAMEFULL)
+	$(CXX) $(AIDLHAL_OBJ) $(CFLAGS) $(AIDLHAL_LDFLAGS) -shared -o install/lib/$(AIDLHAL_LIBNAMEFULL)
 
 %.o: %.cpp
 	@echo "Building $@ ...."
@@ -108,5 +103,5 @@ $(AIDLHAL_LIBNAMEFULL): $(AIDLHAL_OBJ)
 
 clean:
 	@echo "Cleaning the directory..."
-	@$(RM) $(OBJS) $(VHAL_OBJ) $(AIDLHAL_OBJ) install
+	@$(RM) $(OBJS) $(AIDLHAL_OBJ) install
 

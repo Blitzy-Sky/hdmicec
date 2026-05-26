@@ -19,14 +19,14 @@
 SUBDIRS =
 AM_CXXFLAGS = -pthread -Wall -I${top_srcdir}/osal/include -I${top_srcdir}/ccec/include
 
-lib_LTLIBRARIES = libvHAL.la libAidlHAL.la libRCEC.la
-
+#lib_LTLIBRARIES = libvHAL.la libAidlHAL.la libRCEC.la
+lib_LTLIBRARIES = libAidlHAL.la libRCEC.la
 AM_LDFLAGS = -ltelemetry_msgsender
 
 # vHAL library
-libvHAL_la_SOURCES = factoryImpl/vHAL.cpp
-libvHAL_la_CXXFLAGS = $(AM_CXXFLAGS)
-libvHAL_la_LDFLAGS = -lpthread
+#libvHAL_la_SOURCES = factoryImpl/vHAL.cpp
+#libvHAL_la_CXXFLAGS = $(AM_CXXFLAGS)
+#libvHAL_la_LDFLAGS = -lpthread
 
 # AidlHAL library
 libAidlHAL_la_SOURCES = factoryImpl/AidlHAL.cpp
@@ -46,6 +46,7 @@ libRCEC_la_SOURCES = CECFrame.cpp \
                      factoryImpl/HDMICecHalFactory.cpp
 
 libRCEC_la_LDFLAGS = -lpthread
-libRCEC_la_LIBADD = libvHAL.la libAidlHAL.la -lRCECOSHal -L${top_builddir}/osal/src/.libs
-
+libRCEC_la_DEPENDENCIES = libAidlHAL.la
+#libRCEC_la_LIBADD = libvHAL.la libAidlHAL.la -lRCECOSHal -L${top_builddir}/osal/src/.libs
+libRCEC_la_LIBADD = -L$(builddir)/.libs -lAidlHAL -lRCECOSHal -L${top_builddir}/osal/src/.libs
 
