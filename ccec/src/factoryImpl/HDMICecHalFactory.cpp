@@ -16,7 +16,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
 */
-
 #include "HDMICecHalFactory.h"
 
 #include "AidlHAL.h"
@@ -54,5 +53,4 @@ std::unique_ptr<HDMICecHal> HDMICecHalFactory::Create()
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory: HDMICEC_USE_AIDL_HAL not set or false — using legacy vHAL\r\n");
     return std::make_unique<vHAL>();
 }
-
 

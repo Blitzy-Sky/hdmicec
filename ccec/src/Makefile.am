@@ -49,3 +49,4 @@ libRCEC_la_LDFLAGS = -lpthread
 libRCEC_la_LIBADD = libvHAL.la libAidlHAL.la -lRCECOSHal -L${top_builddir}/osal/src/.libs
 
 
+

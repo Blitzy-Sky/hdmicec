@@ -23,6 +23,7 @@
  * Each function wraps the corresponding HdmiCec* C API from hdmi_cec_driver.h.
  */
 
+#include <cstddef>
 #include "vHAL.h"
 #include "ccec/Util.hpp"
 

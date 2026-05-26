@@ -119,12 +119,14 @@ void DriverImpl::open(void) noexcept(false)
 		}
 
 		int err = mHal->open(&nativeHandle);
+		CCEC_LOG( LOG_INFO, "DriverImpl::open mHal->open returned %d, handle=%d\r\n", err, nativeHandle);
 		if (err !=  HDMI_CEC_IO_SUCCESS) {
 			throw IOException();
 		}
 
 		mHal->setRxCallback(nativeHandle, DriverReceiveCallback, 0);
 		mHal->setTxCallback(nativeHandle, DriverTransmitCallback, 0);
+
 		status = OPENED;
     }
 }
@@ -264,16 +266,16 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 			throw IOException();
 		}
 
-        if (sendResult != HDMI_CEC_IO_SUCCESS) {
-            if ((sendResult == HDMI_CEC_IO_INVALID_HANDLE) ||
-                (sendResult == HDMI_CEC_IO_INVALID_ARGUMENT) || 
-                (sendResult == HDMI_CEC_IO_LOGICALADDRESS_UNAVAILABLE) || 
-                (sendResult == HDMI_CEC_IO_SENT_FAILED) || 
-                (sendResult == HDMI_CEC_IO_GENERAL_ERROR) )
-            {
-                throw IOException();
-            }
-        }
+		if (sendResult != HDMI_CEC_IO_SUCCESS) {
+			if ((sendResult == HDMI_CEC_IO_INVALID_HANDLE) ||
+				(sendResult == HDMI_CEC_IO_INVALID_ARGUMENT) ||
+				(sendResult == HDMI_CEC_IO_LOGICALADDRESS_UNAVAILABLE) ||
+				(sendResult == HDMI_CEC_IO_SENT_FAILED) ||
+				(sendResult == HDMI_CEC_IO_GENERAL_ERROR))
+			{
+				throw IOException();
+			}
+		}
 
 		if (((frame.at(0) & 0x0F) != 0x0F) && sendResult == HDMI_CEC_IO_SENT_BUT_NOT_ACKD) {
 			throw CECNoAckException();
@@ -307,7 +309,7 @@ void DriverImpl::getPhysicalAddress(unsigned int *physicalAddress)
     {AutoLock lock_(mutex);
         CCEC_LOG( LOG_DEBUG, "DriverImpl::getPhysicalAddress called \r\n");
 
-        mHal->getPhysicalAddress(nativeHandle, physicalAddress);
+		mHal->getPhysicalAddress(nativeHandle, physicalAddress);
 
         CCEC_LOG( LOG_DEBUG, "DriverImpl::getPhysicalAddress got physical Address : %x \r\n", *physicalAddress);
         return ;
@@ -317,7 +319,6 @@ void DriverImpl::getPhysicalAddress(unsigned int *physicalAddress)
 
 void DriverImpl::removeLogicalAddress(const LogicalAddress &source)
 {
-//	int LA[15] = {0};
     {AutoLock lock_(mutex);
 		if (status != OPENED) {
 			throw InvalidStateException();
@@ -425,4 +426,5 @@ CCEC_END_NAMESPACE
 
 /** @} */
 /** @} */
+
 
