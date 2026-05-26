@@ -110,24 +110,22 @@ DriverImpl::~DriverImpl()
 void DriverImpl::open(void) noexcept(false)
 {
     {AutoLock lock_(mutex);
-		CCEC_LOG( LOG_INFO, "DriverImpl::open invoked\r\n");
 		if (status != CLOSED) {
 			#if 0
 				throw InvalidStateException();
 			#else
-				CCEC_LOG( LOG_INFO, "DriverImpl::open skipped as driver is not CLOSED (status=%d)\r\n", status);
 				return;
 			#endif
 		}
 
-		int err = mHal->open(&nativeHandle, DriverReceiveCallback, DriverTransmitCallback, 0);
-		CCEC_LOG( LOG_INFO, "DriverImpl::open mHal->open returned %d, handle=%d\r\n", err, nativeHandle);
+		int err = mHal->open(&nativeHandle);
 		if (err !=  HDMI_CEC_IO_SUCCESS) {
 			throw IOException();
 		}
 
+		mHal->setRxCallback(nativeHandle, DriverReceiveCallback, 0);
+		mHal->setTxCallback(nativeHandle, DriverTransmitCallback, 0);
 		status = OPENED;
-		CCEC_LOG( LOG_INFO, "DriverImpl::open completed successfully\r\n");
     }
 }
 
@@ -147,7 +145,7 @@ void  DriverImpl::close(void) noexcept(false)
 		/* Use NULL as sentinel */
 		rQueue.offer(0);
 
-		int err = HdmiCecClose(nativeHandle);
+		int err = mHal->close(nativeHandle);
 		if (err != HDMI_CEC_IO_SUCCESS) {
             status = CLOSED;
 			throw IOException();
@@ -213,7 +211,7 @@ void  DriverImpl::writeAsync(const CECFrame &frame)  noexcept(false)
     	}
 		CCEC_LOG( LOG_DEBUG, "DriverImpl::write to call HdmiCecTxAsync\r\n");
 
-		int err = HdmiCecTxAsync(nativeHandle, buf, length);
+		int err = mHal->txAsync(nativeHandle, buf, length);
 
 		CCEC_LOG( LOG_DEBUG, ">>>>>>> >>>>> >>>> >> >> >\r\n");
 
@@ -252,7 +250,7 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 		int sendResult = HDMI_CEC_IO_SUCCESS;
 		CCEC_LOG( LOG_DEBUG, "DriverImpl::write to call HdmiCecTx\r\n");
 
-		int err = HdmiCecTx(nativeHandle, buf, length, &sendResult);
+		int err = mHal->tx(nativeHandle, buf, length, &sendResult);
 
 		CCEC_LOG( LOG_DEBUG, ">>>>>>> >>>>> >>>> >> >> >\r\n");
 
@@ -297,7 +295,7 @@ int DriverImpl::getLogicalAddress(int devType)
 	int logicalAddress = 0;
 	CCEC_LOG( LOG_DEBUG, "DriverImpl::getLogicalAddress called for devType : %d \r\n", devType);
 
-	HdmiCecGetLogicalAddress(nativeHandle, &logicalAddress);
+	mHal->getLogicalAddress(nativeHandle, &logicalAddress);
 
 	CCEC_LOG( LOG_DEBUG, "DriverImpl::getLogicalAddress got logical Address : %d \r\n", logicalAddress);
 	return logicalAddress;
@@ -309,7 +307,7 @@ void DriverImpl::getPhysicalAddress(unsigned int *physicalAddress)
     {AutoLock lock_(mutex);
         CCEC_LOG( LOG_DEBUG, "DriverImpl::getPhysicalAddress called \r\n");
 
-        HdmiCecGetPhysicalAddress(nativeHandle,physicalAddress);
+        mHal->getPhysicalAddress(nativeHandle, physicalAddress);
 
         CCEC_LOG( LOG_DEBUG, "DriverImpl::getPhysicalAddress got physical Address : %x \r\n", *physicalAddress);
         return ;
@@ -326,7 +324,7 @@ void DriverImpl::removeLogicalAddress(const LogicalAddress &source)
 		}
 
 		logicalAddresses.remove(source);
-		HdmiCecRemoveLogicalAddress(nativeHandle, source.toInt());
+		mHal->removeLogicalAddress(nativeHandle, source.toInt());
     }
 }
 
@@ -338,7 +336,7 @@ bool DriverImpl::addLogicalAddress(const LogicalAddress &source)
 			throw InvalidStateException();
 		}
 
-		int retErr =  HdmiCecAddLogicalAddress(nativeHandle, source.toInt());
+		int retErr = mHal->addLogicalAddress(nativeHandle, source.toInt());
 
 		if (retErr == HDMI_CEC_IO_LOGICALADDRESS_UNAVAILABLE) {
 			throw AddressNotAvailableException();

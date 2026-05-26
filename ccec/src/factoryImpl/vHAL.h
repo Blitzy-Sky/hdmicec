@@ -22,12 +22,73 @@
 
 #include "HDMICecHal.h"
 
+/**
+ * @brief Legacy (C HAL) implementation of HDMICecHal.
+ *
+ * Each override delegates directly to the corresponding HdmiCec* C function
+ * from hdmi_cec_driver.h.
+ */
 class vHAL : public HDMICecHal {
 public:
-    int open(int *handle,
-             HdmiCecRxCallback_t rxCb,
-             HdmiCecTxCallback_t txCb,
-             void *cbData) override;
+    /**
+     * @brief Open the HDMI CEC HAL driver.
+     * Calls HdmiCecOpen().
+     */
+    int open(int *handle) override;
+
+    /**
+     * @brief Close the HDMI CEC HAL driver.
+     * Calls HdmiCecClose().
+     */
+    int close(int handle) override;
+
+    /**
+     * @brief Register the receive callback.
+     * Calls HdmiCecSetRxCallback().
+     */
+    int setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data) override;
+
+    /**
+     * @brief Register the transmit-status callback.
+     * Calls HdmiCecSetTxCallback().
+     */
+    int setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data) override;
+
+    /**
+     * @brief Synchronous CEC transmit.
+     * Calls HdmiCecTx(). The send result is written to *result.
+     */
+    int tx(int handle, const unsigned char *buf, int len, int *result) override;
+
+    /**
+     * @brief Asynchronous CEC transmit.
+     * Calls HdmiCecTxAsync(). Result is delivered via the TxCallback.
+     */
+    int txAsync(int handle, const unsigned char *buf, int len) override;
+
+    /**
+     * @brief Add a logical address.
+     * Calls HdmiCecAddLogicalAddress().
+     */
+    int addLogicalAddress(int handle, int logicalAddress) override;
+
+    /**
+     * @brief Remove a logical address.
+     * Calls HdmiCecRemoveLogicalAddress().
+     */
+    int removeLogicalAddress(int handle, int logicalAddress) override;
+
+    /**
+     * @brief Get the device logical address.
+     * Calls HdmiCecGetLogicalAddress().
+     */
+    int getLogicalAddress(int handle, int *logicalAddress) override;
+
+    /**
+     * @brief Get the device physical address.
+     * Calls HdmiCecGetPhysicalAddress().
+     */
+    int getPhysicalAddress(int handle, unsigned int *physicalAddress) override;
 };
 
 #endif // V_HAL_H
