@@ -20,6 +20,8 @@
 #ifndef AIDL_HAL_H
 #define AIDL_HAL_H
 
+#ifdef ENABLE_AIDL_HAL
+
 #include "HDMICecHal.h"
 
 #include <binder/IServiceManager.h>
@@ -55,6 +57,8 @@ private:
     android::sp<com::rdk::hal::hdmicec::IHdmiCecEventListener> mEventListener;
     mutable Mutex mAidlMutex;
 };
+
+#endif // ENABLE_AIDL_HAL
 
 #endif // AIDL_HAL_H
 

@@ -19,7 +19,9 @@
 
 #include "HDMICecHalFactory.h"
 
+#ifdef ENABLE_AIDL_HAL
 #include "AidlHAL.h"
+#endif
 #include "vHAL.h"
 
 #include "ccec/Util.hpp"
@@ -47,8 +49,12 @@ std::unique_ptr<HDMICecHal> HDMICecHalFactory::Create()
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory::Create invoked\r\n");
 
     if (isAidlServiceAvailable()) {
+#ifdef ENABLE_AIDL_HAL
         CCEC_LOG(LOG_INFO, "HDMICecHalFactory: HDMICEC_USE_AIDL_HAL=true — using AidlHAL\r\n");
         return std::make_unique<AidlHAL>();
+#else
+        CCEC_LOG(LOG_WARN, "HDMICecHalFactory: HDMICEC_USE_AIDL_HAL=true but AIDL not compiled — falling back to vHAL\r\n");
+#endif
     }
 
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory: HDMICEC_USE_AIDL_HAL not set or false — using legacy vHAL\r\n");

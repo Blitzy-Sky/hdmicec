@@ -19,6 +19,8 @@
 
 #include "AidlHAL.h"
 
+#ifdef ENABLE_AIDL_HAL
+
 #include <cstddef>
 #include <vector>
 
@@ -134,5 +136,7 @@ int AidlHAL::open(int *handle,
     CCEC_LOG(LOG_INFO, "AidlHAL::open completed successfully\r\n");
     return HDMI_CEC_IO_SUCCESS;
 }
+
+#endif // ENABLE_AIDL_HAL
 
 
