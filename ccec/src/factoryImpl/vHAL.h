@@ -34,61 +34,61 @@ public:
      * @brief Open the HDMI CEC HAL driver.
      * Calls HdmiCecOpen().
      */
-    HDMI_CEC_STATUS open(int *handle) override;
+    int open(int *handle) override;
 
     /**
      * @brief Close the HDMI CEC HAL driver.
      * Calls HdmiCecClose().
      */
-    HDMI_CEC_STATUS close(int handle) override;
+    int close(int handle) override;
 
     /**
      * @brief Register the receive callback.
      * Calls HdmiCecSetRxCallback().
      */
-    HDMI_CEC_STATUS setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data) override;
+    int setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data) override;
 
     /**
      * @brief Register the transmit-status callback.
      * Calls HdmiCecSetTxCallback().
      */
-    HDMI_CEC_STATUS setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data) override;
+    int setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data) override;
 
     /**
      * @brief Synchronous CEC transmit.
      * Calls HdmiCecTx(). The send result is written to *result.
      */
-    HDMI_CEC_STATUS tx(int handle, const unsigned char *buf, int len, int *result) override;
+    int tx(int handle, const unsigned char *buf, int len, int *result) override;
 
     /**
      * @brief Asynchronous CEC transmit.
      * Calls HdmiCecTxAsync(). Result is delivered via the TxCallback.
      */
-    HDMI_CEC_STATUS txAsync(int handle, const unsigned char *buf, int len) override;
+    int txAsync(int handle, const unsigned char *buf, int len) override;
 
     /**
      * @brief Add a logical address.
      * Calls HdmiCecAddLogicalAddress().
      */
-    HDMI_CEC_STATUS addLogicalAddress(int handle, int logicalAddress) override;
+    int addLogicalAddress(int handle, int logicalAddress) override;
 
     /**
      * @brief Remove a logical address.
      * Calls HdmiCecRemoveLogicalAddress().
      */
-    HDMI_CEC_STATUS removeLogicalAddress(int handle, int logicalAddress) override;
+    int removeLogicalAddress(int handle, int logicalAddress) override;
 
     /**
      * @brief Get the device logical address.
      * Calls HdmiCecGetLogicalAddress().
      */
-    HDMI_CEC_STATUS getLogicalAddress(int handle, int *logicalAddress) override;
+    int getLogicalAddress(int handle, int *logicalAddress) override;
 
     /**
      * @brief Get the device physical address.
      * Calls HdmiCecGetPhysicalAddress().
      */
-    HDMI_CEC_STATUS getPhysicalAddress(int handle, unsigned int *physicalAddress) override;
+    int getPhysicalAddress(int handle, unsigned int *physicalAddress) override;
 };
 
 #endif // V_HAL_H

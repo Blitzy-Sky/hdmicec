@@ -44,7 +44,7 @@ public:
      * @param[out] handle  Receives the driver handle.
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
-    virtual HDMI_CEC_STATUS open(int *handle) = 0;
+    virtual int open(int *handle) = 0;
 
     /**
      * @brief Close the HDMI CEC HAL driver.
@@ -55,7 +55,7 @@ public:
      * @param[in] handle  The driver handle returned by open().
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
-    virtual HDMI_CEC_STATUS close(int handle) = 0;
+    virtual int close(int handle) = 0;
 
     /**
      * @brief Set the receive callback for incoming CEC messages.
@@ -68,7 +68,7 @@ public:
      * @param[in] data    Opaque user data forwarded to cbfunc.
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
-    virtual HDMI_CEC_STATUS setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data) = 0;
+    virtual int setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data) = 0;
 
     /**
      * @brief Set the transmit callback for transmission status notification.
@@ -81,7 +81,7 @@ public:
      * @param[in] data    Opaque user data forwarded to cbfunc.
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
-    virtual HDMI_CEC_STATUS setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data) = 0;
+    virtual int setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data) = 0;
 
     /**
      * @brief Transmit a CEC message synchronously.
@@ -95,7 +95,7 @@ public:
      * @param[out] result  Receives the transmission result code.
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
-    virtual HDMI_CEC_STATUS tx(int handle, const unsigned char *buf, int len, int *result) = 0;
+    virtual int tx(int handle, const unsigned char *buf, int len, int *result) = 0;
 
     /**
      * @brief Transmit a CEC message asynchronously.
@@ -108,7 +108,7 @@ public:
      * @param[in] len     Length of the message in bytes.
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
-    virtual HDMI_CEC_STATUS txAsync(int handle, const unsigned char *buf, int len) = 0;
+    virtual int txAsync(int handle, const unsigned char *buf, int len) = 0;
 
     /**
      * @brief Add a logical address for receiving CEC messages.
@@ -120,7 +120,7 @@ public:
      * @param[in] logicalAddress  Logical address to add (0-15).
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
-    virtual HDMI_CEC_STATUS addLogicalAddress(int handle, int logicalAddress) = 0;
+    virtual int addLogicalAddress(int handle, int logicalAddress) = 0;
 
     /**
      * @brief Remove a previously added logical address.
@@ -132,7 +132,7 @@ public:
      * @param[in] logicalAddress  Logical address to remove (0-15).
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
-    virtual HDMI_CEC_STATUS removeLogicalAddress(int handle, int logicalAddress) = 0;
+    virtual int removeLogicalAddress(int handle, int logicalAddress) = 0;
 
     /**
      * @brief Get the logical address of the device.
@@ -144,7 +144,7 @@ public:
      * @param[out] logicalAddress  Pointer to store the logical address.
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
-    virtual HDMI_CEC_STATUS getLogicalAddress(int handle, int *logicalAddress) = 0;
+    virtual int getLogicalAddress(int handle, int *logicalAddress) = 0;
 
     /**
      * @brief Get the physical address of the device.
@@ -156,7 +156,7 @@ public:
      * @param[out] physicalAddress  Pointer to store the physical address.
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
-    virtual HDMI_CEC_STATUS getPhysicalAddress(int handle, unsigned int *physicalAddress) = 0;
+    virtual int getPhysicalAddress(int handle, unsigned int *physicalAddress) = 0;
 };
 
 #endif // HDMI_CEC_HAL_H

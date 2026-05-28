@@ -30,10 +30,10 @@
  * open
  * Calls HdmiCecOpen() to initialise the driver and obtain a handle.
  * -------------------------------------------------------------------- */
-HDMI_CEC_STATUS vHAL::open(int *handle)
+int vHAL::open(int *handle)
 {
     CCEC_LOG(LOG_INFO, "vHAL::open\r\n");
-    HDMI_CEC_STATUS ret = ::HdmiCecOpen(handle);
+    int ret = ::HdmiCecOpen(handle);
     CCEC_LOG(LOG_DEBUG, "vHAL::open ret=%d handle=%d\r\n", ret, (handle ? *handle : -1));
     return ret;
 }
@@ -42,10 +42,10 @@ HDMI_CEC_STATUS vHAL::open(int *handle)
  * close
  * Calls HdmiCecClose() to release driver resources.
  * -------------------------------------------------------------------- */
-HDMI_CEC_STATUS vHAL::close(int handle)
+int vHAL::close(int handle)
 {
     CCEC_LOG(LOG_INFO, "vHAL::close handle=%d\r\n", handle);
-    HDMI_CEC_STATUS ret = ::HdmiCecClose(handle);
+    int ret = ::HdmiCecClose(handle);
     CCEC_LOG(LOG_DEBUG, "vHAL::close ret=%d\r\n", ret);
     return ret;
 }
@@ -54,10 +54,10 @@ HDMI_CEC_STATUS vHAL::close(int handle)
  * setRxCallback
  * Calls HdmiCecSetRxCallback() to register the incoming-message callback.
  * -------------------------------------------------------------------- */
-HDMI_CEC_STATUS vHAL::setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data)
+int vHAL::setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data)
 {
     CCEC_LOG(LOG_INFO, "vHAL::setRxCallback handle=%d\r\n", handle);
-    HDMI_CEC_STATUS ret = ::HdmiCecSetRxCallback(handle, cbfunc, data);
+    int ret = ::HdmiCecSetRxCallback(handle, cbfunc, data);
     CCEC_LOG(LOG_DEBUG, "vHAL::setRxCallback ret=%d\r\n", ret);
     return ret;
 }
@@ -66,10 +66,10 @@ HDMI_CEC_STATUS vHAL::setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void
  * setTxCallback
  * Calls HdmiCecSetTxCallback() to register the transmit-status callback.
  * -------------------------------------------------------------------- */
-HDMI_CEC_STATUS vHAL::setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data)
+int vHAL::setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data)
 {
     CCEC_LOG(LOG_INFO, "vHAL::setTxCallback handle=%d\r\n", handle);
-    HDMI_CEC_STATUS ret = ::HdmiCecSetTxCallback(handle, cbfunc, data);
+    int ret = ::HdmiCecSetTxCallback(handle, cbfunc, data);
     CCEC_LOG(LOG_DEBUG, "vHAL::setTxCallback ret=%d\r\n", ret);
     return ret;
 }
@@ -78,10 +78,10 @@ HDMI_CEC_STATUS vHAL::setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void
  * tx
  * Calls HdmiCecTx() for a synchronous transmit; blocks until ACK/NACK.
  * -------------------------------------------------------------------- */
-HDMI_CEC_STATUS vHAL::tx(int handle, const unsigned char *buf, int len, int *result)
+int vHAL::tx(int handle, const unsigned char *buf, int len, int *result)
 {
     CCEC_LOG(LOG_INFO, "vHAL::tx handle=%d len=%d\r\n", handle, len);
-    HDMI_CEC_STATUS ret = ::HdmiCecTx(handle, buf, len, result);
+    int ret = ::HdmiCecTx(handle, buf, len, result);
     CCEC_LOG(LOG_DEBUG, "vHAL::tx ret=%d sendResult=%d\r\n", ret, (result ? *result : -1));
     return ret;
 }
@@ -90,10 +90,10 @@ HDMI_CEC_STATUS vHAL::tx(int handle, const unsigned char *buf, int len, int *res
  * txAsync
  * Calls HdmiCecTxAsync() for a fire-and-forget transmit.
  * -------------------------------------------------------------------- */
-HDMI_CEC_STATUS vHAL::txAsync(int handle, const unsigned char *buf, int len)
+int vHAL::txAsync(int handle, const unsigned char *buf, int len)
 {
     CCEC_LOG(LOG_INFO, "vHAL::txAsync handle=%d len=%d\r\n", handle, len);
-    HDMI_CEC_STATUS ret = ::HdmiCecTxAsync(handle, buf, len);
+    int ret = ::HdmiCecTxAsync(handle, buf, len);
     CCEC_LOG(LOG_DEBUG, "vHAL::txAsync ret=%d\r\n", ret);
     return ret;
 }
@@ -102,10 +102,10 @@ HDMI_CEC_STATUS vHAL::txAsync(int handle, const unsigned char *buf, int len)
  * addLogicalAddress
  * Calls HdmiCecAddLogicalAddress() to claim a logical address on the bus.
  * -------------------------------------------------------------------- */
-HDMI_CEC_STATUS vHAL::addLogicalAddress(int handle, int logicalAddress)
+int vHAL::addLogicalAddress(int handle, int logicalAddress)
 {
     CCEC_LOG(LOG_INFO, "vHAL::addLogicalAddress handle=%d addr=%d\r\n", handle, logicalAddress);
-    HDMI_CEC_STATUS ret = ::HdmiCecAddLogicalAddress(handle, logicalAddress);
+    int ret = ::HdmiCecAddLogicalAddress(handle, logicalAddress);
     CCEC_LOG(LOG_DEBUG, "vHAL::addLogicalAddress ret=%d\r\n", ret);
     return ret;
 }
@@ -115,10 +115,10 @@ HDMI_CEC_STATUS vHAL::addLogicalAddress(int handle, int logicalAddress)
  * Calls HdmiCecRemoveLogicalAddress() to release a previously claimed
  * logical address.
  * -------------------------------------------------------------------- */
-HDMI_CEC_STATUS vHAL::removeLogicalAddress(int handle, int logicalAddress)
+int vHAL::removeLogicalAddress(int handle, int logicalAddress)
 {
     CCEC_LOG(LOG_INFO, "vHAL::removeLogicalAddress handle=%d addr=%d\r\n", handle, logicalAddress);
-    HDMI_CEC_STATUS ret = ::HdmiCecRemoveLogicalAddress(handle, logicalAddress);
+    int ret = ::HdmiCecRemoveLogicalAddress(handle, logicalAddress);
     CCEC_LOG(LOG_DEBUG, "vHAL::removeLogicalAddress ret=%d\r\n", ret);
     return ret;
 }
@@ -127,10 +127,10 @@ HDMI_CEC_STATUS vHAL::removeLogicalAddress(int handle, int logicalAddress)
  * getLogicalAddress
  * Calls HdmiCecGetLogicalAddress() to retrieve the current logical address.
  * -------------------------------------------------------------------- */
-HDMI_CEC_STATUS vHAL::getLogicalAddress(int handle, int *logicalAddress)
+int vHAL::getLogicalAddress(int handle, int *logicalAddress)
 {
     CCEC_LOG(LOG_INFO, "vHAL::getLogicalAddress handle=%d\r\n", handle);
-    HDMI_CEC_STATUS ret = ::HdmiCecGetLogicalAddress(handle, logicalAddress);
+    int ret = ::HdmiCecGetLogicalAddress(handle, logicalAddress);
     CCEC_LOG(LOG_DEBUG, "vHAL::getLogicalAddress ret=%d addr=%d\r\n",
              ret, (logicalAddress ? *logicalAddress : -1));
     return ret;
@@ -140,10 +140,10 @@ HDMI_CEC_STATUS vHAL::getLogicalAddress(int handle, int *logicalAddress)
  * getPhysicalAddress
  * Calls HdmiCecGetPhysicalAddress() to retrieve the device physical address.
  * -------------------------------------------------------------------- */
-HDMI_CEC_STATUS vHAL::getPhysicalAddress(int handle, unsigned int *physicalAddress)
+int vHAL::getPhysicalAddress(int handle, unsigned int *physicalAddress)
 {
     CCEC_LOG(LOG_INFO, "vHAL::getPhysicalAddress handle=%d\r\n", handle);
-    HDMI_CEC_STATUS ret = ::HdmiCecGetPhysicalAddress(handle, physicalAddress);
+    int ret = ::HdmiCecGetPhysicalAddress(handle, physicalAddress);
     CCEC_LOG(LOG_DEBUG, "vHAL::getPhysicalAddress ret=%d addr=0x%x\r\n",
              ret, (physicalAddress ? *physicalAddress : 0));
     return ret;
