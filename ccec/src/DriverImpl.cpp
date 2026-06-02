@@ -370,7 +370,7 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 
 	if (length < kAidlMinCecFrameSize) {
 		/* Preserve ping/poll semantics as a no-ack condition on AIDL backend. */
-		CCEC_LOG(LOG_WARN,
+		CCEC_LOG(LOG_DEBUG,
 			"DriverImpl::write blocking unsupported CEC frame length=%zu on AIDL backend. Returning no-ack.\\r\\n",
 			length);
 		throw CECNoAckException();
