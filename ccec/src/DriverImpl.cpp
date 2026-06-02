@@ -100,6 +100,11 @@ private:
     DriverImpl* mDriver;
 };
 
+namespace {
+const size_t kAidlMinCecFrameSize = 2;
+const size_t kAidlMaxCecFrameSize = 16;
+}
+
 size_t write(const unsigned char *buf, size_t len);
 
 void DriverImpl::DriverReceiveCallback(int handle, void *callbackData, unsigned char *buf, int len)
@@ -244,9 +249,9 @@ void  DriverImpl::close(void) noexcept(false)
 			android::sp<IHdmiCec> service = getAidlService();
 			if (service != nullptr) {
 				bool result = false;
-				android::binder::Status status = service->close(mAidlController, &result);
-				if (!status.isOk()) {
-					CCEC_LOG(LOG_EXP, "Failed to close AIDL HdmiCec interface: %s\r\n", status.toString8().c_str());
+				android::binder::Status closeStatus = service->close(mAidlController, &result);
+				if (!closeStatus.isOk()) {
+					CCEC_LOG(LOG_EXP, "Failed to close AIDL HdmiCec interface: %s\r\n", closeStatus.toString8().c_str());
 				}
 			}
 			mAidlController = nullptr;
@@ -254,7 +259,7 @@ void  DriverImpl::close(void) noexcept(false)
 		
 		mEventListener = nullptr;
 		nativeHandle = 0;
-		status = CLOSED;
+		this->status = CLOSED;
 		
 		CCEC_LOG(LOG_DEBUG, "Successfully closed AIDL HdmiCec interface\r\n");
     }
@@ -310,6 +315,14 @@ void  DriverImpl::writeAsync(const CECFrame &frame)  noexcept(false)
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
 
+	if (length < kAidlMinCecFrameSize || length > kAidlMaxCecFrameSize) {
+		/* AIDL sendMessage accepts only 2..16 byte CEC frames. */
+		CCEC_LOG(LOG_WARN,
+			"DriverImpl::writeAsync skipping unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\\r\\n",
+			length);
+		return;
+	}
+
     {AutoLock lock_(mutex);
     	if (status != OPENED) {
     		throw InvalidStateException();
@@ -354,6 +367,21 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
+
+	if (length < kAidlMinCecFrameSize) {
+		/* Preserve ping/poll semantics as a no-ack condition on AIDL backend. */
+		CCEC_LOG(LOG_WARN,
+			"DriverImpl::write blocking unsupported CEC frame length=%zu on AIDL backend. Returning no-ack.\\r\\n",
+			length);
+		throw CECNoAckException();
+	}
+
+	if (length > kAidlMaxCecFrameSize) {
+		CCEC_LOG(LOG_EXP,
+			"DriverImpl::write blocking unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\\r\\n",
+			length);
+		throw IOException();
+	}
 
     {AutoLock lock_(mutex);
     	if (status != OPENED) {
