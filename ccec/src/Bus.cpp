@@ -343,7 +343,7 @@ void Bus::send(const CECFrame &frame, int timeout)
 				{
 					char buffer[128]={0};
 					snprintf(buffer, 128, "Bus::send exp caught [%s] ", e.what());
-					t2_event_s("HDMI_WARN_CEC_InvalidParamExcptn",buffer);
+					t2_event_s("HDMI_WARN_CEC_InvalidParamExcptn_split",buffer);
 					CCEC_LOG( LOG_EXP, "Bus::send exp caught [%s] \r\n", e.what());
 				}
 				throw;
