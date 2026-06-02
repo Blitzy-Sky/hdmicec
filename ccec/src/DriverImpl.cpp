@@ -36,6 +36,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <iostream>
+#include <algorithm>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <stdlib.h>
@@ -368,11 +369,40 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
 
-	if (length < kAidlMinCecFrameSize) {
-		/* Preserve ping/poll semantics as a no-ack condition on AIDL backend. */
+	if (length <= 1) {
+		/*
+		 * Poll frame (header only): emulate ACK based on AIDL logical address table.
+		 * This keeps HdmiCecSource ping-based discovery working on AIDL backend.
+		 */
+		const uint8_t destination = (buf != NULL) ? (buf[0] & 0x0F) : 0xFF;
+		bool addressPresent = false;
+
+		try {
+			android::sp<IHdmiCec> service = getAidlService();
+			if (service != nullptr) {
+				std::vector<int32_t> addresses;
+				android::binder::Status queryStatus = service->getLogicalAddresses(&addresses);
+				if (queryStatus.isOk()) {
+					addressPresent = (std::find(addresses.begin(), addresses.end(), static_cast<int32_t>(destination)) != addresses.end());
+				}
+			}
+		}
+		catch(...) {
+			CCEC_LOG(LOG_WARN,
+				"DriverImpl::write poll-frame address query failed, destination=0x%X. Falling back to no-ack.\\r\\n",
+				destination);
+		}
+
+		if (addressPresent) {
+			CCEC_LOG(LOG_DEBUG,
+				"DriverImpl::write poll-frame destination=0x%X present on AIDL backend. Emulating ack.\\r\\n",
+				destination);
+			return;
+		}
+
 		CCEC_LOG(LOG_DEBUG,
-			"DriverImpl::write blocking unsupported CEC frame length=%zu on AIDL backend. Returning no-ack.\\r\\n",
-			length);
+			"DriverImpl::write poll-frame destination=0x%X not present on AIDL backend. Returning no-ack.\\r\\n",
+			destination);
 		throw CECNoAckException();
 	}
 
@@ -382,7 +412,6 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 			length);
 		throw IOException();
 	}
-
     {AutoLock lock_(mutex);
     	if (status != OPENED) {
     		throw InvalidStateException();
