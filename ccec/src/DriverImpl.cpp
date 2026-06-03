@@ -36,6 +36,8 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <iostream>
+#include <fstream>
+#include <cstdlib>
 #include <algorithm>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -104,6 +106,52 @@ private:
 namespace {
 const size_t kAidlMinCecFrameSize = 2;
 const size_t kAidlMaxCecFrameSize = 16;
+const char* kVdeviceTopologyDump = "/tmp/hdmi_cec_device_list_info.txt";
+
+bool parseLogicalAddressField(const std::string& line, const char* field, int& value)
+{
+    const size_t keyPos = line.find(field);
+    if (keyPos == std::string::npos) {
+        return false;
+    }
+
+    const size_t valueStart = line.find_first_not_of(" \t", keyPos + strlen(field));
+    if (valueStart == std::string::npos) {
+        return false;
+    }
+
+    char* endPtr = nullptr;
+    const long parsed = std::strtol(line.c_str() + valueStart, &endPtr, 10);
+    if (endPtr == (line.c_str() + valueStart)) {
+        return false;
+    }
+
+    value = static_cast<int>(parsed);
+    return true;
+}
+
+bool isPresentInVdeviceTopology(const uint8_t destination)
+{
+    std::ifstream topology(kVdeviceTopologyDump);
+    if (!topology.is_open()) {
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(topology, line)) {
+        int logical1 = -1;
+        if (parseLogicalAddressField(line, "Logical-1:", logical1) && logical1 == static_cast<int>(destination)) {
+            return true;
+        }
+
+        int logical2 = -1;
+        if (parseLogicalAddressField(line, "Logical-2:", logical2) && logical2 == static_cast<int>(destination)) {
+            return true;
+        }
+    }
+
+    return false;
+}
 }
 
 size_t write(const unsigned char *buf, size_t len);
@@ -371,37 +419,21 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 
 	if (length <= 1) {
 		/*
-		 * Poll frame (header only): emulate ACK based on AIDL logical address table.
+		 * Poll frame (header only): emulate ACK based on vdevice topology file.
 		 * This keeps HdmiCecSource ping-based discovery working on AIDL backend.
 		 */
 		const uint8_t destination = (buf != NULL) ? (buf[0] & 0x0F) : 0xFF;
-		bool addressPresent = false;
-
-		try {
-			android::sp<IHdmiCec> service = getAidlService();
-			if (service != nullptr) {
-				std::vector<int32_t> addresses;
-				android::binder::Status queryStatus = service->getLogicalAddresses(&addresses);
-				if (queryStatus.isOk()) {
-					addressPresent = (std::find(addresses.begin(), addresses.end(), static_cast<int32_t>(destination)) != addresses.end());
-				}
-			}
-		}
-		catch(...) {
-			CCEC_LOG(LOG_WARN,
-				"DriverImpl::write poll-frame address query failed, destination=0x%X. Falling back to no-ack.\\r\\n",
-				destination);
-		}
+		const bool addressPresent = (destination <= 0x0E) ? isPresentInVdeviceTopology(destination) : false;
 
 		if (addressPresent) {
 			CCEC_LOG(LOG_DEBUG,
-				"DriverImpl::write poll-frame destination=0x%X present on AIDL backend. Emulating ack.\\r\\n",
+				"DriverImpl::write poll-frame destination=0x%X present in topology. Emulating ack.\\r\\n",
 				destination);
 			return;
 		}
 
 		CCEC_LOG(LOG_DEBUG,
-			"DriverImpl::write poll-frame destination=0x%X not present on AIDL backend. Returning no-ack.\\r\\n",
+			"DriverImpl::write poll-frame destination=0x%X not present in topology. Returning no-ack.\\r\\n",
 			destination);
 		throw CECNoAckException();
 	}
