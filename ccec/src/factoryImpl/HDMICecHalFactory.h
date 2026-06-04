@@ -26,9 +26,10 @@
 class HDMICecHalFactory {
 public:
     static std::unique_ptr<HDMICecHal> Create();
+    static bool isAidlBackendSelected();
+
+private:
     static bool isAidlServiceAvailable();
 };
 
 #endif // HDMI_CEC_HAL_FACTORY_H
-
-
