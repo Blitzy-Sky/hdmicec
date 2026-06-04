@@ -36,9 +36,12 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <iostream>
+#include <cstdlib>
+#include <fstream>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <stdlib.h>
+#include <string>
 
 #include "osal/EventQueue.hpp"
 #include "osal/Exception.hpp"
@@ -53,6 +56,62 @@ using CCEC_OSAL::AutoLock;
 CCEC_BEGIN_NAMESPACE
 
 #include "ccec/drivers/hdmi_cec_driver.h"
+
+namespace {
+const size_t kAidlMinCecFrameSize = 2;
+const size_t kAidlMaxCecFrameSize = 16;
+const char* kVdeviceTopologyDump = "/tmp/hdmi_cec_device_list_info.txt";
+
+bool isAidlBackendSelected()
+{
+	return HDMICecHalFactory::isAidlBackendSelected();
+}
+
+bool parseLogicalAddressField(const std::string& line, const char* field, int& value)
+{
+	const size_t keyPos = line.find(field);
+	if (keyPos == std::string::npos) {
+		return false;
+	}
+
+	const size_t valueStart = line.find_first_not_of(" \t", keyPos + strlen(field));
+	if (valueStart == std::string::npos) {
+		return false;
+	}
+
+	char* endPtr = nullptr;
+	const long parsed = std::strtol(line.c_str() + valueStart, &endPtr, 10);
+	if (endPtr == (line.c_str() + valueStart)) {
+		return false;
+	}
+
+	value = static_cast<int>(parsed);
+	return true;
+}
+
+bool isPresentInVdeviceTopology(const uint8_t destination)
+{
+	std::ifstream topology(kVdeviceTopologyDump);
+	if (!topology.is_open()) {
+		return false;
+	}
+
+	std::string line;
+	while (std::getline(topology, line)) {
+		int logical1 = -1;
+		if (parseLogicalAddressField(line, "Logical-1:", logical1) && logical1 == static_cast<int>(destination)) {
+			return true;
+		}
+
+		int logical2 = -1;
+		if (parseLogicalAddressField(line, "Logical-2:", logical2) && logical2 == static_cast<int>(destination)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+}
 
 size_t write(const unsigned char *buf, size_t len);
 
@@ -110,6 +169,7 @@ DriverImpl::~DriverImpl()
 void DriverImpl::open(void) noexcept(false)
 {
     {AutoLock lock_(mutex);
+		CCEC_LOG( LOG_INFO, "DriverImpl::open invoked\r\n");
 		if (status != CLOSED) {
 			#if 0
 				throw InvalidStateException();
@@ -128,6 +188,7 @@ void DriverImpl::open(void) noexcept(false)
 		mHal->setTxCallback(nativeHandle, DriverTransmitCallback, 0);
 
 		status = OPENED;
+		CCEC_LOG( LOG_INFO, "DriverImpl::open completed successfully\r\n");
     }
 }
 
@@ -207,6 +268,14 @@ void  DriverImpl::writeAsync(const CECFrame &frame)  noexcept(false)
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
 
+	if (isAidlBackendSelected() && (length < kAidlMinCecFrameSize || length > kAidlMaxCecFrameSize)) {
+		/* AIDL sendMessage accepts only 2..16 byte CEC frames. */
+		CCEC_LOG(LOG_WARN,
+			"DriverImpl::writeAsync skipping unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\r\n",
+			length);
+		return;
+	}
+
     {AutoLock lock_(mutex);
     	if (status != OPENED) {
     		throw InvalidStateException();
@@ -244,6 +313,36 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
+
+	if (isAidlBackendSelected()) {
+		if (length <= 1) {
+			/*
+			 * Poll frame (header only): emulate ACK based on vdevice topology file.
+			 * This keeps HdmiCecSource ping-based discovery working on AIDL backend.
+			 */
+			const uint8_t destination = (buf != NULL) ? (buf[0] & 0x0F) : 0xFF;
+			const bool addressPresent = (destination <= 0x0E) ? isPresentInVdeviceTopology(destination) : false;
+
+			if (addressPresent) {
+				CCEC_LOG(LOG_DEBUG,
+					"DriverImpl::write poll-frame destination=0x%X present in topology. Emulating ack.\r\n",
+					destination);
+				return;
+			}
+
+			CCEC_LOG(LOG_DEBUG,
+				"DriverImpl::write poll-frame destination=0x%X not present in topology. Returning no-ack.\r\n",
+				destination);
+			throw CECNoAckException();
+		}
+
+		if (length > kAidlMaxCecFrameSize) {
+			CCEC_LOG(LOG_EXP,
+				"DriverImpl::write blocking unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\r\n",
+				length);
+			throw IOException();
+		}
+	}
 
     {AutoLock lock_(mutex);
     	if (status != OPENED) {
@@ -426,5 +525,4 @@ CCEC_END_NAMESPACE
 
 /** @} */
 /** @} */
-
 
