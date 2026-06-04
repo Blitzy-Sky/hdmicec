@@ -23,22 +23,100 @@
 
 #include "ccec/Util.hpp"
 
+#include <binder/IServiceManager.h>
+#include <com/rdk/hal/hdmicec/IHdmiCec.h>
+#include <utils/String16.h>
+#include <utils/String8.h>
+#include <utils/Vector.h>
+
 #include <cstdlib>
 #include <cstring>
+
+using android::String16;
+using android::String8;
+using android::defaultServiceManager;
+using namespace com::rdk::hal::hdmicec;
+
+static const String16 mServiceManagerName("manager");
+static bool mCachedAidlServiceAvailability = false;
+static bool mIsAidlServiceCached = false;
 
 bool HDMICecHalFactory::isAidlServiceAvailable()
 {
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable invoked\r\n");
 
-    const char *env = std::getenv("HDMICEC_USE_AIDL_HAL");
-    if (env == nullptr) {
-        CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable env var is not set\r\n");
+    if (mIsAidlServiceCached) {
+        return mCachedAidlServiceAvailability;
+    }
+
+    android::sp<android::IServiceManager> serviceManager = defaultServiceManager();
+    if (serviceManager == nullptr) {
+        CCEC_LOG(LOG_ERROR, "HDMICecHalFactory::isAidlServiceAvailable failed: IServiceManager unavailable\r\n");
+        mIsAidlServiceCached = true;
+        mCachedAidlServiceAvailability = false;
         return false;
     }
 
-    const bool available = (std::strcmp(env, "true") == 0);
-    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable env var value='%s', available=%d\r\n", env, available);
-    return available;
+    const String16 expectedServiceName(IHdmiCec::serviceName().c_str());
+    android::Vector<String16> services = serviceManager->listServices();
+    size_t discoveredServiceCount = 0;
+    bool matched = false;
+
+    for (size_t index = 0; index < services.size(); ++index) {
+        if (services[index] != mServiceManagerName) {
+            ++discoveredServiceCount;
+        }
+    }
+
+    if (discoveredServiceCount == 0) {
+        CCEC_LOG(LOG_INFO,
+            "HDMICecHalFactory::isAidlServiceAvailable found no binder services beyond the ServiceManager entry while searching for '%s'\r\n",
+            String8(expectedServiceName).string());
+        mIsAidlServiceCached = true;
+        mCachedAidlServiceAvailability = false;
+        return false;
+    }
+
+    CCEC_LOG(LOG_INFO,
+        "HDMICecHalFactory::isAidlServiceAvailable inspecting %zu registered binder services for '%s'\r\n",
+        discoveredServiceCount, String8(expectedServiceName).string());
+
+    for (size_t index = 0; index < services.size(); ++index) {
+        if (services[index] == mServiceManagerName) {
+            continue;
+        }
+
+        const String8 discoveredServiceName(services[index]);
+        if (services[index] == expectedServiceName) {
+            matched = true;
+        }
+
+        CCEC_LOG(LOG_INFO,
+            "HDMICecHalFactory::isAidlServiceAvailable discovered binder service[%zu]='%s'\r\n",
+            index,
+            discoveredServiceName.string());
+    }
+
+    if (matched) {
+        CCEC_LOG(LOG_INFO,
+            "HDMICecHalFactory::isAidlServiceAvailable found HDMI CEC AIDL service '%s'\r\n",
+            String8(expectedServiceName).string());
+        mIsAidlServiceCached = true;
+        mCachedAidlServiceAvailability = true;
+        return true;
+    }
+
+    CCEC_LOG(LOG_INFO,
+        "HDMICecHalFactory::isAidlServiceAvailable did not find HDMI CEC AIDL service '%s'\r\n",
+        String8(expectedServiceName).string());
+    mIsAidlServiceCached = true;
+    mCachedAidlServiceAvailability = false;
+    return false;
+}
+
+bool HDMICecHalFactory::isAidlBackendSelected()
+{
+    return mCachedAidlServiceAvailability;
 }
 
 std::unique_ptr<HDMICecHal> HDMICecHalFactory::Create()
@@ -46,11 +124,10 @@ std::unique_ptr<HDMICecHal> HDMICecHalFactory::Create()
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory::Create invoked\r\n");
 
     if (isAidlServiceAvailable()) {
-        CCEC_LOG(LOG_INFO, "HDMICecHalFactory: HDMICEC_USE_AIDL_HAL=true — using AidlHAL\r\n");
+        CCEC_LOG(LOG_INFO, "HDMICecHalFactory: Aidl Service is available — using AidlHAL\r\n");
         return std::make_unique<AidlHAL>();
     }
 
-    CCEC_LOG(LOG_INFO, "HDMICecHalFactory: HDMICEC_USE_AIDL_HAL not set or false — using legacy vHAL\r\n");
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory: Aidl Service is not available — using legacy vHAL\r\n");
     return std::make_unique<vHAL>();
 }
-
