@@ -26,9 +26,15 @@
 class HDMICecHalFactory {
 public:
     static std::unique_ptr<HDMICecHal> Create();
-    static bool isAidlBackendSelected();
 
 private:
+    enum class BackendType {
+        UNKNOWN,
+        LEGACY,
+        AIDL
+    };
+
+    static BackendType mBackendType;
     static bool isAidlServiceAvailable();
 };
 

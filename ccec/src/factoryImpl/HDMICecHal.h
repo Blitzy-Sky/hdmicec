@@ -157,6 +157,9 @@ public:
      * @return HDMI_CEC_IO_SUCCESS on success, or an error code.
      */
     virtual int getPhysicalAddress(int handle, unsigned int *physicalAddress) = 0;
+
+    virtual bool skipFrameOfUnsupportedLength(size_t length) = 0;
+    virtual bool emulateAckForPollFrames(const unsigned char *buf, int len) = 0;
 };
 
 #endif // HDMI_CEC_HAL_H

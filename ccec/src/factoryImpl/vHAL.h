@@ -89,6 +89,10 @@ public:
      * Calls HdmiCecGetPhysicalAddress().
      */
     int getPhysicalAddress(int handle, unsigned int *physicalAddress) override;
+
+    bool skipFrameOfUnsupportedLength(size_t length) override;
+
+    bool emulateAckForPollFrames(const unsigned char *buf, int len) override;
 };
 
 #endif // V_HAL_H

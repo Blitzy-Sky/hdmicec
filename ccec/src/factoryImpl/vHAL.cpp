@@ -150,4 +150,12 @@ int vHAL::getPhysicalAddress(int handle, unsigned int *physicalAddress)
     return ret;
 }
 
+bool vHAL::skipFrameOfUnsupportedLength(size_t length) {
+    return false;
+}
 
+bool vHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
+{
+    // No emulation for vHAL
+    return false;
+}
