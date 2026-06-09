@@ -159,7 +159,27 @@ public:
      */
     virtual int getPhysicalAddress(int handle, unsigned int *physicalAddress) = 0;
 
+    /**
+     * @brief Check if a frame of unsupported length should be skipped.
+     *
+     * Legacy: calls HdmiCecSkipFrameOfUnsupportedLength().
+     * AIDL:   queries the binder service.
+     *
+     * @param[in] length  Length of the CEC frame.
+     * @return true if the frame should be skipped, false otherwise.
+     */
     virtual bool skipFrameOfUnsupportedLength(size_t length) = 0;
+
+    /**
+     * @brief Emulate acknowledgment for poll frames.
+     *
+     * Legacy: Ignores this as the legacy HAL does not support emulating ACKs.
+     * AIDL:   Check Vdevice topology to determine emulation required or not
+     *
+     * @param[in] buf  Buffer containing the CEC frame.
+     * @param[in] len  Length of the CEC frame.
+     * @return true if acknowledgment should be emulated, false otherwise.
+     */
     virtual bool emulateAckForPollFrames(const unsigned char *buf, int len) = 0;
 };
 
