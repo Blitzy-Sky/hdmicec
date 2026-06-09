@@ -20,6 +20,10 @@
 #include "AidlHAL.h"
 
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <string>
 #include <vector>
 
 #include "ccec/Util.hpp"
@@ -415,7 +419,7 @@ bool AidlHAL::skipFrameOfUnsupportedLength(size_t length) {
 		CCEC_LOG(LOG_WARN,
 			"DriverImpl::writeAsync skipping unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\r\n",
 			length);
-		return;
+        return true;
 	}
 
     return false;
@@ -423,7 +427,7 @@ bool AidlHAL::skipFrameOfUnsupportedLength(size_t length) {
 
 bool AidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
 {
-    if (length <= 1) {
+    if (len <= 1) {
         /*
             * Poll frame (header only): emulate ACK based on vdevice topology file.
             * This keeps HdmiCecSource ping-based discovery working on AIDL backend.
@@ -444,12 +448,13 @@ bool AidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
         throw CECNoAckException();
     }
 
-    if (length > kAidlMaxCecFrameSize) {
+    if (static_cast<size_t>(len) > kAidlMaxCecFrameSize) {
         CCEC_LOG(LOG_EXP,
             "DriverImpl::write blocking unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\r\n",
-            length);
+            static_cast<size_t>(len));
         throw IOException();
     }
 
     return false;
 }
+

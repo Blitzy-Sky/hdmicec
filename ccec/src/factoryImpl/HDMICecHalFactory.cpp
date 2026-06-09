@@ -33,7 +33,7 @@
 using namespace com::rdk::hal::hdmicec;
 
 static const android::String16 mServiceManagerName("manager");
-static HDMICecHalFactory::BackendType mBackendType = HDMICecHalFactory::BackendType::UNKNOWN;
+HDMICecHalFactory::BackendType HDMICecHalFactory::mBackendType = HDMICecHalFactory::BackendType::UNKNOWN;
 
 bool HDMICecHalFactory::isAidlServiceAvailable()
 {
@@ -116,3 +116,4 @@ std::unique_ptr<HDMICecHal> HDMICecHalFactory::Create()
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory: Aidl Service is not available — using legacy vHAL\r\n");
     return std::make_unique<vHAL>();
 }
+

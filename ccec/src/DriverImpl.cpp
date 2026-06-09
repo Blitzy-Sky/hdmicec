@@ -212,7 +212,7 @@ void  DriverImpl::writeAsync(const CECFrame &frame)  noexcept(false)
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
 
-	if(skipFrameOfUnsupportedLength(length)) {
+	if(mHal->skipFrameOfUnsupportedLength(length)) {
 		return;
 	}
 
@@ -254,7 +254,7 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
 
-	if(emulateAckForPollFrames(buf, length)) {
+	if(mHal->emulateAckForPollFrames(buf, length)) {
 		return;
 	}
 

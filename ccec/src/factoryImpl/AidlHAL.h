@@ -59,7 +59,7 @@ public:
 private:
     const size_t kAidlMinCecFrameSize = 2;
     const size_t kAidlMaxCecFrameSize = 16;
-    constexpr const char* kVdeviceTopologyDump = "/tmp/hdmi_cec_device_list_info.txt";
+    static constexpr const char* kVdeviceTopologyDump = "/tmp/hdmi_cec_device_list_info.txt";
 
     bool parseLogicalAddressField(const std::string& line, const char* field, int& value);
     bool isPresentInVdeviceTopology(const uint8_t destination);
@@ -81,5 +81,4 @@ private:
 };
 
 #endif // AIDL_HAL_H
-
 

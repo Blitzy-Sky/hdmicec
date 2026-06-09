@@ -20,6 +20,7 @@
 #ifndef HDMI_CEC_HAL_H
 #define HDMI_CEC_HAL_H
 
+#include <cstddef>
 #include "ccec/drivers/hdmi_cec_driver.h"
 
 /**
