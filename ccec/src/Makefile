@@ -20,7 +20,7 @@ RM          := rm -rf
 CFLAGS      := -g -fPIC -D_REENTRANT -Wall
 LIBNAME     := RCEC
 LIBNAMEFULL := lib$(LIBNAME).so
-VHAL_LIBNAMEFULL := libvHAL.so
+VHAL_LIBNAMEFULL := librdkvHAL.so
 AIDLHAL_LIBNAMEFULL := libAidlHAL.so
 
 OBJS:= CECFrame.o \
@@ -90,7 +90,7 @@ all: clean library
 library: $(VHAL_LIBNAMEFULL) $(AIDLHAL_LIBNAMEFULL) $(OBJS)
 	@echo "Building $(LIBNAMEFULL) ...."
 	mkdir -p install/lib
-	$(CXX) $(OBJS) $(CFLAGS) -Linstall/lib -lvHAL -lAidlHAL $(LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
+	$(CXX) $(OBJS) $(CFLAGS) -Linstall/lib -lrdkvHAL -lAidlHAL $(LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
 
 $(VHAL_LIBNAMEFULL): $(VHAL_OBJ)
 	@echo "Building $(VHAL_LIBNAMEFULL) ...."
