@@ -39,19 +39,28 @@ bool HDMICecHalFactory::isAidlServiceAvailable()
 {
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable invoked\r\n");
 
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable checking mBackendType=%d\r\n", static_cast<int>(mBackendType));
     if (mBackendType == HDMICecHalFactory::BackendType::AIDL) {
+        CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable mBackendType already AIDL, returning true\r\n");
         return true;
     }
 
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable calling defaultServiceManager()\r\n");
     android::sp<android::IServiceManager> serviceManager = android::defaultServiceManager();
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable defaultServiceManager() returned ptr=%p\r\n", serviceManager.get());
     if (serviceManager == nullptr) {
         CCEC_LOG(LOG_ERROR, "HDMICecHalFactory::isAidlServiceAvailable failed: IServiceManager unavailable\r\n");
         mBackendType = HDMICecHalFactory::BackendType::LEGACY;
         return false;
     }
 
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable calling IHdmiCec::serviceName()\r\n");
     const android::String16 expectedServiceName(IHdmiCec::serviceName().c_str());
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable expectedServiceName='%s'\r\n", android::String8(expectedServiceName).string());
+
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable calling serviceManager->listServices()\r\n");
     android::Vector<android::String16> services = serviceManager->listServices();
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable listServices() returned %zu entries\r\n", services.size());
     size_t discoveredServiceCount = 0;
     bool matched = false;
 
@@ -60,6 +69,7 @@ bool HDMICecHalFactory::isAidlServiceAvailable()
             ++discoveredServiceCount;
         }
     }
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable discoveredServiceCount=%zu (excluding 'manager')\r\n", discoveredServiceCount);
 
     if (discoveredServiceCount == 0) {
         CCEC_LOG(LOG_INFO,
@@ -108,12 +118,15 @@ std::unique_ptr<HDMICecHal> HDMICecHalFactory::Create()
 {
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory::Create invoked\r\n");
 
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::Create calling isAidlServiceAvailable()\r\n");
     if (isAidlServiceAvailable()) {
         CCEC_LOG(LOG_INFO, "HDMICecHalFactory: Aidl Service is available — using AidlHAL\r\n");
+        CCEC_LOG(LOG_INFO, "HDMICecHalFactory::Create constructing AidlHAL instance\r\n");
         return std::make_unique<AidlHAL>();
     }
 
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory: Aidl Service is not available — using legacy vHAL\r\n");
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::Create constructing vHAL instance\r\n");
     return std::make_unique<vHAL>();
 }
 

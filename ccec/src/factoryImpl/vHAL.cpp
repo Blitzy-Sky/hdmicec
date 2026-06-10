@@ -33,9 +33,14 @@
  * -------------------------------------------------------------------- */
 int vHAL::open(int *handle)
 {
-    CCEC_LOG(LOG_INFO, "vHAL::open\r\n");
+    CCEC_LOG(LOG_INFO, "vHAL::open invoked, handle ptr=%p\r\n", (void*)handle);
+    if (!handle) {
+        CCEC_LOG(LOG_INFO, "vHAL::open ERROR: handle pointer is NULL\r\n");
+        return -1;
+    }
+    CCEC_LOG(LOG_INFO, "vHAL::open calling HdmiCecOpen()\r\n");
     int ret = ::HdmiCecOpen(handle);
-    CCEC_LOG(LOG_DEBUG, "vHAL::open ret=%d handle=%d\r\n", ret, (handle ? *handle : -1));
+    CCEC_LOG(LOG_INFO, "vHAL::open HdmiCecOpen returned ret=%d handle=%d\r\n", ret, *handle);
     return ret;
 }
 
@@ -45,9 +50,10 @@ int vHAL::open(int *handle)
  * -------------------------------------------------------------------- */
 int vHAL::close(int handle)
 {
-    CCEC_LOG(LOG_INFO, "vHAL::close handle=%d\r\n", handle);
+    CCEC_LOG(LOG_INFO, "vHAL::close invoked handle=%d\r\n", handle);
+    CCEC_LOG(LOG_INFO, "vHAL::close calling HdmiCecClose()\r\n");
     int ret = ::HdmiCecClose(handle);
-    CCEC_LOG(LOG_DEBUG, "vHAL::close ret=%d\r\n", ret);
+    CCEC_LOG(LOG_INFO, "vHAL::close HdmiCecClose returned ret=%d\r\n", ret);
     return ret;
 }
 
@@ -57,9 +63,10 @@ int vHAL::close(int handle)
  * -------------------------------------------------------------------- */
 int vHAL::setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data)
 {
-    CCEC_LOG(LOG_INFO, "vHAL::setRxCallback handle=%d\r\n", handle);
+    CCEC_LOG(LOG_INFO, "vHAL::setRxCallback invoked handle=%d cbfunc=%p data=%p\r\n", handle, (void*)cbfunc, data);
+    CCEC_LOG(LOG_INFO, "vHAL::setRxCallback calling HdmiCecSetRxCallback()\r\n");
     int ret = ::HdmiCecSetRxCallback(handle, cbfunc, data);
-    CCEC_LOG(LOG_DEBUG, "vHAL::setRxCallback ret=%d\r\n", ret);
+    CCEC_LOG(LOG_INFO, "vHAL::setRxCallback HdmiCecSetRxCallback returned ret=%d\r\n", ret);
     return ret;
 }
 
@@ -69,9 +76,10 @@ int vHAL::setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data)
  * -------------------------------------------------------------------- */
 int vHAL::setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data)
 {
-    CCEC_LOG(LOG_INFO, "vHAL::setTxCallback handle=%d\r\n", handle);
+    CCEC_LOG(LOG_INFO, "vHAL::setTxCallback invoked handle=%d cbfunc=%p data=%p\r\n", handle, (void*)cbfunc, data);
+    CCEC_LOG(LOG_INFO, "vHAL::setTxCallback calling HdmiCecSetTxCallback()\r\n");
     int ret = ::HdmiCecSetTxCallback(handle, cbfunc, data);
-    CCEC_LOG(LOG_DEBUG, "vHAL::setTxCallback ret=%d\r\n", ret);
+    CCEC_LOG(LOG_INFO, "vHAL::setTxCallback HdmiCecSetTxCallback returned ret=%d\r\n", ret);
     return ret;
 }
 
@@ -81,9 +89,10 @@ int vHAL::setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data)
  * -------------------------------------------------------------------- */
 int vHAL::tx(int handle, const unsigned char *buf, int len, int *result)
 {
-    CCEC_LOG(LOG_INFO, "vHAL::tx handle=%d len=%d\r\n", handle, len);
+    CCEC_LOG(LOG_INFO, "vHAL::tx invoked handle=%d buf=%p len=%d result=%p\r\n", handle, (void*)buf, len, (void*)result);
+    CCEC_LOG(LOG_INFO, "vHAL::tx calling HdmiCecTx()\r\n");
     int ret = ::HdmiCecTx(handle, buf, len, result);
-    CCEC_LOG(LOG_DEBUG, "vHAL::tx ret=%d sendResult=%d\r\n", ret, (result ? *result : -1));
+    CCEC_LOG(LOG_INFO, "vHAL::tx HdmiCecTx returned ret=%d sendResult=%d\r\n", ret, (result ? *result : -1));
     return ret;
 }
 
@@ -93,9 +102,10 @@ int vHAL::tx(int handle, const unsigned char *buf, int len, int *result)
  * -------------------------------------------------------------------- */
 int vHAL::txAsync(int handle, const unsigned char *buf, int len)
 {
-    CCEC_LOG(LOG_INFO, "vHAL::txAsync handle=%d len=%d\r\n", handle, len);
+    CCEC_LOG(LOG_INFO, "vHAL::txAsync invoked handle=%d buf=%p len=%d\r\n", handle, (void*)buf, len);
+    CCEC_LOG(LOG_INFO, "vHAL::txAsync calling HdmiCecTxAsync()\r\n");
     int ret = ::HdmiCecTxAsync(handle, buf, len);
-    CCEC_LOG(LOG_DEBUG, "vHAL::txAsync ret=%d\r\n", ret);
+    CCEC_LOG(LOG_INFO, "vHAL::txAsync HdmiCecTxAsync returned ret=%d\r\n", ret);
     return ret;
 }
 
@@ -105,9 +115,10 @@ int vHAL::txAsync(int handle, const unsigned char *buf, int len)
  * -------------------------------------------------------------------- */
 int vHAL::addLogicalAddress(int handle, int logicalAddress)
 {
-    CCEC_LOG(LOG_INFO, "vHAL::addLogicalAddress handle=%d addr=%d\r\n", handle, logicalAddress);
+    CCEC_LOG(LOG_INFO, "vHAL::addLogicalAddress invoked handle=%d logicalAddress=%d\r\n", handle, logicalAddress);
+    CCEC_LOG(LOG_INFO, "vHAL::addLogicalAddress calling HdmiCecAddLogicalAddress()\r\n");
     int ret = ::HdmiCecAddLogicalAddress(handle, logicalAddress);
-    CCEC_LOG(LOG_DEBUG, "vHAL::addLogicalAddress ret=%d\r\n", ret);
+    CCEC_LOG(LOG_INFO, "vHAL::addLogicalAddress HdmiCecAddLogicalAddress returned ret=%d\r\n", ret);
     return ret;
 }
 
@@ -118,9 +129,10 @@ int vHAL::addLogicalAddress(int handle, int logicalAddress)
  * -------------------------------------------------------------------- */
 int vHAL::removeLogicalAddress(int handle, int logicalAddress)
 {
-    CCEC_LOG(LOG_INFO, "vHAL::removeLogicalAddress handle=%d addr=%d\r\n", handle, logicalAddress);
+    CCEC_LOG(LOG_INFO, "vHAL::removeLogicalAddress invoked handle=%d logicalAddress=%d\r\n", handle, logicalAddress);
+    CCEC_LOG(LOG_INFO, "vHAL::removeLogicalAddress calling HdmiCecRemoveLogicalAddress()\r\n");
     int ret = ::HdmiCecRemoveLogicalAddress(handle, logicalAddress);
-    CCEC_LOG(LOG_DEBUG, "vHAL::removeLogicalAddress ret=%d\r\n", ret);
+    CCEC_LOG(LOG_INFO, "vHAL::removeLogicalAddress HdmiCecRemoveLogicalAddress returned ret=%d\r\n", ret);
     return ret;
 }
 
@@ -130,9 +142,10 @@ int vHAL::removeLogicalAddress(int handle, int logicalAddress)
  * -------------------------------------------------------------------- */
 int vHAL::getLogicalAddress(int handle, int *logicalAddress)
 {
-    CCEC_LOG(LOG_INFO, "vHAL::getLogicalAddress handle=%d\r\n", handle);
+    CCEC_LOG(LOG_INFO, "vHAL::getLogicalAddress invoked handle=%d logicalAddress=%p\r\n", handle, (void*)logicalAddress);
+    CCEC_LOG(LOG_INFO, "vHAL::getLogicalAddress calling HdmiCecGetLogicalAddress()\r\n");
     int ret = ::HdmiCecGetLogicalAddress(handle, logicalAddress);
-    CCEC_LOG(LOG_DEBUG, "vHAL::getLogicalAddress ret=%d addr=%d\r\n",
+    CCEC_LOG(LOG_INFO, "vHAL::getLogicalAddress HdmiCecGetLogicalAddress returned ret=%d addr=%d\r\n",
              ret, (logicalAddress ? *logicalAddress : -1));
     return ret;
 }
@@ -143,9 +156,10 @@ int vHAL::getLogicalAddress(int handle, int *logicalAddress)
  * -------------------------------------------------------------------- */
 int vHAL::getPhysicalAddress(int handle, unsigned int *physicalAddress)
 {
-    CCEC_LOG(LOG_INFO, "vHAL::getPhysicalAddress handle=%d\r\n", handle);
+    CCEC_LOG(LOG_INFO, "vHAL::getPhysicalAddress invoked handle=%d physicalAddress=%p\r\n", handle, (void*)physicalAddress);
+    CCEC_LOG(LOG_INFO, "vHAL::getPhysicalAddress calling HdmiCecGetPhysicalAddress()\r\n");
     int ret = ::HdmiCecGetPhysicalAddress(handle, physicalAddress);
-    CCEC_LOG(LOG_DEBUG, "vHAL::getPhysicalAddress ret=%d addr=0x%x\r\n",
+    CCEC_LOG(LOG_INFO, "vHAL::getPhysicalAddress HdmiCecGetPhysicalAddress returned ret=%d addr=0x%x\r\n",
              ret, (physicalAddress ? *physicalAddress : 0));
     return ret;
 }
