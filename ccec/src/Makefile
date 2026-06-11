@@ -20,8 +20,8 @@ RM          := rm -rf
 CFLAGS      := -g -fPIC -D_REENTRANT -Wall
 LIBNAME     := RCEC
 LIBNAMEFULL := lib$(LIBNAME).so
-VHAL_LIBNAMEFULL := libHDMICecRdkVHAL.so
-AIDLHAL_LIBNAMEFULL := libHDMICecAidlHAL.so
+VHAL_LIBNAMEFULL := libVHAL.so
+AIDLHAL_LIBNAMEFULL := libAidlHAL.so
 
 OBJS:= CECFrame.o \
 	Connection.o \
@@ -90,12 +90,12 @@ all: clean library
 library: $(VHAL_LIBNAMEFULL) $(AIDLHAL_LIBNAMEFULL) $(OBJS)
 	@echo "Building $(LIBNAMEFULL) ...."
 	mkdir -p install/lib
-	$(CXX) $(OBJS) $(CFLAGS) -Linstall/lib -lHDMICecRdkVHAL -lHDMICecAidlHAL $(LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
+	$(CXX) $(OBJS) $(CFLAGS) -Linstall/lib -lVHAL -lAidlHAL $(LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
 
 $(VHAL_LIBNAMEFULL): $(VHAL_OBJ)
 	@echo "Building $(VHAL_LIBNAMEFULL) ...."
 	mkdir -p install/lib
-	$(CXX) $(VHAL_OBJ) $(CFLAGS) $(LDFLAGS) -shared -o install/lib/$(VHAL_LIBNAMEFULL)
+	$(CXX) $(VHAL_OBJ) $(CFLAGS) $(LDFLAGS) -lRCECOSHal -shared -o install/lib/$(VHAL_LIBNAMEFULL)
 
 $(AIDLHAL_LIBNAMEFULL): $(AIDLHAL_OBJ)
 	@echo "Building $(AIDLHAL_LIBNAMEFULL) ...."
