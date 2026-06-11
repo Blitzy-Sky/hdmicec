@@ -27,6 +27,7 @@ AM_LDFLAGS = -ltelemetry_msgsender
 librdkvHAL_la_SOURCES = factoryImpl/vHAL.cpp
 librdkvHAL_la_CXXFLAGS = $(AM_CXXFLAGS)
 librdkvHAL_la_LDFLAGS = -lpthread
+librdkvHAL_la_LIBADD = -lRCECOSHal -L${top_builddir}/osal/src/.libs
 
 # AidlHAL library
 libAidlHAL_la_SOURCES = factoryImpl/AidlHAL.cpp
