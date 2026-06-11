@@ -17,18 +17,18 @@
  * limitations under the License.
 */
 
-#ifndef V_HAL_H
-#define V_HAL_H
+#ifndef HDMI_CEC_RDK_V_HAL_H
+#define HDMI_CEC_RDK_V_HAL_H
 
-#include "HDMICecHal.h"
+#include "IHDMICecHal.h"
 
 /**
- * @brief Legacy (C HAL) implementation of HDMICecHal.
+ * @brief Legacy (C HAL) implementation of IHDMICecHal.
  *
  * Each override delegates directly to the corresponding HdmiCec* C function
  * from hdmi_cec_driver.h.
  */
-class vHAL : public HDMICecHal {
+class HDMICecRdkVHAL : public IHDMICecHal {
 public:
     /**
      * @brief Open the HDMI CEC HAL driver.
@@ -104,6 +104,6 @@ public:
     bool emulateAckForPollFrames(const unsigned char *buf, int len) override;
 };
 
-#endif // V_HAL_H
+#endif // HDMI_CEC_RDK_V_HAL_H
 
 

@@ -17,10 +17,10 @@
  * limitations under the License.
 */
 
-#ifndef AIDL_HAL_H
-#define AIDL_HAL_H
+#ifndef HDMI_CEC_AIDL_HAL_H
+#define HDMI_CEC_AIDL_HAL_H
 
-#include "HDMICecHal.h"
+#include "IHDMICecHal.h"
 
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
@@ -36,12 +36,12 @@
 
 using CCEC_OSAL::Mutex;
 
-class AidlHALEventListener;
+class HDMICecAidlHALEventListener;
 
-class AidlHAL : public HDMICecHal {
+class HDMICecAidlHAL : public IHDMICecHal {
 public:
-    AidlHAL();
-    ~AidlHAL() override;
+    HDMICecAidlHAL();
+    ~HDMICecAidlHAL() override;
 
     int open(int *handle) override;
     int close(int handle) override;
@@ -77,8 +77,8 @@ private:
     void* mTxCbData;
     mutable Mutex mAidlMutex;
 
-    friend class AidlHALEventListener;
+    friend class HDMICecAidlHALEventListener;
 };
 
-#endif // AIDL_HAL_H
+#endif // HDMI_CEC_AIDL_HAL_H
 

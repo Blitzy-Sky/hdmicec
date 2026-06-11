@@ -17,7 +17,7 @@
  * limitations under the License.
 */
 
-#include "AidlHAL.h"
+#include "HDMICecAidlHAL.h"
 
 #include <cstddef>
 #include <cstdlib>
@@ -37,12 +37,12 @@ using android::interface_cast;
 using namespace com::rdk::hal::hdmicec;
 
 /**
- * @brief AIDL Event Listener — bridges binder callbacks to the
- *        C-style callback function pointers stored in AidlHAL.
+ * @brief HDMI CEC AIDL Event Listener — bridges binder callbacks to the
+ *        C-style callback function pointers stored in HDMICecAidlHAL.
  */
-class AidlHALEventListener : public BnHdmiCecEventListener {
+class HDMICecAidlHALEventListener : public BnHdmiCecEventListener {
 public:
-    AidlHALEventListener(AidlHAL *AidlHal)
+    HDMICecAidlHALEventListener(HDMICecAidlHAL *AidlHal)
         : mAidlHal(AidlHal) {}
 
     android::binder::Status onMessageReceived(const std::vector<uint8_t>& message) override {
@@ -67,10 +67,10 @@ public:
     }
 
 private:
-    AidlHAL *mAidlHal;
+    HDMICecAidlHAL *mAidlHal;
 };
 
-AidlHAL::AidlHAL()
+HDMICecAidlHAL::HDMICecAidlHAL()
     : mAidlService(nullptr),
       mAidlController(nullptr),
     mEventListener(nullptr),
@@ -81,7 +81,7 @@ AidlHAL::AidlHAL()
 {
 }
 
-AidlHAL::~AidlHAL()
+HDMICecAidlHAL::~HDMICecAidlHAL()
 {
     AutoLock lock_(mAidlMutex);
     mAidlController = nullptr;
@@ -89,7 +89,7 @@ AidlHAL::~AidlHAL()
     mEventListener = nullptr;
 }
 
-bool AidlHAL::parseLogicalAddressField(const std::string& line, const char* field, int& value)
+bool HDMICecAidlHAL::parseLogicalAddressField(const std::string& line, const char* field, int& value)
 {
 	const size_t keyPos = line.find(field);
 	if (keyPos == std::string::npos) {
@@ -111,7 +111,7 @@ bool AidlHAL::parseLogicalAddressField(const std::string& line, const char* fiel
 	return true;
 }
 
-bool AidlHAL::isPresentInVdeviceTopology(const uint8_t destination)
+bool HDMICecAidlHAL::isPresentInVdeviceTopology(const uint8_t destination)
 {
 	std::ifstream topology(kVdeviceTopologyDump);
 	if (!topology.is_open()) {
@@ -134,7 +134,7 @@ bool AidlHAL::isPresentInVdeviceTopology(const uint8_t destination)
 	return false;
 }
 
-android::sp<IHdmiCec> AidlHAL::getAidlService()
+android::sp<IHdmiCec> HDMICecAidlHAL::getAidlService()
 {
     AutoLock lock_(mAidlMutex);
     if (mAidlService == nullptr) {
@@ -143,7 +143,7 @@ android::sp<IHdmiCec> AidlHAL::getAidlService()
     return mAidlService;
 }
 
-void AidlHAL::initAidlService()
+void HDMICecAidlHAL::initAidlService()
 {
     android::ProcessState::self()->startThreadPool();
 
@@ -162,13 +162,13 @@ void AidlHAL::initAidlService()
     }
 }
 
-int AidlHAL::open(int *handle)
+int HDMICecAidlHAL::open(int *handle)
 {
-    CCEC_LOG(LOG_INFO, "AidlHAL::open invoked\n");
+    CCEC_LOG(LOG_INFO, "HDMICecAidlHAL::open invoked\n");
 
     android::sp<IHdmiCec> service = getAidlService();
     if (service == nullptr) {
-        CCEC_LOG(LOG_ERROR, "AidlHAL::open failed: IHdmiCec service unavailable\r\n");
+        CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::open failed: IHdmiCec service unavailable\r\n");
         throw IOException();
     }
 
@@ -179,7 +179,7 @@ int AidlHAL::open(int *handle)
     android::sp<IHdmiCecController> controller;
     android::binder::Status status = service->open(mEventListener, &controller);
     if (!status.isOk() || controller == nullptr) {
-        CCEC_LOG(LOG_ERROR, "AidlHAL::open failed: service->open status not OK or controller is null\r\n");
+        CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::open failed: service->open status not OK or controller is null\r\n");
         throw IOException();
     }
 
@@ -187,13 +187,13 @@ int AidlHAL::open(int *handle)
 
     *handle = 1;  /* Dummy handle — AIDL uses controller object */
 
-    CCEC_LOG(LOG_INFO, "AidlHAL::open completed successfully\r\n");
+    CCEC_LOG(LOG_INFO, "HDMICecAidlHAL::open completed successfully\r\n");
     return 0;
 }
 
-int AidlHAL::close(int handle)
+int HDMICecAidlHAL::close(int handle)
 {
-    CCEC_LOG(LOG_INFO, "AidlHAL::close invoked\n");
+    CCEC_LOG(LOG_INFO, "HDMICecAidlHAL::close invoked\n");
 	(void)handle;
 
     if (mAidlController != nullptr) {
@@ -202,11 +202,11 @@ int AidlHAL::close(int handle)
             bool result = false;
             android::binder::Status status = service->close(mAidlController, &result);
             if (!status.isOk()) {
-                CCEC_LOG(LOG_ERROR, "AidlHAL::close failed: service->close status not OK\n");
+                CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::close failed: service->close status not OK\n");
                 throw IOException();
             }
             if (!result) {
-                CCEC_LOG(LOG_ERROR, "AidlHAL::close failed: service->close returned false\n");
+                CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::close failed: service->close returned false\n");
                 throw IOException();
             }
         }
@@ -219,7 +219,7 @@ int AidlHAL::close(int handle)
     return 0;
 }
 
-int AidlHAL::addLogicalAddress(int handle, int logicalAddresses)
+int HDMICecAidlHAL::addLogicalAddress(int handle, int logicalAddresses)
 {
     if (mAidlController == nullptr) {
         throw IOException();
@@ -243,7 +243,7 @@ int AidlHAL::addLogicalAddress(int handle, int logicalAddresses)
     return 0;
 }
 
-int AidlHAL::removeLogicalAddress(int handle, int logicalAddresses)
+int HDMICecAidlHAL::removeLogicalAddress(int handle, int logicalAddresses)
 {
     if (mAidlController == nullptr) {
         throw IOException();
@@ -262,10 +262,10 @@ int AidlHAL::removeLogicalAddress(int handle, int logicalAddresses)
     return 0;
 }
 
-int AidlHAL::getLogicalAddress(int handle, int *logicalAddress)
+int HDMICecAidlHAL::getLogicalAddress(int handle, int *logicalAddress)
 {
     if (logicalAddress == nullptr) {
-        CCEC_LOG(LOG_ERROR, "AidlHAL::getLogicalAddress invalid output pointer\r\n");
+        CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::getLogicalAddress invalid output pointer\r\n");
         throw IOException();
     }
 
@@ -285,77 +285,77 @@ int AidlHAL::getLogicalAddress(int handle, int *logicalAddress)
         *logicalAddress = addresses[0];
     }
     
-    CCEC_LOG( LOG_DEBUG, "AidlHAL::getLogicalAddress completed\r\n");
+    CCEC_LOG( LOG_DEBUG, "HDMICecAidlHAL::getLogicalAddress completed\r\n");
 
     return 0;
 }
 
-int AidlHAL::getPhysicalAddress(int handle, unsigned int *physicalAddress)
+int HDMICecAidlHAL::getPhysicalAddress(int handle, unsigned int *physicalAddress)
 {
     if (physicalAddress != nullptr) {
         *physicalAddress = 0;
     }
 
-    CCEC_LOG( LOG_DEBUG, "AidlHAL::getPhysicalAddress completed\r\n");
+    CCEC_LOG( LOG_DEBUG, "HDMICecAidlHAL::getPhysicalAddress completed\r\n");
 
     return 0;
 }
 
-void AidlHAL::dispatchRx(unsigned char *buf, int len)
+void HDMICecAidlHAL::dispatchRx(unsigned char *buf, int len)
 {
     if (mRxCb == nullptr) {
-        CCEC_LOG(LOG_DEBUG, "AidlHAL::dispatchRx callback not registered\r\n");
+        CCEC_LOG(LOG_DEBUG, "HDMICecAidlHAL::dispatchRx callback not registered\r\n");
         return;
     }
 
     mRxCb(0, mRxCbData, buf, len);
 }
 
-void AidlHAL::dispatchTx(int result)
+void HDMICecAidlHAL::dispatchTx(int result)
 {
     if (mTxCb == nullptr) {
-        CCEC_LOG(LOG_DEBUG, "AidlHAL::dispatchTx callback not registered\r\n");
+        CCEC_LOG(LOG_DEBUG, "HDMICecAidlHAL::dispatchTx callback not registered\r\n");
         return;
     }
 
     mTxCb(0, mTxCbData, result);
 }
 
-int AidlHAL::setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data)
+int HDMICecAidlHAL::setRxCallback(int handle, HdmiCecRxCallback_t cbfunc, void *data)
 {
     (void)handle;
 
     mRxCb = cbfunc;
     mRxCbData = data;
 
-    CCEC_LOG(LOG_DEBUG, "AidlHAL::setRxCallback invoked\r\n");
+    CCEC_LOG(LOG_DEBUG, "HDMICecAidlHAL::setRxCallback invoked\r\n");
     return 0;
 }
 
-int AidlHAL::setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data)
+int HDMICecAidlHAL::setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data)
 {
     (void)handle;
 
     mTxCb = cbfunc;
     mTxCbData = data;
 
-    CCEC_LOG(LOG_DEBUG, "AidlHAL::setTxCallback invoked\r\n");
+    CCEC_LOG(LOG_DEBUG, "HDMICecAidlHAL::setTxCallback invoked\r\n");
     return 0;
 }
 
-int AidlHAL::tx(int handle, const unsigned char *buf, int len, int *result)
+int HDMICecAidlHAL::tx(int handle, const unsigned char *buf, int len, int *result)
 {
     if (mAidlController == nullptr) {
 		throw IOException();
 	}
 
     if (result == nullptr) {
-        CCEC_LOG(LOG_ERROR, "AidlHAL::tx invalid result pointer\n");
+        CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::tx invalid result pointer\n");
         throw IOException();
     }
 
     if (buf == nullptr || len <= 0) {
-        CCEC_LOG(LOG_ERROR, "AidlHAL::tx invalid buffer or length\n");
+        CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::tx invalid buffer or length\n");
         throw IOException();
     }
 
@@ -383,13 +383,13 @@ int AidlHAL::tx(int handle, const unsigned char *buf, int len, int *result)
     return 0;
 }
 
-int AidlHAL::txAsync(int handle, const unsigned char *buf, int len)
+int HDMICecAidlHAL::txAsync(int handle, const unsigned char *buf, int len)
 {
     if (mAidlController == nullptr) {
         throw IOException();
     }
     if (buf == nullptr || len <= 0) {
-        CCEC_LOG(LOG_ERROR, "AidlHAL::txAsync invalid buffer or length\n");
+        CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::txAsync invalid buffer or length\n");
         throw IOException();
     }
 
@@ -413,7 +413,7 @@ int AidlHAL::txAsync(int handle, const unsigned char *buf, int len)
     return 0;
 }
 
-bool AidlHAL::skipFrameOfUnsupportedLength(size_t length) {
+bool HDMICecAidlHAL::skipFrameOfUnsupportedLength(size_t length) {
 	if (length < kAidlMinCecFrameSize || length > kAidlMaxCecFrameSize) {
 		/* AIDL sendMessage accepts only 2..16 byte CEC frames. */
 		CCEC_LOG(LOG_WARN,
@@ -425,7 +425,7 @@ bool AidlHAL::skipFrameOfUnsupportedLength(size_t length) {
     return false;
 }
 
-bool AidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
+bool HDMICecAidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
 {
     if (len <= 1) {
         /*

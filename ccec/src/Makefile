@@ -34,7 +34,7 @@ OBJS:= CECFrame.o \
 	Util.o \
 	factoryImpl/HDMICecHalFactory.o \
 
-VHAL_OBJ := factoryImpl/vHAL.o
+VHAL_OBJ := factoryImpl/HDMICecRdkVHAL.o
 AIDLHAL_OBJ := factoryImpl/AidlHAL.o
 
 # Calculate AIDL include path relative to workspace

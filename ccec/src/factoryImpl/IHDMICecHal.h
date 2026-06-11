@@ -17,8 +17,8 @@
  * limitations under the License.
 */
 
-#ifndef HDMI_CEC_HAL_H
-#define HDMI_CEC_HAL_H
+#ifndef I_HDMI_CEC_HAL_H
+#define I_HDMI_CEC_HAL_H
 
 #include <cstddef>
 #include "ccec/drivers/hdmi_cec_driver.h"
@@ -32,7 +32,7 @@
  * - Legacy subclass: delegates directly to HdmiCec* C functions.
  * - AIDL subclass:   communicates with the Android HDMI CEC AIDL service.
  */
-class HDMICecHal {
+class IHDMICecHal {
 public:
     virtual ~HDMICecHal() = default;
 
@@ -162,8 +162,8 @@ public:
     /**
      * @brief Check if a frame of unsupported length should be skipped.
      *
-     * Legacy: calls HdmiCecSkipFrameOfUnsupportedLength().
-     * AIDL:   queries the binder service.
+     * Legacy: no-op (returns false).
+     * AIDL:   validates frame length against binder service constraints.
      *
      * @param[in] length  Length of the CEC frame.
      * @return true if the frame should be skipped, false otherwise.
@@ -183,7 +183,7 @@ public:
     virtual bool emulateAckForPollFrames(const unsigned char *buf, int len) = 0;
 };
 
-#endif // HDMI_CEC_HAL_H
+#endif // I_HDMI_CEC_HAL_H
 
 
 

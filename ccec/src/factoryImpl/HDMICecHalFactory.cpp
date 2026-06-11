@@ -20,14 +20,20 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <linux/android/binder.h>
 #include <binder/IServiceManager.h>
 #include <com/rdk/hal/hdmicec/IHdmiCec.h>
 #include <utils/String16.h>
 #include <utils/String8.h>
 #include <utils/Vector.h>
 
-#include "AidlHAL.h"
-#include "vHAL.h"
+#include "HDMICecAidlHAL.h"
+#include "HDMICecRdkVHAL.h"
 #include "ccec/Util.hpp"
 
 using namespace com::rdk::hal::hdmicec;
@@ -35,12 +41,132 @@ using namespace com::rdk::hal::hdmicec;
 static const android::String16 mServiceManagerName("manager");
 HDMICecHalFactory::BackendType HDMICecHalFactory::mBackendType = HDMICecHalFactory::BackendType::UNKNOWN;
 
+static bool isServiceManagerAvailable() {
+    #define BINDER_DEV "/dev/binder"
+    #define MAP_SIZE (128 * 1024)
+    #define PING_TRANSACTION 0
+
+    struct FdGuard {
+        int fd = -1;
+        ~FdGuard() {
+            if (fd >= 0) {
+                close(fd);
+            }
+        }
+    };
+
+    struct MapGuard {
+        void* addr = MAP_FAILED;
+        ~MapGuard() {
+            if (addr != MAP_FAILED) {
+                munmap(addr, MAP_SIZE);
+            }
+        }
+    };
+
+    FdGuard fdGuard;
+    MapGuard mapGuard;
+
+    fdGuard.fd = open(BINDER_DEV, O_RDWR);
+    if (fdGuard.fd < 0) {
+        CCEC_LOG(LOG_INFO, "Failed to open binder device: %s\n", strerror(errno));
+        return false;
+    }
+
+    // Check binder protocol version
+    struct binder_version ver;
+    if (ioctl(fdGuard.fd, BINDER_VERSION, &ver) == -1) {
+        CCEC_LOG(LOG_INFO, "Failed to get binder version: %s\n", strerror(errno));
+        return false;
+    }
+    CCEC_LOG(LOG_INFO, "Binder protocol version: %d\n ", ver.protocol_version);
+
+    // Map binder buffer
+    mapGuard.addr = mmap(NULL, MAP_SIZE, PROT_READ, MAP_PRIVATE, fdGuard.fd, 0);
+    if (mapGuard.addr == MAP_FAILED) {
+        CCEC_LOG(LOG_INFO, "Failed to map binder buffer: %s\n", strerror(errno));
+        return false;
+    }
+
+    // Prepare PING transaction
+    uint8_t writebuf[256];
+    uint8_t readbuf[256];
+
+    struct binder_write_read bwr;
+    memset(&bwr, 0, sizeof(bwr));
+
+    struct {
+        uint32_t cmd;
+        struct binder_transaction_data txn;
+    } __attribute__((packed)) msg;
+
+    memset(&msg, 0, sizeof(msg));
+
+    msg.cmd = BC_TRANSACTION;
+
+    msg.txn.target.handle = 0;    // servicemanager
+    msg.txn.code = PING_TRANSACTION; // ping
+    msg.txn.flags = 0;
+    msg.txn.data_size = 0;
+    msg.txn.offsets_size = 0;
+
+    memcpy(writebuf, &msg, sizeof(msg));
+
+    bwr.write_size = sizeof(msg);
+    bwr.write_buffer = (uintptr_t)writebuf;
+    bwr.read_size = sizeof(readbuf);
+    bwr.read_buffer = (uintptr_t)readbuf;
+
+    // Send ping
+    if (ioctl(fdGuard.fd, BINDER_WRITE_READ, &bwr) < 0) {
+        CCEC_LOG(LOG_INFO, "Failed to send ping: %s\n", strerror(errno));
+        return false;
+    }
+
+    // Process response
+    uint32_t* ptr = (uint32_t*)readbuf;
+    size_t consumed = bwr.read_consumed;
+
+    while (consumed > 0) {
+        uint32_t cmd = *ptr++;
+        consumed -= sizeof(uint32_t);
+
+        switch (cmd) {
+            case BR_NOOP:
+                break;
+
+            case BR_REPLY: {
+                struct binder_transaction_data* txn =
+                    (struct binder_transaction_data*)ptr;
+
+                ptr += sizeof(*txn) / sizeof(uint32_t);
+                consumed -= sizeof(*txn);
+                return true;
+            }
+
+            default:
+                CCEC_LOG(LOG_INFO, "Other cmd: 0x%x\n", cmd);
+                break;
+        }
+    }
+
+    return false;
+}
+
 bool HDMICecHalFactory::isAidlServiceAvailable()
 {
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable invoked\r\n");
 
     if (mBackendType == HDMICecHalFactory::BackendType::AIDL) {
         return true;
+    } else if (mBackendType == HDMICecHalFactory::BackendType::LEGACY) {
+        return false;
+    }
+
+    if (!isServiceManagerAvailable()) {
+        CCEC_LOG(LOG_INFO, "Binder driver not available; assuming legacy HDMI CEC HAL\r\n");
+        mBackendType = HDMICecHalFactory::BackendType::LEGACY;
+        return false;
     }
 
     android::sp<android::IServiceManager> serviceManager = android::defaultServiceManager();
@@ -49,6 +175,8 @@ bool HDMICecHalFactory::isAidlServiceAvailable()
         mBackendType = HDMICecHalFactory::BackendType::LEGACY;
         return false;
     }
+
+    CCEC_LOG(LOG_INFO, "Successfully obtained IServiceManager\r\n");
 
     const android::String16 expectedServiceName(IHdmiCec::serviceName().c_str());
     android::Vector<android::String16> services = serviceManager->listServices();
@@ -61,6 +189,7 @@ bool HDMICecHalFactory::isAidlServiceAvailable()
         }
     }
 
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory::isAidlServiceAvailable discovered %zu binder services\r\n", discoveredServiceCount);
     if (discoveredServiceCount == 0) {
         CCEC_LOG(LOG_INFO,
             "HDMICecHalFactory::isAidlServiceAvailable found no binder services beyond the ServiceManager entry while searching for '%s'\r\n",
@@ -109,11 +238,11 @@ std::unique_ptr<HDMICecHal> HDMICecHalFactory::Create()
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory::Create invoked\r\n");
 
     if (isAidlServiceAvailable()) {
-        CCEC_LOG(LOG_INFO, "HDMICecHalFactory: Aidl Service is available — using AidlHAL\r\n");
-        return std::make_unique<AidlHAL>();
+        CCEC_LOG(LOG_INFO, "HDMICecHalFactory: Aidl Service is available — using HDMICecAidlHAL\r\n");
+        return std::make_unique<HDMICecAidlHAL>();
     }
 
-    CCEC_LOG(LOG_INFO, "HDMICecHalFactory: Aidl Service is not available — using legacy vHAL\r\n");
-    return std::make_unique<vHAL>();
+    CCEC_LOG(LOG_INFO, "HDMICecHalFactory: Aidl Service is not available — using legacy HDMICecRdkVHAL\r\n");
+    return std::make_unique<HDMICecRdkVHAL>();
 }
 

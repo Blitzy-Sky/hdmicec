@@ -24,7 +24,7 @@ lib_LTLIBRARIES = librdkvHAL.la libAidlHAL.la libRCEC.la
 AM_LDFLAGS = -ltelemetry_msgsender
 
 # rdkvHAL library
-librdkvHAL_la_SOURCES = factoryImpl/vHAL.cpp
+librdkvHAL_la_SOURCES = factoryImpl/HDMICecRdkVHAL.cpp
 librdkvHAL_la_CXXFLAGS = $(AM_CXXFLAGS)
 librdkvHAL_la_LDFLAGS = -lpthread
 

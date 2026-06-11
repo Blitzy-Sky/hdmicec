@@ -39,7 +39,7 @@
 #include "osal/ConditionVariable.hpp"
 #include "ccec/Driver.hpp"
 #include "ccec/Header.hpp"
-#include "factoryImpl/HDMICecHal.h"
+#include "factoryImpl/IHDMICecHal.h"
 
 using CCEC_OSAL::EventQueue;
 using CCEC_OSAL::Mutex;
@@ -89,7 +89,7 @@ private:
         mutable Mutex mutex;
 	std::list<LogicalAddress> logicalAddresses;
 
-	std::unique_ptr<HDMICecHal> mHal;
+	std::unique_ptr<IHDMICecHal> mHal;
 
 	DriverImpl(const DriverImpl &); /* Not allowed */
 	DriverImpl & operator = (const DriverImpl &); /* Not allowed */
