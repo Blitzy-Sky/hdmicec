@@ -73,6 +73,7 @@ LDFLAGS+= -L$(OPENSOURCE_BASE)/lib
 LDFLAGS+=-L$(GLIB_LIBRARY_PATH)/
 LDFLAGS+=$(GLIBS)
 LDFLAGS += -L. -lpthread
+VHAL_LDFLAGS := $(LDFLAGS) -L../../osal/src/install/lib -lRCECOSHal
 # Binder libraries - link if they exist
 ifneq ($(wildcard $(BINDER_BUILD_DIR)/libbinder.a),)
 LDFLAGS += -L$(BINDER_BUILD_DIR) -lbinder
@@ -95,7 +96,7 @@ library: $(VHAL_LIBNAMEFULL) $(AIDLHAL_LIBNAMEFULL) $(OBJS)
 $(VHAL_LIBNAMEFULL): $(VHAL_OBJ)
 	@echo "Building $(VHAL_LIBNAMEFULL) ...."
 	mkdir -p install/lib
-	$(CXX) $(VHAL_OBJ) $(CFLAGS) $(LDFLAGS) -shared -o install/lib/$(VHAL_LIBNAMEFULL)
+	$(CXX) $(VHAL_OBJ) $(CFLAGS) $(VHAL_LDFLAGS) -shared -o install/lib/$(VHAL_LIBNAMEFULL)
 
 $(AIDLHAL_LIBNAMEFULL): $(AIDLHAL_OBJ)
 	@echo "Building $(AIDLHAL_LIBNAMEFULL) ...."
