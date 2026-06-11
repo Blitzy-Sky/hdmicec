@@ -212,15 +212,16 @@ void  DriverImpl::writeAsync(const CECFrame &frame)  noexcept(false)
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
 
-	if(mHal->skipFrameOfUnsupportedLength(length)) {
-		return;
-	}
-
     {
 		AutoLock lock_(mutex);
 		if (status != OPENED) {
     		throw InvalidStateException();
     	}
+
+		if(mHal->skipFrameOfUnsupportedLength(length)) {
+			return;
+		}
+
 		CCEC_LOG( LOG_DEBUG, "DriverImpl::write to call HdmiCecTxAsync\r\n");
 
 		int err = mHal->txAsync(nativeHandle, buf, length);
@@ -254,15 +255,16 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
 
-	if(mHal->emulateAckForPollFrames(buf, length)) {
-		return;
-	}
-
     {
 		AutoLock lock_(mutex);
     	if (status != OPENED) {
     		throw InvalidStateException();
     	}
+
+		if(mHal->emulateAckForPollFrames(buf, length)) {
+			return;
+		}
+
 		int sendResult = HDMI_CEC_IO_SUCCESS;
 		CCEC_LOG( LOG_DEBUG, "DriverImpl::write to call HdmiCecTx\r\n");
 

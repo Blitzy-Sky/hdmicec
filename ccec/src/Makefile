@@ -32,7 +32,7 @@ OBJS:= CECFrame.o \
 	LibCCEC.o \
 	OpCode.o \
 	Util.o \
-	factoryImpl/HDMICecHalFactory.o \
+	factoryImpl/HDMICecHalFactory.o
 
 VHAL_OBJ := factoryImpl/HDMICecRdkVHAL.o
 AIDLHAL_OBJ := factoryImpl/HDMICecAidlHAL.o

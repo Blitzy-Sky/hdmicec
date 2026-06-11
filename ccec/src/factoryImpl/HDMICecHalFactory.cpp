@@ -18,6 +18,7 @@
 */
 #include "HDMICecHalFactory.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
@@ -135,14 +136,8 @@ static bool isServiceManagerAvailable() {
             case BR_NOOP:
                 break;
 
-            case BR_REPLY: {
-                struct binder_transaction_data* txn =
-                    (struct binder_transaction_data*)ptr;
-
-                ptr += sizeof(*txn) / sizeof(uint32_t);
-                consumed -= sizeof(*txn);
+            case BR_REPLY:
                 return true;
-            }
 
             default:
                 CCEC_LOG(LOG_INFO, "Other cmd: 0x%x\n", cmd);

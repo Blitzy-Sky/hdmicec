@@ -22,6 +22,8 @@
 
 #include "IHDMICecHal.h"
 
+ #include <cstdint>
+ #include <string>
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
 #include <utils/String16.h>

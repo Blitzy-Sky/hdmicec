@@ -46,8 +46,10 @@ public:
         : mAidlHal(AidlHal) {}
 
     android::binder::Status onMessageReceived(const std::vector<uint8_t>& message) override {
-        if (mAidlHal && message.size() > 0) {
-            mAidlHal->dispatchRx(const_cast<unsigned char*>(message.data()), static_cast<int>(message.size()));
+        if (mAidlHal && !message.empty()) {
+            std::vector<uint8_t> mutableMessage(message);
+            mAidlHal->dispatchRx(reinterpret_cast<unsigned char*>(mutableMessage.data()),
+                                  static_cast<int>(mutableMessage.size()));
         }
         return android::binder::Status::ok();
     }
