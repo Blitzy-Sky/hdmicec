@@ -34,7 +34,7 @@
  */
 class IHDMICecHal {
 public:
-    virtual ~HDMICecHal() = default;
+    virtual ~IHDMICecHal() = default;
 
     /**
      * @brief Open the HDMI CEC HAL driver.

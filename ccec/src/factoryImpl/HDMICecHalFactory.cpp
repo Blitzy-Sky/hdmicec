@@ -233,7 +233,7 @@ bool HDMICecHalFactory::isAidlServiceAvailable()
     return false;
 }
 
-std::unique_ptr<HDMICecHal> HDMICecHalFactory::Create()
+std::unique_ptr<IHDMICecHal> HDMICecHalFactory::Create()
 {
     CCEC_LOG(LOG_INFO, "HDMICecHalFactory::Create invoked\r\n");
 
