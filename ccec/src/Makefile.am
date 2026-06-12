@@ -46,7 +46,7 @@ libRCEC_la_SOURCES = CECFrame.cpp \
                      factoryImpl/HDMICecHalFactory.cpp
 
 libRCEC_la_LDFLAGS = -lpthread
-libRCEC_la_LIBADD = libVHAL.la libAidlHAL.la -lRCECOSHal -L${top_builddir}/osal/src/.libs
+libRCEC_la_LIBADD = libVHAL.la libAidlHAL.la ${top_builddir}/osal/src/libRCECOSHal.la
 
 
 
