@@ -26,7 +26,8 @@ AM_LDFLAGS = -ltelemetry_msgsender
 # rdkvHAL library
 libVHAL_la_SOURCES = factoryImpl/HDMICecRdkVHAL.cpp
 libVHAL_la_CXXFLAGS = $(AM_CXXFLAGS)
-libVHAL_la_LDFLAGS = -lpthread -lRCECOSHal
+libVHAL_la_LDFLAGS = -lpthread
+libVHAL_la_LIBADD = ${top_builddir}/osal/src/libRCECOSHal.la
 
 # AidlHAL library
 libAidlHAL_la_SOURCES = factoryImpl/HDMICecAidlHAL.cpp
