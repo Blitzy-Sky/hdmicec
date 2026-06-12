@@ -20,8 +20,6 @@ RM          := rm -rf
 CFLAGS      := -g -fPIC -D_REENTRANT -Wall
 LIBNAME     := RCEC
 LIBNAMEFULL := lib$(LIBNAME).so
-VHAL_LIBNAMEFULL := libVHAL.so
-AIDLHAL_LIBNAMEFULL := libAidlHAL.so
 
 OBJS:= CECFrame.o \
 	Connection.o \
@@ -32,10 +30,9 @@ OBJS:= CECFrame.o \
 	LibCCEC.o \
 	OpCode.o \
 	Util.o \
-	factoryImpl/HDMICecHalFactory.o
-
-VHAL_OBJ := factoryImpl/HDMICecRdkVHAL.o
-AIDLHAL_OBJ := factoryImpl/HDMICecAidlHAL.o
+	factoryImpl/HDMICecHalFactory.o \
+	factoryImpl/HDMICecRdkVHAL.o \
+	factoryImpl/HDMICecAidlHAL.o \
 
 # Calculate AIDL include path relative to workspace
 AIDL_GEN_DIR := $(shell cd ../../.. && pwd)/aidl/rdk-halif-aidl/gen/hdmicec/current
@@ -72,7 +69,7 @@ CFLAGS+= $(INCLUDE)
 LDFLAGS+= -L$(OPENSOURCE_BASE)/lib
 LDFLAGS+=-L$(GLIB_LIBRARY_PATH)/
 LDFLAGS+=$(GLIBS)
-LDFLAGS += -L. -lpthread
+LDFLAGS += -L. -lpthread -L../../osal/src/install/lib -lRCECOSHal
 # Binder libraries - link if they exist
 ifneq ($(wildcard $(BINDER_BUILD_DIR)/libbinder.a),)
 LDFLAGS += -L$(BINDER_BUILD_DIR) -lbinder
@@ -87,20 +84,10 @@ endif
 all: clean library
 	@echo "Build Finished...."
 
-library: $(VHAL_LIBNAMEFULL) $(AIDLHAL_LIBNAMEFULL) $(OBJS)
+library: $(OBJS)
 	@echo "Building $(LIBNAMEFULL) ...."
 	mkdir -p install/lib
-	$(CXX) $(OBJS) $(CFLAGS) -Linstall/lib -lVHAL -lAidlHAL $(LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
-
-$(VHAL_LIBNAMEFULL): $(VHAL_OBJ)
-	@echo "Building $(VHAL_LIBNAMEFULL) ...."
-	mkdir -p install/lib
-	$(CXX) $(VHAL_OBJ) $(CFLAGS) $(LDFLAGS) -lRCECOSHal -shared -o install/lib/$(VHAL_LIBNAMEFULL)
-
-$(AIDLHAL_LIBNAMEFULL): $(AIDLHAL_OBJ)
-	@echo "Building $(AIDLHAL_LIBNAMEFULL) ...."
-	mkdir -p install/lib
-	$(CXX) $(AIDLHAL_OBJ) $(CFLAGS) $(LDFLAGS) -shared -o install/lib/$(AIDLHAL_LIBNAMEFULL)
+	$(CXX) $(OBJS) $(CFLAGS) $(LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
 
 %.o: %.cpp
 	@echo "Building $@ ...."
@@ -108,6 +95,6 @@ $(AIDLHAL_LIBNAMEFULL): $(AIDLHAL_OBJ)
 
 clean:
 	@echo "Cleaning the directory..."
-	@$(RM) $(OBJS) $(VHAL_OBJ) $(AIDLHAL_OBJ) install
+	@$(RM) $(OBJS) install
 
 
