@@ -79,8 +79,6 @@ size_t buildServiceManagerPingParcel(uint8_t* out, size_t capacity) {
     return aligned;
 }
 
-}  // namespace
-
 static bool isServiceManagerAvailable() {
     #define BINDER_DEV "/dev/binder"
     #define MAP_SIZE (128 * 1024)
