@@ -162,13 +162,13 @@ bool HDMICecHalFactory::isAidlServiceAvailable()
     } else if (mBackendType == HDMICecHalFactory::BackendType::LEGACY) {
         return false;
     }
-
+#if 0
     if (!isServiceManagerAvailable()) {
         CCEC_LOG(LOG_INFO, "Binder driver not available; assuming legacy HDMI CEC HAL\r\n");
         mBackendType = HDMICecHalFactory::BackendType::LEGACY;
         return false;
     }
-
+#endif
     android::sp<android::IServiceManager> serviceManager = android::defaultServiceManager();
     if (serviceManager == nullptr) {
         CCEC_LOG(LOG_ERROR, "HDMICecHalFactory::isAidlServiceAvailable failed: IServiceManager unavailable\r\n");
