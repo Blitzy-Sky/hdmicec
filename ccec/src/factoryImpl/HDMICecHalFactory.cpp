@@ -42,6 +42,45 @@ using namespace com::rdk::hal::hdmicec;
 static const android::String16 mServiceManagerName("manager");
 HDMICecHalFactory::BackendType HDMICecHalFactory::mBackendType = HDMICecHalFactory::BackendType::UNKNOWN;
 
+// Build the minimal Parcel payload expected by IServiceManager::PING_TRANSACTION.
+size_t buildServiceManagerPingParcel(uint8_t* out, size_t capacity) {
+    constexpr char16_t kIface[] = u"android.os.IServiceManager";
+    constexpr int32_t kStrictModePolicy = 0;
+    constexpr int32_t kIfaceLen = static_cast<int32_t>((sizeof(kIface) / sizeof(kIface[0])) - 1);
+
+    size_t offset = 0;
+
+    auto writeI32 = [&](int32_t value) -> bool {
+        if (offset + sizeof(value) > capacity) {
+            return false;
+        }
+        std::memcpy(out + offset, &value, sizeof(value));
+        offset += sizeof(value);
+        return true;
+    };
+
+    if (!writeI32(kStrictModePolicy) || !writeI32(kIfaceLen)) {
+        return 0;
+    }
+
+    const size_t ifaceBytes = sizeof(kIface);  // includes UTF-16 null terminator
+    if (offset + ifaceBytes > capacity) {
+        return 0;
+    }
+    std::memcpy(out + offset, kIface, ifaceBytes);
+    offset += ifaceBytes;
+
+    // Binder parcels are 4-byte aligned.
+    const size_t aligned = (offset + 3U) & ~3U;
+    if (aligned > capacity) {
+        return 0;
+    }
+    std::memset(out + offset, 0, aligned - offset);
+    return aligned;
+}
+
+}  // namespace
+
 static bool isServiceManagerAvailable() {
     #define BINDER_DEV "/dev/binder"
     #define MAP_SIZE (128 * 1024)
@@ -92,6 +131,7 @@ static bool isServiceManagerAvailable() {
     // Prepare PING transaction
     uint8_t writebuf[256];
     uint8_t readbuf[256];
+    uint8_t parcelbuf[128];
 
     struct binder_write_read bwr;
     memset(&bwr, 0, sizeof(bwr));
@@ -108,8 +148,14 @@ static bool isServiceManagerAvailable() {
     msg.txn.target.handle = 0;    // servicemanager
     msg.txn.code = PING_TRANSACTION; // ping
     msg.txn.flags = 0;
-    msg.txn.data_size = 0;
+    msg.txn.data_size = buildServiceManagerPingParcel(parcelbuf, sizeof(parcelbuf));
+    if (msg.txn.data_size == 0) {
+        std::cerr << "Failed to build service manager ping parcel" << std::endl;
+        return false;
+    }
     msg.txn.offsets_size = 0;
+    msg.txn.data.ptr.buffer = reinterpret_cast<binder_uintptr_t>(parcelbuf);
+    msg.txn.data.ptr.offsets = 0;
 
     memcpy(writebuf, &msg, sizeof(msg));
 
