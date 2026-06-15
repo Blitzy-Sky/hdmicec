@@ -44,6 +44,12 @@ HDMICecHalFactory::BackendType HDMICecHalFactory::mBackendType = HDMICecHalFacto
 
 namespace {
 
+enum class ServiceManagerProbeResult {
+    BINDER_UNAVAILABLE,
+    SERVICE_MANAGER_AVAILABLE,
+    SERVICE_MANAGER_STATUS_UNKNOWN
+};
+
 // Build the minimal Parcel payload expected by IServiceManager::PING_TRANSACTION.
 size_t buildServiceManagerPingParcel(uint8_t* out, size_t capacity) {
     constexpr char16_t kIface[] = u"android.os.IServiceManager";
@@ -81,7 +87,7 @@ size_t buildServiceManagerPingParcel(uint8_t* out, size_t capacity) {
     return aligned;
 }
 
-static bool isServiceManagerAvailable() {
+static ServiceManagerProbeResult probeServiceManagerAvailability() {
     #define BINDER_DEV "/dev/binder"
     #define MAP_SIZE (128 * 1024)
     #define PING_TRANSACTION 0
@@ -110,14 +116,14 @@ static bool isServiceManagerAvailable() {
     fdGuard.fd = open(BINDER_DEV, O_RDWR);
     if (fdGuard.fd < 0) {
         CCEC_LOG(LOG_INFO, "Failed to open binder device: %s\n", strerror(errno));
-        return false;
+        return ServiceManagerProbeResult::BINDER_UNAVAILABLE;
     }
 
     // Check binder protocol version
     struct binder_version ver;
     if (ioctl(fdGuard.fd, BINDER_VERSION, &ver) == -1) {
         CCEC_LOG(LOG_INFO, "Failed to get binder version: %s\n", strerror(errno));
-        return false;
+        return ServiceManagerProbeResult::BINDER_UNAVAILABLE;
     }
     CCEC_LOG(LOG_INFO, "Binder protocol version: %d\n ", ver.protocol_version);
 
@@ -125,7 +131,7 @@ static bool isServiceManagerAvailable() {
     mapGuard.addr = mmap(NULL, MAP_SIZE, PROT_READ, MAP_PRIVATE, fdGuard.fd, 0);
     if (mapGuard.addr == MAP_FAILED) {
         CCEC_LOG(LOG_INFO, "Failed to map binder buffer: %s\n", strerror(errno));
-        return false;
+        return ServiceManagerProbeResult::BINDER_UNAVAILABLE;
     }
 
     // Prepare PING transaction
@@ -151,7 +157,7 @@ static bool isServiceManagerAvailable() {
     msg.txn.data_size = buildServiceManagerPingParcel(parcelbuf, sizeof(parcelbuf));
     if (msg.txn.data_size == 0) {
         CCEC_LOG(LOG_WARN, "Failed to build service manager ping parcel.\n");
-        return false;
+        return ServiceManagerProbeResult::BINDER_UNAVAILABLE;
     }
     msg.txn.offsets_size = 0;
     msg.txn.data.ptr.buffer = reinterpret_cast<binder_uintptr_t>(parcelbuf);
@@ -167,7 +173,8 @@ static bool isServiceManagerAvailable() {
     // Send ping
     if (ioctl(fdGuard.fd, BINDER_WRITE_READ, &bwr) < 0) {
         CCEC_LOG(LOG_INFO, "Failed to send ping: %s\n", strerror(errno));
-        return false;
+        CCEC_LOG(LOG_INFO, "ServiceManager ping unsupported or inconclusive; continuing with IServiceManager lookup.\n");
+        return ServiceManagerProbeResult::SERVICE_MANAGER_STATUS_UNKNOWN;
     }
 
     // Process response
@@ -183,7 +190,7 @@ static bool isServiceManagerAvailable() {
                 break;
 
             case BR_REPLY:
-                return true;
+                return ServiceManagerProbeResult::SERVICE_MANAGER_AVAILABLE;
 
             default:
                 CCEC_LOG(LOG_INFO, "Other cmd: 0x%x\n", cmd);
@@ -191,7 +198,8 @@ static bool isServiceManagerAvailable() {
         }
     }
 
-    return false;
+    CCEC_LOG(LOG_INFO, "ServiceManager ping did not return BR_REPLY; continuing with IServiceManager lookup.\n");
+    return ServiceManagerProbeResult::SERVICE_MANAGER_STATUS_UNKNOWN;
 }
 
 }  // namespace
@@ -206,7 +214,8 @@ bool HDMICecHalFactory::isAidlServiceAvailable()
         return false;
     }
 
-    if (!isServiceManagerAvailable()) {
+    const ServiceManagerProbeResult probeResult = probeServiceManagerAvailability();
+    if (probeResult == ServiceManagerProbeResult::BINDER_UNAVAILABLE) {
         CCEC_LOG(LOG_INFO, "Binder driver not available; assuming legacy HDMI CEC HAL\r\n");
         mBackendType = HDMICecHalFactory::BackendType::LEGACY;
         return false;
