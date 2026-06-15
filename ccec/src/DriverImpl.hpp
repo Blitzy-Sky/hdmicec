@@ -32,6 +32,7 @@
 
 #include <list>
 #include <memory>
+#include <set>
 
 #include "osal/Mutex.hpp"
 #include "osal/EventQueue.hpp"
@@ -108,6 +109,11 @@ private:
 	android::sp<com::rdk::hal::hdmicec::IHdmiCecController> mAidlController;
 	android::sp<com::rdk::hal::hdmicec::IHdmiCecEventListener> mEventListener;
 	mutable Mutex mAidlMutex;
+
+	// Logical addresses seen on inbound CEC frames.
+	// Used to emulate poll ACK/NACK locally because some AIDL backends
+	// reject 1-byte poll frames as invalid message size.
+	std::set<uint8_t> mSeenLogicalAddresses;
 
 	DriverImpl(const DriverImpl &); /* Not allowed */
 	DriverImpl & operator = (const DriverImpl &); /* Not allowed */

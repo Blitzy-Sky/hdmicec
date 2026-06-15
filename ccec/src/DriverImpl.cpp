@@ -33,12 +33,6 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/select.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <iostream>
-#include <fstream>
-#include <cstdlib>
-#include <algorithm>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <stdlib.h>
@@ -106,51 +100,22 @@ private:
 namespace {
 const size_t kAidlMinCecFrameSize = 2;
 const size_t kAidlMaxCecFrameSize = 16;
-const char* kVdeviceTopologyDump = "/tmp/hdmi_cec_device_list_info.txt";
 
-bool parseLogicalAddressField(const std::string& line, const char* field, int& value)
+// Return the standard logical-address candidates for a given device type.
+// Used only as a fallback when AIDL reports no allocated addresses yet.
+std::vector<int32_t> preferredLogicalAddressesForDeviceType(int devType)
 {
-    const size_t keyPos = line.find(field);
-    if (keyPos == std::string::npos) {
-        return false;
-    }
-
-    const size_t valueStart = line.find_first_not_of(" \t", keyPos + strlen(field));
-    if (valueStart == std::string::npos) {
-        return false;
-    }
-
-    char* endPtr = nullptr;
-    const long parsed = std::strtol(line.c_str() + valueStart, &endPtr, 10);
-    if (endPtr == (line.c_str() + valueStart)) {
-        return false;
-    }
-
-    value = static_cast<int>(parsed);
-    return true;
-}
-
-bool isPresentInVdeviceTopology(const uint8_t destination)
-{
-    std::ifstream topology(kVdeviceTopologyDump);
-    if (!topology.is_open()) {
-        return false;
-    }
-
-    std::string line;
-    while (std::getline(topology, line)) {
-        int logical1 = -1;
-        if (parseLogicalAddressField(line, "Logical-1:", logical1) && logical1 == static_cast<int>(destination)) {
-            return true;
-        }
-
-        int logical2 = -1;
-        if (parseLogicalAddressField(line, "Logical-2:", logical2) && logical2 == static_cast<int>(destination)) {
-            return true;
-        }
-    }
-
-    return false;
+	// Common CEC type ids used in middleware:
+	// 0: TV, 1: RecordingDevice, 3: Tuner, 4: PlaybackDevice, 5: AudioSystem.
+	switch (devType) {
+		case 0: return std::vector<int32_t>{0}; // TV
+		case 1: return std::vector<int32_t>{1, 2, 9}; // Recorder
+		case 3: return std::vector<int32_t>{3, 6, 7, 10}; // Tuner
+		case 5: return std::vector<int32_t>{5}; // AudioSystem
+		case 4:
+		default:
+			return std::vector<int32_t>{4, 8, 11}; // PlaybackDevice fallback
+	}
 }
 }
 
@@ -167,12 +132,23 @@ void DriverImpl::DriverReceiveCallback(int handle, void *callbackData, unsigned 
 
 	CCEC_LOG(LOG_DEBUG, "==========================\r\n");
 
+	// Track initiator LA from inbound frames so 1-byte poll can be emulated
+	// locally on AIDL backends that reject 1-byte sendMessage payloads.
+	if (buf != nullptr && len >= 1) {
+		const uint8_t srcLA = static_cast<uint8_t>((buf[0] >> 4) & 0x0F);
+		if (srcLA <= 0x0E) {
+			DriverImpl& self = static_cast<DriverImpl&>(Driver::getInstance());
+			AutoLock lock_(self.mutex);
+			self.mSeenLogicalAddresses.insert(srcLA);
+			CCEC_LOG(LOG_DEBUG, "DriverReceiveCallback: recorded srcLA 0x%X\r\n", srcLA);
+		}
+	}
+
 	try {
 		static_cast<DriverImpl &>(Driver::getInstance()).getIncomingQueue(handle).offer(frame);
 	}
 	catch(...) {
 		CCEC_LOG( LOG_EXP, "Exception during frame offer...discarding\r\n");
-		// Copilot fix: Delete frame to prevent memory leak when offer() throws exception
 		delete frame;
 	}
 	CCEC_LOG( LOG_DEBUG, "frame offered\r\n");
@@ -419,21 +395,59 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 
 	if (length <= 1) {
 		/*
-		 * Poll frame (header only): emulate ACK based on vdevice topology file.
-		 * This keeps HdmiCecSource ping-based discovery working on AIDL backend.
+		 * Poll frame (header only): do NOT forward to AIDL sendMessage.
+		 * Some AIDL backends reject 1-byte messages as invalid size.
+		 * Instead emulate ACK/NACK from logical addresses observed on
+		 * inbound frames (tracked in DriverReceiveCallback).
+		 *
+		 * If destination is not yet in seen-LA cache, probe with a harmless
+		 * 2-byte directed frame (GiveDevicePowerStatus) to infer presence
+		 * from AIDL ACK/NACK and cache the destination on ACK.
 		 */
 		const uint8_t destination = (buf != NULL) ? (buf[0] & 0x0F) : 0xFF;
-		const bool addressPresent = (destination <= 0x0E) ? isPresentInVdeviceTopology(destination) : false;
+		bool addressPresent = false;
+		if (destination <= 0x0E) {
+			AutoLock lock_(mutex);
+			addressPresent = (mSeenLogicalAddresses.count(destination) > 0);
+		}
 
 		if (addressPresent) {
 			CCEC_LOG(LOG_DEBUG,
-				"DriverImpl::write poll-frame destination=0x%X present in topology. Emulating ack.\\r\\n",
+				"DriverImpl::write poll-frame destination=0x%X present in seen-LA set. Emulating ack.\r\n",
 				destination);
 			return;
 		}
 
+		if (destination <= 0x0E) {
+			AutoLock lock_(mutex);
+			if (this->status != OPENED || mAidlController == nullptr) {
+				throw InvalidStateException();
+			}
+
+			std::vector<uint8_t> probe;
+			probe.reserve(2);
+			probe.push_back(buf ? buf[0] : 0);
+			probe.push_back(0x8F); // GiveDevicePowerStatus
+
+			SendMessageStatus probeStatus = SendMessageStatus::BUSY;
+			android::binder::Status aidlStatus = mAidlController->sendMessage(probe, &probeStatus);
+			if (aidlStatus.isOk() && probeStatus == SendMessageStatus::ACK_STATE_0) {
+				mSeenLogicalAddresses.insert(destination);
+				CCEC_LOG(LOG_DEBUG,
+					"DriverImpl::write poll-frame destination=0x%X ACKed by 2-byte probe. Emulating ack.\r\n",
+					destination);
+				return;
+			}
+
+			CCEC_LOG(LOG_DEBUG,
+				"DriverImpl::write poll-frame destination=0x%X probe NACK/failed (aidlOk=%d status=%d).\r\n",
+				destination,
+				aidlStatus.isOk() ? 1 : 0,
+				static_cast<int>(probeStatus));
+		}
+
 		CCEC_LOG(LOG_DEBUG,
-			"DriverImpl::write poll-frame destination=0x%X not present in topology. Returning no-ack.\\r\\n",
+			"DriverImpl::write poll-frame destination=0x%X not in seen-LA set. Returning no-ack.\r\n",
 			destination);
 		throw CECNoAckException();
 	}
@@ -514,6 +528,33 @@ int DriverImpl::getLogicalAddress(int devType)
 	android::binder::Status status = mAidlService->getLogicalAddresses(&addresses);
 	if (status.isOk() && addresses.size() > 0) {
 		logicalAddress = addresses[0];  // Return first logical address
+	} else {
+		CCEC_LOG(LOG_WARN,
+			"DriverImpl::getLogicalAddress no allocated LA from AIDL (statusOk=%d, count=%zu). Trying fallback allocation.\r\n",
+			status.isOk() ? 1 : 0,
+			addresses.size());
+
+		if (mAidlController != nullptr) {
+			const std::vector<int32_t> preferred = preferredLogicalAddressesForDeviceType(devType);
+			for (std::vector<int32_t>::const_iterator it = preferred.begin(); it != preferred.end(); ++it) {
+				std::vector<int32_t> candidate;
+				candidate.push_back(*it);
+				bool addResult = false;
+				android::binder::Status addStatus = mAidlController->addLogicalAddresses(candidate, &addResult);
+				CCEC_LOG(LOG_DEBUG,
+					"DriverImpl::getLogicalAddress fallback addLogicalAddresses candidate=%d addOk=%d addResult=%d\r\n",
+					candidate[0],
+					addStatus.isOk() ? 1 : 0,
+					addResult ? 1 : 0);
+
+				addresses.clear();
+				android::binder::Status retryStatus = mAidlService->getLogicalAddresses(&addresses);
+				if (retryStatus.isOk() && addresses.size() > 0) {
+					logicalAddress = addresses[0];
+					break;
+				}
+			}
+		}
 	}
 
 	CCEC_LOG( LOG_DEBUG, "DriverImpl::getLogicalAddress got logical Address : %d \r\n", logicalAddress);
