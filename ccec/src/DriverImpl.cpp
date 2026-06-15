@@ -38,9 +38,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <fstream>
-#include <sys/types.h>
 #include <sys/socket.h>
-#include <stdlib.h>
 #include <string>
 
 #include "osal/EventQueue.hpp"
@@ -57,6 +55,28 @@ CCEC_BEGIN_NAMESPACE
 
 #include "ccec/drivers/hdmi_cec_driver.h"
 
+namespace {
+const size_t kAidlMinCecFrameSize = 2;
+const size_t kAidlMaxCecFrameSize = 16;
+
+// Return the standard logical-address candidates for a given device type.
+// Used only as a fallback when AIDL reports no allocated addresses yet.
+std::vector<int32_t> preferredLogicalAddressesForDeviceType(int devType)
+{
+	// Common CEC type ids used in middleware:
+	// 0: TV, 1: RecordingDevice, 3: Tuner, 4: PlaybackDevice, 5: AudioSystem.
+	switch (devType) {
+		case 0: return std::vector<int32_t>{0}; // TV
+		case 1: return std::vector<int32_t>{1, 2, 9}; // Recorder
+		case 3: return std::vector<int32_t>{3, 6, 7, 10}; // Tuner
+		case 5: return std::vector<int32_t>{5}; // AudioSystem
+		case 4:
+		default:
+			return std::vector<int32_t>{4, 8, 11}; // PlaybackDevice fallback
+	}
+}
+}
+
 size_t write(const unsigned char *buf, size_t len);
 
 void DriverImpl::DriverReceiveCallback(int handle, void *callbackData, unsigned char *buf, int len)
@@ -70,12 +90,23 @@ void DriverImpl::DriverReceiveCallback(int handle, void *callbackData, unsigned 
 
 	CCEC_LOG(LOG_DEBUG, "==========================\r\n");
 
+	// Track initiator LA from inbound frames so 1-byte poll can be emulated
+	// locally on AIDL backends that reject 1-byte sendMessage payloads.
+	if (buf != nullptr && len >= 1) {
+		const uint8_t srcLA = static_cast<uint8_t>((buf[0] >> 4) & 0x0F);
+		if (srcLA <= 0x0E) {
+			DriverImpl& self = static_cast<DriverImpl&>(Driver::getInstance());
+			AutoLock lock_(self.mutex);
+			self.mSeenLogicalAddresses.insert(srcLA);
+			CCEC_LOG(LOG_DEBUG, "DriverReceiveCallback: recorded srcLA 0x%X\r\n", srcLA);
+		}
+	}
+
 	try {
 		static_cast<DriverImpl &>(Driver::getInstance()).getIncomingQueue(handle).offer(frame);
 	}
 	catch(...) {
 		CCEC_LOG( LOG_EXP, "Exception during frame offer...discarding\r\n");
-		// Copilot fix: Delete frame to prevent memory leak when offer() throws exception
 		delete frame;
 	}
 	CCEC_LOG( LOG_DEBUG, "frame offered\r\n");
@@ -255,6 +286,71 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
 
+	if (length <= 1) {
+		/*
+		 * Poll frame (header only): do NOT forward to AIDL sendMessage.
+		 * Some AIDL backends reject 1-byte messages as invalid size.
+		 * Instead emulate ACK/NACK from logical addresses observed on
+		 * inbound frames (tracked in DriverReceiveCallback).
+		 *
+		 * If destination is not yet in seen-LA cache, probe with a harmless
+		 * 2-byte directed frame (GiveDevicePowerStatus) to infer presence
+		 * from AIDL ACK/NACK and cache the destination on ACK.
+		 */
+		const uint8_t destination = (buf != NULL) ? (buf[0] & 0x0F) : 0xFF;
+		bool addressPresent = false;
+		if (destination <= 0x0E) {
+			AutoLock lock_(mutex);
+			addressPresent = (mSeenLogicalAddresses.count(destination) > 0);
+		}
+
+		if (addressPresent) {
+			CCEC_LOG(LOG_DEBUG,
+				"DriverImpl::write poll-frame destination=0x%X present in seen-LA set. Emulating ack.\r\n",
+				destination);
+			return;
+		}
+
+		if (destination <= 0x0E) {
+			AutoLock lock_(mutex);
+			if (this->status != OPENED || mAidlController == nullptr) {
+				throw InvalidStateException();
+			}
+
+			std::vector<uint8_t> probe;
+			probe.reserve(2);
+			probe.push_back(buf ? buf[0] : 0);
+			probe.push_back(0x8F); // GiveDevicePowerStatus
+
+			SendMessageStatus probeStatus = SendMessageStatus::BUSY;
+			android::binder::Status aidlStatus = mAidlController->sendMessage(probe, &probeStatus);
+			if (aidlStatus.isOk() && probeStatus == SendMessageStatus::ACK_STATE_0) {
+				mSeenLogicalAddresses.insert(destination);
+				CCEC_LOG(LOG_DEBUG,
+					"DriverImpl::write poll-frame destination=0x%X ACKed by 2-byte probe. Emulating ack.\r\n",
+					destination);
+				return;
+			}
+
+			CCEC_LOG(LOG_DEBUG,
+				"DriverImpl::write poll-frame destination=0x%X probe NACK/failed (aidlOk=%d status=%d).\r\n",
+				destination,
+				aidlStatus.isOk() ? 1 : 0,
+				static_cast<int>(probeStatus));
+		}
+
+		CCEC_LOG(LOG_DEBUG,
+			"DriverImpl::write poll-frame destination=0x%X not in seen-LA set. Returning no-ack.\r\n",
+			destination);
+		throw CECNoAckException();
+	}
+
+	if (length > kAidlMaxCecFrameSize) {
+		CCEC_LOG(LOG_EXP,
+			"DriverImpl::write blocking unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\\r\\n",
+			length);
+		throw IOException();
+	}
     {
 		AutoLock lock_(mutex);
     	if (status != OPENED) {
