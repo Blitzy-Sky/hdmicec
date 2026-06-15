@@ -19,19 +19,19 @@
 SUBDIRS =
 AM_CXXFLAGS = -pthread -Wall -I${top_srcdir}/osal/include -I${top_srcdir}/ccec/include
 
-lib_LTLIBRARIES = librdkvHAL.la libAidlHAL.la libRCEC.la
+lib_LTLIBRARIES = libHDMICecRdkVHAL.la libHDMICecAidlHAL.la libRCEC.la
 
 AM_LDFLAGS = -ltelemetry_msgsender
 
 # rdkvHAL library
-librdkvHAL_la_SOURCES = factoryImpl/HDMICecRdkVHAL.cpp
-librdkvHAL_la_CXXFLAGS = $(AM_CXXFLAGS)
-librdkvHAL_la_LDFLAGS = -lpthread
+libHDMICecRdkVHAL_la_SOURCES = factoryImpl/HDMICecRdkVHAL.cpp
+libHDMICecRdkVHAL_la_CXXFLAGS = $(AM_CXXFLAGS)
+libHDMICecRdkVHAL_la_LDFLAGS = -lpthread
 
 # AidlHAL library
-libAidlHAL_la_SOURCES = factoryImpl/AidlHAL.cpp
-libAidlHAL_la_CXXFLAGS = $(AM_CXXFLAGS)
-libAidlHAL_la_LDFLAGS = -lpthread
+libHDMICecAidlHAL_la_SOURCES = factoryImpl/HDMICecAidlHAL.cpp
+libHDMICecAidlHAL_la_CXXFLAGS = $(AM_CXXFLAGS)
+libHDMICecAidlHAL_la_LDFLAGS = -lpthread
 
 # Main RCEC library
 libRCEC_la_SOURCES = CECFrame.cpp \
@@ -46,7 +46,7 @@ libRCEC_la_SOURCES = CECFrame.cpp \
                      factoryImpl/HDMICecHalFactory.cpp
 
 libRCEC_la_LDFLAGS = -lpthread
-libRCEC_la_LIBADD = librdkvHAL.la libAidlHAL.la -lRCECOSHal -L${top_builddir}/osal/src/.libs
+libRCEC_la_LIBADD = libHDMICecRdkVHAL.la libHDMICecAidlHAL.la -lRCECOSHal -L${top_builddir}/osal/src/.libs
 
 
 

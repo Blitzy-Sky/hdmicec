@@ -20,8 +20,8 @@ RM          := rm -rf
 CFLAGS      := -g -fPIC -D_REENTRANT -Wall
 LIBNAME     := RCEC
 LIBNAMEFULL := lib$(LIBNAME).so
-VHAL_LIBNAMEFULL := librdkvHAL.so
-AIDLHAL_LIBNAMEFULL := libAidlHAL.so
+VHAL_LIBNAMEFULL := libHDMICecRdkVHAL.so
+AIDLHAL_LIBNAMEFULL := libHDMICecAidlHAL.so
 
 OBJS:= CECFrame.o \
 	Connection.o \
@@ -35,7 +35,7 @@ OBJS:= CECFrame.o \
 	factoryImpl/HDMICecHalFactory.o \
 
 VHAL_OBJ := factoryImpl/HDMICecRdkVHAL.o
-AIDLHAL_OBJ := factoryImpl/AidlHAL.o
+AIDLHAL_OBJ := factoryImpl/HDMICecAidlHAL.o
 
 # Calculate AIDL include path relative to workspace
 AIDL_GEN_DIR := $(shell cd ../../.. && pwd)/aidl/rdk-halif-aidl/gen/hdmicec/current
@@ -90,7 +90,7 @@ all: clean library
 library: $(VHAL_LIBNAMEFULL) $(AIDLHAL_LIBNAMEFULL) $(OBJS)
 	@echo "Building $(LIBNAMEFULL) ...."
 	mkdir -p install/lib
-	$(CXX) $(OBJS) $(CFLAGS) -Linstall/lib -lrdkvHAL -lAidlHAL $(LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
+	$(CXX) $(OBJS) $(CFLAGS) -Linstall/lib -lHDMICecRdkVHAL -lHDMICecAidlHAL $(LDFLAGS) -shared -o install/lib/$(LIBNAMEFULL)
 
 $(VHAL_LIBNAMEFULL): $(VHAL_OBJ)
 	@echo "Building $(VHAL_LIBNAMEFULL) ...."

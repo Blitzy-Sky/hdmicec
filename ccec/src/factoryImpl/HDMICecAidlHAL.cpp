@@ -173,7 +173,7 @@ int HDMICecAidlHAL::open(int *handle)
     }
 
     // Create event listener
-    mEventListener = new AidlHALEventListener(this);
+    mEventListener = new HDMICecAidlHALEventListener(this);
 
     // Open AIDL interface
     android::sp<IHdmiCecController> controller;
