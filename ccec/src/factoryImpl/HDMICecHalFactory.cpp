@@ -42,6 +42,8 @@ using namespace com::rdk::hal::hdmicec;
 static const android::String16 mServiceManagerName("manager");
 HDMICecHalFactory::BackendType HDMICecHalFactory::mBackendType = HDMICecHalFactory::BackendType::UNKNOWN;
 
+namespace {
+
 // Build the minimal Parcel payload expected by IServiceManager::PING_TRANSACTION.
 size_t buildServiceManagerPingParcel(uint8_t* out, size_t capacity) {
     constexpr char16_t kIface[] = u"android.os.IServiceManager";
@@ -148,7 +150,7 @@ static bool isServiceManagerAvailable() {
     msg.txn.flags = 0;
     msg.txn.data_size = buildServiceManagerPingParcel(parcelbuf, sizeof(parcelbuf));
     if (msg.txn.data_size == 0) {
-        std::cerr << "Failed to build service manager ping parcel" << std::endl;
+        CCEC_LOG(LOG_WARN, "Failed to build service manager ping parcel.\n");
         return false;
     }
     msg.txn.offsets_size = 0;
@@ -191,6 +193,8 @@ static bool isServiceManagerAvailable() {
 
     return false;
 }
+
+}  // namespace
 
 bool HDMICecHalFactory::isAidlServiceAvailable()
 {
