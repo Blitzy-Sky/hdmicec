@@ -36,12 +36,8 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <iostream>
-#include <cstdlib>
-#include <fstream>
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <stdlib.h>
-#include <string>
 
 #include "osal/EventQueue.hpp"
 #include "osal/Exception.hpp"
@@ -75,7 +71,6 @@ void DriverImpl::DriverReceiveCallback(int handle, void *callbackData, unsigned 
 	}
 	catch(...) {
 		CCEC_LOG( LOG_EXP, "Exception during frame offer...discarding\r\n");
-		// Copilot fix: Delete frame to prevent memory leak when offer() throws exception
 		delete frame;
 	}
 	CCEC_LOG( LOG_DEBUG, "frame offered\r\n");
@@ -212,15 +207,10 @@ void  DriverImpl::writeAsync(const CECFrame &frame)  noexcept(false)
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
 
-    {
-		AutoLock lock_(mutex);
+    {AutoLock lock_(mutex);
 		if (status != OPENED) {
     		throw InvalidStateException();
     	}
-
-		if(mHal->skipFrameOfUnsupportedLength(length)) {
-			return;
-		}
 
 		CCEC_LOG( LOG_DEBUG, "DriverImpl::write to call HdmiCecTxAsync\r\n");
 
@@ -239,7 +229,7 @@ void  DriverImpl::writeAsync(const CECFrame &frame)  noexcept(false)
 		}
 	}
 
-	CCEC_LOG( LOG_DEBUG, "Send Async Completed\r\n");
+    CCEC_LOG( LOG_DEBUG, "Send Async Completed\r\n");
 }
 
 
@@ -255,16 +245,10 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 	frame.getBuffer(&buf, &length);
 	printFrameDetails(frame);
 
-    {
-		AutoLock lock_(mutex);
+    {AutoLock lock_(mutex);
     	if (status != OPENED) {
     		throw InvalidStateException();
     	}
-
-		if(mHal->emulateAckForPollFrames(buf, length)) {
-			return;
-		}
-
 		int sendResult = HDMI_CEC_IO_SUCCESS;
 		CCEC_LOG( LOG_DEBUG, "DriverImpl::write to call HdmiCecTx\r\n");
 
@@ -282,16 +266,16 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
 			throw IOException();
 		}
 
-		if (sendResult != HDMI_CEC_IO_SUCCESS) {
-			if ((sendResult == HDMI_CEC_IO_INVALID_HANDLE) ||
-				(sendResult == HDMI_CEC_IO_INVALID_ARGUMENT) ||
-				(sendResult == HDMI_CEC_IO_LOGICALADDRESS_UNAVAILABLE) ||
-				(sendResult == HDMI_CEC_IO_SENT_FAILED) ||
-				(sendResult == HDMI_CEC_IO_GENERAL_ERROR))
-			{
-				throw IOException();
-			}
-		}
+        if (sendResult != HDMI_CEC_IO_SUCCESS) {
+            if ((sendResult == HDMI_CEC_IO_INVALID_HANDLE) ||
+                (sendResult == HDMI_CEC_IO_INVALID_ARGUMENT) ||
+                (sendResult == HDMI_CEC_IO_LOGICALADDRESS_UNAVAILABLE) ||
+                (sendResult == HDMI_CEC_IO_SENT_FAILED) ||
+                (sendResult == HDMI_CEC_IO_GENERAL_ERROR))
+            {
+                throw IOException();
+            }
+        }
 
 		if (((frame.at(0) & 0x0F) != 0x0F) && sendResult == HDMI_CEC_IO_SENT_BUT_NOT_ACKD) {
 			throw CECNoAckException();
@@ -438,6 +422,7 @@ void  DriverImpl::printFrameDetails(const CECFrame &frame)  noexcept(false) {
 }
 
 CCEC_END_NAMESPACE
+
 
 /** @} */
 /** @} */
