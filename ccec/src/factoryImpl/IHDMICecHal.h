@@ -21,6 +21,7 @@
 #define I_HDMI_CEC_HAL_H
 
 #include <cstddef>
+#include <cstdint>
 #include "ccec/drivers/hdmi_cec_driver.h"
 
 /**
@@ -181,6 +182,19 @@ public:
      * @return true if acknowledgment should be emulated, false otherwise.
      */
     virtual bool emulateAckForPollFrames(const unsigned char *buf, int len) = 0;
+
+    /**
+     * @brief Record a logical address observed on an inbound CEC frame.
+     *
+     * AIDL backends use this to build a local cache of active logical
+     * addresses so that 1-byte poll frames can be emulated without
+     * sending an actual message on the bus.
+     *
+     * Legacy: no-op.
+     *
+     * @param[in] logicalAddress  The source logical address (0-14).
+     */
+    virtual void recordSeenLogicalAddress(uint8_t logicalAddress) { (void)logicalAddress; }
 };
 
 #endif // I_HDMI_CEC_HAL_H

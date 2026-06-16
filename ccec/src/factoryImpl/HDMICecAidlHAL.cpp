@@ -431,32 +431,82 @@ bool HDMICecAidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
 {
     if (len <= 1) {
         /*
-            * Poll frame (header only): emulate ACK based on vdevice topology file.
-            * This keeps HdmiCecSource ping-based discovery working on AIDL backend.
-            */
+         * Poll frame (header only): emulate ACK based on seen-LA cache,
+         * 2-byte probe, and vdevice topology file.
+         * This keeps HdmiCecSource ping-based discovery working on AIDL backend.
+         */
         const uint8_t destination = (buf != NULL) ? (buf[0] & 0x0F) : 0xFF;
-        const bool addressPresent = (destination <= 0x0E) ? isPresentInVdeviceTopology(destination) : false;
 
-        if (addressPresent) {
-            CCEC_LOG(LOG_DEBUG,
-                "DriverImpl::write poll-frame destination=0x%X present in topology. Emulating ack.\r\n",
-                destination);
-            return true;
+        if (destination <= 0x0E) {
+            /* Check seen-LA cache first */
+            {
+                AutoLock lock_(mAidlMutex);
+                if (mSeenLogicalAddresses.count(destination) > 0) {
+                    CCEC_LOG(LOG_DEBUG,
+                        "HDMICecAidlHAL::emulateAckForPollFrames destination=0x%X present in seen-LA set. Emulating ack.\r\n",
+                        destination);
+                    return true;
+                }
+            }
+
+            /* Probe with a 2-byte directed frame (GiveDevicePowerStatus) */
+            {
+                AutoLock lock_(mAidlMutex);
+                if (mAidlController != nullptr) {
+                    std::vector<uint8_t> probe;
+                    probe.reserve(2);
+                    probe.push_back(buf ? buf[0] : 0);
+                    probe.push_back(0x8F); // GiveDevicePowerStatus
+
+                    SendMessageStatus probeStatus = SendMessageStatus::BUSY;
+                    android::binder::Status aidlStatus = mAidlController->sendMessage(probe, &probeStatus);
+                    if (aidlStatus.isOk() && probeStatus == SendMessageStatus::ACK_STATE_0) {
+                        mSeenLogicalAddresses.insert(destination);
+                        CCEC_LOG(LOG_DEBUG,
+                            "HDMICecAidlHAL::emulateAckForPollFrames destination=0x%X ACKed by 2-byte probe. Emulating ack.\r\n",
+                            destination);
+                        return true;
+                    }
+
+                    CCEC_LOG(LOG_DEBUG,
+                        "HDMICecAidlHAL::emulateAckForPollFrames destination=0x%X probe NACK/failed (aidlOk=%d status=%d).\r\n",
+                        destination,
+                        aidlStatus.isOk() ? 1 : 0,
+                        static_cast<int>(probeStatus));
+                }
+            }
+
+            /* Fallback: check vdevice topology file */
+            if (isPresentInVdeviceTopology(destination)) {
+                CCEC_LOG(LOG_DEBUG,
+                    "HDMICecAidlHAL::emulateAckForPollFrames destination=0x%X present in topology. Emulating ack.\r\n",
+                    destination);
+                return true;
+            }
         }
 
         CCEC_LOG(LOG_DEBUG,
-            "DriverImpl::write poll-frame destination=0x%X not present in topology. Returning no-ack.\r\n",
-            destination);
+            "HDMICecAidlHAL::emulateAckForPollFrames destination=0x%X not present. Returning no-ack.\r\n",
+            (buf != NULL) ? (buf[0] & 0x0F) : 0xFF);
         throw CECNoAckException();
     }
 
     if (static_cast<size_t>(len) > kAidlMaxCecFrameSize) {
         CCEC_LOG(LOG_EXP,
-            "DriverImpl::write blocking unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\r\n",
+            "HDMICecAidlHAL::emulateAckForPollFrames blocking unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\r\n",
             static_cast<size_t>(len));
         throw IOException();
     }
 
     return false;
+}
+
+void HDMICecAidlHAL::recordSeenLogicalAddress(uint8_t logicalAddress)
+{
+    if (logicalAddress <= 0x0E) {
+        AutoLock lock_(mAidlMutex);
+        mSeenLogicalAddresses.insert(logicalAddress);
+        CCEC_LOG(LOG_DEBUG, "HDMICecAidlHAL::recordSeenLogicalAddress recorded LA 0x%X\r\n", logicalAddress);
+    }
 }
 
