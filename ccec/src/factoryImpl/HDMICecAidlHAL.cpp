@@ -168,12 +168,16 @@ int HDMICecAidlHAL::open(int *handle)
 {
     CCEC_LOG(LOG_INFO, "HDMICecAidlHAL::open invoked\n");
 
+    if (handle == nullptr) {
+        CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::open failed: invalid handle pointer\r\n");
+        throw IOException();
+    }
+
     android::sp<IHdmiCec> service = getAidlService();
     if (service == nullptr) {
         CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::open failed: IHdmiCec service unavailable\r\n");
         throw IOException();
     }
-
     // Create event listener
     mEventListener = new HDMICecAidlHALEventListener(this);
 
@@ -223,10 +227,10 @@ int HDMICecAidlHAL::close(int handle)
 
 int HDMICecAidlHAL::addLogicalAddress(int handle, int logicalAddresses)
 {
+    (void)handle;
     if (mAidlController == nullptr) {
         throw IOException();
     }
-
     std::vector<int32_t> addresses;
     addresses.push_back(logicalAddresses);
     bool result = false;
@@ -247,6 +251,7 @@ int HDMICecAidlHAL::addLogicalAddress(int handle, int logicalAddresses)
 
 int HDMICecAidlHAL::removeLogicalAddress(int handle, int logicalAddresses)
 {
+    (void)handle;
     if (mAidlController == nullptr) {
         throw IOException();
     }
@@ -266,13 +271,13 @@ int HDMICecAidlHAL::removeLogicalAddress(int handle, int logicalAddresses)
 
 int HDMICecAidlHAL::getLogicalAddress(int handle, int *logicalAddress)
 {
+    (void)handle;
     if (logicalAddress == nullptr) {
         CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::getLogicalAddress invalid output pointer\r\n");
         throw IOException();
     }
 
     *logicalAddress = 0;
-
 	if (mAidlService == nullptr) {
 		android::sp<IHdmiCec> service = getAidlService();
 		if (service == nullptr) {
@@ -347,6 +352,7 @@ int HDMICecAidlHAL::setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *
 
 int HDMICecAidlHAL::tx(int handle, const unsigned char *buf, int len, int *result)
 {
+    (void)handle;
     if (mAidlController == nullptr) {
 		throw IOException();
 	}
@@ -387,6 +393,7 @@ int HDMICecAidlHAL::tx(int handle, const unsigned char *buf, int len, int *resul
 
 int HDMICecAidlHAL::txAsync(int handle, const unsigned char *buf, int len)
 {
+    (void)handle;
     if (mAidlController == nullptr) {
         throw IOException();
     }
@@ -419,7 +426,7 @@ bool HDMICecAidlHAL::skipFrameOfUnsupportedLength(size_t length) {
 	if (length < kAidlMinCecFrameSize || length > kAidlMaxCecFrameSize) {
 		/* AIDL sendMessage accepts only 2..16 byte CEC frames. */
 		CCEC_LOG(LOG_WARN,
-			"DriverImpl::writeAsync skipping unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\r\n",
+			"HDMICecAidlHAL::skipFrameOfUnsupportedLength skipping unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\r\n",
 			length);
         return true;
 	}

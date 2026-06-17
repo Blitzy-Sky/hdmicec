@@ -151,11 +151,14 @@ int HDMICecRdkVHAL::getPhysicalAddress(int handle, unsigned int *physicalAddress
 }
 
 bool HDMICecRdkVHAL::skipFrameOfUnsupportedLength(size_t length) {
+    (void)length;
     return false;
 }
 
 bool HDMICecRdkVHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
 {
+    (void)buf;
+    (void)len;
     // No emulation for HDMICecRdkVHAL
     return false;
 }
