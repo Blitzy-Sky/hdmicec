@@ -72,6 +72,24 @@ private:
     HDMICecAidlHAL *mAidlHal;
 };
 
+
+// Return the standard logical-address candidates for a given device type.
+// Used only as a fallback when AIDL reports no allocated addresses yet.
+std::vector<int32_t> preferredLogicalAddressesForDeviceType(int devType)
+{
+	// Common CEC type ids used in middleware:
+	// 0: TV, 1: RecordingDevice, 3: Tuner, 4: PlaybackDevice, 5: AudioSystem.
+	switch (devType) {
+		case 0: return std::vector<int32_t>{0}; // TV
+		case 1: return std::vector<int32_t>{1, 2, 9}; // Recorder
+		case 3: return std::vector<int32_t>{3, 6, 7, 10}; // Tuner
+		case 5: return std::vector<int32_t>{5}; // AudioSystem
+		case 4:
+		default:
+			return std::vector<int32_t>{4, 8, 11}; // PlaybackDevice fallback
+	}
+}
+
 HDMICecAidlHAL::HDMICecAidlHAL()
     : mAidlService(nullptr),
       mAidlController(nullptr),
@@ -111,29 +129,6 @@ bool HDMICecAidlHAL::parseLogicalAddressField(const std::string& line, const cha
 
 	value = static_cast<int>(parsed);
 	return true;
-}
-
-bool HDMICecAidlHAL::isPresentInVdeviceTopology(const uint8_t destination)
-{
-	std::ifstream topology(kVdeviceTopologyDump);
-	if (!topology.is_open()) {
-		return false;
-	}
-
-	std::string line;
-	while (std::getline(topology, line)) {
-		int logicalAddr = -1;
-		if (parseLogicalAddressField(line, "Logical-1:", logicalAddr) && logicalAddr == static_cast<int>(destination)) {
-			return true;
-		}
-
-		logicalAddr = -1;
-		if (parseLogicalAddressField(line, "Logical-2:", logicalAddr) && logicalAddr == static_cast<int>(destination)) {
-			return true;
-		}
-	}
-
-	return false;
 }
 
 android::sp<IHdmiCec> HDMICecAidlHAL::getAidlService()
@@ -208,6 +203,7 @@ int HDMICecAidlHAL::close(int handle)
             bool result = false;
             android::binder::Status status = service->close(mAidlController, &result);
             if (!status.isOk()) {
+                CCEC_LOG(LOG_EXP, "Failed to close AIDL HdmiCec interface: %s\r\n", status.toString8().c_str());
                 CCEC_LOG(LOG_ERROR, "HDMICecAidlHAL::close failed: service->close status not OK\n");
                 throw IOException();
             }
@@ -290,7 +286,33 @@ int HDMICecAidlHAL::getLogicalAddress(int handle, int *logicalAddress)
     android::binder::Status status = mAidlService->getLogicalAddresses(&addresses);
     if (status.isOk() && addresses.size() > 0) {
         *logicalAddress = addresses[0];
+    }else {
+		CCEC_LOG(LOG_WARN,
+			"DriverImpl::getLogicalAddress no allocated LA from AIDL (statusOk=%d, count=%zu). Trying fallback allocation.\r\n",
+			status.isOk() ? 1 : 0,
+			addresses.size());
+		if (mAidlController != nullptr) {
+			const std::vector<int32_t> preferred = preferredLogicalAddressesForDeviceType(*logicalAddress);
+			for (std::vector<int32_t>::const_iterator it = preferred.begin(); it != preferred.end(); ++it) {
+				std::vector<int32_t> candidate;
+				candidate.push_back(*it);
+				bool addResult = false;
+				android::binder::Status addStatus = mAidlController->addLogicalAddresses(candidate, &addResult);
+				CCEC_LOG(LOG_DEBUG,
+					"DriverImpl::getLogicalAddress fallback addLogicalAddresses candidate=%d addOk=%d addResult=%d\r\n",
+					candidate[0],
+					addStatus.isOk() ? 1 : 0,
+					addResult ? 1 : 0);
+				addresses.clear();
+				android::binder::Status retryStatus = mAidlService->getLogicalAddresses(&addresses);
+				if (retryStatus.isOk() && addresses.size() > 0) {
+					*logicalAddress = addresses[0];
+					break;
+				}
+			}
+		}
     }
+
     
     CCEC_LOG( LOG_DEBUG, "HDMICecAidlHAL::getLogicalAddress completed\r\n");
 
@@ -422,18 +444,6 @@ int HDMICecAidlHAL::txAsync(int handle, const unsigned char *buf, int len)
     return 0;
 }
 
-bool HDMICecAidlHAL::skipFrameOfUnsupportedLength(size_t length) {
-	if (length < kAidlMinCecFrameSize || length > kAidlMaxCecFrameSize) {
-		/* AIDL sendMessage accepts only 2..16 byte CEC frames. */
-		CCEC_LOG(LOG_WARN,
-			"HDMICecAidlHAL::skipFrameOfUnsupportedLength skipping unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\r\n",
-			length);
-        return true;
-	}
-
-    return false;
-}
-
 bool HDMICecAidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
 {
     if (len <= 1) {
@@ -508,12 +518,5 @@ bool HDMICecAidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
     return false;
 }
 
-void HDMICecAidlHAL::recordSeenLogicalAddress(uint8_t logicalAddress)
-{
-    if (logicalAddress <= 0x0E) {
-        AutoLock lock_(mAidlMutex);
-        mSeenLogicalAddresses.insert(logicalAddress);
-        CCEC_LOG(LOG_DEBUG, "HDMICecAidlHAL::recordSeenLogicalAddress recorded LA 0x%X\r\n", logicalAddress);
-    }
-}
+
 

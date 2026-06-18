@@ -68,13 +68,15 @@ void DriverImpl::DriverReceiveCallback(int handle, void *callbackData, unsigned 
 
 	CCEC_LOG(LOG_DEBUG, "==========================\r\n");
 
-	// Track initiator LA from inbound frames so poll frames can be emulated
-	// on AIDL backends that reject 1-byte sendMessage payloads.
+	// Track initiator LA from inbound frames so 1-byte poll can be emulated
+	// locally on AIDL backends that reject 1-byte sendMessage payloads.
 	if (buf != nullptr && len >= 1) {
 		const uint8_t srcLA = static_cast<uint8_t>((buf[0] >> 4) & 0x0F);
 		if (srcLA <= 0x0E) {
 			DriverImpl& self = static_cast<DriverImpl&>(Driver::getInstance());
-			self.mHal->recordSeenLogicalAddress(srcLA);
+			AutoLock lock_(self.mutex);
+			self.mSeenLogicalAddresses.insert(srcLA);
+			CCEC_LOG(LOG_DEBUG, "DriverReceiveCallback: recorded srcLA 0x%X\r\n", srcLA);
 		}
 	}
 
@@ -224,10 +226,6 @@ void  DriverImpl::writeAsync(const CECFrame &frame)  noexcept(false)
 		if (status != OPENED) {
     		throw InvalidStateException();
     	}
-
-		if(mHal->skipFrameOfUnsupportedLength(length)) {
-			return;
-		}
 
 		CCEC_LOG( LOG_DEBUG, "DriverImpl::write to call HdmiCecTxAsync\r\n");
 

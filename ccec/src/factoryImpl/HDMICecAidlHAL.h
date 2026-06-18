@@ -22,10 +22,8 @@
 
 #include "IHDMICecHal.h"
 
- #include <cstdint>
- #include <set>
- #include <string>
- #include <vector>
+#include <cstdint>
+#include <string>
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
 #include <utils/String16.h>
@@ -57,17 +55,13 @@ public:
     int setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data) override;
     int tx(int handle, const unsigned char *buf, int len, int *result) override;
     int txAsync(int handle, const unsigned char *buf, int len) override;
-    bool skipFrameOfUnsupportedLength(size_t length) override;
     bool emulateAckForPollFrames(const unsigned char *buf, int len) override;
-    void recordSeenLogicalAddress(uint8_t logicalAddress) override;
+
 
 private:
     const size_t kAidlMinCecFrameSize = 2;
     const size_t kAidlMaxCecFrameSize = 16;
-    static constexpr const char* kVdeviceTopologyDump = "/tmp/hdmi_cec_device_list_info.txt";
-
     bool parseLogicalAddressField(const std::string& line, const char* field, int& value);
-    bool isPresentInVdeviceTopology(const uint8_t destination);
     android::sp<com::rdk::hal::hdmicec::IHdmiCec> getAidlService();
     void initAidlService();
     void dispatchRx(unsigned char *buf, int len);
@@ -81,7 +75,7 @@ private:
     void* mRxCbData;
     void* mTxCbData;
     mutable Mutex mAidlMutex;
-    std::set<uint8_t> mSeenLogicalAddresses;
+
 
     friend class HDMICecAidlHALEventListener;
 };

@@ -21,7 +21,6 @@
 #define I_HDMI_CEC_HAL_H
 
 #include <cstddef>
-#include <cstdint>
 #include "ccec/drivers/hdmi_cec_driver.h"
 
 /**
@@ -161,17 +160,6 @@ public:
     virtual int getPhysicalAddress(int handle, unsigned int *physicalAddress) = 0;
 
     /**
-     * @brief Check if a frame of unsupported length should be skipped.
-     *
-     * Legacy: no-op (returns false).
-     * AIDL:   validates frame length against binder service constraints.
-     *
-     * @param[in] length  Length of the CEC frame.
-     * @return true if the frame should be skipped, false otherwise.
-     */
-    virtual bool skipFrameOfUnsupportedLength(size_t length) = 0;
-
-    /**
      * @brief Emulate acknowledgment for poll frames.
      *
      * Legacy: Ignores this as the legacy HAL does not support emulating ACKs.
@@ -183,18 +171,6 @@ public:
      */
     virtual bool emulateAckForPollFrames(const unsigned char *buf, int len) = 0;
 
-    /**
-     * @brief Record a logical address observed on an inbound CEC frame.
-     *
-     * AIDL backends use this to build a local cache of active logical
-     * addresses so that 1-byte poll frames can be emulated without
-     * sending an actual message on the bus.
-     *
-     * Legacy: no-op.
-     *
-     * @param[in] logicalAddress  The source logical address (0-14).
-     */
-    virtual void recordSeenLogicalAddress(uint8_t logicalAddress) { (void)logicalAddress; }
 };
 
 #endif // I_HDMI_CEC_HAL_H
