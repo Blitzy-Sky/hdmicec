@@ -22,8 +22,9 @@
 
 #include "IHDMICecHal.h"
 
-#include <cstdint>
-#include <string>
+ #include <cstdint>
+#include <set>
+#include <vector>
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
 #include <utils/String16.h>
@@ -61,7 +62,6 @@ public:
 private:
     const size_t kAidlMinCecFrameSize = 2;
     const size_t kAidlMaxCecFrameSize = 16;
-    bool parseLogicalAddressField(const std::string& line, const char* field, int& value);
     android::sp<com::rdk::hal::hdmicec::IHdmiCec> getAidlService();
     void initAidlService();
     void dispatchRx(unsigned char *buf, int len);

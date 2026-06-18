@@ -22,7 +22,6 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -107,28 +106,6 @@ HDMICecAidlHAL::~HDMICecAidlHAL()
     mAidlController = nullptr;
     mAidlService = nullptr;
     mEventListener = nullptr;
-}
-
-bool HDMICecAidlHAL::parseLogicalAddressField(const std::string& line, const char* field, int& value)
-{
-	const size_t keyPos = line.find(field);
-	if (keyPos == std::string::npos) {
-		return false;
-	}
-
-	const size_t valueStart = line.find_first_not_of(" \t", keyPos + strlen(field));
-	if (valueStart == std::string::npos) {
-		return false;
-	}
-
-	char* endPtr = nullptr;
-	const long parsed = std::strtol(line.c_str() + valueStart, &endPtr, 10);
-	if (endPtr == (line.c_str() + valueStart)) {
-		return false;
-	}
-
-	value = static_cast<int>(parsed);
-	return true;
 }
 
 android::sp<IHdmiCec> HDMICecAidlHAL::getAidlService()
@@ -448,9 +425,9 @@ bool HDMICecAidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
 {
     if (len <= 1) {
         /*
-         * Poll frame (header only): emulate ACK based on seen-LA cache,
-         * 2-byte probe, and vdevice topology file.
-         * This keeps HdmiCecSource ping-based discovery working on AIDL backend.
+         * Poll frame (header only): emulate ACK based on seen-LA cache
+         * and 2-byte probe. This keeps HdmiCecSource ping-based discovery
+         * working on AIDL backend.
          */
         const uint8_t destination = (buf != NULL) ? (buf[0] & 0x0F) : 0xFF;
 
@@ -491,14 +468,6 @@ bool HDMICecAidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
                         aidlStatus.isOk() ? 1 : 0,
                         static_cast<int>(probeStatus));
                 }
-            }
-
-            /* Fallback: check vdevice topology file */
-            if (isPresentInVdeviceTopology(destination)) {
-                CCEC_LOG(LOG_DEBUG,
-                    "HDMICecAidlHAL::emulateAckForPollFrames destination=0x%X present in topology. Emulating ack.\r\n",
-                    destination);
-                return true;
             }
         }
 
