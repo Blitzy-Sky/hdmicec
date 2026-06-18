@@ -94,7 +94,6 @@ public:
      * @brief Determine if a received frame of the given length should be skipped
      *        because its length is unsupported by the legacy HAL.
      */
-    bool skipFrameOfUnsupportedLength(size_t length) override;
 
     /**
      * @brief Emulate ACK for Poll messages, which the legacy HAL does not support.

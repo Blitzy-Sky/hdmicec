@@ -225,10 +225,6 @@ void  DriverImpl::writeAsync(const CECFrame &frame)  noexcept(false)
     		throw InvalidStateException();
     	}
 
-		if(mHal->skipFrameOfUnsupportedLength(length)) {
-			return;
-		}
-
 		CCEC_LOG( LOG_DEBUG, "DriverImpl::write to call HdmiCecTxAsync\r\n");
 
 		int err = mHal->txAsync(nativeHandle, buf, length);

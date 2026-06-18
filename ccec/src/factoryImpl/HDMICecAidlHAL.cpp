@@ -422,18 +422,6 @@ int HDMICecAidlHAL::txAsync(int handle, const unsigned char *buf, int len)
     return 0;
 }
 
-bool HDMICecAidlHAL::skipFrameOfUnsupportedLength(size_t length) {
-	if (length < kAidlMinCecFrameSize || length > kAidlMaxCecFrameSize) {
-		/* AIDL sendMessage accepts only 2..16 byte CEC frames. */
-		CCEC_LOG(LOG_WARN,
-			"HDMICecAidlHAL::skipFrameOfUnsupportedLength skipping unsupported CEC frame length=%zu on AIDL backend (valid range: 2..16).\r\n",
-			length);
-        return true;
-	}
-
-    return false;
-}
-
 bool HDMICecAidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
 {
     if (len <= 1) {

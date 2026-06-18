@@ -161,17 +161,6 @@ public:
     virtual int getPhysicalAddress(int handle, unsigned int *physicalAddress) = 0;
 
     /**
-     * @brief Check if a frame of unsupported length should be skipped.
-     *
-     * Legacy: no-op (returns false).
-     * AIDL:   validates frame length against binder service constraints.
-     *
-     * @param[in] length  Length of the CEC frame.
-     * @return true if the frame should be skipped, false otherwise.
-     */
-    virtual bool skipFrameOfUnsupportedLength(size_t length) = 0;
-
-    /**
      * @brief Emulate acknowledgment for poll frames.
      *
      * Legacy: Ignores this as the legacy HAL does not support emulating ACKs.
