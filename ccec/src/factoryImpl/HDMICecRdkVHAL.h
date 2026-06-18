@@ -95,7 +95,7 @@ public:
      *        This allows the driver to treat Poll frames as if they were ACKed,
      *        ensuring proper handling of device presence on the bus.
      */
-    bool emulateAckForPollFrames(const unsigned char *buf, int len) override;
+    bool emulateAckForPollFrames(const unsigned char *buf, int len, std::set<uint8_t> &seenLogicalAddresses) override;
 };
 
 #endif // HDMI_CEC_RDK_V_HAL_H

@@ -266,7 +266,7 @@ void  DriverImpl::write(const CECFrame &frame)  noexcept(false)
     		throw InvalidStateException();
     	}
 
-		if(mHal->emulateAckForPollFrames(buf, length)) {
+		if(mHal->emulateAckForPollFrames(buf, length, mSeenLogicalAddresses)) {
 			return;
 		}
 

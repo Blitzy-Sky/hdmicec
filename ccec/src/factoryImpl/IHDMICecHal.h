@@ -21,6 +21,8 @@
 #define I_HDMI_CEC_HAL_H
 
 #include <cstddef>
+#include <cstdint>
+#include <set>
 #include "ccec/drivers/hdmi_cec_driver.h"
 
 /**
@@ -167,9 +169,10 @@ public:
      *
      * @param[in] buf  Buffer containing the CEC frame.
      * @param[in] len  Length of the CEC frame.
+     * @param[in,out] seenLogicalAddresses  Set of logical addresses seen on the bus.
      * @return true if acknowledgment should be emulated, false otherwise.
      */
-    virtual bool emulateAckForPollFrames(const unsigned char *buf, int len) = 0;
+    virtual bool emulateAckForPollFrames(const unsigned char *buf, int len, std::set<uint8_t> &seenLogicalAddresses) = 0;
 
 };
 

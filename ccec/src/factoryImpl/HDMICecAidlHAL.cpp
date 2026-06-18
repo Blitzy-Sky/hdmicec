@@ -421,7 +421,7 @@ int HDMICecAidlHAL::txAsync(int handle, const unsigned char *buf, int len)
     return 0;
 }
 
-bool HDMICecAidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
+bool HDMICecAidlHAL::emulateAckForPollFrames(const unsigned char *buf, int len, std::set<uint8_t> &mSeenLogicalAddresses)
 {
     if (len <= 1) {
         /*

@@ -56,7 +56,7 @@ public:
     int setTxCallback(int handle, HdmiCecTxCallback_t cbfunc, void *data) override;
     int tx(int handle, const unsigned char *buf, int len, int *result) override;
     int txAsync(int handle, const unsigned char *buf, int len) override;
-    bool emulateAckForPollFrames(const unsigned char *buf, int len) override;
+    bool emulateAckForPollFrames(const unsigned char *buf, int len, std::set<uint8_t> &seenLogicalAddresses) override;
 
 
 private:

@@ -150,10 +150,11 @@ int HDMICecRdkVHAL::getPhysicalAddress(int handle, unsigned int *physicalAddress
     return ret;
 }
 
-bool HDMICecRdkVHAL::emulateAckForPollFrames(const unsigned char *buf, int len)
+bool HDMICecRdkVHAL::emulateAckForPollFrames(const unsigned char *buf, int len, std::set<uint8_t> &seenLogicalAddresses)
 {
     (void)buf;
     (void)len;
+    (void)seenLogicalAddresses;
     // No emulation for HDMICecRdkVHAL
     return false;
 }
