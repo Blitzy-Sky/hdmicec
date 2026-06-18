@@ -23,9 +23,8 @@
 #include "IHDMICecHal.h"
 
  #include <cstdint>
- #include <set>
- #include <string>
- #include <vector>
+#include <set>
+#include <vector>
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
 #include <utils/String16.h>
@@ -63,10 +62,7 @@ public:
 private:
     const size_t kAidlMinCecFrameSize = 2;
     const size_t kAidlMaxCecFrameSize = 16;
-    static constexpr const char* kVdeviceTopologyDump = "/tmp/hdmi_cec_device_list_info.txt";
 
-    bool parseLogicalAddressField(const std::string& line, const char* field, int& value);
-    bool isPresentInVdeviceTopology(const uint8_t destination);
     android::sp<com::rdk::hal::hdmicec::IHdmiCec> getAidlService();
     void initAidlService();
     void dispatchRx(unsigned char *buf, int len);
