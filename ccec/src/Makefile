@@ -75,12 +75,14 @@ LDFLAGS += -L. -lpthread -L../../osal/src/install/lib -lRCECOSHal
 ifneq ($(wildcard $(BINDER_BUILD_DIR)/libbinder.a),)
 LDFLAGS += -L$(BINDER_BUILD_DIR) -lbinder
 endif
-ifneq ($(wildcard $(BINDER_BUILD_DIR)/libutils.a),)
-LDFLAGS += -L$(BINDER_BUILD_DIR) -lutils
-endif
-ifneq ($(wildcard $(BINDER_BUILD_DIR)/liblog.a),)
-LDFLAGS += -L$(BINDER_BUILD_DIR) -llog
-endif
+
+#ifneq ($(wildcard $(BINDER_BUILD_DIR)/libutils.a),)
+#LDFLAGS += -L$(BINDER_BUILD_DIR) -lutils
+#endif
+
+#ifneq ($(wildcard $(BINDER_BUILD_DIR)/liblog.a),)
+#LDFLAGS += -L$(BINDER_BUILD_DIR) -llog
+#endif
 
 all: clean library
 	@echo "Build Finished...."
