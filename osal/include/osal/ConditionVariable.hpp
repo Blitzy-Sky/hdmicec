@@ -129,9 +129,27 @@ ConditionVariable by calling notify/notifyAll.
 */
 /**************************************************************************/
 
+/**
+ * @param[in] timeout - Maximum time to wait, in milliseconds; 0 waits indefinitely until signalled.
+ * @return 1 if the condition was signalled (or on an indefinite wait); 0 if the timed wait expired.
+ */
 	long wait(long timeout);
+/**
+ * @brief Signals the condition variable, waking one thread waiting on it.
+ *
+ * Sets the associated condition and wakes a single waiting thread.
+ */
 	void notify(void);
+/**
+ * @brief Signals the condition variable, waking all threads waiting on it.
+ *
+ * Sets the associated condition and wakes every waiting thread.
+ */
 	void notifyAll(void);
+/**
+ * @brief Retrieves the opaque handle to the underlying native condition-variable implementation.
+ * @return Pointer to the native handle (the underlying pthread_cond_t*).
+ */
 	void *getNativeHandle(void);
 private:
 	Condition *cond;

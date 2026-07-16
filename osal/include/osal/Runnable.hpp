@@ -34,9 +34,23 @@
 
 CCEC_OSAL_BEGIN_NAMESPACE
 
+/**
+ * @brief Interface for tasks that can be executed by a Thread.
+ *
+ * A class that requires thread functionality implements this interface and is
+ * passed to a Thread on construction. Thread::start() causes the runnable's
+ * run() method to execute in a threaded context.
+ */
 class Runnable {
 
 public:
+/**
+ * @brief Pure-virtual work method executed in a threaded context.
+ *
+ * Implementations perform the task's work in this method. It is invoked on the
+ * new thread of execution created by Thread::start().
+ * @see Thread
+ */
 	virtual void  run(void) = 0;
 };
 

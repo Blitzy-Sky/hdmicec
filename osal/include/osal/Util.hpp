@@ -26,12 +26,27 @@
 * @{
 **/
 
+/**
+ * @file
+ * @brief OSAL allocation-alias utility header.
+ *
+ * Provides thin aliases (@ref Malloc, @ref Free) over the standard C library
+ * allocation routines used throughout the OSAL layer.
+ */
 
 #ifndef HDMI_CCEC_OSAL_UTIL_
 #define HDMI_CCEC_OSAL_UTIL_
 
 #include "OSAL.hpp"
 
+/**
+ * @def Malloc
+ * @brief Alias for the standard C library `malloc` used by the OSAL layer.
+ */
+/**
+ * @def Free
+ * @brief Alias for the standard C library `free` used by the OSAL layer.
+ */
 CCEC_OSAL_BEGIN_NAMESPACE
 
 #define Malloc malloc

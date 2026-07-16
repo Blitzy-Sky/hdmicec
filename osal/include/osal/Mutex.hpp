@@ -61,7 +61,19 @@ Creates Mutex object.
 /**************************************************************************/
 
 	Mutex(void);
+/**
+ * @brief Copy constructor.
+ *
+ * Constructs a Mutex from another Mutex (the source is passed by const reference).
+ * Document-as-is: no deep-copy semantics are defined here beyond the declared signature.
+ */
 	Mutex(const Mutex &);
+/**
+ * @brief Copy-assignment operator.
+ *
+ * Assigns from another Mutex (the source is passed by const reference).
+ * @return Reference to this Mutex (`*this`).
+ */
 	Mutex & operator = (const Mutex &);
 
 /***************************************************************************/
@@ -118,16 +130,30 @@ private:
 	void *nativeHandle;
 };
 
+/**
+ * @brief RAII scoped-lock guard for a Mutex.
+ *
+ * Acquires the referenced Mutex on construction and releases it on destruction,
+ * guaranteeing the lock is freed when the guard goes out of scope.
+ */
 class AutoLock
 {
 public:
+/**
+ * @brief Constructs the guard and immediately acquires the given mutex.
+ * @param[in] mutex - The Mutex to lock for the lifetime (scope) of this guard.
+ */
 	AutoLock(Mutex & mutex) : mutex(mutex) {
 		mutex.lock();
 	}
 
+/**
+ * @brief Destroys the guard and releases the held mutex.
+ */
 	~AutoLock(void) {
 		mutex.unlock();
 	}
+/** @brief Reference to the Mutex guarded by this AutoLock. */
 	Mutex &mutex;
 };
 
