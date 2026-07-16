@@ -36,6 +36,17 @@
 
 CCEC_OSAL_BEGIN_NAMESPACE
 
+/**
+ * @brief Constructs a Mutex, allocating and initializing a recursive POSIX mutex.
+ *
+ * Allocates storage for a native @c pthread_mutex_t and initializes it with the
+ * @c PTHREAD_MUTEX_RECURSIVE_NP attribute, so the owning thread may lock the
+ * mutex multiple times without deadlocking. The temporary mutex attribute object
+ * is destroyed before the constructor returns.
+ *
+ * @note The mutex is recursive; each lock() must be balanced by a matching unlock().
+ * @see lock(), unlock(), getNativeHandle()
+ */
 Mutex::Mutex(void) : nativeHandle(NULL)
 {
     pthread_mutexattr_t attr;
@@ -46,12 +57,29 @@ Mutex::Mutex(void) : nativeHandle(NULL)
     pthread_mutexattr_destroy(&attr);
 }
 
+/**
+ * @brief Copy-constructs a Mutex by duplicating the native handle storage.
+ *
+ * Allocates a new native @c pthread_mutex_t buffer and byte-copies the source
+ * mutex's native handle contents into it.
+ *
+ * @param[in] rhs   The source Mutex whose native handle contents are copied.
+ */
 Mutex::Mutex(const Mutex &rhs)
 {
     nativeHandle = Malloc(sizeof(pthread_mutex_t));
     MEMCPY_S(nativeHandle,sizeof(pthread_mutex_t), rhs.nativeHandle, sizeof(pthread_mutex_t));
 }
 
+/**
+ * @brief Copy-assigns from another Mutex using the copy-and-swap idiom.
+ *
+ * Constructs a temporary copy of @p rhs and swaps its native handle with this
+ * object's handle; the temporary releases the previously held handle on destruction.
+ *
+ * @param[in] rhs   The source Mutex to copy-assign from.
+ * @return Reference to this Mutex (@c *this).
+ */
 Mutex & Mutex::operator = (const Mutex &rhs)
 {
 	Mutex temp(rhs);
@@ -62,6 +90,12 @@ Mutex & Mutex::operator = (const Mutex &rhs)
 	return *this;
 }
 
+/**
+ * @brief Destroys the Mutex and releases its native resources.
+ *
+ * When the native handle is non-NULL, destroys the underlying @c pthread_mutex_t
+ * and frees the allocated storage.
+ */
 Mutex::~Mutex(void)
 {
 	if (nativeHandle != NULL) {
@@ -70,16 +104,39 @@ Mutex::~Mutex(void)
 	}
 }
 
+/**
+ * @brief Acquires (locks) the recursive mutex.
+ *
+ * Blocks the calling thread until the underlying pthread mutex is acquired.
+ * Because the mutex is recursive, the owning thread may lock it multiple times;
+ * a matching number of unlock() calls is required to release it.
+ *
+ * @see unlock()
+ */
 void Mutex::lock(void)
 {
 	pthread_mutex_lock((pthread_mutex_t *)nativeHandle);
 }
 
+/**
+ * @brief Releases (unlocks) the recursive mutex.
+ *
+ * Decrements the recursive lock count of the underlying pthread mutex; the mutex
+ * becomes available to other threads once the count reaches zero.
+ *
+ * @see lock()
+ */
 void Mutex::unlock(void)
 {
 	pthread_mutex_unlock((pthread_mutex_t *)nativeHandle);
 }
 
+/**
+ * @brief Returns the opaque native mutex handle.
+ *
+ * @return Pointer to the underlying native @c pthread_mutex_t, returned as a
+ *         @c void* opaque handle (may be NULL if not initialized).
+ */
 void * Mutex::getNativeHandle(void)
 {
 	return nativeHandle;
