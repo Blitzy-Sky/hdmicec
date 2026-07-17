@@ -78,6 +78,10 @@ protected:
 	 *
 	 * @param[in] buf Pointer to the source bytes to copy; may be NULL.
 	 * @param[in] len Number of bytes to copy from @p buf.
+	 * @note This constructor performs no length validation: it does not call
+	 *       validate(), so the resulting operand may hold zero bytes or more than
+	 *       getMaxLen() bytes. Callers requiring a bounded operand must supply a
+	 *       buffer whose length is already within the operand's valid range.
 	 */
 	CECBytes(const uint8_t *buf, size_t len) {
         if (buf && len) {
@@ -100,13 +104,24 @@ protected:
 	/**
 	 * @brief Constructs an operand by decoding bytes from a CEC frame.
 	 *
-	 * Consumes up to @p len bytes from @p frame starting at @p startPos. If fewer
-	 * bytes remain in the frame than requested, only the remaining bytes are
+	 * Reads the frame's backing buffer and consumes up to @p len bytes starting at
+	 * @p startPos. When @p startPos lies within the frame and fewer bytes remain
+	 * than requested (@p startPos + @p len exceeds the frame length), the count is
+	 * clamped so that only the bytes from @p startPos to the end of the frame are
 	 * consumed. The resulting operand is validated on construction.
 	 *
 	 * @param[in] frame    The CEC frame to read the operand bytes from.
 	 * @param[in] startPos Zero-based byte offset within @p frame at which to start.
 	 * @param[in] len      Maximum number of bytes to consume from @p frame.
+	 * @pre @p startPos must not exceed the frame length (@c frame.length()). The
+	 *      byte count is computed as @c frameLen-startPos with unsigned arithmetic,
+	 *      so a @p startPos greater than the frame length underflows to a very
+	 *      large value.
+	 * @warning When @p startPos is greater than the frame length the underflowed
+	 *          count makes the constructor read past the end of the frame buffer
+	 *          (out-of-bounds access, undefined behavior); no bounds check guards
+	 *          this case. Callers must ensure @p startPos <= @c frame.length().
+	 *          This documents the code exactly as implemented.
 	 * @throws InvalidParamException If the decoded byte sequence fails validate().
 	 */
 	CECBytes(const CECFrame &frame, size_t startPos, size_t len) {
@@ -146,6 +161,16 @@ public:
 	}
     /**
      * @brief Brings the base Operand::serialize(void) overload into scope alongside the override.
+     *
+     * Makes the inherited zero-argument @c Operand::serialize(void) overload
+     * visible on @c CECBytes in addition to the @c serialize(CECFrame&)
+     * override declared above, so both overloads participate in overload
+     * resolution on this type.
+     *
+     * @return The inherited zero-argument overload returns a new @c CECFrame
+     *         containing this operand's encoded bytes; the @c serialize(CECFrame&)
+     *         override declared above instead appends to, and returns a reference
+     *         to, the caller-supplied frame.
      */
     using Operand::serialize;
 
@@ -221,7 +246,15 @@ public:
     /**
      * @brief Constructs an OSD string operand from a C string.
      *
+     * The C string length is measured with @c strlen and its bytes are copied by
+     * the base @c CECBytes(const uint8_t*, size_t) constructor.
+     *
      * @param[in] str NUL-terminated character string providing the OSD text.
+     * @pre @p str must be a non-null, NUL-terminated C string.
+     * @warning Passing a NULL @p str is undefined behavior because the length is
+     *          obtained with @c strlen(str). The subsequent validate() call is
+     *          invoked but its result is not checked, so an empty or over-length
+     *          string is not rejected here. Documents the code as implemented.
      */
     OSDString(const char *str) : CECBytes((const uint8_t *)str, strlen(str)) {
         validate();
@@ -272,7 +305,15 @@ public:
     /**
      * @brief Constructs an OSD name operand from a C string.
      *
+     * The C string length is measured with @c strlen and its bytes are copied by
+     * the base @c CECBytes(const uint8_t*, size_t) constructor.
+     *
      * @param[in] str NUL-terminated character string providing the OSD name.
+     * @pre @p str must be a non-null, NUL-terminated C string.
+     * @warning Passing a NULL @p str is undefined behavior because the length is
+     *          obtained with @c strlen(str). The subsequent validate() call is
+     *          invoked but its result is not checked, so an empty or over-length
+     *          string is not rejected here. Documents the code as implemented.
      */
     OSDName(const char *str) : CECBytes((const uint8_t *)str, strlen(str)) {
         validate();
@@ -512,7 +553,16 @@ public:
     /**
      * @brief Constructs a language operand from a C string.
      *
+     * The C string length is measured with @c strlen and its bytes are copied by
+     * the base @c CECBytes(const uint8_t*, size_t) constructor.
+     *
      * @param[in] str NUL-terminated character string providing the language code.
+     * @pre @p str must be a non-null, NUL-terminated C string no longer than
+     *      @c MAX_LEN bytes.
+     * @warning Passing a NULL @p str is undefined behavior because the length is
+     *          obtained with @c strlen(str). An @c Assert enforces
+     *          @c strlen(str) <= @c MAX_LEN only in assertion-enabled builds.
+     *          Documents the code as implemented.
      */
     Language(const char *str) : CECBytes((const uint8_t*)str, strlen(str)) {
         Assert(strlen(str) <= MAX_LEN);
@@ -662,6 +712,9 @@ class PhysicalAddress : public CECBytes
 	 * separated by dots) into the packed two-byte address.
 	 *
 	 * @param[in,out] addr The dotted address string to parse; consumed during parsing.
+	 * @pre @p addr must be exactly seven characters long ("a.b.c.d"). An @c Assert
+	 *      enforces @c addr.length()==7 in assertion-enabled builds; other lengths
+	 *      are not otherwise guarded. Documents the code as implemented.
 	 */
 	PhysicalAddress(std::string &addr)         : CECBytes (NULL, 0) {
 		uint8_t byte[4];
@@ -778,25 +831,45 @@ public:
 
     /**
      * @brief Enumerates the CEC logical addresses.
+     *
+     * A CEC logical address identifies a device's role on the bus. The
+     * enumerators and their assigned address values are:
+     * - @c TV (0): Television.
+     * - @c RECORDING_DEVICE_1 (1): Recording device 1.
+     * - @c RECORDING_DEVICE_2 (2): Recording device 2.
+     * - @c TUNER_1 (3): Tuner 1.
+     * - @c PLAYBACK_DEVICE_1 (4): Playback device 1.
+     * - @c AUDIO_SYSTEM (5): Audio system.
+     * - @c TUNER_2 (6): Tuner 2.
+     * - @c TUNER_3 (7): Tuner 3.
+     * - @c PLAYBACK_DEVICE_2 (8): Playback device 2.
+     * - @c RECORDING_DEVICE_3 (9): Recording device 3.
+     * - @c TUNER_4 (10): Tuner 4.
+     * - @c PLAYBACK_DEVICE_3 (11): Playback device 3.
+     * - @c RESERVED_12 (12): Reserved (12).
+     * - @c RESERVED_13 (13): Reserved (13).
+     * - @c SPECIFIC_USE (14): Specific use.
+     * - @c UNREGISTERED (15): Unregistered / unallocated device.
+     * - @c BROADCAST (alias of @c UNREGISTERED, 15): Broadcast address.
      */
     enum {
-    	TV 						= 0,  ///< Television (logical address 0).
-    	RECORDING_DEVICE_1 		= 1,  ///< Recording device 1.
-    	RECORDING_DEVICE_2		= 2,  ///< Recording device 2.
-        TUNER_1 				= 3,  ///< Tuner 1.
-        PLAYBACK_DEVICE_1 		= 4,  ///< Playback device 1.
-        AUDIO_SYSTEM 			= 5,  ///< Audio system.
-        TUNER_2 				= 6,  ///< Tuner 2.
-        TUNER_3 				= 7,  ///< Tuner 3.
-        PLAYBACK_DEVICE_2 		= 8,  ///< Playback device 2.
-        RECORDING_DEVICE_3 		= 9,  ///< Recording device 3.
-        TUNER_4 				= 10,  ///< Tuner 4.
-        PLAYBACK_DEVICE_3 		= 11,  ///< Playback device 3.
-        RESERVED_12 			= 12,  ///< Reserved (12).
-        RESERVED_13 			= 13,  ///< Reserved (13).
-        SPECIFIC_USE 			= 14,  ///< Specific use.
-        UNREGISTERED 			= 15,  ///< Unregistered / unallocated device.
-        BROADCAST				= UNREGISTERED,  ///< Broadcast address (alias of UNREGISTERED, 15).
+    	TV 						= 0,
+    	RECORDING_DEVICE_1 		= 1,
+    	RECORDING_DEVICE_2		= 2,
+        TUNER_1 				= 3,
+        PLAYBACK_DEVICE_1 		= 4,
+        AUDIO_SYSTEM 			= 5,
+        TUNER_2 				= 6,
+        TUNER_3 				= 7,
+        PLAYBACK_DEVICE_2 		= 8,
+        RECORDING_DEVICE_3 		= 9,
+        TUNER_4 				= 10,
+        PLAYBACK_DEVICE_3 		= 11,
+        RESERVED_12 			= 12,
+        RESERVED_13 			= 13,
+        SPECIFIC_USE 			= 14,
+        UNREGISTERED 			= 15,
+        BROADCAST				= UNREGISTERED,
     };
 
     /**
@@ -930,15 +1003,24 @@ public:
 
     /**
      * @brief Enumerates the CEC version codes.
+     *
+     * Each enumerator corresponds to a CEC specification version code:
+     * - @c V_RESERVED_0: Reserved version code 0.
+     * - @c V_RESERVED_1: Reserved version code 1.
+     * - @c V_RESERVED_2: Reserved version code 2.
+     * - @c V_RESERVED_3: Reserved version code 3.
+     * - @c V_1_3a: CEC version 1.3a.
+     * - @c V_1_4: CEC version 1.4.
+     * - @c V_2_0: CEC version 2.0.
      */
     enum {
-    	V_RESERVED_0,  ///< Reserved version code 0.
-    	V_RESERVED_1,  ///< Reserved version code 1.
-    	V_RESERVED_2,  ///< Reserved version code 2.
-    	V_RESERVED_3,  ///< Reserved version code 3.
-    	V_1_3a,  ///< CEC version 1.3a.
-    	V_1_4,  ///< CEC version 1.4.
-	V_2_0,  ///< CEC version 2.0.
+    	V_RESERVED_0,
+    	V_RESERVED_1,
+    	V_RESERVED_2,
+    	V_RESERVED_3,
+    	V_1_3a,
+    	V_1_4,
+	V_2_0,
     };
 
 	/**
@@ -1121,9 +1203,9 @@ class RequestAudioFormat : public CECBytes
 
           /// Linear PCM (code 1).
           SAD_FMT_CODE_LPCM =1 ,		       // 1
- 	  /// AC-3 (code 2).
+          /// AC-3 (code 2).
  	  SAD_FMT_CODE_AC3,	      // 2
- 	  /// MPEG-1 (code 3).
+          /// MPEG-1 (code 3).
  	  SAD_FMT_CODE_MPEG1,		    //   3
           /// MP3 (code 4).
           SAD_FMT_CODE_MP3,	      // 4
@@ -1244,9 +1326,9 @@ class ShortAudioDescriptor : public CECBytes
 
           /// Linear PCM (code 1).
           SAD_FMT_CODE_LPCM =1 ,		       // 1
- 		  /// AC-3 (code 2).
+          /// AC-3 (code 2).
  		  SAD_FMT_CODE_AC3,	      // 2
- 		  /// MPEG-1 (code 3).
+          /// MPEG-1 (code 3).
  		  SAD_FMT_CODE_MPEG1,		    //   3
           /// MP3 (code 4).
           SAD_FMT_CODE_MP3,	      // 4

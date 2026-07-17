@@ -64,12 +64,12 @@ The table below lists the key components of the module with their role and sourc
 | `DriverImpl` | The **single concrete adapter** of `Driver` — the migration seam. Provides static HAL callbacks `DriverReceiveCallback` / `DriverTransmitCallback` and an incoming `rQueue` (`typedef EventQueue<CECFrame*> IncomingQueue`). *(Implementation source — context only.)* | `hdmicec/ccec/src/DriverImpl.hpp` |
 | `MessageEncoder` | Encodes high-level messages into `CECFrame` bytes via static `encode(...)` overloads. | `hdmicec/ccec/include/ccec/MessageEncoder.hpp` |
 | `MessageDecoder` | Decodes a `CECFrame` back into a high-level message via `decode(const CECFrame&)`, dispatching the result through a `MessageProcessor` reference. | `hdmicec/ccec/include/ccec/MessageDecoder.hpp` |
-| `MessageProcessor` | Base class with overloaded `process()` methods, one per message type. Each base-class default logs the frame via `header.print()` / `msg.print()` and otherwise takes no action, so applications **subclass** it to actually handle specific messages. | `hdmicec/ccec/include/ccec/MessageProcessor.hpp` |
+| `MessageProcessor` | Base class with overloaded `process()` methods, one per **supported/decoded** message type — **38** `process()` overloads for the **43** message classes declared in `Messages.hpp`, so **five** message classes have **no** dedicated handler (`GiveAudioStatus`, `ReportArcInitiation`, `ReportArcTermination`, `RequestArcInitiation`, `RequestArcTermination`). Each base-class default logs the frame via `header.print()` / `msg.print()` and otherwise takes no action, so applications **subclass** it to actually handle specific messages. | `hdmicec/ccec/include/ccec/MessageProcessor.hpp` |
 | `FrameListener` | Observer interface: `virtual void notify(const CECFrame&) const = 0`. Paired with `FrameFilter::isFiltered(const CECFrame&)` for selective delivery. | `hdmicec/ccec/include/ccec/FrameListener.hpp` |
 | `CECFrame` | Raw CEC frame buffer. Declares `enum { MAX_LENGTH = 128 }` and backs it with `uint8_t buf_[MAX_LENGTH]`. | `hdmicec/ccec/include/ccec/CECFrame.hpp` |
 | OSAL primitives | `Thread`, `Mutex` / `AutoLock`, `ConditionVariable`, `EventQueue`, `Runnable`, `Stoppable` — the OS-abstraction building blocks used by `Bus` for its producer/consumer model. | `hdmicec/osal/include/osal/` |
 
-> **Note on frame capacity.** `CECFrame` reserves `MAX_LENGTH = 128` bytes of buffer in code. `Source: hdmicec/ccec/include/ccec/CECFrame.hpp`. Real CEC messages are far smaller: the maximum CEC message (header block plus opcode block plus operand blocks) is documented as *"16 * 8 bits (16bytes)"* — a characteristic of the **HDMI-CEC 1.4b protocol**, not a code constant. `Source: rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/IHdmiCecController.aidl`.
+> **Note on frame capacity.** `CECFrame` reserves `MAX_LENGTH = 128` bytes of buffer in code. `Source: hdmicec/ccec/include/ccec/CECFrame.hpp`. Real CEC messages are far smaller: the AIDL HAL contract documents the maximum message size — header block plus opcode block plus operand blocks — as `16 * 8` bits (16 bytes). `Source: rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/IHdmiCecController.aidl:95`. The 128-byte buffer is therefore a generous code-level constant, not the protocol's own message-size limit.
 
 ---
 
@@ -77,7 +77,7 @@ The table below lists the key components of the module with their role and sourc
 
 The middleware wires its components into a single downward call chain from the facade to the HAL, with the message pipeline and the observer contract attached at the application-facing edge:
 
-- **`LibCCEC`** owns the module lifecycle (`init` / `term`) and answers address queries (`getLogicalAddress`, `getPhysicalAddress`, `addLogicalAddress`); internally it drives the HAL through the shared `Driver` accessor (`Driver::getInstance()`). `Source: hdmicec/ccec/include/ccec/LibCCEC.hpp`, `hdmicec/ccec/src/LibCCEC.cpp`.
+- **`LibCCEC`** owns the module lifecycle (`init` / `term`) and answers address queries (`getLogicalAddress`, `getPhysicalAddress`, `addLogicalAddress`). It drives **both** the HAL and the transport directly through their shared accessors: `init()` **opens the HAL and then starts the transport** — `Driver::getInstance().open()` followed by `Bus::getInstance().start()` — while `term()` tears them down in the **reverse order** — `Bus::getInstance().stop()` followed by `Driver::getInstance().close()`. `LibCCEC` therefore has a **direct lifecycle-control edge to `Bus`** (not only to `Driver`). `Source: hdmicec/ccec/include/ccec/LibCCEC.hpp`, `hdmicec/ccec/src/LibCCEC.cpp`.
 - **`Connection`** is the application's handle onto the CEC bus. It holds a reference to the `Bus` singleton (`Bus &bus`) and registers a private `DefaultFrameListener` (guarded by a private `DefaultFilter`) so that received frames are routed back to the application. `Source: hdmicec/ccec/include/ccec/Connection.hpp`.
 - **`Bus`** (singleton) is the actual transport. It calls `Driver::getInstance()` to perform the real `read()` / `write()`, keeps the registered `listeners`, buffers outbound frames in `EventQueue<CECFrame*> wQueue`, and runs its inner `Reader` and `Writer` — each declared `: public Runnable, public Stoppable`. `Source: hdmicec/ccec/src/Bus.hpp`.
 - **`Driver`** is abstract; **`DriverImpl`** is its single concrete subclass and the seam to the HAL, exposing the static `DriverReceiveCallback` / `DriverTransmitCallback` entry points and buffering inbound frames in its `rQueue`. `Source: hdmicec/ccec/include/ccec/Driver.hpp`, `hdmicec/ccec/src/DriverImpl.hpp`.
@@ -153,7 +153,8 @@ classDiagram
         +MAX_LENGTH
     }
 
-    LibCCEC --> Driver : uses
+    LibCCEC --> Driver : opens / closes (lifecycle)
+    LibCCEC --> Bus : starts / stops (lifecycle)
     Connection --> Bus : holds reference
     Connection ..> Driver : isValidLogicalAddress()
     Connection ..> FrameListener : registers

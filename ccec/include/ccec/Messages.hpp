@@ -31,6 +31,26 @@
  * The Message API allows the application to send or receive high-level CEC message construct instead of raw bytes.
  * Basically for each CEC message (such as ActiveSource), there is a C++ class implementation representing it.
  * Each message class provides necessary getter and setter methods to access the properties of each message.
+ * @n @n
+ * This header defines the complete set of message classes present in the source.
+ * There are 43 such classes, each deriving from @c DataBlock: ActiveSource,
+ * ImageViewOn, TextViewOn, InActiveSource, RequestActiveSource, Standby,
+ * GetCECVersion, CECVersion, SetMenuLanguage, GetMenuLanguage, GiveOSDName,
+ * SetOSDName, SetOSDString, GivePhysicalAddress, ReportPhysicalAddress,
+ * GiveDeviceVendorID, DeviceVendorID, GiveDevicePowerStatus, ReportPowerStatus,
+ * Abort, FeatureAbort, RoutingChange, RoutingInformation, SetStreamPath,
+ * RequestShortAudioDescriptor, ReportShortAudioDescriptor, SystemAudioModeRequest,
+ * SetSystemAudioMode, GiveAudioStatus, ReportAudioStatus, UserControlPressed,
+ * UserControlReleased, Polling, RequestArcInitiation, ReportArcInitiation,
+ * RequestArcTermination, ReportArcTermination, InitiateArc, TerminateArc,
+ * GiveFeatures, ReportFeatures, RequestCurrentLatency, and ReportCurrentLatency.
+ * @n @n
+ * Of these 43 classes, five have no corresponding MessageProcessor overload and
+ * are therefore not dispatched to a typed handler: GiveAudioStatus,
+ * RequestArcInitiation, ReportArcInitiation, RequestArcTermination, and
+ * ReportArcTermination. The remaining 38 classes each have a MessageProcessor
+ * overload. This inventory documents the source exactly as it exists: the header
+ * contains 43 message classes (not 44).
  * @ingroup HDMI_CEC
  *
  * @defgroup HDMI_CEC_MSG_N_FRAME_CLASSES HDMI-CEC Messages and Frames Classes
@@ -1055,6 +1075,15 @@ public:
        * @param[in] formatid  Audio format IDs, one per requested descriptor.
        * @param[in] audioFormatCode  Audio format codes, one per requested descriptor.
        * @param[in] number_of_descriptor  Number of descriptors to request (capped at 4; defaults to 1).
+       * @pre @p formatid and @p audioFormatCode must each contain at least as many
+       *      elements as the effective descriptor count, i.e. @c min(number_of_descriptor,4).
+       * @warning The effective count is capped at 4 but is not validated against the
+       *          sizes of @p formatid or @p audioFormatCode; the loop indexes both
+       *          vectors up to that count, so supplying shorter vectors causes an
+       *          out-of-bounds std::vector element access (undefined behavior). Each
+       *          descriptor is packed as (formatid[i] << 6) | (audioFormatCode[i] & 0x3f),
+       *          so only the low six bits of each @p audioFormatCode entry are kept.
+       *          Documents the code as implemented.
        */
       RequestShortAudioDescriptor(const std::vector<uint8_t> formatid, const std::vector<uint8_t> audioFormatCode, uint8_t number_of_descriptor = 1)
       {
@@ -1138,6 +1167,16 @@ public:
 	       *
 	       * @param[in] shortaudiodescriptor  Packed short audio descriptor values to report.
 	       * @param[in] numberofdescriptor  Number of descriptors to report (capped at 4; defaults to 1).
+	       * @pre @p shortaudiodescriptor must contain at least as many elements as the
+	       *      effective descriptor count, i.e. @c min(numberofdescriptor,4).
+	       * @warning The effective count is capped at 4 but is not validated against the
+	       *          size of @p shortaudiodescriptor; the loop indexes the vector up to
+	       *          that count, so a shorter vector causes an out-of-bounds std::vector
+	       *          element access (undefined behavior). For each descriptor three
+	       *          bytes are extracted as (value & 0xF), ((value >> 8) & 0xF) and
+	       *          ((value >> 16) & 0xF): only the low nibble (4 bits) of each of the
+	       *          three bytes is retained; the high nibble of each byte is truncated
+	       *          (discarded). Documents the code as implemented.
 	       */
 	      ReportShortAudioDescriptor( const std::vector <uint32_t> shortaudiodescriptor, uint8_t numberofdescriptor = 1)
 	      {
@@ -1628,7 +1667,17 @@ class ReportFeatures : public DataBlock
          * @brief Constructs the Report Features message by decoding it from a received CEC frame.
          *
          * @param[in] frame     The received CEC frame to decode the message from.
-         * @param[in] startPos  Byte offset within @p frame at which this message's operands begin.
+         * @param[in] startPos  Nominal byte offset within @p frame at which this
+         *                      message's operands begin.
+         * @warning The member initializer list contains the assignment
+         *          `version(frame, startPos = 0)`: this resets @p startPos to 0
+         *          before it is used, so any nonzero caller-supplied @p startPos is
+         *          ignored. The @c version operand is decoded from offset 0, and the
+         *          subsequent `allDeviceTypes(frame, startPos + Version::MAX_LEN)`
+         *          and the body's `RcProfile(frame, startPos + 2, ...)` all observe
+         *          @p startPos equal to 0. In effect this constructor always decodes
+         *          from the start of the frame. This documents the code exactly as
+         *          implemented; correcting the behavior is out of scope.
          */
         ReportFeatures(const CECFrame &frame, int startPos = 0) : version(frame, startPos = 0) , allDeviceTypes(frame, startPos+Version::MAX_LEN) {
                 const uint8_t *buf = 0;

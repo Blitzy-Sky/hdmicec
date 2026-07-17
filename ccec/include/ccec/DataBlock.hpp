@@ -35,10 +35,12 @@
  *
  * A DataBlock is a self-describing unit that can render itself into the raw
  * bytes of a CEC frame and report the CEC opcode it represents. It is the
- * common base from which the header, opcode, operand, and concrete message
- * types are built, giving the CCEC encode path a single polymorphic type to
- * serialize and print. This header also declares the @c Op_t opcode type and
- * the @c GetOpName() helper used to render an opcode as human-readable text.
+ * common base from which the opcode block (@c OpCode) and the concrete message
+ * types declared in Messages.hpp are built, giving the CCEC encode path a single
+ * polymorphic type to serialize and print. @c Header and @c Operand are
+ * independent classes and are not derived from DataBlock. This header also
+ * declares the @c Op_t opcode type and the @c GetOpName() helper used to render
+ * an opcode as human-readable text.
  *
  * @see DataBlock
  */
@@ -64,9 +66,14 @@ typedef uint32_t Op_t;
 /**
  * @brief Maps a CEC opcode to its human-readable name.
  *
- * Looks up the supplied opcode value (an @c Op_t input) and returns a
- * constant, human-readable label for it (for example, @c ACTIVE_SOURCE maps to
- * "Active Source"). Intended for logging and diagnostics.
+ * Looks up the supplied opcode value and returns a constant, human-readable
+ * label for it (for example, the opcode @c 0x82 maps to "Active Source").
+ * Intended for logging and diagnostics.
+ *
+ * @par Input parameter (direction [in])
+ * The single argument is an input: the CEC operation code, an @c Op_t value, to
+ * resolve to a name. The parameter is unnamed in the declaration, so its @c [in]
+ * direction is documented here in prose rather than with an @c \@param tag.
  *
  * @return Pointer to a constant, null-terminated name string for the opcode;
  *         the storage is owned by the callee and must not be modified or freed
@@ -81,9 +88,10 @@ extern "C" const char *GetOpName(Op_t);
  * in a CEC message payload: the ability to serialize itself into a CECFrame,
  * to report the opcode it represents, and to render itself as text for
  * logging. The base class itself models an empty block (it contributes no
- * bytes); the concrete building blocks @c OpCode and @c Header, together with
- * all of the message types declared in Messages.hpp, derive from it and
- * override this contract.
+ * bytes); the concrete building block @c OpCode, together with all of the
+ * message types declared in Messages.hpp, derives from it and overrides this
+ * contract. @c Header and @c Operand are independent classes and do not derive
+ * from DataBlock.
  */
 class DataBlock
 {

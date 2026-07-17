@@ -127,7 +127,7 @@ enum
  * The tens digit of @p byte_ is packed into the high nibble and the units
  * digit into the low nibble of the resulting byte.
  *
- * @param byte_ The binary value (typically 0-99) to convert to BCD.
+ * @param[in] byte_ The binary value (typically 0-99) to convert to BCD.
  */
 #define BYTE_TO_BCD(byte_) (((((byte_) / 10) & 0x0F) << 4) | (((byte_) % 10) & 0x0F))
 /**
@@ -137,7 +137,7 @@ enum
  * The tens digit is extracted from the high nibble and the units digit from
  * the low nibble of @p byte_, and the two are combined into a binary value.
  *
- * @param byte_ The BCD-encoded value to convert to binary.
+ * @param[in] byte_ The BCD-encoded value to convert to binary.
  */
 #define BCD_TO_BYTE(byte_) (((((byte_) & 0xF0) >> 4) * 10) + (((byte_) & 0x0F)))
 

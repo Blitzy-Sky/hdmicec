@@ -45,13 +45,22 @@ class PhysicalAddress;
  * LibCCEC is the primary entry point an application uses before opening a
  * Connection. It owns initialization and teardown of the CCEC library and the
  * underlying HAL, and exposes the local device's logical and physical address
- * queries. A single process-wide instance is shared across the middleware;
- * callers obtain it through getInstance() rather than constructing LibCCEC
- * directly.
+ * queries. getInstance() returns a process-wide instance created on first use
+ * (a function-local static), and callers are expected to share that instance
+ * rather than construct their own. This shared use is a convention, not an
+ * enforced singleton: the constructor is public, so additional LibCCEC
+ * instances can be created, and each would drive the same process-wide Driver
+ * and Bus singletons.
  *
- * @note The instance holds an internal Mutex member for synchronization.
+ * @note Thread safety is limited: the internal Mutex serializes only the
+ *       init() and term() lifecycle transitions with respect to one another.
+ *       The address queries (getLogicalAddress(), getPhysicalAddress(),
+ *       addLogicalAddress()) do not take this mutex and are not synchronized
+ *       by it, so this class does not provide general all-method thread
+ *       safety.
  * @see Connection
  * @see Driver
+ * @see hdmicec/ccec/src/LibCCEC.cpp
  */
 class LibCCEC {
 public:
@@ -65,41 +74,88 @@ public:
 	/**
 	 * @brief Constructs the LibCCEC facade.
 	 *
-	 * @note Not normally called directly; obtain the shared instance through
-	 *       getInstance() instead.
+	 * Initializes the internal state flags (initialized/connected) to false; it
+	 * does not touch the Driver or Bus. Sharing the getInstance() instance is
+	 * preferred but not enforced: because this constructor is public, callers
+	 * can construct their own LibCCEC instances.
+	 *
+	 * @note Prefer the shared instance from getInstance() rather than
+	 *       constructing LibCCEC directly.
 	 */
 	LibCCEC(void);
 	/**
 	 * @brief Initializes the CCEC library and the underlying HAL.
 	 *
-	 * @param[in] name Optional client/instance name; defaults to 0 (NULL) when
-	 *                 not supplied.
+	 * Must be called before opening a Connection or issuing address queries. On
+	 * success it opens the Driver and then starts the Bus, and marks the library
+	 * initialized.
+	 *
+	 * @param[in] name Optional CEC log-prefix string. When non-NULL it is copied
+	 *                 (truncated to fit) into the global CEC log prefix used by
+	 *                 CCEC log lines; when NULL (the default) the log prefix is
+	 *                 cleared. It is not a client identity or handle.
+	 * @throws InvalidStateException (ccec/Exception.hpp) if the library is
+	 *         already initialized (init() is not re-entrant and must be paired
+	 *         with term()).
+	 * @note May also propagate exceptions raised while opening the Driver or
+	 *       starting the Bus (for example IOException).
+	 * @see hdmicec/ccec/src/LibCCEC.cpp (init: Driver::open() then Bus::start())
 	 */
 	void init(const char * name= 0);
 	/**
 	 * @brief Tears down the CCEC library and releases HAL resources.
+	 *
+	 * Stops the Bus and then closes the Driver, and marks the library
+	 * uninitialized.
+	 *
+	 * @throws InvalidStateException (ccec/Exception.hpp) if the library is not
+	 *         currently initialized.
+	 * @see hdmicec/ccec/src/LibCCEC.cpp (term: Bus::stop() then Driver::close())
 	 */
 	void term(void);
 	/**
-	 * @brief Obtains the logical address for the given device type.
+	 * @brief Obtains the logical address currently allocated to this device.
 	 *
-	 * @param[in] devType The CEC device type to query.
-	 * @return The logical address as an int.
+	 * @param[in] devType Device type argument. It is forwarded to the driver but
+	 *                    is currently ignored by the legacy HAL query
+	 *                    (HdmiCecGetLogicalAddress does not take a device type),
+	 *                    so the value returned is not specific to @p devType.
+	 * @return The allocated logical address as a non-zero int.
+	 * @throws InvalidStateException (ccec/Exception.hpp) if the library is not
+	 *         initialized, or if the driver reports logical address 0. Because 0
+	 *         is the TV logical address, a genuine TV allocation is rejected by
+	 *         this 0-means-unallocated check (documented as-is).
+	 * @see hdmicec/ccec/src/LibCCEC.cpp (getLogicalAddress)
 	 */
 	int getLogicalAddress(int devType);
 	/**
 	 * @brief Retrieves the device's physical address.
 	 *
-	 * @param[out] physicalAddress Receives the packed physical address.
+	 * @param[out] physicalAddress Non-null pointer that receives the packed
+	 *                             physical address. The pointer is forwarded
+	 *                             directly to the driver and dereferenced without
+	 *                             a null check, so the caller must supply a valid,
+	 *                             non-null pointer.
+	 * @throws InvalidStateException (ccec/Exception.hpp) if the library is not
+	 *         initialized.
+	 * @see hdmicec/ccec/src/LibCCEC.cpp (getPhysicalAddress)
 	 */
 	void getPhysicalAddress(unsigned int *physicalAddress);
 	/**
 	 * @brief Claims (allocates) a logical address for this device.
 	 *
+	 * Forwards the request to Driver::addLogicalAddress().
+	 *
 	 * @param[in] source The logical address to claim.
-	 * @return The result of the claim operation as an int.
-	 * @note This facade method returns an int, whereas Driver::addLogicalAddress
-	 *       returns a bool; the int value is reported as-is by the CCEC library.
+	 * @return Always the integer 1 when it returns normally. The driver's bool
+	 *         result is not inspected, so the return value does not indicate
+	 *         whether the claim actually succeeded.
+	 * @throws InvalidStateException (ccec/Exception.hpp) if the library is not
+	 *         initialized. Failures detected by the driver are reported by
+	 *         exceptions it throws (for example AddressNotAvailableException or
+	 *         IOException), which propagate out of this method.
+	 * @see hdmicec/ccec/src/LibCCEC.cpp (addLogicalAddress returns true
+	 *      unconditionally)
 	 */
 	int addLogicalAddress(const LogicalAddress &source);
 

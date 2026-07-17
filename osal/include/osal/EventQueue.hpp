@@ -47,42 +47,39 @@
 
 CCEC_OSAL_BEGIN_NAMESPACE
 
-/***************************************************************************/
-/*!
-\brief Thread-safe bounded event queue with blocking consumer semantics.
-
-This is a collection class which provides the event queue functionality.
-consumer threads could wait on the queue and will be signalled when 
-queue is populated.
-
-\tparam E - type of elements held in this collection.
-*/
-/**************************************************************************/
+/**
+ * @brief Thread-safe bounded event queue with blocking consumer semantics.
+ *
+ * This is a collection class which provides the event queue functionality.
+ * consumer threads could wait on the queue and will be signalled when
+ * queue is populated.
+ *
+ * @tparam E - type of elements held in this collection.
+ */
 
 template <class E>
 class EventQueue  {
 public:
 
-/***************************************************************************/
-/*!
-\brief Constructor.
-Creates an EventQueue with the provided capacity.
-
-\param[in] cap - Number of elements that could be held in the queue.
-*/
-/**************************************************************************/
+/**
+ * @brief Constructor.
+ *
+ * Creates an EventQueue with the provided capacity.
+ *
+ * @param[in] cap - Number of elements that could be held in the queue. Defaults
+ *            to 32. This capacity is a hard bound: offer() silently discards
+ *            elements once the queue is full (see offer()).
+ */
 
 	EventQueue(size_t cap = 32) {
 		this->cap = cap;
 		events = new std::deque<E>(0);
 	}
-/***************************************************************************/
-/*!
-
-\brief Destructor
-Destructor - Destroys the EventQueue object.
-*/
-/**************************************************************************/
+/**
+ * @brief Destructor.
+ *
+ * Destructor - Destroys the EventQueue object.
+ */
 
 	~EventQueue(void)
 	{AutoLock lock_(mutex);
@@ -91,20 +88,18 @@ Destructor - Destroys the EventQueue object.
 		}
 		delete events;
 	}
-/***************************************************************************/
-/*!
-\brief method for polling events. This will block if queue is empty.
-
-Consumer will be returned with the object from front of the queue if queue is
-not empty. If queue is empty, consumer threads will wait until an event is 
-posted to the queue.
-
-If waiting thread is awakened by there is no element on queue, a default
-value is returned. This allows the waiting thread to close out the queue.
-
-\return event from the front of the queue.
-*/
-/**************************************************************************/
+/**
+ * @brief method for polling events. This will block if queue is empty.
+ *
+ * Consumer will be returned with the object from front of the queue if queue is
+ * not empty. If queue is empty, consumer threads will wait until an event is
+ * posted to the queue.
+ *
+ * If waiting thread is awakened by there is no element on queue, a default
+ * value is returned. This allows the waiting thread to close out the queue.
+ *
+ * @return event from the front of the queue.
+ */
 
 	E poll(void) {
 		typedef E ET;
@@ -137,35 +132,36 @@ value is returned. This allows the waiting thread to close out the queue.
 		return front;
 	}
 	
-/***************************************************************************/
-/*!
-\brief returns size of queue.
-
-Retrieves number of events currently available in the queue
-
-\return number of events in queue.
-*/
-/**************************************************************************/
+/**
+ * @brief returns size of queue.
+ *
+ * Retrieves number of events currently available in the queue
+ *
+ * @return number of events in queue.
+ */
 
     size_t size(void)  {
     	AutoLock lock_(mutex);
     	return events->size();
     }
 	
-/***************************************************************************/
-/*!
-\brief send an event to the queue.
-
-Post a event to the queue and signals threads waiting on the queue.
-On receiving the signal (event), if there is any consumer thread waiting
-on the queue will come out of wait state and will consume the event.
-
-\param[in] element - Object that is to be posted to the queue.
-\note If the queue is already at capacity the element is silently discarded:
- the method returns without posting and without signalling, and no exception is
- thrown in the current implementation.
-*/
-/**************************************************************************/
+/**
+ * @brief send an event to the queue.
+ *
+ * Post a event to the queue and signals threads waiting on the queue.
+ * On receiving the signal (event), if there is any consumer thread waiting
+ * on the queue will come out of wait state and will consume the event.
+ *
+ * @param[in] element - Object that is to be posted to the queue.
+ * @note If the queue is already at capacity the element is silently discarded:
+ *       the method returns without posting and without signalling, and no
+ *       exception is thrown in the current implementation.
+ * @warning When @c E is a heap-allocated pointer (as used by the CCEC transport
+ *          for @c CECFrame*), a silent discard at capacity means the queued
+ *          pointer is neither stored nor freed by this queue; ownership remains
+ *          with the caller, so an unguarded caller can leak the element and
+ *          lose the frame. Documented as-is; the production code is unchanged.
+ */
 
 	void offer(E element) {
     	AutoLock lock_(mutex);

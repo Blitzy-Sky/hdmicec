@@ -58,15 +58,38 @@ public:
 	/**
 	 * @brief Decodes a raw received CEC frame and dispatches the resulting message.
 	 *
-	 * Parses @p in as a CEC message (header byte, then opcode, then any operands),
-	 * constructs the corresponding high-level typed message, and dispatches it to the
-	 * bound @c MessageProcessor by invoking the matching process() overload. A
-	 * single-byte frame is treated as a Polling message.
+	 * Parses @p in as a CEC message and dispatches it to the bound
+	 * @c MessageProcessor by invoking the matching process() overload. The header
+	 * byte (offset 0) is parsed first, then the opcode byte (offset 1), then any
+	 * operands (from offset 2). A single-byte frame (length 1) is treated as a
+	 * Polling message and dispatched immediately, before opcode decoding.
+	 *
+	 * Dispatch coverage (documents the decoder exactly as implemented):
+	 * - Supported / dispatched: 38 message types reach a process() overload - 37
+	 *   opcode cases in the decode switch plus the Polling path above.
+	 * - Recognized but ignored: four vendor opcodes have a case label whose
+	 *   process() call is commented out, so they are matched and then dropped with
+	 *   no action - `VENDOR_COMMAND`, `VENDOR_COMMAND_WITH_ID`,
+	 *   `VENDOR_REMOTE_BUTTON_DOWN` and `VENDOR_REMOTE_BUTTON_UP`.
+	 * - Unsupported: five message classes have neither a decode case nor a
+	 *   MessageProcessor overload and are never produced by the decoder -
+	 *   GiveAudioStatus, RequestArcInitiation, ReportArcInitiation,
+	 *   RequestArcTermination and ReportArcTermination.
+	 * - Unknown opcodes: the switch `default` logs "Unhandled Message Received"
+	 *   and prints the opcode; no message is dispatched.
 	 *
 	 * @param[in] in The raw received CEC frame to decode and dispatch.
 	 *
-	 * @note Exceptions raised while parsing operands (for example @c InvalidParamException)
-	 *       are caught and logged internally and are not propagated to the caller.
+	 * @warning Exception boundary: the header (`Header(in, 0)`) is constructed
+	 *          BEFORE the internal try block, so an exception thrown there is NOT
+	 *          caught and propagates to the caller. In particular, an empty frame
+	 *          makes the header byte read out of range and throws
+	 *          `std::out_of_range`, which escapes decode().
+	 * @note Exceptions thrown INSIDE the try block - while parsing operands or
+	 *       dispatching (for example `InvalidParamException`, or any
+	 *       `std::exception` such as `std::out_of_range` raised during operand
+	 *       parsing) - are caught and logged internally (the `std::exception`
+	 *       handler also hex-dumps the frame) and are not propagated to the caller.
 	 */
 	void decode(const CECFrame &in);
 

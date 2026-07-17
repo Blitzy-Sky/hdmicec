@@ -49,19 +49,26 @@ CCEC_BEGIN_NAMESPACE
  * and receive CEC frames and to manage logical/physical addressing. It marks
  * the boundary between the CCEC middleware and the underlying platform HAL:
  * a single concrete adapter, DriverImpl (in ccec/src), implements this
- * contract and forms the HAL migration seam. DriverImpl may be backed by
- * either of two platform HAL back-ends:
- *   - the legacy C HAL (libRCECHal.so, hdmi_cec_driver.h), or
- *   - the AIDL/Binder HAL (com.rdk.hal.hdmicec).
+ * contract and forms the HAL migration seam. In the current implementation
+ * DriverImpl bridges exclusively to the legacy C HAL (libRCECHal.so, declared
+ * in hdmi_cec_driver.h): every DriverImpl method calls the legacy @c HdmiCec*
+ * C API (for example @c HdmiCecOpen(), @c HdmiCecTx() / @c HdmiCecTxAsync(),
+ * @c HdmiCecGetLogicalAddress()), and no AIDL/Binder client code is present.
+ * The AIDL/Binder HAL (com.rdk.hal.hdmicec) is the migration target this seam
+ * is intended to move to; it is the future backend, not a second
+ * run-time-selectable HAL today.
  *
  * Each member below describes the abstract contract an implementation MUST
  * honour; the concrete behaviour lives in DriverImpl and is out of scope in
  * this header.
  *
- * @note Callers obtain the active implementation through getInstance() rather
+ * @note Callers obtain the concrete implementation through getInstance() rather
  *       than constructing a Driver directly.
- * @see hdmi_cec_driver.h
- * @see com.rdk.hal.hdmicec.IHdmiCecController
+ * @see hdmi_cec_driver.h (current legacy C HAL backend)
+ * @see com.rdk.hal.hdmicec.IHdmiCecController (AIDL migration target)
+ *
+ * Source: hdmicec/ccec/src/DriverImpl.cpp (includes ccec/drivers/hdmi_cec_driver.h
+ * and calls only the legacy HdmiCec* C API).
  */
 class Driver {
 public:

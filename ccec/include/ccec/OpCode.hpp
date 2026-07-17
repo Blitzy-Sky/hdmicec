@@ -44,12 +44,19 @@ CCEC_BEGIN_NAMESPACE
  * @brief Maps a CEC opcode to its human-readable command name.
  *
  * Looks up the symbolic name string for a HDMI-CEC opcode value (for example
- * the opcode 0x82 maps to the string "ACTIVE_SOURCE"). The returned pointer
+ * the opcode 0x82 maps to the string "Active Source"). The returned pointer
  * refers to a statically stored, null-terminated C string owned by the
  * implementation; callers must neither free nor modify it.
  *
- * @param[in] op  The CEC opcode value to translate (see the opcode enumeration).
- * @return Pointer to a const, null-terminated name string for @p op.
+ * @par Input parameter (direction [in])
+ * The single argument is an input: the CEC opcode value (an @c Op_t) to
+ * translate to a name. Its @c [in] direction is documented here in prose rather
+ * than with an @c \@param tag because the same @c extern "C" function is also
+ * declared without a parameter name in DataBlock.hpp, so a named @c \@param
+ * would not resolve consistently across both declarations.
+ *
+ * @return Pointer to a const, null-terminated name string for the opcode; the
+ *         storage is owned by the callee and must not be modified or freed.
  */
 extern "C" const char *GetOpName(Op_t op);
 
@@ -59,8 +66,10 @@ extern "C" const char *GetOpName(Op_t op);
  * Enumerates the one-byte operation codes carried in the opcode block of a CEC
  * message, as defined by the HDMI-CEC specification, together with two
  * middleware-internal sentinel values (@c POLLING and @c UNKNOWN) that never
- * appear on the CEC wire. Each value's numeric code is the byte transmitted in
- * a CEC frame.
+ * appear on the CEC wire. For the specification opcodes, each value's numeric
+ * code is the single byte transmitted in a CEC frame; the two sentinels are the
+ * exceptions: @c POLLING (@c 0x200) and @c UNKNOWN (@c 0xFFFF) are not one-byte
+ * wire values and are never transmitted.
  */
 enum
 {

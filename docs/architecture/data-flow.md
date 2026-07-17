@@ -1,13 +1,13 @@
 # hdmicec Data Flow & Concurrency
 
-This document traces a CEC message end-to-end through the `hdmicec` (CCEC) middleware — **outbound** (host → HAL → SoC) and **inbound** (SoC → HAL → application) — and explains the `Bus` **producer/consumer** concurrency model that carries those messages. Everything here is anchored on the real `Driver` / `DriverImpl` seam and the actual member names found in the code; the flow *above* the seam is CCEC's responsibility, and the flow *below* it is delegated to whichever HAL backend is active (see [HAL Interaction](hal-interaction.md)).
+This document traces a CEC message end-to-end through the `hdmicec` (CCEC) middleware — **outbound** (host → HAL → SoC) and **inbound** (SoC → HAL → application) — and explains the `Bus` **producer/consumer** concurrency model that carries those messages. Everything here is anchored on the real `Driver` / `DriverImpl` seam and the actual member names found in the code; the flow *above* the seam is CCEC's responsibility, and the flow *below* it is delegated by `DriverImpl` to the platform HAL. In the current implementation that backend is exclusively the **Legacy C HAL** (`DriverImpl` calls only the `HdmiCec*` C API); the **AIDL/Binder HAL** is the migration target, not a second run-time-selectable backend (see [HAL Interaction](hal-interaction.md)).
 
 The transport is deliberately asymmetric. Outbound frames have **two distinct paths** — a *synchronous* path that calls the HAL directly and an *asynchronous* path that queues the frame for a background writer thread — while inbound frames always arrive asynchronously through a HAL callback and are drained by a background reader thread. The sections below document each path exactly as implemented.
 
 ## Related documents
 
 - [Architecture Overview](overview.md) — stack placement and the component/class relationships that this document animates.
-- [HAL Interaction](hal-interaction.md) — how CCEC talks to **both** HAL backends (Legacy C HAL and AIDL/Binder HAL) below the `Driver` seam.
+- [HAL Interaction](hal-interaction.md) — how CCEC talks to the HAL below the `Driver` seam: the **Legacy C HAL** (the current backend) and the **AIDL/Binder HAL** (the migration target).
 - [Module README](../../README.md) — module overview (purpose, key components, configuration, testing, and limitations).
 
 ---
@@ -18,13 +18,17 @@ Outbound traffic starts with a high-level message being **encoded** into a raw `
 
 ### 1.1 Building the frame
 
-Before anything is sent, the application turns a high-level message into wire bytes with `MessageEncoder`. Its `encode(...)` methods are **static overloads** that serialise a message into a `CECFrame` in the fixed order **header → opcode → operand**: the header block is serialised first (`h.serialize(out)`), then the opcode (`OpCode(m.opCode()).serialize(out)`), then the message operands (`m.serialize(out)`). `Source: hdmicec/ccec/include/ccec/MessageEncoder.hpp`. The resulting `CECFrame` is a fixed-capacity byte buffer — `enum { MAX_LENGTH = 128 }` backing `uint8_t buf_[MAX_LENGTH]` with a `size_t len_` length. `Source: hdmicec/ccec/include/ccec/CECFrame.hpp`.
+Before anything is sent, the application turns a high-level message into wire bytes with `MessageEncoder`, which exposes **four static `encode(...)` overloads** in two families. The two **header-taking** overloads (`encode(const Header&, const DataBlock&, CECFrame&)` and `encode(const Header&, const DataBlock&)`) serialise in the order **header → opcode → operand**: the header first (`h.serialize(out)`), then the opcode (`OpCode(m.opCode()).serialize(out)`), then the operands (`m.serialize(out)`). The two **data-block-only** overloads (`encode(const DataBlock&, CECFrame&)` and `encode(const DataBlock&)`) emit only **opcode → operand** with **no header**. `Source: hdmicec/ccec/include/ccec/MessageEncoder.hpp`. The resulting `CECFrame` is a fixed-capacity byte buffer — `enum { MAX_LENGTH = 128 }` backing `uint8_t buf_[MAX_LENGTH]` with a `size_t len_` length. `Source: hdmicec/ccec/include/ccec/CECFrame.hpp`.
 
 ### 1.2 Synchronous path (`Connection::send` / `sendTo`)
 
-`Connection::send()` / `Connection::sendTo()` forward the frame to the singleton transport as `Bus::send(frame, timeout)`; `Connection` holds a reference to the `Bus` (`Bus &bus`). `Source: hdmicec/ccec/include/ccec/Connection.hpp`. The behaviour of `Bus::send` then branches on `timeout`:
+`Connection::send()` / `Connection::sendTo()` forward the frame to the singleton transport as `Bus::send(frame, timeout)`; `Connection` holds a reference to the `Bus` (`Bus &bus`). `Source: hdmicec/ccec/include/ccec/Connection.hpp`.
 
-- **When `timeout <= 0`** (the default; `send` declares `int timeout = 0`), `Bus::send` takes **both** locks (`AutoLock rlock_(rMutex), wlock_(wMutex)`), verifies the bus is `started`, and calls `Driver::getInstance().write(frame)` **directly** — the frame is *not* placed on any queue. If the HAL write throws, the exception is rethrown to the caller. `Source: hdmicec/ccec/src/Bus.cpp`, `hdmicec/ccec/src/Bus.hpp`.
+> **Exception handling differs by overload.** The **untagged** `Connection::send(frame, timeout)` / `sendTo(to, frame, timeout)` overloads wrap the `Bus::send` call in `try { ... } catch (Exception &) {}` with an **empty catch body**, so any CCEC transmit exception (for example `CECNoAckException` or `IOException`) is **suppressed** and never reaches the caller. Only the **`Throw_e`-tagged** overloads (`send(frame, timeout, Throw_e)` / `sendTo(to, frame, timeout, Throw_e)`) re-throw, propagating the exception to the caller. `Source: hdmicec/ccec/src/Connection.cpp`.
+
+The behaviour of `Bus::send` (which both overload families call) then branches on `timeout`:
+
+- **When `timeout <= 0`** (the default; `send` declares `int timeout = 0`), `Bus::send` takes **both** locks (`AutoLock rlock_(rMutex), wlock_(wMutex)`), verifies the bus is `started`, and calls `Driver::getInstance().write(frame)` **directly** — the frame is *not* placed on any queue. If the HAL write throws, `Bus::send` rethrows to `Connection`, which then suppresses or propagates it according to the overload the caller chose (see the note above). `Source: hdmicec/ccec/src/Bus.cpp`, `hdmicec/ccec/src/Bus.hpp`.
 - **When `timeout > 0`**, `Bus::send` retries the synchronous write in 250&nbsp;ms increments until the budget is exhausted. It computes `int retry = (timeout / 250)` and loops: `usleep(1000)`, attempt `send(frame, 0)` (the direct branch above), and on failure `usleep(250000)` (250&nbsp;ms) before the next attempt, continuing `while (retry--)`. If the final attempt still fails, the exception is rethrown. `Source: hdmicec/ccec/src/Bus.cpp`.
 
 The exact retry arithmetic (document-as-is):
@@ -43,11 +47,15 @@ do {
 
 ### 1.3 Asynchronous path (`Connection::sendAsync`)
 
-`Connection::sendAsync()` forwards to `Bus::sendAsync(frame)`. `Source: hdmicec/ccec/include/ccec/Connection.hpp`. Under `AutoLock lock_(wMutex)`, `Bus::sendAsync` verifies the bus is `started`, **copies the frame onto the heap** (`CECFrame *copyFrame = new CECFrame(); *copyFrame = frame;`), and enqueues the copy with `wQueue.offer(copyFrame)`; if `offer` throws, the copy is deleted and the exception is rethrown so no memory leaks. `Source: hdmicec/ccec/src/Bus.cpp`. The background `Bus::Writer` thread later drains the queue: it calls `bus.wQueue.poll()` (blocking), and for each non-null `outFrame` calls `Driver::getInstance().write(*outFrame)` before `delete`-ing it. `Source: hdmicec/ccec/src/Bus.cpp`.
+`Connection::sendAsync()` forwards to `Bus::sendAsync(frame)`. `Source: hdmicec/ccec/include/ccec/Connection.hpp`. Under `AutoLock lock_(wMutex)`, `Bus::sendAsync` verifies the bus is `started`, **copies the frame onto the heap** (`CECFrame *copyFrame = new CECFrame(); *copyFrame = frame;`), and enqueues the copy with `wQueue.offer(copyFrame)`. `Source: hdmicec/ccec/src/Bus.cpp`.
+
+> **Silent drop and leak at capacity (document-as-is).** `EventQueue::offer` **never throws** when the queue is full: at capacity (default 32) it simply **discards** the element with no signal and no error. `Bus::sendAsync` guards the enqueue with a `try/catch` that deletes the copy only *if `offer` throws* — but because a full-queue drop does **not** throw, that cleanup path never runs. When `wQueue` is saturated the heap-allocated `copyFrame` is therefore **neither enqueued nor freed**: the frame is silently **lost** and its memory is **leaked**. `Source: hdmicec/ccec/src/Bus.cpp`, `hdmicec/osal/include/osal/EventQueue.hpp`.
+
+The background `Bus::Writer` thread later drains the queue: it calls `bus.wQueue.poll()` (blocking), and for each non-null `outFrame` calls `Driver::getInstance().write(*outFrame)` before `delete`-ing it. `Source: hdmicec/ccec/src/Bus.cpp`.
 
 ### 1.4 The concrete HAL leg (`DriverImpl::write`)
 
-Both paths converge on the same HAL call. `DriverImpl::write()` serialises the frame's bytes out with `frame.getBuffer(&buf, &length)` and, under its own `AutoLock lock_(mutex)`, hands them to the HAL — on the Legacy C HAL path this is `HdmiCecTx(nativeHandle, buf, length, &sendResult)`. A directed frame that is sent but not acknowledged raises `CECNoAckException`; a hard error raises `IOException`. `Source: hdmicec/ccec/src/DriverImpl.cpp`. (The `Driver` abstraction and the two HAL backends behind it are detailed in [HAL Interaction](hal-interaction.md).)
+Both paths converge on the same HAL call. `DriverImpl::write()` serialises the frame's bytes out with `frame.getBuffer(&buf, &length)` and, under its own `AutoLock lock_(mutex)`, hands them to the HAL — on the Legacy C HAL path this is `HdmiCecTx(nativeHandle, buf, length, &sendResult)`. A directed frame that is sent but not acknowledged raises `CECNoAckException`; a hard error raises `IOException`. `Source: hdmicec/ccec/src/DriverImpl.cpp`. (The `Driver` abstraction and the HAL backend behind it — the Legacy C HAL today, with the AIDL/Binder HAL as the migration target — are detailed in [HAL Interaction](hal-interaction.md).)
 
 **Diagram 1 — Outbound transmit (synchronous vs. asynchronous).**
 
@@ -80,6 +88,8 @@ sequenceDiagram
         HAL-->>DI: result
         DI-->>Bus: return (or throw CECNoAckException / IOException)
         Bus-->>Conn: return (rethrows on failure, retries every 250 ms when timeout is positive)
+        Note over Conn: untagged send / sendTo swallow the exception via empty catch, only Throw_e overloads re-throw
+        Conn-->>App: return (exception propagates to caller only on the Throw_e overloads)
     else Asynchronous path — Connection::sendAsync
         App->>Conn: sendAsync(frame)
         Conn->>Bus: sendAsync(frame)
@@ -102,10 +112,17 @@ sequenceDiagram
 
 Reception is **push-driven** from the SoC upward and is delivered to the application through the observer (`FrameListener`) contract. The chain, documented as-is, is:
 
-1. **HAL callback.** The SoC driver, via the HAL, invokes the registered receive callback `DriverImpl::DriverReceiveCallback(int handle, void *callbackData, unsigned char *buf, int len)`. The callback allocates a fresh `CECFrame`, appends the raw bytes into it (`frame->append(buf, len)`), and `offer()`s it onto the incoming queue `rQueue` — an `EventQueue<CECFrame *>` that lives **inside `DriverImpl`** (reached through `getIncomingQueue(handle)`). If the `offer` throws, the frame is deleted to avoid a leak. `Source: hdmicec/ccec/src/DriverImpl.cpp`, `hdmicec/ccec/src/DriverImpl.hpp`.
+1. **HAL callback.** The SoC driver, via the HAL, invokes the registered receive callback `DriverImpl::DriverReceiveCallback(int handle, void *callbackData, unsigned char *buf, int len)`. The callback allocates a fresh `CECFrame` (`new CECFrame()`) and appends the raw bytes into it (`frame->append((unsigned char *)buf, (size_t)len)`) **before** entering a `try` block, then `offer()`s the frame onto the incoming queue `rQueue` — an `EventQueue<CECFrame *>` that lives **inside `DriverImpl`** (reached through `getIncomingQueue(handle)`) — from within `try { ... } catch (...) { delete frame; }`. `Source: hdmicec/ccec/src/DriverImpl.cpp`, `hdmicec/ccec/src/DriverImpl.hpp`.
+
+   > **Receive-callback trust boundary (document-as-is).** The callback trusts the HAL's arguments: `buf` is assumed **non-null** and `len` is assumed to be a valid frame length in the range **0 … `CECFrame::MAX_LENGTH` (128)**. Because `frame->append(buf, (size_t)len)` runs **before** the `try`, a violated assumption is *not* caught here: `CECFrame::append` throws `std::out_of_range` ("Frame grows beyond maximum") when the byte count exceeds `MAX_LENGTH`, and a **negative** `len` becomes a huge value under the `(size_t)` cast and triggers the same throw. That exception leaks the just-allocated `frame` and escapes upward across the C HAL callback boundary. `Source: hdmicec/ccec/src/DriverImpl.cpp`, `hdmicec/ccec/include/ccec/CECFrame.hpp`.
+   >
+   > **Silent drop and leak at capacity.** As on the outbound side (§1.3), `EventQueue::offer` **never throws** when `rQueue` is full — it **discards** the frame silently at capacity. The `catch (...) { delete frame; }` guard only runs if `offer` *throws*, which a full-queue drop does not, so a saturated `rQueue` **loses the inbound frame and leaks its `CECFrame`**. `Source: hdmicec/ccec/src/DriverImpl.cpp`, `hdmicec/osal/include/osal/EventQueue.hpp`.
 2. **Reader drains the HAL.** The background `Bus::Reader` thread loops while running, calling `Driver::getInstance().read(frame)`. `DriverImpl::read()` drains `rQueue` via a blocking `rQueue.poll()`, copies the dequeued frame into the caller's `CECFrame`, and deletes the heap copy. `Source: hdmicec/ccec/src/Bus.cpp`, `hdmicec/ccec/src/DriverImpl.cpp`.
-3. **Fan-out to listeners.** Still inside the reader loop, under `AutoLock lock_(bus.rMutex)`, `Bus::Reader` iterates the registered `listeners` and calls `(*list_it)->notify(frame)` on each. `Source: hdmicec/ccec/src/Bus.cpp`.
-4. **Decode and dispatch.** `FrameListener::notify(const CECFrame &)` delivers the frame up to the `Connection` (via its private `DefaultFrameListener`), which feeds it to `MessageDecoder::decode(const CECFrame &)`. The decoder converts the raw bytes back into a high-level message and dispatches it through the overloaded `MessageProcessor::process(...)` handlers; applications **subclass** `MessageProcessor` to react to the messages they care about (the base implementation simply discards). `Source: hdmicec/ccec/include/ccec/FrameListener.hpp`, `hdmicec/ccec/include/ccec/MessageDecoder.hpp`, `hdmicec/ccec/include/ccec/MessageProcessor.hpp`, `hdmicec/ccec/include/ccec/Connection.hpp`.
+3. **Fan-out through the Bus.** Still inside the reader loop, under `AutoLock lock_(bus.rMutex)`, `Bus::Reader` iterates its registered `listeners` and calls `(*list_it)->notify(frame)` on each. The listener the `Connection` registered with the `Bus` (in `Connection::open()`) is the `Connection`'s **private** `DefaultFrameListener`, so this call lands back inside `Connection`. `Source: hdmicec/ccec/src/Bus.cpp`, `hdmicec/ccec/src/Connection.cpp`.
+4. **Fan-out through the Connection.** `Connection`'s `DefaultFrameListener::notify(const CECFrame &)` re-fans-out — under the `Connection`'s own `AutoLock lock_(connection.mutex)` — to every **application** `FrameListener` registered through `Connection::addFrameListener(...)`. `Connection` itself does **not** decode: it only forwards the frame to the application listeners. `Source: hdmicec/ccec/src/Connection.cpp`, `hdmicec/ccec/include/ccec/FrameListener.hpp`.
+5. **Decode and dispatch (application-owned).** Decoding happens in the **application's** `FrameListener::notify(const CECFrame &in)`: the plugin constructs a `MessageDecoder` bound to its own `MessageProcessor` and calls `MessageDecoder(processor).decode(in)` — for example `entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp:127` (the listener's `notify`) → `:148` (the `decode` call), and `entservices-hdmicecsource/plugin/HdmiCecSourceImplementation.cpp:97` → `:108`. `MessageDecoder::decode` converts the raw bytes back into a high-level message and dispatches it through the overloaded `MessageProcessor::process(...)` handlers. Applications **subclass** `MessageProcessor` to react to the messages they care about; the **base** `MessageProcessor::process(...)` overloads are **not** empty and do **not** discard — they **log** the message (calling `header.print()` / `msg.print()`) and take no further protocol action. `Source: hdmicec/ccec/include/ccec/MessageDecoder.hpp`, `hdmicec/ccec/include/ccec/MessageProcessor.hpp`, `entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp`, `entservices-hdmicecsource/plugin/HdmiCecSourceImplementation.cpp`.
+
+> **Listener-callback execution context (document-as-is).** The entire fan-out in steps 3–5 runs **synchronously on the `Bus::Reader` thread**, while that thread holds `bus.rMutex` (and then, inside `Connection`, `connection.mutex`). Application `FrameListener`s therefore run **on the reader thread under those locks**: a listener that **blocks** stalls all inbound reception; a listener that calls back into `Connection`/`Bus` risks **re-entrant** locking; and — because the fan-out loops are not wrapped in `try/catch` — an exception thrown from a listener **propagates out of the reader thread**. Listeners are held as **raw, non-owned pointers**, so each registered listener must **outlive** its registration and be unregistered before destruction. Handlers should return **promptly** and **must not throw**. `Source: hdmicec/ccec/src/Bus.cpp`, `hdmicec/ccec/src/Connection.cpp`.
 
 **Diagram 2 — Inbound receive (HAL callback to application).**
 
@@ -117,26 +134,31 @@ sequenceDiagram
     participant DI as DriverImpl
     participant RQ as rQueue (EventQueue in DriverImpl)
     participant Reader as Bus::Reader thread
-    participant FL as FrameListener
-    participant Conn as Connection
-    participant Dec as MessageDecoder
+    participant CFL as Connection::DefaultFrameListener
+    participant AFL as App FrameListener (plugin)
+    participant Dec as MessageDecoder (app-created)
     participant Proc as MessageProcessor
 
     SoC-->>HAL: incoming CEC frame
     HAL->>DI: DriverReceiveCallback(handle, data, buf, len)
-    DI->>DI: new CECFrame, append(buf, len)
-    DI->>RQ: rQueue.offer(frame)
+    DI->>DI: new CECFrame, then append(buf, (size_t)len) before try
+    DI->>RQ: rQueue.offer(frame) - silent drop and leak if full
+    Note over DI,RQ: append/offer failures escape the C callback (see trust boundary)
 
     Note over Reader,RQ: reader loop pulls inbound frames from the HAL
     Reader->>DI: Driver::getInstance().read(frame)
     DI->>RQ: rQueue.poll() (blocking)
     RQ-->>DI: inFrame
     DI-->>Reader: frame (copied, heap copy deleted)
-    Note over Reader,FL: AutoLock rMutex, iterate registered listeners
-    Reader->>FL: notify(frame)
-    FL->>Conn: deliver frame
-    Conn->>Dec: decode(frame)
+
+    Note over Reader,CFL: AutoLock bus.rMutex, iterate Bus listeners
+    Reader->>CFL: notify(frame)
+    Note over CFL,AFL: AutoLock connection.mutex, iterate app listeners
+    CFL->>AFL: notify(frame)
+    Note over AFL: plugin constructs MessageDecoder(processor)
+    AFL->>Dec: MessageDecoder(processor).decode(frame)
     Dec->>Proc: process(message, header)
+    Note over Proc: base process(...) logs via header.print / msg.print, subclasses handle
 ```
 
 ---
@@ -166,13 +188,13 @@ The `Bus` holds the following shared state, and its two threads play opposite pr
 
 The threading model is built entirely on the OSAL primitives:
 
-- **`EventQueue<E>`** is a template collection (default capacity `EventQueue(size_t cap = 32)`). `offer(E)` appends to the internal `std::deque` and signals waiters (`push_back` + `cond.set()` + `cond.notifyAll()`); if the queue is already at capacity the element is dropped. `poll()` **blocks** on `cond.wait()` and returns the front element (resetting the condition when the queue empties); `size()` reports the current depth. It is synchronised internally by an OSAL `Mutex` plus a `ConditionVariable`. `Source: hdmicec/osal/include/osal/EventQueue.hpp`.
+- **`EventQueue<E>`** is a template collection (default capacity `EventQueue(size_t cap = 32)`). `offer(E)` appends to the internal `std::deque` and signals waiters (`push_back` + `cond.set()` + `cond.notifyAll()`) **only while there is spare capacity**; once the queue holds `cap` (32) elements, `offer` **silently discards** the element and **never throws** — there is no return value or error to signal the drop, so the caller cannot tell the element was lost (the frame-loss/leak consequence of this is documented in §1.3 and §2). `poll()` **blocks** on `cond.wait()` and returns the front element (resetting the condition when the queue empties); `size()` reports the current depth. It is synchronised internally by an OSAL `Mutex` plus a `ConditionVariable`. `Source: hdmicec/osal/include/osal/EventQueue.hpp`.
 - **`Thread`** derives from `Runnable` and wraps a native thread; constructing a `Thread(Runnable &target)` and calling `start()` runs the target's `run()` in a new thread of execution. `Source: hdmicec/osal/include/osal/Thread.hpp`, `hdmicec/osal/include/osal/Runnable.hpp`.
 - **`Mutex`** is a **recursive** mutual-exclusion lock, paired with the `AutoLock` RAII helper that locks on construction and unlocks on destruction (the `AutoLock rlock_(rMutex), wlock_(wMutex)` idiom seen throughout `Bus`). `Source: hdmicec/osal/include/osal/Mutex.hpp`.
 - **`ConditionVariable`** provides `wait()` / `wait(long timeout)` / `notify()` / `notifyAll()` plus a latched flag via `set()` / `reset()` / `isSet()`; it is the signalling mechanism inside `EventQueue`. `Source: hdmicec/osal/include/osal/ConditionVariable.hpp`.
 - **`Stoppable`** gives each worker its lifecycle state machine (`RUNNING` / `STOPPING` / `STOPPED`) via `stop(bool)`, `isStopped()`, and the protected `runStarted()` / `stopStarted()` / `stopCompleted()` transitions used by `Reader::run` and `Writer::run`. `Source: hdmicec/osal/include/osal/Stoppable.hpp`.
 
-> **Note on frame capacity.** `CECFrame` reserves `MAX_LENGTH = 128` bytes of buffer in code (`uint8_t buf_[MAX_LENGTH]`). `Source: hdmicec/ccec/include/ccec/CECFrame.hpp`. Real CEC messages are far smaller — on the order of ~16 bytes — but that small size is a characteristic of the **HDMI-CEC 1.4b protocol**, not a code constant.
+> **Note on frame capacity.** `CECFrame` reserves `MAX_LENGTH = 128` bytes of buffer in code (`uint8_t buf_[MAX_LENGTH]`). `Source: hdmicec/ccec/include/ccec/CECFrame.hpp`. Real CEC messages are far smaller: the AIDL HAL contract states that the maximum message size — header block plus opcode block plus operand blocks — is `16 * 8` bits (16 bytes). `Source: rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/IHdmiCecController.aidl:95`. The 128-byte buffer is therefore a generous code-level constant, not the protocol's own message-size limit.
 
 **Diagram 3 — Bus producer/consumer threading.** Both queues are OSAL `EventQueue`s synchronised internally by a `Mutex` + `ConditionVariable`; `wMutex` guards the outbound enqueue/write, and `rMutex` guards the inbound listener fan-out.
 
@@ -192,19 +214,19 @@ flowchart TB
     subgraph RX["Inbound path — HAL callback to listeners"]
         direction TB
         CB["DriverImpl::DriverReceiveCallback"]
-        RQ(["rQueue : EventQueue, in DriverImpl"])
+        RQ(["rQueue : EventQueue (cap 32), in DriverImpl"])
         RD["Bus::Reader thread (Runnable + Stoppable)"]
-        FL["registered FrameListeners"]
-        CB -->|"offer(frame)"| RQ
+        FL["Connection::DefaultFrameListener → app listeners"]
+        CB -->|"offer(frame) — silent drop if full"| RQ
         RQ -->|"poll() blocking, via Driver::read"| RD
         RD -->|"notify(frame) under rMutex"| FL
     end
 
-    DW --> HAL["HAL (Legacy C / AIDL)"]
+    DW --> HAL["HAL — Legacy C (current); AIDL (migration target)"]
     HAL --> SOC["SoC CEC driver"]
     SOC -->|"incoming frame"| CB
 ```
 
 ---
 
-*For where these components sit in the stack and how they relate, see the [Architecture Overview](overview.md); for the two HAL backends that `DriverImpl::write` and `DriverReceiveCallback` bridge to, see [HAL Interaction](hal-interaction.md). For module-level context, return to the [Module README](../../README.md).*
+*For where these components sit in the stack and how they relate, see the [Architecture Overview](overview.md); for the HAL backend that `DriverImpl::write` and `DriverReceiveCallback` bridge to — the Legacy C HAL today, with the AIDL/Binder HAL as the migration target — see [HAL Interaction](hal-interaction.md). For module-level context, return to the [Module README](../../README.md).*

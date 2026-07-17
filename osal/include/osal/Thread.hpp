@@ -48,109 +48,92 @@
 CCEC_OSAL_BEGIN_NAMESPACE
 
 
-/***************************************************************************/
-/*!
-\brief Runnable wrapper that executes a target on the OSAL threading primitive.
-
-A thread is a thread of execution in a program. 
-An application could have multiple threads of execution running concurrently.
-
-A class that needs thread functionality shall implement Runnable interface and 
-object will be passed to Thread on creation of Thread object. 
-On the invocation of start() method of Thread, runnable's run() will be executed 
-in a threaded context. Alternatively, calling run() directly executes the
-target synchronously on the calling thread (see Thread::run()).
-*/
-/**************************************************************************/
+/**
+ * @brief Runnable wrapper that executes a target on the OSAL threading primitive.
+ *
+ * A thread is a thread of execution in a program.
+ * An application could have multiple threads of execution running concurrently.
+ *
+ * A class that needs thread functionality shall implement Runnable interface and
+ * object will be passed to Thread on creation of Thread object.
+ * On the invocation of start() method of Thread, runnable's run() will be executed
+ * in a threaded context. Alternatively, calling run() directly executes the
+ * target synchronously on the calling thread (see Thread::run()).
+ */
 
 class Thread : public Runnable {
 public:
-/**************************************************************************/
-/*! 
-\brief Constructor
-
- Allocates a new Thread object
- \param[in] target - Object implements Runnable interface.  
+/**
+ * @brief Constructor.
+ *
+ * Allocates a new Thread object
+ * @param[in] target - Object implements Runnable interface.
  */
- /************************************************************************/
 
 	Thread(Runnable &target);
-/**************************************************************************/
-/*! 
-\brief Constructor
-
- Allocates a new Thread object
- \param[in] target - Object implementes Runnable interface.
- \param[in] name - Name of the thread context.
+/**
+ * @brief Constructor.
+ *
+ * Allocates a new Thread object
+ * @param[in] target - Object implementes Runnable interface.
+ * @param[in] name - Name of the thread context.
  */
- /************************************************************************/
 
 	Thread(Runnable &target, const int8_t* name);
-/**************************************************************************/
-/*! 
-\brief Destructor
-
- Destroys the Thread object
+/**
+ * @brief Destructor.
+ *
+ * Destroys the Thread object
  */
- /************************************************************************/
 
 	virtual ~Thread(void);
-/*! 
-\brief Executes the run() method of runnable object on the calling thread.
-
- If this object is created by passing reference to a runnable object, that 
- object's run() will be executed, otherwise this method does nothing and returns.
- Execution is synchronous in the context of the caller; it does not spawn a new
- thread of execution (contrast with start()).
+/**
+ * @brief Executes the run() method of runnable object on the calling thread.
+ *
+ * If this object is created by passing reference to a runnable object, that
+ * object's run() will be executed, otherwise this method does nothing and returns.
+ * Execution is synchronous in the context of the caller; it does not spawn a new
+ * thread of execution (contrast with start()).
  */
- /************************************************************************/
 
 	void run(void);
 
-/************************************************************************/
-/*!
-\brief Starts excecution of the thread.
-
- Causes this thread to begin execution;This calls the run method of this thread.
- The result is that two threads are running concurrently: 
- the current thread (which returns from the call to the start method) 
- and the other thread (which executes its run method).
- The new thread of execution is created in the detached state, so its resources
- are reclaimed automatically on termination.
+/**
+ * @brief Starts execution of the thread.
+ *
+ * Causes this thread to begin execution; this calls the run method of this thread.
+ * The result is that two threads are running concurrently:
+ * the current thread (which returns from the call to the start method)
+ * and the other thread (which executes its run method).
+ * The new thread of execution is created in the detached state, so its resources
+ * are reclaimed automatically on termination.
  */
-/***********************************************************************/
 
 	void start(void);
-/************************************************************************/
-/*!
-\brief Declares a request to stop execution of the thread.
-
- Declared by the Thread interface to request that the thread stop executing.
- \note The OSAL sources provide no definition for this method, so it has no
- defined runtime effect on its own and does not by itself force the thread to
- terminate; any behavior depends on a definition supplied by the consuming
- component.
+/**
+ * @brief Declares a request to stop execution of the thread.
+ *
+ * Declared by the Thread interface to request that the thread stop executing.
+ * @note The OSAL sources provide no definition for this method, so it has no
+ * defined runtime effect on its own and does not by itself force the thread to
+ * terminate; any behavior depends on a definition supplied by the consuming
+ * component.
  */
-/***********************************************************************/
 
 	void stop(void);
-/************************************************************************/
-/*!
-\brief Detaches the thread.
-
- Detaches the thread.
+/**
+ * @brief Detaches the thread.
+ *
+ * Detaches the thread.
  */
-/***********************************************************************/
 
 	void detach(void);
-/************************************************************************/
-/*!
-\brief Returns native thread handle.
-
- Retrieves native thread handle if thread is started other wise returns null.
- \return native thread handle.
+/**
+ * @brief Returns native thread handle.
+ *
+ * Retrieves native thread handle if thread is started, otherwise returns null.
+ * @return Native thread handle, or null if the thread has not been started.
  */
-/***********************************************************************/
 
 	void *getNativeHandle(void);
 

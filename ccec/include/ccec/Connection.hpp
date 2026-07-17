@@ -72,6 +72,27 @@ public:
 	 *                   @c true.
 	 * @param[in] name   Optional human-readable connection name. Defaults to an
 	 *                   empty string.
+	 *
+	 * The @p source value is copied into this connection's internal inbound
+	 * frame filter when the connection is constructed; that captured copy is
+	 * what inbound filtering uses, and setSource() does not refresh it.
+	 *
+	 * @warning Startup order and exceptions: when @p opened is @c true (the
+	 *          default) this constructor calls open() during construction, which
+	 *          registers the connection's internal listener with the singleton
+	 *          Bus. Bus registration throws InvalidStateException
+	 *          (ccec/Exception.hpp) when the Bus has not been started, so
+	 *          constructing an opened Connection before LibCCEC::init() has
+	 *          started the Bus propagates that exception out of the constructor.
+	 *          Pass @p opened = @c false to defer registration, then call open()
+	 *          after the library has been initialized.
+	 * @warning With @p source == @c LogicalAddress::UNREGISTERED the internal
+	 *          filter performs no filtering: every inbound frame delivered to
+	 *          this connection is forwarded to the registered listeners.
+	 * @note The destructor does not close the connection; call close() explicitly
+	 *       before destruction (see ~Connection()).
+	 * @see hdmicec/ccec/src/Connection.cpp (Connection constructor calls open();
+	 *      Bus::addFrameListener throws when the Bus is not started)
 	 */
 	Connection(const LogicalAddress &source = LogicalAddress::UNREGISTERED, bool opened = true, const std::string &name="");
 	/**
@@ -79,6 +100,16 @@ public:
 	 *
 	 * Declared virtual so that instances can be safely destroyed through a
 	 * base-class pointer.
+	 *
+	 * @warning The destructor does NOT close the connection: it neither
+	 *          unregisters this connection's internal listener from the Bus nor
+	 *          clears the registered application listeners. A caller that opened
+	 *          the connection MUST call close() before destroying it; otherwise
+	 *          the Bus keeps a dangling pointer to this connection's internal
+	 *          listener and dereferences it on the next inbound frame
+	 *          (use-after-free).
+	 * @see close()
+	 * @see hdmicec/ccec/src/Connection.cpp (~Connection has an empty body)
 	 */
 	virtual ~Connection(void);
 
@@ -90,6 +121,15 @@ public:
 	 * (@c LogicalAddress::UNREGISTERED) it picks up all frames destined to the
 	 * host device regardless of the roles the device holds, which is useful for
 	 * sniffing all available CEC traffic on the bus.
+	 *
+	 * @throws InvalidStateException (ccec/Exception.hpp) if the Bus has not been
+	 *         started; LibCCEC::init() must have started the Bus before a
+	 *         connection is opened.
+	 * @warning open() performs no idempotency check: calling it more than once
+	 *          registers the internal listener with the Bus again, after which
+	 *          inbound frames are delivered more than once.
+	 * @see hdmicec/ccec/src/Bus.cpp (Bus::addFrameListener throws when the Bus
+	 *      is not started)
 	 */
 	void open(void);
 	/**
@@ -108,6 +148,26 @@ public:
      * from the bus that passes this connection's filtering.
      *
      * @param[in] listener Frame listener to add to the notification list.
+     *
+     * @warning No de-duplication is performed: registering the same @p listener
+     *          pointer N times stores it N times, and it is then notified N
+     *          times for every matching inbound frame.
+     * @warning Ownership and lifetime: @p listener is stored as a raw, non-owned
+     *          pointer. The connection does not take ownership; the listener
+     *          must outlive its registration and be removed (via
+     *          removeFrameListener() or close()) before it is destroyed, or the
+     *          connection is left holding a dangling pointer.
+     * @warning Callback context: the listener's FrameListener::notify() is
+     *          invoked synchronously on the Bus reader thread while the Bus
+     *          receive mutex and this connection's mutex are both held during
+     *          fan-out. notify() must return promptly (blocking stalls the
+     *          single reader thread and hence all inbound CEC traffic), must
+     *          not throw (an exception escapes into the reader thread), and
+     *          must not call back into this connection's registration APIs (a
+     *          re-entrant lock deadlocks).
+     * @see hdmicec/ccec/src/Bus.cpp (Bus::Reader::run notifies under rMutex)
+     *      and Connection.cpp (DefaultFrameListener::notify fans out under the
+     *      connection mutex)
      */
     void addFrameListener(FrameListener *listener);
     /**
@@ -117,6 +177,12 @@ public:
      * so it no longer receives inbound CEC frames.
      *
      * @param[in] listener Frame listener to remove from the notification list.
+     *
+     * @note Removes every matching entry (std::list::remove), so a listener
+     *       registered multiple times is fully unregistered by one call, and
+     *       removing a listener that is not present is a no-op. Unregister a
+     *       listener (here or via close()) before the listener object is
+     *       destroyed.
      */
     void removeFrameListener(FrameListener *listener);
 
@@ -129,11 +195,21 @@ public:
 	 * by the @p doThrow tag parameter.
 	 *
 	 * @param[in] frame   Raw CEC frame (byte stream) to transmit.
-	 * @param[in] timeout Transmit timeout; an upper bound on the time to wait so
-	 *                    the call does not block indefinitely during sending.
+	 * @param[in] timeout Transmit retry budget in milliseconds, NOT a wall-clock
+	 *                    upper bound. A value <= 0 attempts the transmit once; a
+	 *                    positive value makes up to floor(@p timeout / 250) + 1
+	 *                    attempts (see the @note for the exact arithmetic).
 	 * @param[in] doThrow Throwing-mode tag that selects this overload.
 	 * @throws Exception On transmit failure, such as a missing acknowledgement
 	 *         (CECNoAckException) or an I/O error (IOException).
+	 * @note Retry arithmetic (Bus::send): for a positive @p timeout the retry
+	 *       count is the integer floor(@p timeout / 250); each attempt is
+	 *       preceded by a 1 ms sleep and, on failure, followed by a 250 ms delay
+	 *       before the next, giving up to floor(@p timeout / 250) + 1 attempts.
+	 *       Total elapsed time therefore includes those sleeps plus the HAL
+	 *       transmit duration and can exceed @p timeout; it is a retry budget,
+	 *       not a deadline.
+	 * @see hdmicec/ccec/src/Bus.cpp (Bus::send retry loop)
 	 */
 	void send(const CECFrame &frame, int timeout, const Throw_e &doThrow);
 	/**
@@ -146,11 +222,16 @@ public:
 	 *
 	 * @param[in] to      Destination logical address for the frame.
 	 * @param[in] frame   Raw CEC frame (byte stream) to transmit.
-	 * @param[in] timeout Transmit timeout; an upper bound on the time to wait so
-	 *                    the call does not block indefinitely during sending.
+	 * @param[in] timeout Transmit retry budget in milliseconds, NOT a wall-clock
+	 *                    upper bound. A value <= 0 attempts the transmit once; a
+	 *                    positive value makes up to floor(@p timeout / 250) + 1
+	 *                    attempts with 1 ms pre-attempt sleeps and 250 ms
+	 *                    inter-attempt delays plus the HAL transmit duration.
 	 * @param[in] doThrow Throwing-mode tag that selects this overload.
 	 * @throws Exception On transmit failure, such as a missing acknowledgement
 	 *         (CECNoAckException) or an I/O error (IOException).
+	 * @see send(const CECFrame &, int, const Throw_e &) for the exact retry
+	 *      arithmetic and Bus::send in hdmicec/ccec/src/Bus.cpp.
 	 */
 	void sendTo(const LogicalAddress &to, const CECFrame &frame, int timeout, const Throw_e &doThrow);
 	/**
@@ -161,9 +242,14 @@ public:
 	 * caller.
 	 *
 	 * @param[in] frame   Raw CEC frame (byte stream) to transmit.
-	 * @param[in] timeout Transmit timeout; an upper bound on the time to wait so
-	 *                    the call does not block indefinitely during sending.
-	 *                    Defaults to 0.
+	 * @param[in] timeout Transmit retry budget in milliseconds, NOT a wall-clock
+	 *                    upper bound. Defaults to 0, which attempts the transmit
+	 *                    once; a positive value makes up to
+	 *                    floor(@p timeout / 250) + 1 attempts with 1 ms
+	 *                    pre-attempt sleeps and 250 ms inter-attempt delays plus
+	 *                    the HAL transmit duration.
+	 * @see send(const CECFrame &, int, const Throw_e &) for the exact retry
+	 *      arithmetic and Bus::send in hdmicec/ccec/src/Bus.cpp.
 	 */
 	void send(const CECFrame &frame, int timeout = 0);
 	/**
@@ -175,9 +261,14 @@ public:
 	 *
 	 * @param[in] to      Destination logical address for the frame.
 	 * @param[in] frame   Raw CEC frame (byte stream) to transmit.
-	 * @param[in] timeout Transmit timeout; an upper bound on the time to wait so
-	 *                    the call does not block indefinitely during sending.
-	 *                    Defaults to 0.
+	 * @param[in] timeout Transmit retry budget in milliseconds, NOT a wall-clock
+	 *                    upper bound. Defaults to 0, which attempts the transmit
+	 *                    once; a positive value makes up to
+	 *                    floor(@p timeout / 250) + 1 attempts with 1 ms
+	 *                    pre-attempt sleeps and 250 ms inter-attempt delays plus
+	 *                    the HAL transmit duration.
+	 * @see send(const CECFrame &, int, const Throw_e &) for the exact retry
+	 *      arithmetic and Bus::send in hdmicec/ccec/src/Bus.cpp.
 	 */
 	void sendTo(const LogicalAddress &to, const CECFrame &frame, int timeout = 0);
 	/**
@@ -242,7 +333,20 @@ public:
 	/**
 	 * @brief Sets the source logical address bound to this connection.
 	 *
+	 * Updates only the connection's own @c source member, which is used when
+	 * building outbound frame headers and by outbound source matching. It does
+	 * NOT update the copy captured by the internal inbound frame filter at
+	 * construction, so inbound filtering keeps using the source supplied to the
+	 * constructor. To change the address used for inbound filtering, construct a
+	 * new Connection with the desired source.
+	 *
 	 * @param[in] from New source logical address for this connection.
+	 *
+	 * @warning Stale-filter behaviour: after setSource() the outbound source and
+	 *          the inbound-filter source can differ. This reflects the current
+	 *          implementation and is documented as-is.
+	 * @see hdmicec/ccec/src/Connection.cpp (DefaultFilter holds its own copied
+	 *      source; setSource updates Connection::source only)
 	 */
 	void setSource(const LogicalAddress &from) {
 		source = from;

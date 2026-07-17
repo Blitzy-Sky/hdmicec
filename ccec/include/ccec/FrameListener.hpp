@@ -59,6 +59,26 @@ public:
 	 * observer's own logical state. The supplied frame carries the raw received
 	 * CEC bytes and remains owned by the caller for the duration of the call.
 	 *
+	 * @par Input parameter (direction [in])
+	 * The single argument is an input: a reference to the received @c CECFrame.
+	 * The parameter is unnamed in the declaration, so its @c [in] direction is
+	 * documented here in prose rather than with an @c \@param tag. The frame is
+	 * borrowed for the duration of the call only and must not be retained past
+	 * return.
+	 *
+	 * @warning Threading and callback contract: notify() is invoked synchronously
+	 *          on the internal Bus reader thread while that thread holds the bus
+	 *          receive mutex, and (for listeners registered through a Connection)
+	 *          while the Connection also holds its own mutex during fan-out. An
+	 *          implementation must therefore return promptly (blocking stalls the
+	 *          single reader thread and delays delivery of all subsequent frames),
+	 *          must not throw (an exception would propagate into the reader thread
+	 *          and escape the vendor C receive callback), and must avoid re-entering
+	 *          the CCEC send/receive path in a way that could deadlock on the held
+	 *          locks.
+	 * @note The listener is referenced as a raw, non-owned pointer by the receive
+	 *       path: it must outlive its registration and must be unregistered before
+	 *       it is destroyed. Documents the code as implemented.
 	 * @note Pure-virtual; implemented by frame subscribers.
 	 */
 	virtual void notify(const CECFrame &) const = 0;

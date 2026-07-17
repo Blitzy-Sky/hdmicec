@@ -43,15 +43,16 @@ CCEC_BEGIN_NAMESPACE
  * corresponding process() function.
  * @n @n
  * Application that desires to process certain CEC messages should extend MessageProcessor class and provide customized
- * implementation of the overloaded process() method. The default processing in the base class is simply discarding the message
- * (and by doing so, serves as a message filter for the application).
+ * implementation of the overloaded process() method. The default processing in the base class logs the message (each base
+ * overload calls header.print() and msg.print()) and then takes no CEC protocol action; because it issues no response, an
+ * unoverridden handler effectively acts as a message filter for the application.
  * @n @n
  * Here is an example code that sends an ActiveSource message by a Tuner device,
  * @code
  * CECFrame frame = (MessageEncoder().encode(
- *     Header(LogicalAddress(TUNER_1), LogicalAddress(TV)),
- *        ActiveSource(PhysicalAddress(phy0, phy1, phy2, phy3)));
- * Connection(LogicalAddress(TUNER_1)).send(frame);
+ *     Header(LogicalAddress(LogicalAddress::TUNER_1), LogicalAddress(LogicalAddress::TV)),
+ *        ActiveSource(PhysicalAddress(phy0, phy1, phy2, phy3))));
+ * Connection(LogicalAddress(LogicalAddress::TUNER_1)).send(frame);
  * @endcode
  * @ingroup HDMI_CEC_MSG_N_FRAME_CLASSES
  */
