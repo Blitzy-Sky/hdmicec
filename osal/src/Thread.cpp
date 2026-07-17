@@ -53,8 +53,6 @@ void *Thread::CEntry(void * arg)
 
 /**
  * @brief Constructs a Thread bound to a Runnable target.
- *
- * @param[in] target   The Runnable whose run() method executes on the thread.
  */
 Thread::Thread(Runnable &target) : runnable(target), nativeHandle(0)
 {
@@ -62,9 +60,6 @@ Thread::Thread(Runnable &target) : runnable(target), nativeHandle(0)
 
 /**
  * @brief Constructs a named Thread bound to a Runnable target.
- *
- * @param[in] target   The Runnable whose run() method executes on the thread.
- * @param[in] name     Human-readable name associated with the thread.
  */
 Thread::Thread(Runnable &target, const int8_t* name) : runnable(target), name((const char *)name), nativeHandle(0)
 {
