@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -40,8 +40,12 @@ CCEC_BEGIN_NAMESPACE
  * @c Throw_e carries no data members; it exists purely as a disambiguating parameter type.
  * In this repository it is used only by the overloaded @c Connection send/sendTo/poll/ping
  * operations: passing a @c Throw_e argument selects the variant that reports failures by
- * throwing a CCEC @c Exception, as opposed to the variant that reports failure through a
- * return value. Its presence in a function signature therefore signals "throw on error"
+ * throwing a CCEC @c Exception (all CCEC exceptions derive from @c std::exception).
+ * The overloads WITHOUT a @c Throw_e argument do not report failure through a return
+ * value: the @c Connection::send and @c Connection::sendTo non-throwing overloads return
+ * @c void and silently suppress (swallow) any CCEC @c Exception, so the caller receives
+ * neither a success nor a failure indication (@c poll and @c ping are provided only in the
+ * throwing form). Its presence in a function signature therefore signals "throw on error"
  * semantics at the call site.
  */
 typedef struct _Throw_e{

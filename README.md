@@ -106,7 +106,7 @@ This is headless C/C++ middleware; its dependencies fall into three groups.
 
 - **Runtime / build dependencies (declared).** The module declares its RDK build-time dependencies as `sdk` and `devicesettings`, and it is Coverity-supported. `Source: hdmicec/rdk_env.xml`.
 - **Internal dependency.** The `ccec` library depends on `osal` for its threading and synchronization primitives; `osal` has no dependency on `ccec`. `Source: hdmicec/ccec/src/Bus.hpp`, `hdmicec/osal/include/osal/`.
-- **Test-only dependencies.** The L1 unit tests require **Google Test (gtest) &ge; 1.10.0** and **Google Mock (gmock)**; these are pulled in only when the build is configured with `--enable-l1tests` and are not needed for a production build. `Source: hdmicec/configure.ac`, `hdmicec/tests/L1Tests/README.md`.
+- **Test-only dependencies.** The L1 unit tests require **Google Test (gtest)** and **Google Mock (gmock)**; these are pulled in only when the build is configured with `--enable-l1tests` and are not needed for a production build. The test sources compile with **C++14** (`tests/L1Tests/Makefile.am` sets `-std=c++14`). Treat `&ge; 1.10.0` as the **configure-time minimum**, not an open-ended "any newer version works" range: recent GoogleTest releases raise the required language standard (current GoogleTest requires C++17), so select a GoogleTest release compatible with the module's C++14 toolchain. `Source: hdmicec/configure.ac`, `hdmicec/tests/L1Tests/Makefile.am`, `hdmicec/tests/L1Tests/README.md`.
 
 The build additionally probes for **GLib** (`glib-2.0 >= 0.10.28`) via `PKG_CHECK_MODULES`. `Source: hdmicec/configure.ac`.
 
@@ -119,7 +119,7 @@ The **documentation toolchain** (Doxygen, and optionally Graphviz for call/colla
 The module is used by CEC service plugins (and by the L1 tests) to:
 
 - **Initialize and tear down the CEC library** for the process lifetime — `LibCCEC::init()` / `LibCCEC::term()`. `Source: hdmicec/ccec/include/ccec/LibCCEC.hpp`.
-- **Send CEC messages** onto the bus, either synchronously with a bounded timeout (`Connection::send` / `Connection::sendTo`) or asynchronously (`Connection::sendAsync` / `Connection::sendToAsync`). `Source: hdmicec/ccec/include/ccec/Connection.hpp`.
+- **Send CEC messages** onto the bus, either synchronously with a caller-supplied retry budget (`Connection::send` / `Connection::sendTo`) or asynchronously (`Connection::sendAsync` / `Connection::sendToAsync`). `Source: hdmicec/ccec/include/ccec/Connection.hpp`.
 - **Receive CEC messages** by registering a `FrameListener` on a `Connection`; inbound frames are delivered to `notify(const CECFrame&)`. `Source: hdmicec/ccec/include/ccec/Connection.hpp`, `hdmicec/ccec/include/ccec/FrameListener.hpp`.
 - **Manage logical / physical addresses** — allocate a logical address for a device type and query the device's physical address (`LibCCEC::addLogicalAddress`, `getLogicalAddress`, `getPhysicalAddress`). `Source: hdmicec/ccec/include/ccec/LibCCEC.hpp`.
 - **Probe the bus** for the presence of devices at given logical addresses (`Connection::poll` / `Connection::ping`). `Source: hdmicec/ccec/include/ccec/Connection.hpp`.
@@ -134,25 +134,51 @@ The module is used by CEC service plugins (and by the L1 tests) to:
 #include "ccec/Messages.hpp"
 #include "ccec/Operands.hpp"
 
-// The CCEC public types live in the CCEC namespace scaffolding
-// established by ccec/CCEC.hpp (CCEC_BEGIN_NAMESPACE / CCEC_END_NAMESPACE).
+// Namespace note: ccec/CCEC.hpp defines the single-C macro CEC_NAMESPACE
+// (expanding to nothing) and separately gates the double-C pair
+// CCEC_BEGIN_NAMESPACE / CCEC_END_NAMESPACE on whether the double-C macro
+// CCEC_NAMESPACE is #defined. In the default build CCEC_NAMESPACE is NOT
+// defined, so both macros expand to nothing and every CCEC type below lives
+// in the GLOBAL namespace -- no "CCEC::" qualifier is required. Only a build
+// that defines CCEC_NAMESPACE places these types inside a "CCEC" namespace.
 
 // 1. Initialize the library facade (lifecycle owner).
 LibCCEC::getInstance().init("MyCecApp");
 
-// 2. Open an application connection onto the CEC bus.
-//    The constructor opens the connection by default.
-Connection conn(LogicalAddress::PLAYBACK_DEVICE_1);
+// 2. Claim (allocate) a logical address for this device's role instead of
+//    assuming ownership of a fixed address, then run the whole session so the
+//    connection is always closed and the library always torn down -- on the
+//    normal path AND on every exceptional path.
+try {
+    LogicalAddress source(LogicalAddress::PLAYBACK_DEVICE_1);
+    LibCCEC::getInstance().addLogicalAddress(source);   // register the role
 
-// 3. Encode a high-level CEC message into a raw CECFrame.
-CECFrame frame = MessageEncoder::encode(ImageViewOn());
+    // 3. Open a connection on the CLAIMED address. The constructor opens the
+    //    connection by default, so init() must already have started the Bus
+    //    (otherwise the constructor throws InvalidStateException).
+    Connection conn(source);
+    try {
+        // 4. Encode a high-level CEC message into a raw CECFrame.
+        CECFrame frame = MessageEncoder::encode(ImageViewOn());
 
-// 4. Send it to the TV (logical address 0). The timeout (ms) is an
-//    upper bound so the caller does not hang; 0 means "do not retry".
-conn.sendTo(LogicalAddress::TV, frame, 1000 /* ms upper bound */);
+        // 5. Send it to the TV (logical address 0). The `timeout` (ms) is NOT a
+        //    wall-clock deadline -- it is a RETRY budget: Bus::send makes
+        //    floor(timeout/250)+1 synchronous write attempts (sleeping 1 ms
+        //    before each attempt and 250 ms after each failure), and the HAL
+        //    write itself is unbounded, so total time is not capped by
+        //    `timeout`. A timeout <= 0 makes exactly one attempt.
+        conn.sendTo(LogicalAddress::TV, frame, 1000 /* retry budget, not a deadline */);
+    } catch (...) {
+        conn.close();   // MUST close before ~Connection: the destructor does not
+        throw;          // unregister the Bus listener (dangling pointer otherwise)
+    }
+    conn.close();       // normal path: close before the Connection is destroyed
+} catch (...) {
+    LibCCEC::getInstance().term();   // tear the library down on every failure path
+    throw;                           // once init() has succeeded
+}
 
-// 5. Tear down when finished.
-conn.close();
+// 6. Normal teardown.
 LibCCEC::getInstance().term();
 ```
 
@@ -162,10 +188,11 @@ LibCCEC::getInstance().term();
 
 ## 6. Configuration
 
-The module carries no runtime configuration file of its own; its "configuration" is build metadata plus the Autotools build system.
+Apart from one optional runtime **log-control file** (documented below), the module has no runtime configuration of its own; its remaining "configuration" is build metadata plus the Autotools build system.
 
+- **Runtime log control — `/tmp/cec_log_enabled`.** On startup `LibCCEC::init()` calls `check_cec_log_status()`, which opens `/tmp/cec_log_enabled` and, if present, reads its first line and matches it (by prefix) against the level names `FATAL`, `ERROR`, `WARN`, `EXP`, `NOTICE`, `INFO`, `DEBUG`, `TRACE`, setting the CCEC log verbosity `cec_log_level` to the matching level (`0`–`7`). If the file is absent the verbosity stays at its built-in default (`INFO`). This is the module's one runtime-tunable behavior. `Source: hdmicec/ccec/src/LibCCEC.cpp`, `hdmicec/ccec/src/Util.cpp`.
 - **Component metadata — `rdk_env.xml`.** Declares the module's dependencies (`sdk`, `devicesettings`), its script paths, and `is_coverity_supported = True`. `Source: hdmicec/rdk_env.xml`.
-- **Autotools build.** `configure.ac` declares the package as `hdmicec` version `1.0` and wires up the sub-`Makefile`s for `cfg/`, `osal/`, `ccec/`, and `tests/`; the optional `--enable-l1tests` flag turns on the L1 unit-test build (requiring `gtest >= 1.10.0`). `Source: hdmicec/configure.ac`.
+- **Autotools build.** `configure.ac` declares the package as `hdmicec` version `1.0` and wires up the sub-`Makefile`s for `cfg/`, `osal/`, `ccec/`, and `tests/`; the optional `--enable-l1tests` flag turns on the L1 unit-test build (requiring `gtest >= 1.10.0` as the configure-time minimum; see the C++14/GoogleTest compatibility note under [Dependencies](#4-dependencies)). `Source: hdmicec/configure.ac`.
 - **Top-level `Makefile`.** A recursive build that builds `soc/$(PLATFORM_SOC)/common`, `osal/`, `ccec/`, and `tests/`, then installs the resulting `.so` libraries under `./install/lib`. `Source: hdmicec/Makefile`.
 - **Build scripts.** `build.sh` defaults `PLATFORM_SOC` to `intel` and carries a Broadcom branch; `rdk_build.sh` is the RDK Build Framework entry point, offering the actions `configure`, `clean`, `build` (default), `rebuild`, and `install` across the `intel` / `broadcom` / `entropic` / `mstar` platforms. `Source: hdmicec/build.sh`, `hdmicec/rdk_build.sh`.
 - **Packaged Autotools aux — `cfg/`.** Holds the Autotools auxiliary files, including `cfg/Makefile.am`. `Source: hdmicec/cfg/`.
@@ -180,7 +207,7 @@ cd hdmicec/ccec && doxygen Doxyfile
 cd hdmicec/osal && doxygen Doxyfile
 ```
 
-The generated `html/index.html` opens with this README as its landing page. `Source: hdmicec/osal/Doxyfile`.
+Each command writes into its own module's `doc/` tree, so the generated landing pages are `hdmicec/ccec/doc/html/index.html` (CCEC) and `hdmicec/osal/doc/html/index.html` (OSAL); both open with this README as the Doxygen main page. `Source: hdmicec/ccec/Doxyfile`, `hdmicec/osal/Doxyfile`.
 
 ---
 
@@ -191,7 +218,7 @@ CEC traffic is deliberately **asymmetric**: outbound frames have both a synchron
 - **Outbound transmit.** A plugin builds a message → `MessageEncoder` encodes it into a `CECFrame`; `Connection` then forwards it to the `Bus` over one of **two paths**, both of which reach `DriverImpl::write()` → HAL → SoC. **Synchronous** (`Connection::send` / `sendTo` → `Bus::send`): the frame is written **directly** via `Driver::getInstance().write()` under the bus locks — it is *not* placed on any queue; when `timeout > 0`, `Bus::send` retries this synchronous write in 250 ms increments (see the timeout note below). **Asynchronous** (`Connection::sendAsync` / `sendToAsync` → `Bus::sendAsync`): a heap copy of the frame is enqueued to the `Bus` write queue `wQueue` and drained by the `Bus::Writer` thread, which then calls `DriverImpl::write()`. `Source: hdmicec/ccec/include/ccec/Connection.hpp`, `hdmicec/ccec/src/Connection.cpp`, `hdmicec/ccec/src/Bus.cpp`, `hdmicec/ccec/src/Bus.hpp`, `hdmicec/ccec/src/DriverImpl.hpp`.
 - **Inbound receive.** SoC → HAL Rx callback → `DriverImpl::DriverReceiveCallback()` → the frame is placed on the `DriverImpl` incoming queue `rQueue` and drained by the `Bus` reader thread → delivered through `FrameListener` → `Connection` → `MessageDecoder` → `MessageProcessor`. `Source: hdmicec/ccec/src/DriverImpl.hpp`, `hdmicec/ccec/include/ccec/FrameListener.hpp`, `hdmicec/ccec/include/ccec/MessageDecoder.hpp`, `hdmicec/ccec/include/ccec/MessageProcessor.hpp`.
 
-**On the transmit timeout.** The `timeout` parameter of `Connection::send` / `sendTo` is an **upper bound** on how long the call may block, so the application does not hang. Because the HAL transmit is synchronous, `Bus::send` retries the frame in **250 ms increments** until it succeeds or the budget lapses (internally `retry = timeout / 250`); a `timeout` of `0` means the frame is attempted once with no retry loop. `Source: hdmicec/ccec/src/Bus.cpp`, `hdmicec/ccec/src/Connection.cpp`.
+**On the transmit timeout.** The `timeout` parameter of `Connection::send` / `sendTo` is **not** a wall-clock deadline and does **not** bound how long the call may block — it is a **retry budget**. `Bus::send` computes `retry = timeout / 250` and makes **`floor(timeout / 250) + 1`** synchronous write attempts, sleeping `usleep(1000)` (1 ms) *before* each attempt and `usleep(250000)` (250 ms) *after* each failed attempt; a `timeout <= 0` makes exactly **one** attempt with no retry loop. Because each underlying HAL write is itself synchronous and **unbounded**, the total call duration is governed by the HAL, not by `timeout`. `Source: hdmicec/ccec/src/Bus.cpp`, `hdmicec/ccec/src/Connection.cpp`.
 
 ---
 
@@ -215,7 +242,7 @@ The following are documented **as the code and the HDMI-CEC protocol currently r
 
 - **Shared, process-wide services.** `LibCCEC`, `Bus`, and `Driver` are reached through `getInstance()`. `Bus` is a true singleton (private constructor); `LibCCEC` and `Driver` expose public constructors, so `getInstance()` is a shared accessor rather than a hard guarantee of a single instance. Treat these as process-wide services. `Source: hdmicec/ccec/include/ccec/LibCCEC.hpp`, `hdmicec/ccec/src/Bus.hpp`, `hdmicec/ccec/include/ccec/Driver.hpp`.
 - **Frame buffer vs. protocol message size.** `CECFrame` reserves a fixed code-level buffer of `MAX_LENGTH = 128` bytes (`uint8_t buf_[MAX_LENGTH]`). `Source: hdmicec/ccec/include/ccec/CECFrame.hpp`. A real CEC message is far smaller: per the HDMI-CEC 1.4b protocol a complete frame is a header block plus an opcode block plus up to a handful of operand bytes — a maximum of **16 bytes** as documented by the HAL contract. `Source: rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/IHdmiCecController.aidl`. The 128-byte buffer is therefore a generous code constant, not the protocol's message-size limit.
-- **Bounded, synchronous transmit.** Transmission is bounded by the caller-supplied `timeout` (retried by `Bus` in 250 ms increments); there is no separate hard-coded transmit-duration constant in the middleware. Callers that must not block should use the asynchronous `sendAsync` / `sendToAsync` paths. `Source: hdmicec/ccec/src/Bus.cpp`, `hdmicec/ccec/src/Connection.cpp`.
+- **Retry-bounded, synchronous transmit.** The synchronous transmit is **not** time-bounded: the caller-supplied `timeout` is a **retry budget** (`floor(timeout / 250) + 1` attempts with 1 ms / 250 ms sleeps), and because each HAL write is synchronous and **unbounded** there is no wall-clock cap on how long `send` / `sendTo` may block — nor any hard-coded transmit-duration constant in the middleware. Callers that must not block should use the asynchronous `sendAsync` / `sendToAsync` paths. `Source: hdmicec/ccec/src/Bus.cpp`, `hdmicec/ccec/src/Connection.cpp`.
 - **Synchronous HAL and serialized access.** The HAL transmit is synchronous — it blocks until the frame is ACK-sampled or the attempt times out. The middleware does not assume the HAL is re-entrant; instead it serializes access through the `Bus` reader/writer threads and OSAL mutexes (`rMutex` / `wMutex`). `Source: rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`, `rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`, `hdmicec/ccec/src/Bus.hpp`.
 - **Single active backend.** `DriverImpl` is built against one HAL backend at a time. The Legacy C HAL is the backend implemented today; the AIDL/Binder HAL is a compile-time migration target, not a second run-time-selectable backend. `Source: hdmicec/ccec/src/DriverImpl.hpp`, `hdmicec/docs/architecture/hal-interaction.md`.
 
@@ -225,12 +252,15 @@ The following are documented **as the code and the HDMI-CEC protocol currently r
 
 The `hdmicec` module ships its own **L1** (module functional / unit) test suite; **L2** and **L3** coverage lives outside the module in the plugin and HAL-conformance repositories.
 
-**L1 — in this module.** The suite is built on **Google Test (gtest) v1.10.0+**, **Google Mock (gmock)**, **C++11**, and **Autotools**. It contains ~195+ CCEC tests (frame construction/serialization, connection management, the `LibCCEC` lifecycle and addresses, message encode/decode across all opcodes and operands, and the driver/bus) plus OSAL tests. `Source: hdmicec/tests/L1Tests/README.md`, `hdmicec/tests/L1Tests/QUICK_START.md`.
+**L1 — in this module.** The suite is built on **Google Test (gtest)**, **Google Mock (gmock)**, **C++14** (`tests/L1Tests/Makefile.am` sets `-std=c++14`), and **Autotools**. It covers frame construction/serialization, connection management, the `LibCCEC` lifecycle and address handling, message encode/decode across the supported opcodes and operands, and the driver/bus, alongside the OSAL primitives. `Source: hdmicec/tests/L1Tests/README.md`, `hdmicec/tests/L1Tests/QUICK_START.md`.
 
 Build and run:
 
 ```bash
-# Configure with L1 tests enabled, then build and run via the check target
+# From a clean checkout, first bootstrap the Autotools build (generates
+# ./configure), then configure with L1 tests enabled and build/run via the
+# check target. Run these from the module root (hdmicec/).
+autoreconf -fi
 ./configure --enable-l1tests
 make check
 
@@ -268,20 +298,26 @@ sequenceDiagram
     Note over Impl,HAL: Open + register callbacks (once)
     Impl->>HAL: HdmiCecOpen()
     Impl->>HAL: HdmiCecSetRxCallback()
-    Impl->>HAL: HdmiCecSetTxCallback()
+    Impl->>HAL: HdmiCecSetTxCallback() [deprecated async-Tx completion]
     Impl->>HAL: HdmiCecAddLogicalAddress()
 
-    Note over Conn,SoC: Outbound transmit
-    Conn->>Impl: write(CECFrame) / writeAsync(CECFrame)
-    Impl->>HAL: HdmiCecTx() / HdmiCecTxAsync()
+    Note over Conn,SoC: Outbound transmit (synchronous - the path DriverImpl uses)
+    Conn->>Impl: write(CECFrame)
+    Impl->>HAL: HdmiCecTx(handle, buf, len, &result)
+    HAL->>SoC: drive frame onto CEC line, await ACK
+    SoC-->>HAL: ACK / NACK
+    HAL-->>Impl: return HDMI_CEC_STATUS + result (SENT_AND_ACKD / SENT_FAILED / SENT_BUT_NOT_ACKD)
+
+    Note over Conn,SoC: Outbound transmit (deprecated asynchronous variant)
+    Conn->>Impl: writeAsync(CECFrame)
+    Impl->>HAL: HdmiCecTxAsync(handle, buf, len) [deprecated]
     HAL->>SoC: drive frame onto CEC line
-    SoC-->>HAL: ACK / result
-    HAL-->>Impl: return status (SENT_AND_ACKD / SENT_FAILED / SENT_BUT_NOT_ACKD)
+    HAL-->>Impl: HdmiCecTxCallback(handle, data, result) [deprecated, via HdmiCecSetTxCallback]
 
     Note over SoC,Conn: Inbound receive (asynchronous)
     SoC-->>HAL: incoming frame
     HAL-->>Impl: DriverReceiveCallback(handle, data, buf, len)
-    Impl-->>Conn: enqueue to rQueue -> Bus reader -> FrameListener
+    Impl-->>Conn: enqueue to rQueue -> Bus reader -> FrameListener -> application decode
 ```
 
 ### 11.2 AIDL/Binder HAL — out-of-process (migration target)
@@ -310,7 +346,7 @@ sequenceDiagram
     Note over SoC,Conn: Inbound receive (asynchronous)
     SoC-->>Svc: incoming frame
     Svc-->>Impl: IHdmiCecEventListener.onMessageReceived(byte[]) [Binder IPC]
-    Impl-->>Conn: decode -> Bus reader -> FrameListener
+    Impl-->>Conn: enqueue -> Bus reader -> FrameListener -> application decode
     Svc-->>Impl: IHdmiCecEventListener.onStateChanged(old, new)
 ```
 
@@ -324,4 +360,3 @@ Both diagrams are anchored on the real `Driver` / `DriverImpl` seam: everything 
 - [HAL Interaction](docs/architecture/hal-interaction.md) — the Legacy C HAL and AIDL/Binder HAL paths and the migration seam, in depth.
 - [Data Flow &amp; Concurrency](docs/architecture/data-flow.md) — outbound/inbound sequences and the `Bus` producer/consumer threading model.
 - [L1 Tests README](tests/L1Tests/README.md) &middot; [L1 Quick Start](tests/L1Tests/QUICK_START.md) &middot; [Unit Test Setup](UNIT_TEST_SETUP.md) &middot; [Mocks](mocks/README.md).
-

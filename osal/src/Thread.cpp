@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup osal
+* @defgroup osal OS Abstraction Layer (OSAL)
 * @{
 **/
 
@@ -56,7 +56,10 @@ void *Thread::CEntry(void * arg)
 /**
  * @brief Constructs a Thread bound to a Runnable target.
  *
- * @param[in] target   Runnable whose run() method is executed by run() or start().
+ * The target is stored by reference (member @c runnable) and is not copied; the
+ * caller retains ownership and must keep it alive until any thread started from
+ * this object has finished running. Parameter documentation is on the
+ * declaration in Thread.hpp.
  */
 Thread::Thread(Runnable &target) : runnable(target), nativeHandle(0)
 {
@@ -65,8 +68,12 @@ Thread::Thread(Runnable &target) : runnable(target), nativeHandle(0)
 /**
  * @brief Constructs a named Thread bound to a Runnable target.
  *
- * @param[in] target   Runnable whose run() method is executed by run() or start().
- * @param[in] name     Null-terminated name assigned to the thread context.
+ * Behaves like Thread(Runnable&) and additionally copies @p name into the member
+ * string @c name. That stored string is only retained: start() does not apply it
+ * to the native thread (no pthread_setname_np or equivalent call is made), so the
+ * stored name has no effect on the created thread. The target is held by
+ * reference and remains caller-owned. Parameter documentation is on the
+ * declaration in Thread.hpp. Documented as-is.
  */
 Thread::Thread(Runnable &target, const int8_t* name) : runnable(target), name((const char *)name), nativeHandle(0)
 {
@@ -76,7 +83,9 @@ Thread::Thread(Runnable &target, const int8_t* name) : runnable(target), name((c
  * @brief Destroys the Thread object.
  *
  * Does not join or stop the underlying native thread; threads created by start()
- * are launched in the detached state.
+ * are launched in the detached state and cannot be joined. A thread that is still
+ * running therefore continues after this object is destroyed, so the caller must
+ * ensure the referenced Runnable target outlives any such thread.
  */
 Thread::~Thread(void)
 {
@@ -105,6 +114,11 @@ void Thread::run(void)
  * subsequent detach. On success the native thread identifier is stored and is
  * retrievable via getNativeHandle().
  *
+ * @warning If pthread_create() fails (non-zero return) the failure is silently
+ *          swallowed: no exception is thrown, no status is returned, and
+ *          nativeHandle is left unset (0). The caller therefore cannot detect
+ *          that the thread was not started. Documented as-is; the production
+ *          code is unchanged.
  * @see run(), detach(), CEntry()
  */
 void Thread::start()

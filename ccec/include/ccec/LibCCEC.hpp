@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -100,6 +100,14 @@ public:
 	 * @note May also propagate exceptions raised while opening the Driver or
 	 *       starting the Bus (for example IOException).
 	 * @see hdmicec/ccec/src/LibCCEC.cpp (init: Driver::open() then Bus::start())
+	 * @note Exact HAL open sequence (documents the code as implemented): init()
+	 *       calls Driver::open() directly and then Bus::start(), which itself
+	 *       calls Driver::open() a second time - so open() is invoked twice per
+	 *       init(). The concrete legacy adapter DriverImpl::open() is idempotent:
+	 *       it opens the native HAL (HdmiCecOpen) only when its state is CLOSED
+	 *       and returns immediately as a no-op when already OPENED. The nested
+	 *       duplicate open() therefore performs no work; only the first call
+	 *       actually opens the vendor HAL.
 	 */
 	void init(const char * name= 0);
 	/**
@@ -111,6 +119,14 @@ public:
 	 * @throws InvalidStateException (ccec/Exception.hpp) if the library is not
 	 *         currently initialized.
 	 * @see hdmicec/ccec/src/LibCCEC.cpp (term: Bus::stop() then Driver::close())
+	 * @note Exact HAL close sequence (documents the code as implemented): term()
+	 *       calls Bus::stop(), which itself calls Driver::close(), and then term()
+	 *       calls Driver::close() a second time - so close() is invoked twice per
+	 *       term(). The concrete legacy adapter DriverImpl::close() is idempotent:
+	 *       it closes the native HAL (HdmiCecClose) only when its state is OPENED
+	 *       and returns immediately as a no-op when already CLOSED. The duplicate
+	 *       close() therefore performs no work; only the first call actually
+	 *       closes the vendor HAL.
 	 */
 	void term(void);
 	/**

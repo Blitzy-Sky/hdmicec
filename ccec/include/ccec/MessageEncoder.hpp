@@ -19,9 +19,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -72,6 +72,8 @@ public:
 	 * @param[in]     m    CEC data block carrying the opcode and its operands.
 	 * @param[in,out] out  The @c CECFrame to which the encoded header and data-block bytes are appended.
 	 * @return Reference to @p out, now holding the fully encoded CEC message, to support call chaining.
+	 * @note POLLING special case: if @p m carries the @c POLLING opcode, no opcode
+	 *       byte is emitted (see the @c encode(const DataBlock&, CECFrame&) overload).
 	 */
 	static CECFrame & encode(const Header &h, const DataBlock &m, CECFrame &out)
     {
@@ -88,6 +90,8 @@ public:
 	 * @param[in] h  CEC message header carrying the initiator and destination logical addresses.
 	 * @param[in] m  CEC data block carrying the opcode and its operands.
 	 * @return A newly constructed @c CECFrame containing the fully encoded CEC message.
+	 * @note POLLING special case: if @p m carries the @c POLLING opcode, no opcode
+	 *       byte is emitted (see the @c encode(const DataBlock&, CECFrame&) overload).
 	 */
 	static CECFrame encode(const Header &h, const DataBlock &m)
     {
@@ -105,6 +109,11 @@ public:
 	 * @param[in]     m    CEC data block carrying the opcode and its operands.
 	 * @param[in,out] out  The @c CECFrame to which the encoded opcode and operand bytes are appended.
 	 * @return Reference to @p out, now holding the encoded data block, to support call chaining.
+	 * @note POLLING special case: when @p m carries the @c POLLING opcode (the
+	 *       pseudo-opcode 0x200, which is not a wire value), OpCode::serialize()
+	 *       emits NO opcode byte, so only the data block's operands follow (none,
+	 *       for a polling message). Every other opcode is written as a single
+	 *       leading byte before its operands.
 	 */
 	static CECFrame & encode(const DataBlock &m, CECFrame &out)
 	{
@@ -121,6 +130,8 @@ public:
 	 *
 	 * @param[in] m  CEC data block carrying the opcode and its operands.
 	 * @return A newly constructed @c CECFrame containing the encoded data block.
+	 * @note POLLING special case: if @p m carries the @c POLLING opcode, no opcode
+	 *       byte is emitted (see the @c encode(const DataBlock&, CECFrame&) overload).
 	 */
 	static CECFrame encode(const DataBlock &m) {
         CECFrame out;

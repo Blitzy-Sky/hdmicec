@@ -19,9 +19,9 @@
 
 
 /**
- * @defgroup hdmicec
+ * @defgroup hdmicec HDMI-CEC Middleware
  * @{
- * @defgroup ccec
+ * @defgroup ccec CCEC Library
  * @{
  **/
 
@@ -85,11 +85,17 @@ public:
 	 *          caught and propagates to the caller. In particular, an empty frame
 	 *          makes the header byte read out of range and throws
 	 *          `std::out_of_range`, which escapes decode().
-	 * @note Exceptions thrown INSIDE the try block - while parsing operands or
-	 *       dispatching (for example `InvalidParamException`, or any
-	 *       `std::exception` such as `std::out_of_range` raised during operand
-	 *       parsing) - are caught and logged internally (the `std::exception`
-	 *       handler also hex-dumps the frame) and are not propagated to the caller.
+	 * @note Caught exception categories (documents the two internal catch handlers
+	 *       exactly): an exception thrown INSIDE the try block is caught only if it
+	 *       is an `InvalidParamException` or derives from `std::exception` (for
+	 *       example `std::out_of_range` raised while parsing operands). Because
+	 *       every CCEC exception type derives from `std::exception`, all of them are
+	 *       caught here. Caught exceptions are logged internally (the
+	 *       `std::exception` handler also hex-dumps the frame) and are NOT
+	 *       propagated to the caller.
+	 * @note A throwable that does NOT derive from `std::exception` (for example a
+	 *       thrown integer or other non-standard exception type) matches neither
+	 *       handler and therefore escapes decode() to the caller.
 	 */
 	void decode(const CECFrame &in);
 

@@ -11,7 +11,6 @@ Both paths are anchored on the real `Driver` / `DriverImpl` seam described below
 
 - [Architecture Overview](overview.md) — stack placement and the component/class relationships that this document drills into.
 - [Data Flow & Concurrency](data-flow.md) — the outbound transmit / inbound receive sequences and the `Bus` producer/consumer threading model that sit *above* the seam described here.
-- [Module README](../../README.md) — module overview (purpose, key components, configuration, testing, and limitations).
 
 ---
 
@@ -83,7 +82,12 @@ The C library also declares the two callback function-pointer types the adapter 
 
 Reception is push-driven from the bottom up: the SoC driver, via the legacy HAL, invokes the registered `HdmiCecRxCallback_t` — which is `DriverImpl::DriverReceiveCallback(int handle, void *callbackData, unsigned char *buf, int len)`. That callback allocates a fresh `CECFrame`, appends the raw bytes into it (`frame->append((unsigned char *)buf, (size_t)len)`) **before** entering a `try`, then `offer()`s the frame onto the incoming `rQueue` from within `try { ... } catch (...) { delete frame; }`, from which the middleware's reader side drains it. `Source: hdmicec/ccec/src/DriverImpl.cpp`.
 
-> **Receive-callback trust boundary (document-as-is).** The callback trusts the HAL's arguments: `buf` is assumed **non-null** and `len` a valid length in **0 … `CECFrame::MAX_LENGTH` (128)**. Because the `append` runs **before** the `try`, a bad argument is *not* caught here — `CECFrame::append` throws `std::out_of_range` ("Frame grows beyond maximum") when the count exceeds `MAX_LENGTH`, and a **negative** `len` becomes a huge value under the `(size_t)` cast and triggers the same throw — so the just-allocated `frame` leaks and the exception escapes across the C HAL callback boundary. And because `EventQueue::offer` **never throws** on a full queue (it silently discards at capacity 32), the `catch`-based `delete` never runs for a full-queue drop, so a saturated `rQueue` **loses the frame and leaks its `CECFrame`**. `Source: hdmicec/ccec/src/DriverImpl.cpp`, `hdmicec/ccec/include/ccec/CECFrame.hpp`, `hdmicec/osal/include/osal/EventQueue.hpp`.
+> **Receive-callback trust boundary (document-as-is).** The callback trusts the HAL's arguments — `buf` is assumed **non-null** and `len` a valid length in **0 … `CECFrame::MAX_LENGTH` (128)** — and `frame->append((unsigned char *)buf, (size_t)len)` runs **before** the `try`, so its failure modes are distinct and must not be conflated:
+>
+> - **Null `buf` with positive `len` → undefined behaviour, not an exception.** `CECFrame::append(const uint8_t *, size_t)` loops calling `append(buf[i])`; the first iteration passes the length check (`len_ == 0`, below `MAX_LENGTH`) and **reads `buf[0]`**. A null `buf` is therefore a **null-pointer dereference (UB / likely crash)** — it raises no catchable C++ exception, so neither the pre-`try` code nor the `catch (...)` can intercept it.
+> - **Oversized or negative `len` → pre-`try` `std::out_of_range`, frame leaked.** When `len` exceeds `MAX_LENGTH` — or a **negative** `len` widens to a huge value under the `(size_t)` cast — `append` throws `std::out_of_range` ("Frame grows beyond maximum") once 128 bytes have been copied. Because this throw happens **before** the `try`, the just-allocated `frame` **leaks** and the exception **escapes upward across the C HAL callback boundary**.
+> - **`offer()` itself throws → caught, frame freed.** The enqueue is wrapped as `try { rQueue.offer(frame); } catch (...) { delete frame; }`, so if `offer()` throws (for example `std::bad_alloc` from the underlying `push_back`) the `catch` runs and **deletes** the frame — this path neither escapes nor leaks.
+> - **Full queue → silent discard and leak.** `EventQueue::offer` **never throws** when the queue is full: at capacity (default 32) it **silently discards** the element. The `catch`-based `delete` therefore never runs for a full-queue drop, so a saturated `rQueue` **loses the frame and leaks its `CECFrame`** — silently, with no exception. `Source: hdmicec/ccec/src/DriverImpl.cpp`, `hdmicec/ccec/include/ccec/CECFrame.hpp`, `hdmicec/ccec/src/CECFrame.cpp`, `hdmicec/osal/include/osal/EventQueue.hpp`.
 
 ### 2.3 Contract properties
 
@@ -124,7 +128,7 @@ sequenceDiagram
     HAL->>DI: DriverReceiveCallback(handle, data, buf, len)
     DI->>DI: new CECFrame, append(buf, (size_t)len) before try
     DI->>DI: rQueue.offer(frame) - silent drop and leak if full
-    Note over DI: buf assumed non-null, len 0..128, append/offer failures escape the C callback
+    Note over DI: null buf + positive len is UB, oversized/negative len throws out_of_range and leaks, offer() throw caught and freed, full queue silently drops and leaks
 ```
 
 Every arrow above is an in-process function call. The asynchronous element is the receive callback: when the HAL invokes the registered `DriverReceiveCallback`, the adapter copies the raw bytes into a freshly allocated `CECFrame` and enqueues it on `rQueue` via `offer()`. The HAL contract does **not** specify which thread runs the callback, and `EventQueue::offer()` acquires the queue's own mutex, so whether the enqueue can block is likewise unspecified — the callback's execution context and blocking behaviour should be treated as undefined by the contract. As detailed in the §2.2 trust-boundary note, the `append(buf, (size_t)len)` also runs **before** the callback's `try`, so a null `buf` or an out-of-range `len` (including a negative value widened by the `(size_t)` cast) throws out of the C callback and leaks the frame. `Source: hdmicec/ccec/src/DriverImpl.cpp`.
@@ -242,4 +246,4 @@ Beyond the shared split, **transport locality** is only the most visible differe
 
 ---
 
-*For where this seam sits in the wider module, see the [Architecture Overview](overview.md); for the transmit/receive sequences and the `Bus` threading model above the seam, see [Data Flow & Concurrency](data-flow.md); for module-level context, return to the [Module README](../../README.md).*
+*For where this seam sits in the wider module, see the [Architecture Overview](overview.md); for the transmit/receive sequences and the `Bus` threading model above the seam, see [Data Flow & Concurrency](data-flow.md).*

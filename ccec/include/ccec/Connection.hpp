@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -161,10 +161,13 @@ public:
      *          invoked synchronously on the Bus reader thread while the Bus
      *          receive mutex and this connection's mutex are both held during
      *          fan-out. notify() must return promptly (blocking stalls the
-     *          single reader thread and hence all inbound CEC traffic), must
-     *          not throw (an exception escapes into the reader thread), and
+     *          single reader thread and hence all inbound CEC traffic), and
      *          must not call back into this connection's registration APIs (a
-     *          re-entrant lock deadlocks).
+     *          re-entrant lock deadlocks). Regarding exceptions: an
+     *          InvalidStateException propagated out of notify() is caught by the
+     *          Bus reader loop (treated as the benign end-of-stream case), but any
+     *          other exception type escapes the reader thread's entry point and
+     *          terminates it, stopping all inbound CEC delivery.
      * @see hdmicec/ccec/src/Bus.cpp (Bus::Reader::run notifies under rMutex)
      *      and Connection.cpp (DefaultFrameListener::notify fans out under the
      *      connection mutex)

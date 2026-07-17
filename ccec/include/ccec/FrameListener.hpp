@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -72,8 +72,13 @@ public:
 	 *          while the Connection also holds its own mutex during fan-out. An
 	 *          implementation must therefore return promptly (blocking stalls the
 	 *          single reader thread and delays delivery of all subsequent frames),
-	 *          must not throw (an exception would propagate into the reader thread
-	 *          and escape the vendor C receive callback), and must avoid re-entering
+	 *          must not let exceptions escape notify() (the Bus reader loop that invokes
+	 *          notify() catches only InvalidStateException, treating it as the benign
+	 *          end-of-stream signal; any other exception propagates out of the reader
+	 *          thread's run() entry point and terminates that thread, halting all
+	 *          subsequent inbound frame delivery - note that notify() executes on the
+	 *          Bus reader thread, not in the vendor C receive callback, which merely
+	 *          enqueues the frame for the reader), and must avoid re-entering
 	 *          the CCEC send/receive path in a way that could deadlock on the held
 	 *          locks.
 	 * @note The listener is referenced as a raw, non-owned pointer by the receive

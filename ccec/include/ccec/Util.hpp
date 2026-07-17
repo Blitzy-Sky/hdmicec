@@ -19,9 +19,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -159,6 +159,9 @@ void dump_buffer(unsigned char * buf, int len);
  *
  * The tens digit is placed in the high nibble and the units digit in the low nibble.
  * @param[in] byte_ The binary value to convert.
+ * @note Canonical documentation entry. This macro is also defined identically
+ *       in ccec/Operand.hpp, where it carries a non-Doxygen comment that refers
+ *       back here, so only this single API entry is generated.
  */
 #define BYTE_TO_BCD(byte_) (((((byte_) / 10) & 0x0F) << 4) | (((byte_) % 10) & 0x0F))
 /**
@@ -168,6 +171,9 @@ void dump_buffer(unsigned char * buf, int len);
  * The high nibble is interpreted as the tens digit and the low nibble as the
  * units digit, yielding @c ((high * 10) + low).
  * @param[in] byte_ The BCD-encoded value to convert.
+ * @note Canonical documentation entry. This macro is also defined identically
+ *       in ccec/Operand.hpp, where it carries a non-Doxygen comment that refers
+ *       back here, so only this single API entry is generated.
  */
 #define BCD_TO_BYTE(byte_) (((((byte_) & 0xF0) >> 4) * 10) + (((byte_) & 0x0F)))
 

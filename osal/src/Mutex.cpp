@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup osal
+* @defgroup osal OS Abstraction Layer (OSAL)
 * @{
 **/
 

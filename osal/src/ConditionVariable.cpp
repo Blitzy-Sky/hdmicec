@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup osal
+* @defgroup osal OS Abstraction Layer (OSAL)
 * @{
 **/
 
@@ -141,10 +141,23 @@ void ConditionVariable::wait(void)
  * waits with @c pthread_cond_timedwait(), returning early on @c ETIMEDOUT.
  * The mutex is released before returning.
  *
- * @param[in] timeout   Maximum time to wait, in milliseconds; 0 waits forever.
- * @return A flag indicating how the wait completed.
- * @retval 1   The condition was signalled/set before the timeout elapsed.
- * @retval 0   The wait timed out before the condition was set.
+ * @note Parameter and return semantics are documented on the declaration in
+ *       ConditionVariable.hpp; this block records the implementation behavior.
+ * @note Timeout-to-timespec conversion advances tv_sec by (timeout / 1000) and
+ *       sets tv_nsec to the current microseconds plus (timeout % 1000) * 1000000.
+ *       The one-second carry is applied only when tv_nsec is strictly greater
+ *       than 1,000,000,000, so a value of exactly 1,000,000,000 nanoseconds is
+ *       left in place, forming an invalid timespec that pthread_cond_timedwait()
+ *       rejects with EINVAL.
+ * @note A negative timeout yields a wake time at or before now (negative seconds
+ *       and/or nanoseconds), so the timed wait does not block for any positive
+ *       duration.
+ * @warning The wait loop treats only ETIMEDOUT as a timeout and breaks on it; any
+ *          other non-zero return (for example EINVAL from the invalid timespec
+ *          above) is ignored while the condition remains unset, so the loop
+ *          re-arms the same absolute wake time and busy-spins on
+ *          pthread_cond_timedwait(). Documented as-is; the production code is
+ *          unchanged.
  */
 long ConditionVariable::wait(long timeout)
 {

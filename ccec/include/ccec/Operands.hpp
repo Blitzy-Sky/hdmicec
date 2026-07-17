@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -827,7 +827,20 @@ public:
         MAX_LEN = 1,  ///< Logical address length in bytes (1).
     };
 
-    static const LogicalAddress kTv;  ///< Predefined logical-address constant representing the TV (logical address TV = 0).
+    /**
+     * @brief Predefined logical-address constant intended to represent the TV
+     *        (logical address TV = 0).
+     *
+     * @warning Declaration only: this static member is declared here but has no
+     *          out-of-class definition anywhere in the module, so it is not a
+     *          usable constant. Any ODR-use - taking its address, binding a
+     *          reference to it, or otherwise using it where a definition is
+     *          required - produces an "undefined reference to
+     *          CCEC::LogicalAddress::kTv" link error. This documents the code
+     *          exactly as implemented; the missing definition is intentionally
+     *          not added here because this is a documentation-only task.
+     */
+    static const LogicalAddress kTv;
 
     /**
      * @brief Enumerates the CEC logical addresses.
@@ -1896,6 +1909,16 @@ public:
      * @param[in] frame    The CEC frame to read the profile bytes from.
      * @param[in] startPos Zero-based byte offset within @p frame at which to start.
      * @param[in] len      Number of bytes to consume for the profile.
+     * @note This frame constructor does NOT enforce the advertised @c MAX_LEN
+     *       (4). The base CECBytes(frame, startPos, len) constructor validates
+     *       length by calling the virtual getMaxLen() during base-class
+     *       construction, where virtual dispatch resolves to
+     *       CECBytes::getMaxLen() (== @c CECFrame::MAX_LENGTH, 128), not
+     *       RcProfile::getMaxLen(). It therefore accepts any @p len the caller
+     *       supplies, up to the frame's remaining byte count.
+     * @pre Callers must pass @p len <= @c MAX_LEN (4) to obtain a correctly
+     *      bounded RC-profile operand; larger values are accepted but violate
+     *      the operand's advertised size.
      */
     RcProfile( const CECFrame &frame, size_t startPos, size_t len) : CECBytes (frame, startPos, len) {
     };
@@ -2126,6 +2149,16 @@ public:
      * @param[in] frame    The CEC frame to read the features bytes from.
      * @param[in] startPos Zero-based byte offset within @p frame at which to start.
      * @param[in] len      Number of bytes to consume for the features.
+     * @note This frame constructor does NOT enforce the advertised @c MAX_LEN
+     *       (4). The base CECBytes(frame, startPos, len) constructor validates
+     *       length by calling the virtual getMaxLen() during base-class
+     *       construction, where virtual dispatch resolves to
+     *       CECBytes::getMaxLen() (== @c CECFrame::MAX_LENGTH, 128), not
+     *       DeviceFeatures::getMaxLen(). It therefore accepts any @p len the
+     *       caller supplies, up to the frame's remaining byte count.
+     * @pre Callers must pass @p len <= @c MAX_LEN (4) to obtain a correctly
+     *      bounded device-features operand; larger values are accepted but
+     *      violate the operand's advertised size.
      */
     DeviceFeatures( const CECFrame &frame, size_t startPos, size_t len) : CECBytes (frame, startPos, len) {};
 
@@ -2303,6 +2336,14 @@ public:
      * @brief Constructs a latency-info operand from a single byte.
      *
      * @param[in] info The initial latency-info byte.
+     * @warning Single-byte construction: this constructor stores exactly ONE
+     *          byte (str.size() == 1). getLatencyFlags() and
+     *          getAudioOutputDelay() access str[1] (the latter reads it
+     *          unconditionally - see those methods), so calling them on an
+     *          operand built with this constructor reads past the single
+     *          stored byte: an out-of-bounds access with undefined behavior.
+     *          Only getVideoLatency() (which reads str[0]) is safe on a
+     *          one-byte operand.
      */
     LatencyInfo(uint8_t info) : CECBytes((uint8_t)info) { };
 
@@ -2313,6 +2354,16 @@ public:
      * @param[in] frame    The CEC frame to read the latency bytes from.
      * @param[in] startPos Zero-based byte offset within @p frame at which to start.
      * @param[in] len      Number of bytes to consume for the latency info.
+     * @note This frame constructor does NOT enforce the advertised @c MAX_LEN
+     *       (3). The base CECBytes(frame, startPos, len) constructor validates
+     *       length by calling the virtual getMaxLen() during base-class
+     *       construction, where virtual dispatch resolves to
+     *       CECBytes::getMaxLen() (== @c CECFrame::MAX_LENGTH, 128), not
+     *       LatencyInfo::getMaxLen(). It therefore accepts any @p len the
+     *       caller supplies, up to the frame's remaining byte count.
+     * @pre Callers must pass @p len <= @c MAX_LEN (3) to obtain a correctly
+     *      bounded latency-info operand; larger values are accepted but
+     *      violate the operand's advertised size.
      */
     LatencyInfo ( const CECFrame &frame, size_t startPos, size_t len) : CECBytes (frame, startPos, len) {};
 
@@ -2329,6 +2380,11 @@ public:
      * @brief Returns the latency flags value.
      *
      * @return The latency-flags byte.
+     * @pre The operand must hold at least two bytes (str.size() >= 2).
+     * @warning No bounds check: this accessor returns str[1] directly. When
+     *          the operand holds fewer than two bytes (for example one built
+     *          from the single-byte LatencyInfo(uint8_t) constructor), this is
+     *          an out-of-bounds read with undefined behavior.
      */
     uint8_t getLatencyFlags(void) const {
             return str[1];
@@ -2337,8 +2393,18 @@ public:
     /**
      * @brief Returns the audio output delay, when present.
      *
-     * @return The audio output delay byte when it is available (latency flags == 0x3
-     *         and three bytes are present); otherwise 0xFF.
+     * @return When the latency-flags byte (str[1]) equals 0x3 and exactly three
+     *         bytes are stored, the audio output delay byte (str[2]); the value
+     *         0xFF is returned only when that combined condition is false and no
+     *         out-of-bounds access occurs (see the warning below).
+     * @pre The operand must hold at least two bytes (str.size() >= 2); a delay
+     *      value is only meaningful when it holds three (str.size() == 3).
+     * @warning The guard is written with the bitwise operator
+     *          @c (str[1]==0x3) & (str.size()==3), which is NOT short-circuiting,
+     *          so str[1] is evaluated unconditionally BEFORE the size check. On
+     *          an operand holding fewer than two bytes this reads out of bounds
+     *          (undefined behavior), and the "otherwise 0xFF" result is
+     *          therefore NOT guaranteed for such short operands.
      */
     int getAudioOutputDelay(void) const {
             int audio_output_delay = 0xFF;

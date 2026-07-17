@@ -28,9 +28,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup osal
+* @defgroup osal OS Abstraction Layer (OSAL)
 * @{
 **/
 
@@ -138,6 +138,17 @@ ConditionVariable by calling notify/notifyAll.
  * @retval 1 - The condition was signalled (also returned for the indefinite
  *             wait when timeout is 0).
  * @retval 0 - The non-zero timed wait expired before the condition was set.
+ * @note A negative timeout is not interpreted as "wait forever"; it is converted
+ *       directly to an absolute wake time at or before the current time, so the
+ *       timed wait expires without blocking for any positive duration.
+ * @warning The millisecond-to-timespec conversion only carries into tv_sec when
+ *          the nanoseconds field is strictly greater than 1,000,000,000, so a
+ *          timeout whose remainder lands exactly on the one-second boundary
+ *          leaves an invalid timespec (tv_nsec == 1,000,000,000) that the
+ *          underlying pthread_cond_timedwait() rejects with EINVAL. Because the
+ *          wait loop breaks only on ETIMEDOUT, such an error is ignored while the
+ *          condition is unset and the call busy-spins rather than timing out.
+ *          See the definition in ConditionVariable.cpp. Documented as-is.
  */
 	long wait(long timeout);
 /**

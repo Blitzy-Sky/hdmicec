@@ -19,9 +19,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -120,24 +120,28 @@ enum
 };
 
 
-/**
- * @def BYTE_TO_BCD
- * @brief Converts a binary byte value to its Binary-Coded Decimal (BCD) representation.
+/*
+ * BYTE_TO_BCD(byte_): converts a binary byte value (typically 0-99) to its
+ * Binary-Coded Decimal (BCD) representation - the tens digit is packed into
+ * the high nibble and the units digit into the low nibble of the result.
  *
- * The tens digit of @p byte_ is packed into the high nibble and the units
- * digit into the low nibble of the resulting byte.
- *
- * @param[in] byte_ The binary value (typically 0-99) to convert to BCD.
+ * This macro is also defined identically in ccec/Util.hpp. To avoid a
+ * duplicate generated API entry, the canonical Doxygen documentation lives in
+ * ccec/Util.hpp (see BYTE_TO_BCD there); this block is deliberately a plain
+ * non-Doxygen comment so only the single canonical entry is generated.
+ * Comment only - the macro definition below is unchanged.
  */
 #define BYTE_TO_BCD(byte_) (((((byte_) / 10) & 0x0F) << 4) | (((byte_) % 10) & 0x0F))
-/**
- * @def BCD_TO_BYTE
- * @brief Converts a Binary-Coded Decimal (BCD) byte to its binary value.
+/*
+ * BCD_TO_BYTE(byte_): converts a Binary-Coded Decimal (BCD) byte to its binary
+ * value - the tens digit is taken from the high nibble and the units digit
+ * from the low nibble of byte_, combined as ((high * 10) + low).
  *
- * The tens digit is extracted from the high nibble and the units digit from
- * the low nibble of @p byte_, and the two are combined into a binary value.
- *
- * @param[in] byte_ The BCD-encoded value to convert to binary.
+ * This macro is also defined identically in ccec/Util.hpp. To avoid a
+ * duplicate generated API entry, the canonical Doxygen documentation lives in
+ * ccec/Util.hpp (see BCD_TO_BYTE there); this block is deliberately a plain
+ * non-Doxygen comment so only the single canonical entry is generated.
+ * Comment only - the macro definition below is unchanged.
  */
 #define BCD_TO_BYTE(byte_) (((((byte_) & 0xF0) >> 4) * 10) + (((byte_) & 0x0F)))
 
