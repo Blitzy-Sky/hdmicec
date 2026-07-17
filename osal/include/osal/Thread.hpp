@@ -73,7 +73,7 @@ public:
 \brief Constructor
 
  Allocates a new Thread object
- \param target - Object implements Runnable interface.  
+ \param[in] target - Object implements Runnable interface.  
  \note The target is stored by reference and is not copied; the caller retains
        ownership and must keep it alive until the thread has finished running.
  */
@@ -85,8 +85,8 @@ public:
 \brief Constructor
 
  Allocates a new Thread object
- \param target - Object implementes Runnable interface.
- \param name - Name of the thread context.
+ \param[in] target - Object implements Runnable interface.
+ \param[in] name - Name of the thread context.
  \note The name is retained in a member string but is not applied to the
        native thread: start() performs no pthread_setname_np (or equivalent)
        call, so the stored name has no effect on the created thread.

@@ -70,7 +70,7 @@ Creates an Condition object with state set to false.
 \brief Constructor.
 Creates an Condition object with state set to given parameter.
 
-\param initial - initial state to be set. This will be set as default state 
+\param[in] initial - initial state to be set. This will be set as default state 
 of the object as well.
 */
 /**************************************************************************/
