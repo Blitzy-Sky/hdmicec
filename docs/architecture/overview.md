@@ -19,10 +19,10 @@ This overview is the starting point that the two sibling documents drill into: [
 1. **Thunder host process** — the WPEFramework/Thunder web-server framework that hosts the CEC service plugins. `Source: README.md`.
 2. **`entservices-apis` (contracts)** — the COM-RPC/JSON-RPC interface contracts the plugins expose to the rest of the system. `Source: README.md`.
 3. **CCEC middleware (`ccec` + `osal`)** — *this module*. `ccec` provides the CEC library (lifecycle, connections, the message pipeline, and the abstract HAL contract), while `osal` provides the OS-abstraction primitives (threads, mutexes, condition variables, queues) that the library's transport is built on. `Source: hdmicec/rdk_env.xml`.
-4. **`{ Legacy C HAL | AIDL HAL }`** — one of two interchangeable HAL backends beneath the middleware. The **Legacy C HAL** is the in-process C driver `hdmi_cec_driver.h` (shipped as `libRCECHal.so`), and the **AIDL HAL** is the out-of-process AIDL/Binder service `com.rdk.hal.hdmicec`. `Source: rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`, `rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/`.
+4. **HAL beneath the middleware** — the **Legacy C HAL** is the **currently implemented** backend: an in-process C driver declared in `hdmi_cec_driver.h` (shipped as `libRCECHal.so`). The **AIDL HAL** is the **migration target**: an out-of-process AIDL/Binder service whose interfaces are declared in the AIDL package `com.rdk.hal.hdmicec` and which registers with the Service Manager under the service name `HdmiCec` (the value of the `IHdmiCec.serviceName` constant). The package name and the service registration name are distinct — see [`hal-interaction.md`](hal-interaction.md). `Source: rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`, `rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/`.
 5. **SoC CEC driver** — the vendor silicon driver that owns the physical CEC line. `Source: rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`.
 
-Because CCEC is the HAL **Caller**, the two HAL options are **alternative backends behind the same `Driver` abstract contract**: the middleware always calls `Driver`, and a single concrete `DriverImpl` adapts those calls to whichever HAL is present. This `Driver`/`DriverImpl` seam is the migration boundary from the legacy C API to AIDL/Binder, and it is examined in depth in [`hal-interaction.md`](hal-interaction.md). The module declares its build-time dependencies as `sdk` and `devicesettings`. `Source: hdmicec/rdk_env.xml`.
+Because CCEC is the HAL **Caller**, both HAL contracts are expressed behind the same `Driver` abstract contract: the middleware always calls `Driver`, and the single concrete `DriverImpl` implements those calls. **Today `DriverImpl` is backed by the Legacy C HAL** — its source `#include`s the legacy C header `ccec/drivers/hdmi_cec_driver.h`; the AIDL/Binder HAL is the **target** the adapter is being migrated toward, not a second backend selectable at run time. This `Driver`/`DriverImpl` seam is therefore the migration boundary from the legacy C API to AIDL/Binder, and it is examined in depth in [`hal-interaction.md`](hal-interaction.md). The module declares its build-time dependencies as `sdk` and `devicesettings`. `Source: hdmicec/ccec/src/DriverImpl.cpp`, `hdmicec/rdk_env.xml`.
 
 **Diagram 1 — Layered stack placement.**
 
@@ -35,19 +35,19 @@ flowchart TD
         CCEClib["ccec (CEC library)"]
         OSAL["osal (OS abstraction)"]
     end
-    LEGACY["Legacy C HAL — libRCECHal.so"]
-    AIDL["AIDL HAL — com.rdk.hal.hdmicec"]
+    LEGACY["Legacy C HAL (current)<br/>libRCECHal.so — in-process C API"]
+    AIDL["AIDL HAL (migration target)<br/>package com.rdk.hal.hdmicec, service 'HdmiCec' — out-of-process Binder"]
     SOC["SoC CEC driver"]
 
     THUNDER --> APIS
     APIS --> CCEC
-    CCEC -->|Driver / DriverImpl seam| LEGACY
-    CCEC -->|Driver / DriverImpl seam| AIDL
+    CCEC -->|"Driver / DriverImpl seam (implemented today)"| LEGACY
+    CCEC -.->|"Driver / DriverImpl seam (migration target)"| AIDL
     LEGACY --> SOC
-    AIDL --> SOC
+    AIDL -.-> SOC
 ```
 
-The two HAL nodes are drawn as parallel siblings on purpose: at run time exactly one backend is active behind the single `Driver` abstraction, and the choice of backend is invisible to everything above the seam.
+The two HAL nodes are drawn to distinguish **migration state**, not a run-time choice: the Legacy C HAL (solid arrow) is the backend `DriverImpl` implements today, while the AIDL/Binder HAL (dashed arrow) is the target the seam is being migrated toward. Whichever backend `DriverImpl` is built against, everything above the seam sees only the abstract `Driver` contract.
 
 ---
 
@@ -57,19 +57,19 @@ The table below lists the key components of the module with their role and sourc
 
 | Component | Role | Source |
 |-----------|------|--------|
-| `LibCCEC` | Library **facade** and lifecycle owner (**singleton**). API: `static LibCCEC & getInstance(void)`, `void init(const char * name = 0)`, `void term(void)`, `int getLogicalAddress(int devType)`, `void getPhysicalAddress(unsigned int *physicalAddress)`, `int addLogicalAddress(const LogicalAddress &source)`. | `hdmicec/ccec/include/ccec/LibCCEC.hpp` |
+| `LibCCEC` | Library **facade** and lifecycle owner, reached through a shared `getInstance()` accessor. The class also declares a **public constructor**, so it follows a *singleton-style* (shared-accessor) pattern rather than enforcing a unique instance. API: `static LibCCEC & getInstance(void)`, `void init(const char * name = 0)`, `void term(void)`, `int getLogicalAddress(int devType)`, `void getPhysicalAddress(unsigned int *physicalAddress)`, `int addLogicalAddress(const LogicalAddress &source)`. | `hdmicec/ccec/include/ccec/LibCCEC.hpp` |
 | `Connection` | Application-facing tap into the CEC bus (send/receive). API: `open()`, `close()`, `addFrameListener()` / `removeFrameListener()`, `send(const CECFrame&, int timeout = 0)`, `sendTo(const LogicalAddress&, const CECFrame&, int timeout = 0)`, `sendToAsync()`, `sendAsync()`, `poll()`, `ping()`, `getSource()` / `setSource()`. | `hdmicec/ccec/include/ccec/Connection.hpp` |
 | `Bus` | Internal **singleton** producer/consumer transport with inner `Reader` / `Writer` threads. Holds `std::list<FrameListener*> listeners`, `EventQueue<CECFrame*> wQueue`, `Mutex rMutex` / `Mutex wMutex`; exposes `start()` / `stop()`. *(Implementation source — context only.)* | `hdmicec/ccec/src/Bus.hpp` |
-| `Driver` | **Abstract**, pure-virtual HAL contract accessed via `static Driver & getInstance(void)`. Declares `open`, `close`, `read`, `write`, `writeAsync`, `addLogicalAddress`, `removeLogicalAddress`, `getLogicalAddress`, `getPhysicalAddress`, and `poll` (all pure virtual). | `hdmicec/ccec/include/ccec/Driver.hpp` |
+| `Driver` | **Abstract** HAL contract accessed via `static Driver & getInstance(void)`. Declares twelve pure-virtual methods: `open`, `close`, `read`, `write`, `writeAsync`, `addLogicalAddress`, `removeLogicalAddress`, `getLogicalAddress`, `getPhysicalAddress`, `isValidLogicalAddress`, `poll`, and `printFrameDetails`. | `hdmicec/ccec/include/ccec/Driver.hpp` |
 | `DriverImpl` | The **single concrete adapter** of `Driver` — the migration seam. Provides static HAL callbacks `DriverReceiveCallback` / `DriverTransmitCallback` and an incoming `rQueue` (`typedef EventQueue<CECFrame*> IncomingQueue`). *(Implementation source — context only.)* | `hdmicec/ccec/src/DriverImpl.hpp` |
 | `MessageEncoder` | Encodes high-level messages into `CECFrame` bytes via static `encode(...)` overloads. | `hdmicec/ccec/include/ccec/MessageEncoder.hpp` |
 | `MessageDecoder` | Decodes a `CECFrame` back into a high-level message via `decode(const CECFrame&)`, dispatching the result through a `MessageProcessor` reference. | `hdmicec/ccec/include/ccec/MessageDecoder.hpp` |
-| `MessageProcessor` | Base class with overloaded `process()` methods, one per message type; the default implementation discards, so applications **subclass** it to handle specific messages. | `hdmicec/ccec/include/ccec/MessageProcessor.hpp` |
+| `MessageProcessor` | Base class with overloaded `process()` methods, one per message type. Each base-class default logs the frame via `header.print()` / `msg.print()` and otherwise takes no action, so applications **subclass** it to actually handle specific messages. | `hdmicec/ccec/include/ccec/MessageProcessor.hpp` |
 | `FrameListener` | Observer interface: `virtual void notify(const CECFrame&) const = 0`. Paired with `FrameFilter::isFiltered(const CECFrame&)` for selective delivery. | `hdmicec/ccec/include/ccec/FrameListener.hpp` |
 | `CECFrame` | Raw CEC frame buffer. Declares `enum { MAX_LENGTH = 128 }` and backs it with `uint8_t buf_[MAX_LENGTH]`. | `hdmicec/ccec/include/ccec/CECFrame.hpp` |
 | OSAL primitives | `Thread`, `Mutex` / `AutoLock`, `ConditionVariable`, `EventQueue`, `Runnable`, `Stoppable` — the OS-abstraction building blocks used by `Bus` for its producer/consumer model. | `hdmicec/osal/include/osal/` |
 
-> **Note on frame capacity.** `CECFrame` reserves `MAX_LENGTH = 128` bytes of buffer in code. `Source: hdmicec/ccec/include/ccec/CECFrame.hpp`. Real CEC messages are far smaller (on the order of ~16 bytes) — that small size is a characteristic of the **HDMI-CEC 1.4b protocol**, not a code constant. `Source: rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`.
+> **Note on frame capacity.** `CECFrame` reserves `MAX_LENGTH = 128` bytes of buffer in code. `Source: hdmicec/ccec/include/ccec/CECFrame.hpp`. Real CEC messages are far smaller: the maximum CEC message (header block plus opcode block plus operand blocks) is documented as *"16 * 8 bits (16bytes)"* — a characteristic of the **HDMI-CEC 1.4b protocol**, not a code constant. `Source: rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/IHdmiCecController.aidl`.
 
 ---
 
@@ -77,18 +77,18 @@ The table below lists the key components of the module with their role and sourc
 
 The middleware wires its components into a single downward call chain from the facade to the HAL, with the message pipeline and the observer contract attached at the application-facing edge:
 
-- **`LibCCEC`** owns the module lifecycle (`init` / `term`) and answers address queries (`getLogicalAddress`, `getPhysicalAddress`, `addLogicalAddress`); internally it drives the HAL through the `Driver` singleton. `Source: hdmicec/ccec/include/ccec/LibCCEC.hpp`.
+- **`LibCCEC`** owns the module lifecycle (`init` / `term`) and answers address queries (`getLogicalAddress`, `getPhysicalAddress`, `addLogicalAddress`); internally it drives the HAL through the shared `Driver` accessor (`Driver::getInstance()`). `Source: hdmicec/ccec/include/ccec/LibCCEC.hpp`, `hdmicec/ccec/src/LibCCEC.cpp`.
 - **`Connection`** is the application's handle onto the CEC bus. It holds a reference to the `Bus` singleton (`Bus &bus`) and registers a private `DefaultFrameListener` (guarded by a private `DefaultFilter`) so that received frames are routed back to the application. `Source: hdmicec/ccec/include/ccec/Connection.hpp`.
 - **`Bus`** (singleton) is the actual transport. It calls `Driver::getInstance()` to perform the real `read()` / `write()`, keeps the registered `listeners`, buffers outbound frames in `EventQueue<CECFrame*> wQueue`, and runs its inner `Reader` and `Writer` — each declared `: public Runnable, public Stoppable`. `Source: hdmicec/ccec/src/Bus.hpp`.
 - **`Driver`** is abstract; **`DriverImpl`** is its single concrete subclass and the seam to the HAL, exposing the static `DriverReceiveCallback` / `DriverTransmitCallback` entry points and buffering inbound frames in its `rQueue`. `Source: hdmicec/ccec/include/ccec/Driver.hpp`, `hdmicec/ccec/src/DriverImpl.hpp`.
-- **`MessageEncoder`**, **`MessageDecoder`**, and **`MessageProcessor`** sit on the *application* side of `Connection`: the encoder turns a high-level message into a `CECFrame` for sending, the decoder reconstructs a message from a received `CECFrame`, and the processor (subclassed by the application) handles it. **`FrameListener`** is the observer contract over which received frames are delivered. `Source: hdmicec/ccec/include/ccec/MessageEncoder.hpp`, `hdmicec/ccec/include/ccec/MessageDecoder.hpp`, `hdmicec/ccec/include/ccec/MessageProcessor.hpp`, `hdmicec/ccec/include/ccec/FrameListener.hpp`.
+- **`MessageEncoder`**, **`MessageDecoder`**, and **`MessageProcessor`** are *application-side utilities*; they are **not** dependencies of `Connection`, whose header includes only `FrameListener`, `Operands`, `Driver`, `LibCCEC`, and `Exception` — not the message-pipeline helpers. Application code uses the encoder to turn a high-level message into a `CECFrame` before sending, and pairs the decoder with a `MessageProcessor` to reconstruct and dispatch a received `CECFrame`: `MessageDecoder` holds a `MessageProcessor &` and invokes the matching `process()` overload, whose base-class default logs the frame (via `header.print()` / `msg.print()`) unless the application subclasses `MessageProcessor` to handle it. **`FrameListener`** is the observer contract over which received frames are delivered from the `Bus`. `Source: hdmicec/ccec/include/ccec/Connection.hpp`, `hdmicec/ccec/include/ccec/MessageEncoder.hpp`, `hdmicec/ccec/include/ccec/MessageDecoder.hpp`, `hdmicec/ccec/include/ccec/MessageProcessor.hpp`, `hdmicec/ccec/include/ccec/FrameListener.hpp`.
 
 **Diagram 2 — Component / class relationships.** The diagram is anchored on the real `Driver` (abstract) → `DriverImpl` (concrete) inheritance seam.
 
 ```mermaid
 classDiagram
     class LibCCEC {
-        <<singleton>>
+        <<shared accessor>>
         +getInstance()
         +init()
         +term()
@@ -128,7 +128,9 @@ classDiagram
         +removeLogicalAddress()
         +getLogicalAddress()
         +getPhysicalAddress()
+        +isValidLogicalAddress()
         +poll()
+        +printFrameDetails()
     }
     class DriverImpl {
         +DriverReceiveCallback()
@@ -152,16 +154,16 @@ classDiagram
     }
 
     LibCCEC --> Driver : uses
-    LibCCEC ..> Connection : opens
     Connection --> Bus : holds reference
-    Connection ..> MessageEncoder : encodes with
-    Connection ..> MessageDecoder : decodes with
+    Connection ..> Driver : isValidLogicalAddress()
     Connection ..> FrameListener : registers
-    MessageDecoder --> MessageProcessor : dispatches to
     Bus --> Driver : reads and writes
     Bus o-- FrameListener : notifies
     Bus ..> CECFrame : queues
     Driver <|-- DriverImpl : realizes
+    MessageEncoder ..> CECFrame : encodes to
+    MessageDecoder ..> CECFrame : decodes from
+    MessageDecoder --> MessageProcessor : dispatches to
 ```
 
 ---
@@ -173,7 +175,7 @@ The boundary between `hdmicec` and the HAL beneath it follows the RDK HDMI-CEC c
 - **CCEC middleware owns the CEC *high-level* protocol** — device discovery, logical-address allocation, and message semantics (encoding, decoding, and dispatch through the `Message*` pipeline). `Source: rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`.
 - **The HAL owns the CEC *low-level* protocol** — electrical timing, bus arbitration, retries, and ACK sampling — as defined by HDMI-CEC 1.4b. `Source: rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`.
 
-Crucially, the HAL treats frames as **opaque**: the caller (the middleware) must pass **fully-formed** message frames — a header block and its data blocks — and the HAL neither parses nor interprets their command-level meaning. All opcode/operand parsing and semantics therefore live in the middleware. `Source: rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`. This clean split is exactly what lets the `Driver`/`DriverImpl` seam swap the Legacy C HAL for the AIDL/Binder HAL without changing any middleware logic; the two backends are compared side-by-side in [`hal-interaction.md`](hal-interaction.md).
+Crucially, the HAL treats frames as **opaque**: the caller (the middleware) must pass **fully-formed** message frames — a header block and its data blocks — and the HAL neither parses nor interprets their command-level meaning. All opcode/operand parsing and semantics therefore live in the middleware. `Source: rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`. This clean split is what **confines the HAL migration to the `DriverImpl` adapter**: code *above* the `Driver`/`DriverImpl` seam is insulated from the change, while `DriverImpl` itself must be re-implemented to satisfy the differing AIDL contract. The two backends and the specific adaptations required are compared side-by-side in [`hal-interaction.md`](hal-interaction.md).
 
 ---
 
@@ -182,10 +184,10 @@ Crucially, the HAL treats frames as **opaque**: the caller (the middleware) must
 The module's structure is best understood through five recurring patterns, each tied to a concrete component:
 
 - **Layered architecture** — CCEC is a well-defined middleware layer between the Thunder service plugins above and the HAL below, communicating with each through a narrow, explicit contract. `Source: hdmicec/rdk_env.xml`.
-- **Adapter / migration seam** — the abstract `Driver` contract plus the concrete `DriverImpl` adapter isolate the middleware from any specific HAL implementation, which is what enables the Legacy-C-to-AIDL migration to happen behind a stable interface. `Source: hdmicec/ccec/include/ccec/Driver.hpp`, `hdmicec/ccec/src/DriverImpl.hpp`.
+- **Adapter / migration seam** — the abstract `Driver` contract plus the concrete `DriverImpl` adapter isolate the code above the seam from any specific HAL implementation. `DriverImpl` currently adapts the **Legacy C HAL**; the same seam is where the **AIDL/Binder** target will be adopted, letting the Legacy-C-to-AIDL migration proceed behind the stable `Driver` interface. `Source: hdmicec/ccec/include/ccec/Driver.hpp`, `hdmicec/ccec/src/DriverImpl.hpp`, `hdmicec/ccec/src/DriverImpl.cpp`.
 - **Producer/consumer** — the `Bus` runs inner `Reader` and `Writer` threads over an `EventQueue<CECFrame*> wQueue`, decoupling the callers that enqueue frames from the thread that drains the queue to the HAL. `Source: hdmicec/ccec/src/Bus.hpp`.
 - **Observer** — inbound frames are delivered through the `FrameListener` interface (`notify(const CECFrame&)`), letting multiple application listeners subscribe without the transport knowing their concrete types. `Source: hdmicec/ccec/include/ccec/FrameListener.hpp`.
-- **Singleton** — the module's shared, process-wide services — `LibCCEC`, `Bus`, and `Driver` — are each reached through a `getInstance()` accessor, guaranteeing a single instance of the facade, the transport, and the HAL adapter. `Source: hdmicec/ccec/include/ccec/LibCCEC.hpp`, `hdmicec/ccec/src/Bus.hpp`, `hdmicec/ccec/include/ccec/Driver.hpp`.
+- **Singleton / shared accessor** — the module's shared, process-wide services — `LibCCEC`, `Bus`, and `Driver` — are each reached through a `getInstance()` accessor. `Bus` enforces uniqueness with a **private constructor** (a true singleton), whereas `LibCCEC` and `Driver` declare **public constructors**, so their `getInstance()` provides a shared, conventional access point without preventing additional instances from being constructed. `Source: hdmicec/ccec/include/ccec/LibCCEC.hpp`, `hdmicec/ccec/src/Bus.hpp`, `hdmicec/ccec/include/ccec/Driver.hpp`.
 
 ---
 

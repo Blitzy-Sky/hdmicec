@@ -49,12 +49,13 @@ CCEC_OSAL_BEGIN_NAMESPACE
 
 /***************************************************************************/
 /*!
+\brief Thread-safe bounded event queue with blocking consumer semantics.
 
 This is a collection class which provides the event queue functionality.
 consumer threads could wait on the queue and will be signalled when 
 queue is populated.
 
-\param E - type of elements held in this collection.
+\tparam E - type of elements held in this collection.
 */
 /**************************************************************************/
 
@@ -67,7 +68,7 @@ public:
 \brief Constructor.
 Creates an EventQueue with the provided capacity.
 
-\param cap - Number of elements that could be held in the queue.
+\param[in] cap - Number of elements that could be held in the queue.
 */
 /**************************************************************************/
 
@@ -159,8 +160,10 @@ Post a event to the queue and signals threads waiting on the queue.
 On receiving the signal (event), if there is any consumer thread waiting
 on the queue will come out of wait state and will consume the event.
 
-\exception - if queue is full, method will throw an exception.
-\param E - Object that is to be posted to the queue.
+\param[in] element - Object that is to be posted to the queue.
+\note If the queue is already at capacity the element is silently discarded:
+ the method returns without posting and without signalling, and no exception is
+ thrown in the current implementation.
 */
 /**************************************************************************/
 

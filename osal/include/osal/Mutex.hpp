@@ -124,7 +124,10 @@ will be able to acquire the lock released and will come out of wait state.
 */
 /**************************************************************************/
 
-
+/**
+ * @return Opaque pointer to the underlying native mutex object; specifically
+ *         the address of the @c pthread_mutex_t allocated for this Mutex.
+ */
 	void *getNativeHandle(void);
 private:
 	void *nativeHandle;

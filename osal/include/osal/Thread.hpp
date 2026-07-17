@@ -50,6 +50,7 @@ CCEC_OSAL_BEGIN_NAMESPACE
 
 /***************************************************************************/
 /*!
+\brief Runnable wrapper that executes a target on the OSAL threading primitive.
 
 A thread is a thread of execution in a program. 
 An application could have multiple threads of execution running concurrently.
@@ -57,7 +58,8 @@ An application could have multiple threads of execution running concurrently.
 A class that needs thread functionality shall implement Runnable interface and 
 object will be passed to Thread on creation of Thread object. 
 On the invocation of start() method of Thread, runnable's run() will be executed 
-in a threaded context.
+in a threaded context. Alternatively, calling run() directly executes the
+target synchronously on the calling thread (see Thread::run()).
 */
 /**************************************************************************/
 
@@ -68,7 +70,7 @@ public:
 \brief Constructor
 
  Allocates a new Thread object
- \param target - Object implements Runnable interface.  
+ \param[in] target - Object implements Runnable interface.  
  */
  /************************************************************************/
 
@@ -78,8 +80,8 @@ public:
 \brief Constructor
 
  Allocates a new Thread object
- \param target - Object implementes Runnable interface.
- \name - Name of the thread context.
+ \param[in] target - Object implementes Runnable interface.
+ \param[in] name - Name of the thread context.
  */
  /************************************************************************/
 
@@ -94,10 +96,12 @@ public:
 
 	virtual ~Thread(void);
 /*! 
-\brief Executes the run() method of runnable object.
+\brief Executes the run() method of runnable object on the calling thread.
 
  If this object is created by passing reference to a runnable object, that 
  object's run() will be executed, otherwise this method does nothing and returns.
+ Execution is synchronous in the context of the caller; it does not spawn a new
+ thread of execution (contrast with start()).
  */
  /************************************************************************/
 
@@ -111,15 +115,21 @@ public:
  The result is that two threads are running concurrently: 
  the current thread (which returns from the call to the start method) 
  and the other thread (which executes its run method).
+ The new thread of execution is created in the detached state, so its resources
+ are reclaimed automatically on termination.
  */
 /***********************************************************************/
 
 	void start(void);
 /************************************************************************/
 /*!
-\brief Stops execution of thread.
+\brief Declares a request to stop execution of the thread.
 
- Forces the thread to stop executing.
+ Declared by the Thread interface to request that the thread stop executing.
+ \note The OSAL sources provide no definition for this method, so it has no
+ defined runtime effect on its own and does not by itself force the thread to
+ terminate; any behavior depends on a definition supplied by the consuming
+ component.
  */
 /***********************************************************************/
 

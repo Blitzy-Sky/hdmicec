@@ -129,6 +129,16 @@ ConditionVariable by calling notify/notifyAll.
 */
 /**************************************************************************/
 
+/**
+ * @param[in] timeout - Maximum time to wait, expressed in milliseconds. A value
+ *            of 0 waits indefinitely (blocks until signalled via notify() /
+ *            notifyAll()); a non-zero value performs a timed wait of that many
+ *            milliseconds.
+ * @return Signalled/timeout indicator.
+ * @retval 1 - The condition was signalled (also returned for the indefinite
+ *             wait when timeout is 0).
+ * @retval 0 - The non-zero timed wait expired before the condition was set.
+ */
 	long wait(long timeout);
 /**
  * @brief Signals the condition variable, waking one thread waiting on it.

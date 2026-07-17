@@ -1,11 +1,11 @@
 # hdmicec HAL Interaction
 
-This document explains how the `hdmicec` (CCEC) middleware talks to the HDMI-CEC **HAL** beneath it, on **both** supported backends. As the HAL **"Caller,"** CCEC never implements the HAL itself; it *consumes* one of two interchangeable backends through a single abstract contract:
+This document explains how the `hdmicec` (CCEC) middleware talks to the HDMI-CEC **HAL** beneath it, across the legacy and the target backends. As the HAL **"Caller,"** CCEC never implements the HAL itself; it *consumes* a HAL through a single abstract contract. Two concrete backends are relevant to that contract:
 
 - the **Legacy C HAL** — the **currently implemented** path, an **in-process** vendor C library (`libRCECHal.so`) reached through the C API declared in `hdmi_cec_driver.h`; and
-- the **AIDL/Binder HAL** — the **migration target**, an **out-of-process** service (`com.rdk.hal.hdmicec`) reached over **Binder IPC**.
+- the **AIDL/Binder HAL** — the **migration target**, an **out-of-process** service reached over **Binder IPC**; its interfaces are declared in the AIDL package `com.rdk.hal.hdmicec`, and the service registers under the name `HdmiCec` (see §3 for the precise package / interface / service-name distinction).
 
-Both paths are anchored on the real `Driver` / `DriverImpl` seam described below, and both are diagrammed here. That the legacy path is the concrete implementation today is verifiable directly in the adapter, which `#include`s the legacy C header: `#include "ccec/drivers/hdmi_cec_driver.h"`. `Source: hdmicec/ccec/src/DriverImpl.cpp`. The AIDL/Binder contract is the modern replacement standardised by `rdk-halif-aidl`, and swapping between the two is confined to the single adapter class — the essence of the *Bundle 1: RDK-V — CEC HAL Migration* effort (see §4).
+Both paths are anchored on the real `Driver` / `DriverImpl` seam described below, and both are diagrammed here. That the legacy path is the concrete implementation today is verifiable directly in the adapter, which `#include`s the legacy C header: `#include "ccec/drivers/hdmi_cec_driver.h"`. `Source: hdmicec/ccec/src/DriverImpl.cpp`. The AIDL/Binder contract is the modern replacement standardised by `rdk-halif-aidl`; adopting it is **confined to the single adapter class**, but it is **not** a mechanical body-swap — the AIDL contract differs from the legacy C API in lifecycle, status/error reporting, callback model, and address APIs, so the adapter must translate between the two (enumerated in §4). This is the essence of the *Bundle 1: RDK-V — CEC HAL Migration* effort.
 
 ## Related documents
 
@@ -48,9 +48,9 @@ The middleware isolates itself from any specific HAL behind a single **abstract,
 - a **lifecycle status** enum `{ CLOSED = 0, CLOSING, OPENED }` tracked by the `status` member, plus a `nativeHandle` for the opened HAL instance and a `std::list<LogicalAddress> logicalAddresses` of claimed addresses. `Source: hdmicec/ccec/src/DriverImpl.hpp`.
 - two **static HAL callbacks** with C-compatible signatures that the backend can invoke: `DriverReceiveCallback(int handle, void *callbackData, unsigned char *buf, int len)` for inbound frames and `DriverTransmitCallback(int handle, void *callbackData, int result)` for transmit-result notifications. `Source: hdmicec/ccec/src/DriverImpl.hpp`.
 
-Every public method of `DriverImpl` runs under an OSAL mutex (`AutoLock lock_(mutex)`), so the adapter serialises all access to the HAL from the middleware's threads — a property that matters because the legacy C HAL is explicitly *not* thread-safe (see §2). `Source: hdmicec/ccec/src/DriverImpl.cpp`.
+Most of `DriverImpl`'s HAL-facing methods take an OSAL mutex (`AutoLock lock_(mutex)`) at entry — `open`, `close`, `write`, `writeAsync`, `addLogicalAddress`, `removeLogicalAddress`, `getLogicalAddress`, `getPhysicalAddress`, and `isValidLogicalAddress` — so concurrent calls through the adapter are serialised while that mutex is held. This matters because the legacy C HAL is explicitly *not* thread-safe (see §2). Three qualifications apply, however, and are visible in the source: (1) `read()` takes the mutex only to check state, then **releases it before blocking** on `rQueue.poll()`; (2) the static callbacks `DriverReceiveCallback` / `DriverTransmitCallback`, the accessor `getIncomingQueue()`, and `printFrameDetails()` do **not** take the adapter mutex (`poll()` acquires no mutex of its own, but reaches the HAL by delegating to the locked `write()`); and (3) the adapter's callers are not only the `Bus` threads — `LibCCEC` invokes `open`/`close`/`addLogicalAddress`/`getLogicalAddress`/`getPhysicalAddress`, and `Connection` invokes `isValidLogicalAddress`, directly via `Driver::getInstance()`. `Source: hdmicec/ccec/src/DriverImpl.cpp`, `hdmicec/ccec/src/LibCCEC.cpp`, `hdmicec/ccec/src/Connection.cpp`.
 
-Because the middleware depends only on `Driver`, changing which HAL sits beneath the seam is a change to `DriverImpl` alone; nothing above it is aware of the swap. The remainder of this document walks the two concrete backends that `DriverImpl` bridges to.
+Because the middleware depends only on `Driver`, adopting a different HAL beneath the seam is localised to `DriverImpl`; nothing above it is aware of the change (though, as §4 details, that change is a genuine re-implementation of the adapter, not merely re-pointing calls). The remainder of this document walks the two concrete backends that `DriverImpl` bridges to.
 
 ---
 
@@ -60,18 +60,22 @@ On the legacy path, `DriverImpl` binds **in-process** to the vendor C library (`
 
 ### 2.1 Method mapping (abstract → concrete C call)
 
-`DriverImpl` translates each abstract `Driver` method into the corresponding legacy C function. The following mappings are verified against the adapter implementation. `Source: hdmicec/ccec/src/DriverImpl.cpp`, `rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`.
+`DriverImpl` implements each abstract `Driver` method; most translate directly into a legacy C function, while a few are serviced locally — from the incoming queue or the adapter's own state — and make no HAL call. All mappings below are verified against the adapter implementation. `Source: hdmicec/ccec/src/DriverImpl.cpp`, `rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`.
 
 | `Driver` method | Legacy C HAL call(s) | Notes |
 |-----------------|----------------------|-------|
 | `open()` | `HdmiCecOpen(&nativeHandle)`, then `HdmiCecSetRxCallback(nativeHandle, DriverReceiveCallback, 0)` and `HdmiCecSetTxCallback(nativeHandle, DriverTransmitCallback, 0)` | Opens the instance and registers the receive/transmit callbacks; on success `status` becomes `OPENED`. |
 | `close()` | `HdmiCecClose(nativeHandle)` | Offers a `NULL` sentinel to `rQueue` first to unblock the reader, then closes. |
-| `write()` | `HdmiCecTx(nativeHandle, buf, length, &sendResult)` | **Synchronous** — writes a complete frame and waits for ACK. A directed message that returns `HDMI_CEC_IO_SENT_BUT_NOT_ACKD` raises `CECNoAckException`; a hard error raises `IOException`. |
+| `write()` | `HdmiCecTx(nativeHandle, buf, length, &sendResult)` | **Synchronous** — writes a complete frame and waits for ACK. A hard error raises `IOException`. Two distinct NACK paths raise `CECNoAckException` on `HDMI_CEC_IO_SENT_BUT_NOT_ACKD`: (a) a **directed** message (`(frame.at(0) & 0x0F) != 0x0F`); and (b) a **broadcast** `REPORT_PHYSICAL_ADDRESS` message (`(frame.at(0) & 0x0F) == 0x0F` with opcode `REPORT_PHYSICAL_ADDRESS`), the latter to satisfy CEC CTS 9-3-3. |
 | `writeAsync()` | `HdmiCecTxAsync(nativeHandle, buf, length)` | The **deprecated** fire-and-forget variant. |
 | `addLogicalAddress()` | `HdmiCecAddLogicalAddress(nativeHandle, source.toInt())` | Throws `AddressNotAvailableException` on `HDMI_CEC_IO_LOGICALADDRESS_UNAVAILABLE`. |
 | `removeLogicalAddress()` | `HdmiCecRemoveLogicalAddress(nativeHandle, source.toInt())` | Also removes the address from the local `logicalAddresses` list. |
-| `getLogicalAddress()` | `HdmiCecGetLogicalAddress(nativeHandle, &logicalAddress)` | Returns the queried logical address. |
+| `getLogicalAddress()` | `HdmiCecGetLogicalAddress(nativeHandle, &logicalAddress)` | Returns the logical address reported by the HAL. Although the `Driver` signature takes a `devType`, the current implementation **ignores it** (it is only logged) and does not pass it to `HdmiCecGetLogicalAddress()`. |
 | `getPhysicalAddress()` | `HdmiCecGetPhysicalAddress(nativeHandle, physicalAddress)` | Fills the caller-provided physical-address out-parameter. |
+| `read()` | *(none — local incoming queue)* | Drains the next frame from the incoming `rQueue`; takes the mutex only for the state check and releases it before blocking on `rQueue.poll()`. Makes no HAL call. |
+| `isValidLogicalAddress()` | *(none — local state)* | Returns whether `source` is present in the adapter's local `logicalAddresses` list. Makes no HAL call. |
+| `poll()` | `HdmiCecTx(...)` via `write()` | Builds a one-byte frame from the `from`/`to` nibbles and calls `write()`, so it reaches the HAL through `HdmiCecTx()` rather than a dedicated poll function. |
+| `printFrameDetails()` | *(none — diagnostic)* | Formats and logs the frame's bytes and opcode/header for debugging. Makes no HAL call. |
 
 The C library also declares the two callback function-pointer types the adapter registers: `HdmiCecRxCallback_t(int handle, void *callbackData, unsigned char *buf, int len)` for received frames and the **deprecated** `HdmiCecTxCallback_t(int handle, void *callbackData, int result)` for async transmit results. `Source: rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`.
 
@@ -84,7 +88,7 @@ Reception is push-driven from the bottom up: the SoC driver, via the legacy HAL,
 Two properties of the legacy C contract shape the middleware's design:
 
 - **Synchronous transmit.** `HdmiCecTx()` is documented as a *"Synchronous transmit call"* that *"writes a complete CEC message onto the bus and waits for ACK."* `Source: rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`.
-- **Not thread-safe.** The C HAL functions are repeatedly annotated *"This API is NOT thread safe."* `Source: rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`. The middleware therefore serialises every HAL call through the `Bus` threads and the OSAL mutex held inside `DriverImpl`. `Source: hdmicec/ccec/src/DriverImpl.cpp`.
+- **Not thread-safe.** The C HAL functions are repeatedly annotated *"This API is NOT thread safe."* `Source: rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`. The middleware's principal defence is the OSAL mutex taken inside `DriverImpl`'s HAL-facing methods (enumerated in §1.2), which serialises the calls that acquire it. Note that not every entry point locks and that callers include `LibCCEC` and `Connection` directly — not only the `Bus` threads. `Source: hdmicec/ccec/src/DriverImpl.cpp`.
 
 **Diagram 1 — Legacy C HAL interaction (in-process, no IPC).** All of `Connection`/`Bus`, `DriverImpl`, and the Legacy C HAL live in the same process; only the SoC silicon sits below them.
 
@@ -119,13 +123,13 @@ sequenceDiagram
     DI->>DI: wrap bytes in CECFrame, rQueue.offer(frame)
 ```
 
-Every arrow above is an in-process function call. The only truly asynchronous element is the receive callback, which the HAL raises on its own thread; `DriverImpl` immediately hands the frame to `rQueue` so the middleware's reader thread can process it without blocking the HAL.
+Every arrow above is an in-process function call. The asynchronous element is the receive callback: when the HAL invokes the registered `DriverReceiveCallback`, the adapter copies the raw bytes into a freshly allocated `CECFrame` and enqueues it on `rQueue` via `offer()`. The HAL contract does **not** specify which thread runs the callback, and `EventQueue::offer()` acquires the queue's own mutex, so whether the enqueue can block is likewise unspecified — the callback's execution context and blocking behaviour should be treated as undefined by the contract. `Source: hdmicec/ccec/src/DriverImpl.cpp`.
 
 ---
 
 ## 3. AIDL/Binder HAL Path (migration target)
 
-The modern contract standardises the HAL over **AIDL/Binder IPC** to an **out-of-process** service. The service is published under the name `com.rdk.hal.hdmicec` and registers with the Service Manager using the string constant `IHdmiCec.serviceName = "HdmiCec"`. `Source: rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/IHdmiCec.aidl`. In this model, `DriverImpl` (or its AIDL successor) is the **Binder client**, and every call below crosses the **process boundary** — the defining contrast with the in-process legacy path in §2. All three interfaces are declared `@VintfStability`. `Source: rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/IHdmiCec.aidl`.
+The modern contract standardises the HAL over **AIDL/Binder IPC** to an **out-of-process** service. Three identifiers must be kept distinct: the **AIDL package** (namespace) `com.rdk.hal.hdmicec`, in which the interfaces are declared; the **interface** `IHdmiCec` (fully qualified `com.rdk.hal.hdmicec.IHdmiCec`); and the **service registration name** `HdmiCec`, the value of the `IHdmiCec.serviceName` string constant, under which the service registers with — and is looked up from — the Service Manager. The package name is therefore *not* the service name. `Source: rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/IHdmiCec.aidl`. In this model, `DriverImpl` (or its AIDL successor) is the **Binder client**, and every call below crosses the **process boundary** — the defining contrast with the in-process legacy path in §2. All three interfaces are declared `@VintfStability`. `Source: rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/IHdmiCec.aidl`.
 
 ### 3.1 `IHdmiCec` — the service / session interface
 
@@ -171,7 +175,7 @@ sequenceDiagram
         participant DI as DriverImpl (AIDL client)
         participant LSN as IHdmiCecEventListener (client callback)
     end
-    box transparent HAL service process, out-of-process, com.rdk.hal.hdmicec
+    box transparent HAL service process (out-of-process) — service 'HdmiCec', package com.rdk.hal.hdmicec
         participant SVC as IHdmiCec service
         participant CTRL as IHdmiCecController
     end
@@ -202,23 +206,35 @@ Contrast with Diagram 1: here the `DI ⇄ SVC/CTRL` arrows and the `SVC/CTRL →
 
 ---
 
-## 4. The Migration Seam and Rationale
+## 4. The Migration Seam and Required Adaptations
 
-Because the middleware depends **only** on the abstract `Driver` contract — never on a concrete HAL — replacing the backend is localised entirely to `DriverImpl`, the single adapter. `Source: hdmicec/ccec/include/ccec/Driver.hpp`, `hdmicec/ccec/src/DriverImpl.hpp`. Moving from the Legacy C HAL to the AIDL/Binder HAL therefore means re-pointing that one adapter's method bodies from the in-process `HdmiCec*` C calls (§2) to out-of-process `IHdmiCec` / `IHdmiCecController` Binder calls (§3), while `LibCCEC`, `Connection`, `Bus`, and the message pipeline stay untouched. This localised, contract-preserving swap is the core of the *Bundle 1: RDK-V — CEC HAL Migration* effort.
+Because the middleware depends **only** on the abstract `Driver` contract — never on a concrete HAL — adopting a different backend is localised entirely to `DriverImpl`, the single adapter, while `LibCCEC`, `Connection`, `Bus`, and the message pipeline stay untouched. `Source: hdmicec/ccec/include/ccec/Driver.hpp`, `hdmicec/ccec/src/DriverImpl.hpp`. This localisation is what makes the *Bundle 1: RDK-V — CEC HAL Migration* effort tractable.
 
-The swap is safe precisely because both backends honour the **same responsibility split** between the HAL and the middleware. `Source: rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`.
+That localisation, however, is **not** the same as a mechanical body-swap. The AIDL/Binder contract (§3) is presented here as the **target adapter** — the interface a future `DriverImpl` must satisfy — and it differs from the legacy C API (§2) in several ways the adapter must reconcile in order to keep honouring the existing `Driver` contract (§1.1). The concrete adaptations are:
+
+| `Driver` contract expectation (§1.1) | Legacy C HAL (§2) | AIDL/Binder HAL (§3) | Adaptation the adapter must perform |
+|---|---|---|---|
+| **Lifecycle** — `open(void)` / `close(void)` | `HdmiCecOpen(&handle)` / `HdmiCecClose(handle)`; a bare integer handle, no session object | `IHdmiCec.open(listener)` returns an `IHdmiCecController` session; `close(controller)`; explicit `State { CLOSED, STARTED }`; single-open constraint; implicit `close()` on client crash | Hold and drive the returned `IHdmiCecController`, track the `State` model, and observe/enforce the single-open rule instead of a bare handle. |
+| **Transmit status** | `sendResult` codes such as `HDMI_CEC_IO_SENT_AND_ACKD` / `HDMI_CEC_IO_SENT_BUT_NOT_ACKD` / `HDMI_CEC_IO_SENT_FAILED` | `SendMessageStatus { ACK_STATE_0, ACK_STATE_1, BUSY }` returned from `sendMessage()` | Map `SendMessageStatus` onto the `Driver` transmit-status semantics and onto the existing `CECNoAckException` / `IOException` decisions. |
+| **Error reporting** | integer return codes inspected inline; adapter throws `CECNoAckException` / `IOException` / `AddressNotAvailableException` | Binder status / service-specific exceptions (`EX_SERVICE_SPECIFIC`, `EX_ILLEGAL_ARGUMENT`, …) | Translate Binder exceptions into the same C++ exception types the middleware already catches. |
+| **Receive/transmit callbacks** | C function pointers `HdmiCecSetRxCallback` / `HdmiCecSetTxCallback` invoking `DriverReceiveCallback` / `DriverTransmitCallback` | `oneway IHdmiCecEventListener` with `onMessageReceived` / `onStateChanged` / `onMessageSent`, delivered over Binder | Implement the listener interface and funnel `onMessageReceived()` into the same `rQueue.offer()` path the legacy callback uses. |
+| **Logical addresses** — single `addLogicalAddress` / `removeLogicalAddress` / `getLogicalAddress(devType)` / `isValidLogicalAddress` | one-at-a-time C calls; adapter keeps a local `logicalAddresses` list | batch `addLogicalAddresses(int[])` / `removeLogicalAddresses(int[])` / `getLogicalAddresses()`; **no** per-`devType` query and **no** dedicated `isValidLogicalAddress` | Bridge the single-address calls onto the batch array APIs, and continue servicing `getLogicalAddress`/`isValidLogicalAddress` from local state. |
+| **Physical address** — `getPhysicalAddress(unsigned int *)` | `HdmiCecGetPhysicalAddress(handle, out)` | **not provided** by the AIDL HDMI-CEC interfaces | Source the physical address elsewhere (e.g. host / device-settings), since the AIDL contract exposes no equivalent. |
+| **Async transmit** — `writeAsync` | `HdmiCecTxAsync()` (deprecated) | **no** asynchronous send — only synchronous `sendMessage()` | Emulate `writeAsync` on top of `sendMessage()`, or treat it as unsupported, as the AIDL contract has no fire-and-forget send. |
+
+Underlying these adaptations, both backends do share the same **responsibility split** between HAL and middleware, which is why the migration is confined to the adapter rather than rippling through the stack. `Source: rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`.
 
 | Concern | Owner | Responsibilities |
 |---------|-------|------------------|
 | **Low-level CEC protocol** | **HAL** (Legacy C or AIDL) | Electrical timing, bus arbitration, frame re-transmission/retries, and ACK sampling, per HDMI-CEC 1.4b. Frames are treated as **opaque** byte buffers. |
 | **High-level CEC protocol** | **CCEC middleware** | Device discovery, logical-address allocation, and message semantics — opcode/operand encoding, decoding, and dispatch through the `Message*` pipeline. |
 
-Two consequences follow from this split and are visible in both diagrams:
+Two further properties are common to both backends and are visible in the diagrams:
 
 - The HAL never parses a frame; the caller must pass a **fully-formed** frame (header block + data blocks). All opcode/operand meaning lives in the middleware. `Source: rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`.
-- Transmit is **synchronous** on both backends (`HdmiCecTx()` / `sendMessage()`), and the HAL provides **no queuing** — the middleware's `Bus` performs the queuing and one-in-flight serialisation above the seam. `Source: rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`, `rdk-halif-aidl/hdmicec/current/docs/hdmi_cec.md`.
+- Transmit is **synchronous** on both (`HdmiCecTx()` / `sendMessage()`), and the HAL provides **no queuing** — the middleware's `Bus` performs the queuing and one-in-flight serialisation above the seam. `Source: rdk-halif-hdmi_cec/include/hdmi_cec_driver.h`, `rdk-halif-aidl/hdmicec/current/com/rdk/hal/hdmicec/IHdmiCecController.aidl`.
 
-The only behavioural difference the middleware must absorb at the seam is **transport locality**: the legacy path is in-process C function calls, while the AIDL path is out-of-process Binder IPC with `oneway` event callbacks. Everything above `DriverImpl` is insulated from that difference.
+Beyond the shared split, **transport locality** is only the most visible difference — in-process C calls versus out-of-process Binder IPC with `oneway` callbacks. As the adaptation table above shows, the migration additionally requires the adapter to reconcile lifecycle, status, error, callback, and address-API differences. Everything *above* `DriverImpl` remains insulated from all of these; the adapter absorbs them.
 
 ---
 

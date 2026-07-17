@@ -36,10 +36,12 @@
 CCEC_OSAL_BEGIN_NAMESPACE
 
 /**
- * @brief Static C-linkage entry trampoline used to launch a thread.
+ * @brief Static pthread entry trampoline used to launch a thread.
  *
- * Casts the supplied argument back to a Runnable pointer and invokes its run()
- * method. Passed as the start routine to @c pthread_create().
+ * A static C++ member function whose signature is compatible with the
+ * @c pthread_create() start-routine callback; it is not declared with C
+ * language linkage. Casts the supplied argument back to a Runnable pointer and
+ * invokes its run() method. Passed as the start routine to @c pthread_create().
  *
  * @param[in] arg   Opaque pointer to the Runnable target to execute.
  * @return Always returns NULL when the runnable completes.
@@ -53,6 +55,8 @@ void *Thread::CEntry(void * arg)
 
 /**
  * @brief Constructs a Thread bound to a Runnable target.
+ *
+ * @param[in] target   Runnable whose run() method is executed by run() or start().
  */
 Thread::Thread(Runnable &target) : runnable(target), nativeHandle(0)
 {
@@ -60,6 +64,9 @@ Thread::Thread(Runnable &target) : runnable(target), nativeHandle(0)
 
 /**
  * @brief Constructs a named Thread bound to a Runnable target.
+ *
+ * @param[in] target   Runnable whose run() method is executed by run() or start().
+ * @param[in] name     Null-terminated name assigned to the thread context.
  */
 Thread::Thread(Runnable &target, const int8_t* name) : runnable(target), name((const char *)name), nativeHandle(0)
 {
@@ -91,9 +98,12 @@ void Thread::run(void)
 /**
  * @brief Starts a new detached POSIX thread executing the Runnable target.
  *
- * Initializes thread attributes for a detached, @c SCHED_OTHER thread and creates
- * it via @c pthread_create() with CEntry() as the start routine. On success the
- * native thread identifier is stored for a later detach().
+ * Initializes thread attributes with @c PTHREAD_CREATE_DETACHED and
+ * @c SCHED_OTHER, then creates the thread via @c pthread_create() with CEntry()
+ * as the start routine. Because the thread is created in the detached state, its
+ * resources are reclaimed automatically on termination without a join or a
+ * subsequent detach. On success the native thread identifier is stored and is
+ * retrievable via getNativeHandle().
  *
  * @see run(), detach(), CEntry()
  */
@@ -119,10 +129,12 @@ void Thread::start()
 }
 
 /**
- * @brief Detaches the underlying native thread.
+ * @brief Invokes @c pthread_detach() on the stored native thread handle.
  *
- * Detaches the stored native thread handle via @c pthread_detach(), allowing its
- * resources to be reclaimed automatically upon termination.
+ * Calls @c pthread_detach() with the handle saved by start(). Threads created by
+ * start() are already in the detached state, so this call does not itself
+ * establish detachment; its return status is not checked and no state transition
+ * is guaranteed.
  *
  * @see start()
  */

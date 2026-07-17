@@ -46,11 +46,17 @@
  * library @c assert(expr). The macro expands to a <tt>do { ... } while (0)</tt>
  * block, so it behaves as a single statement and yields no value.
  *
- * @param expr Boolean expression expected to be @c true; when it evaluates to
+ * @param[in] expr Boolean expression expected to be @c true; when it evaluates to
  *             @c false the diagnostic is printed and @c assert(expr) is invoked.
  *
+ * @warning @p expr must be side-effect free. It is evaluated by the internal
+ *          <tt>if (!(expr))</tt> guard and again by @c assert(expr), so it can be
+ *          evaluated more than once; in particular, when the first evaluation is
+ *          @c false it is re-evaluated by @c assert(). Supplying an expression
+ *          with side effects can therefore change program behavior.
+ *
  * @note An alternative class-based @c Assert implementation is retained under the
- *       disabled <tt>#if 0</tt> block below and is intentionally compiled out; the
+ *       disabled <tt>\#if 0</tt> block below and is intentionally compiled out; the
  *       macro form below is the one in effect.
  */
 CCEC_BEGIN_NAMESPACE

@@ -132,8 +132,10 @@ void check_cec_log_status(void);
 /**
  * @brief printf-style CEC logging entry point; emits a formatted message when
  *        @p level is within the currently-enabled verbosity threshold.
- * @param[in] level  Severity of the message; one of the @c LOG_* constants
- *                   (@ref LOG_FATAL through @ref LOG_MAX).
+ * @param[in] level  Severity of the message; one of the valid @c LOG_* constants
+ *                   from @ref LOG_FATAL through @ref LOG_TRACE. @ref LOG_MAX is a
+ *                   sentinel one past the last valid level and is the exclusive
+ *                   upper bound: output is gated by <tt>level < LOG_MAX</tt>.
  * @param[in] format printf-style format string describing the message.
  * @param[in] ...    Variadic arguments substituted into @p format, matching its
  *                   conversion specifiers.
@@ -156,7 +158,7 @@ void dump_buffer(unsigned char * buf, int len);
  * @brief Converts an 8-bit binary value (0-99) to its two-nibble Binary-Coded-Decimal (BCD) form.
  *
  * The tens digit is placed in the high nibble and the units digit in the low nibble.
- * @param byte_ The binary value to convert.
+ * @param[in] byte_ The binary value to convert.
  */
 #define BYTE_TO_BCD(byte_) (((((byte_) / 10) & 0x0F) << 4) | (((byte_) % 10) & 0x0F))
 /**
@@ -165,7 +167,7 @@ void dump_buffer(unsigned char * buf, int len);
  *
  * The high nibble is interpreted as the tens digit and the low nibble as the
  * units digit, yielding @c ((high * 10) + low).
- * @param byte_ The BCD-encoded value to convert.
+ * @param[in] byte_ The BCD-encoded value to convert.
  */
 #define BCD_TO_BYTE(byte_) (((((byte_) & 0xF0) >> 4) * 10) + (((byte_) & 0x0F)))
 

@@ -46,11 +46,15 @@
 
 /**
  * @def CEC_NAMESPACE
- * @brief Feature marker that enables the CEC namespace scaffolding for the module.
+ * @brief Object-like marker macro defined unconditionally by this header.
  *
- * Defined unconditionally by this header as an empty object-like macro to flag
- * that the CCEC namespace scaffolding is available to translation units that
- * include it.
+ * This header defines @c CEC_NAMESPACE (single-C spelling) as an empty
+ * object-like macro. Document-as-is: defining @c CEC_NAMESPACE does @b not
+ * activate the namespace wrapper macros. CCEC_BEGIN_NAMESPACE / CCEC_END_NAMESPACE
+ * are gated below on the differently spelled @c CCEC_NAMESPACE (double-C) macro,
+ * so whether the @c CCEC namespace is opened depends solely on whether
+ * @c CCEC_NAMESPACE is separately defined (for example, by the build), and not
+ * on @c CEC_NAMESPACE defined here.
  */
 #define CEC_NAMESPACE
 
@@ -62,6 +66,8 @@
  * <tt>namespace CCEC {</tt>, wrapping all subsequent CCEC declarations in the
  * @c CCEC namespace; otherwise it expands to nothing and the declarations are
  * emitted in the global namespace.
+ * @note The gating macro is @c CCEC_NAMESPACE (double-C), which is distinct from
+ * the @c CEC_NAMESPACE marker defined above; the two are not interchangeable.
  *
  * @def CCEC_END_NAMESPACE
  * @brief Closes the namespace scope opened by @c CCEC_BEGIN_NAMESPACE.

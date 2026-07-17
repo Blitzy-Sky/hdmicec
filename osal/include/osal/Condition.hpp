@@ -42,6 +42,7 @@ CCEC_OSAL_BEGIN_NAMESPACE
 
 /***************************************************************************/
 /*!
+\brief Simple boolean state abstraction used by ConditionVariable.
 
 This is a simple class which abstract boolean functionality and is used by 
 ConditionVariable class. 
@@ -65,7 +66,7 @@ Creates an Condition object with state set to false.
 \brief Constructor.
 Creates an Condition object with state set to given parameter.
 
-\param initial - initial state to be set. This will be set as default state 
+\param[in] initial - initial state to be set. This will be set as default state 
 of the object as well.
 */
 /**************************************************************************/
@@ -82,11 +83,9 @@ Destroys the Condition object.
 
 /***************************************************************************/
 /*!
-\brief Set the state of the object.
-Sets the state of the object, which will be either true/false.
-
-\param cond - state to be set.This will default to true is method called with
- no parameters.
+\brief Set the state of the object to true.
+Unconditionally sets the boolean state of the object to true. This overload
+takes no parameters.
 */
 /**************************************************************************/
 

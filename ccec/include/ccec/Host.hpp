@@ -85,8 +85,8 @@ typedef enum {
  * powered off in response to CEC activity.
  */
 typedef struct _CECHost_Policy_t {
-	int32_t turnOffTv;  ///< Non-zero if policy permits turning the TV off.
-	int32_t turnOffSTB;  ///< Non-zero if policy permits turning the STB off.
+	int32_t turnOffTv;  ///< Host policy field concerning turning the TV off (value encoding defined by the host).
+	int32_t turnOffSTB;  ///< Host policy field concerning turning the STB off (value encoding defined by the host).
 } CECHost_Policy_t;
 
 /**
@@ -111,7 +111,7 @@ typedef struct _CECHost_DeviceStatus_t
 	union{
 		int powerState;  ///< Power state; valid when statusType == CECHost_POWER_STATUS.
 		int isConnected;  ///< Connection state; valid when statusType == CECHost_CONNECTED_STATUS.
-		char osdName[14+1];  ///< OSD name buffer (14 chars + NUL); valid when statusType == CECHost_OSD_NAME.
+		char osdName[14+1];  ///< OSD name buffer of 15 bytes (char[14+1]), storage capacity only; NUL termination is not guaranteed. Valid when statusType == CECHost_OSD_NAME.
 	}data;  ///< Status payload; the active member is selected by statusType.
 }CECHost_DeviceStatus_t;
 
@@ -146,13 +146,17 @@ typedef CECHost_Err_t (*CECHost_PowerStateCallback_t)	(int32_t curState, int32_t
  * @return @c CECHost_ERR_NONE on success, or another @c CECHost_Err_t error code.
  */
 typedef CECHost_Err_t (*CECHost_DevMgrStatusCallback_t) (bool ipStatus,bool* opStatus);
-/**
- * @brief Callback invoked by the host to notify CEC of the latest OSD name.
- *
+/*
  * Description: Notify CEC of the latest OSD name.
  *
  * The 'name' need not be null terminated. if it is, the 'len' does
  * not include the 'null' termintator.
+ *
+ * @param name: the ASCII bytes of the OSD name.
+ * @param len:  the number of ASCII bytes.
+ */
+/**
+ * @brief Callback invoked by the host to notify CEC of the latest OSD name.
  *
  * @param[in] name the ASCII bytes of the OSD name.
  * @param[in] len  the number of ASCII bytes.
@@ -207,12 +211,14 @@ CECHost_Err_t CECHost_SetCallback(CECHost_Callback_t cb);
 /**
  * @brief Retrieve the physical address of the HDMI output.
  *
- * The physical address is returned as its four constituent bytes.
+ * The physical address is returned via four output byte parameters. Their
+ * ordering and composition within the physical address are defined by the host
+ * implementation and are not specified by this declaration.
  *
- * @param[out] byte0 Receives the first byte of the physical address.
- * @param[out] byte1 Receives the second byte of the physical address.
- * @param[out] byte2 Receives the third byte of the physical address.
- * @param[out] byte3 Receives the fourth byte of the physical address.
+ * @param[out] byte0 Receives output byte @c byte0 of the HDMI output physical address.
+ * @param[out] byte1 Receives output byte @c byte1 of the HDMI output physical address.
+ * @param[out] byte2 Receives output byte @c byte2 of the HDMI output physical address.
+ * @param[out] byte3 Receives output byte @c byte3 of the HDMI output physical address.
  * @return @c CECHost_ERR_NONE on success, or another @c CECHost_Err_t error code.
  */
 CECHost_Err_t CECHost_GetHdmiOuputPhysicalAddress(uint8_t *byte0, uint8_t *byte1, uint8_t *byte2, uint8_t *byte3);
@@ -245,7 +251,7 @@ CECHost_Err_t CECHost_SetPowerState(int32_t state);
 
 /* Device Status */
 /**
- * @brief Update the cached status of a logical CEC device.
+ * @brief Update the status of a logical CEC device.
  *
  * @param[in] logicalAddress The logical address of the device to update.
  * @param[in] deviceStatus   The status attribute to store for the device.
@@ -255,13 +261,17 @@ CECHost_Err_t CECHost_SetDeviceStatus(int logicalAddress, CECHost_DeviceStatus_t
 
 /* CEC Control */
 
-/**
- * @brief Get the OSD name from the host module.
- *
+/*
  * Description: Get the OSD name from Host module.
  *
  * The 'name' need not be null terminated. if it is, the 'len' does
  * not include the 'null' termintator.
+ *
+ * @param name: the ASCII bytes of the OSD name.
+ * @param len:  the number of ASCII bytes.
+ */
+/**
+ * @brief Get the OSD name from the host module.
  *
  * @param[out] name the ASCII bytes of the OSD name.
  * @param[out] len  the number of ASCII bytes.
@@ -278,9 +288,7 @@ CECHost_Err_t CECHost_GetOSDName(uint8_t *name, size_t *len);
 CECHost_Err_t CECHost_GetPolicy(CECHost_Policy_t *policy);
 
 
-/**
- * @brief Query whether the box is currently an active source.
- *
+/*
  * If box is an active source is different from its power state.
  * I.e. a PowerOn STB in lightsleep may not claim to be an
  * active source.
@@ -290,24 +298,27 @@ CECHost_Err_t CECHost_GetPolicy(CECHost_Policy_t *policy);
  * Active imples ON
  * Inactive does not imply STANDBY
  *
+ */
+/**
+ * @brief Query whether the box is currently an active source.
+ *
  * @param[out] active Receives non-zero if the box is an active source, zero otherwise.
  * @return @c CECHost_ERR_NONE on success, or another @c CECHost_Err_t error code.
  */
 CECHost_Err_t CECHost_IsActive(int32_t *active);
 
 
+/*
+ * Host Plugin Need not implement these two APIs.
+ */
 /**
  * @brief Load the host plugin.
- *
- * @note Host Plugin Need not implement these two APIs.
  *
  * @return @c CECHost_ERR_NONE on success, or another @c CECHost_Err_t error code.
  */
 CECHost_Err_t CECHost_LoadPlugin(void);
 /**
  * @brief Unload the host plugin.
- *
- * @note Host Plugin Need not implement these two APIs.
  *
  * @return @c CECHost_ERR_NONE on success, or another @c CECHost_Err_t error code.
  */

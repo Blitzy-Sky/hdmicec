@@ -38,10 +38,11 @@ CCEC_BEGIN_NAMESPACE
  * @brief Empty tag type used to select the "throw on error" overloads of the CCEC APIs.
  *
  * @c Throw_e carries no data members; it exists purely as a disambiguating parameter type.
- * Passing a @c Throw_e argument to an overloaded @c Connection or @c Driver send/poll
- * operation selects the variant that reports failures by throwing a CCEC @c Exception,
- * as opposed to the variant that reports failure through a return value. Its presence in a
- * function signature therefore signals "throw on error" semantics at the call site.
+ * In this repository it is used only by the overloaded @c Connection send/sendTo/poll/ping
+ * operations: passing a @c Throw_e argument selects the variant that reports failures by
+ * throwing a CCEC @c Exception, as opposed to the variant that reports failure through a
+ * return value. Its presence in a function signature therefore signals "throw on error"
+ * semantics at the call site.
  */
 typedef struct _Throw_e{
 	/*Empty Struct */
@@ -77,7 +78,8 @@ private:
  * @brief Exception raised when a transmitted CEC message is not acknowledged by the follower.
  *
  * Indicates that a CEC frame was placed on the bus but the addressed follower device did not
- * acknowledge (ACK) it, so the message was not received by the intended target.
+ * acknowledge (ACK) it. This establishes only that the frame was not acknowledged; it does
+ * not by itself prove whether the intended target received the frame.
  */
 class CECNoAckException : public Exception
 {

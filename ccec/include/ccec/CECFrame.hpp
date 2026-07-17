@@ -73,6 +73,9 @@ class CECFrame {
          * @param[in] buf Source bytes to copy into the frame. May be NULL to
          *                create an empty frame. Defaults to NULL.
          * @param[in] len Number of bytes to copy from @p buf. Defaults to 0.
+         * @throws std::out_of_range If @p len exceeds the frame's storage capacity
+         *         (@c MAX_LENGTH): construction copies via append(), which throws
+         *         (message "Frame grows beyond maximum") once the buffer is full.
          */
         CECFrame(const uint8_t *buf = NULL, size_t len = 0);
         /**
@@ -99,6 +102,8 @@ class CECFrame {
          * @brief Appends a single byte to the end of the frame.
          *
          * @param[in] byte The byte value to append.
+         * @throws std::out_of_range With message "Frame grows beyond maximum" when
+         *         the frame is already at @c MAX_LENGTH bytes.
          */
         void append(uint8_t byte);
         /**
@@ -106,12 +111,17 @@ class CECFrame {
          *
          * @param[in] buf Pointer to the source bytes to append.
          * @param[in] len Number of bytes to append from @p buf.
+         * @throws std::out_of_range With message "Frame grows beyond maximum" if
+         *         appending the bytes would exceed @c MAX_LENGTH (bytes are
+         *         appended one at a time).
          */
         void append(const uint8_t *buf, size_t len);
         /**
          * @brief Appends the bytes of another frame to the end of this frame.
          *
          * @param[in] frame The frame whose bytes are appended.
+         * @throws std::out_of_range With message "Frame grows beyond maximum" if
+         *         appending would exceed @c MAX_LENGTH.
          */
         void append(const CECFrame &frame);
         /**
@@ -119,12 +129,20 @@ class CECFrame {
          *
          * @param[out] buf Receives a pointer to the frame's internal byte buffer.
          * @param[out] len Receives the current number of bytes in the frame.
+         * @note The returned pointer refers to storage owned by this CECFrame and
+         *       is valid only for the lifetime of this object; its contents may
+         *       change on subsequent append()/reset() calls. Callers must not
+         *       retain the pointer beyond the frame's lifetime or free it.
          */
         void getBuffer(const uint8_t **buf, size_t *len) const;
         /**
          * @brief Returns a pointer to the internal byte buffer.
          *
-         * @return Pointer to the frame's internal byte buffer.
+         * @return Pointer to the frame's internal byte buffer. The pointer refers
+         *         to storage owned by this CECFrame and is valid only for the
+         *         object's lifetime; its contents may change on subsequent
+         *         append()/reset() calls. Callers must not retain the pointer
+         *         beyond the frame's lifetime or free it.
          */
         const uint8_t * getBuffer(void) const;
         /**
@@ -132,6 +150,8 @@ class CECFrame {
          *
          * @param[in] i Zero-based index of the byte to read.
          * @return The byte value stored at index @p i.
+         * @throws std::out_of_range With message "Frame reads beyond maximum" when
+         *         @p i is greater than or equal to length().
          */
         uint8_t at(size_t i) const;
         /**
@@ -152,6 +172,8 @@ class CECFrame {
          *
          * @param[in] i Zero-based index of the byte to access.
          * @return A reference to the byte stored at index @p i.
+         * @throws std::out_of_range With message "Frame access beyond maximum" when
+         *         @p i is greater than or equal to length().
          */
         uint8_t & operator[](size_t i);
 
