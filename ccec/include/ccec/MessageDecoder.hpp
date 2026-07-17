@@ -45,7 +45,29 @@ class CECFrame;
 class MessageDecoder
 {
 public:
+	/**
+	 * @brief Binds the decoder to the @c MessageProcessor that will handle decoded messages.
+	 *
+	 * Stores the supplied processor reference for later use by decode(), which dispatches
+	 * every decoded message to it. The reference is retained for the lifetime of this
+	 * MessageDecoder, so the referenced @c MessageProcessor must outlive the decoder.
+	 *
+	 * @param[in] processor Reference to the @c MessageProcessor that receives the dispatched, decoded messages.
+	 */
 	MessageDecoder(MessageProcessor & processor) : processor(processor){};
+	/**
+	 * @brief Decodes a raw received CEC frame and dispatches the resulting message.
+	 *
+	 * Parses @p in as a CEC message (header byte, then opcode, then any operands),
+	 * constructs the corresponding high-level typed message, and dispatches it to the
+	 * bound @c MessageProcessor by invoking the matching process() overload. A
+	 * single-byte frame is treated as a Polling message.
+	 *
+	 * @param[in] in The raw received CEC frame to decode and dispatch.
+	 *
+	 * @note Exceptions raised while parsing operands (for example @c InvalidParamException)
+	 *       are caught and logged internally and are not propagated to the caller.
+	 */
 	void decode(const CECFrame &in);
 
 private:
