@@ -28,9 +28,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup osal
+* @defgroup osal OS Abstraction Layer (OSAL)
 * @{
 **/
 
@@ -67,7 +67,9 @@ public:
 \brief Constructor.
 Creates an EventQueue with the provided capacity.
 
-\param cap - Number of elements that could be held in the queue.
+\param[in] cap - Number of elements that could be held in the queue.
+\note The capacity is a hard bound: offer() silently discards elements once
+      the queue is full (see offer()). Defaults to 32.
 */
 /**************************************************************************/
 
@@ -160,7 +162,14 @@ On receiving the signal (event), if there is any consumer thread waiting
 on the queue will come out of wait state and will consume the event.
 
 \exception - if queue is full, method will throw an exception.
-\param E - Object that is to be posted to the queue.
+\param[in] element - Object that is to be posted to the queue.
+\note Despite the exception note above, the current implementation does not
+      throw when the queue is at capacity: the element is silently discarded
+      and the method returns without posting or signalling. Documented as-is.
+\warning When E is a heap-allocated pointer (as used by the CCEC transport for
+         CECFrame*), a silent discard at capacity means the queued pointer is
+         neither stored nor freed by this queue; ownership remains with the
+         caller, so an unguarded caller can leak the element and lose the frame.
 */
 /**************************************************************************/
 

@@ -27,9 +27,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup osal
+* @defgroup osal OS Abstraction Layer (OSAL)
 * @{
 **/
 
@@ -58,6 +58,11 @@ A class that needs thread functionality shall implement Runnable interface and
 object will be passed to Thread on creation of Thread object. 
 On the invocation of start() method of Thread, runnable's run() will be executed 
 in a threaded context.
+
+\note Ownership: the Runnable target passed at construction is held by
+      reference, not copied; the caller must keep the target alive for the
+      entire lifetime of the running thread. The started thread runs detached
+      and is not joined by the destructor.
 */
 /**************************************************************************/
 
@@ -68,7 +73,9 @@ public:
 \brief Constructor
 
  Allocates a new Thread object
- \param target - Object implements Runnable interface.  
+ \param[in] target - Object implements Runnable interface.  
+ \note The target is stored by reference and is not copied; the caller retains
+       ownership and must keep it alive until the thread has finished running.
  */
  /************************************************************************/
 
@@ -78,8 +85,12 @@ public:
 \brief Constructor
 
  Allocates a new Thread object
- \param target - Object implementes Runnable interface.
- \name - Name of the thread context.
+ \param[in] target - Object implements Runnable interface.
+ \param[in] name - Name of the thread context.
+ \note The name is retained in a member string but is not applied to the
+       native thread: start() performs no pthread_setname_np (or equivalent)
+       call, so the stored name has no effect on the created thread.
+       Documented as-is.
  */
  /************************************************************************/
 
@@ -89,6 +100,10 @@ public:
 \brief Destructor
 
  Destroys the Thread object
+ \note The destructor does not join or stop the underlying thread: because the
+       thread is created detached it cannot be joined, and no stop is issued
+       here. A thread already started may continue to run after this object is
+       destroyed; the caller must ensure the Runnable target outlives it.
  */
  /************************************************************************/
 
@@ -98,6 +113,8 @@ public:
 
  If this object is created by passing reference to a runnable object, that 
  object's run() will be executed, otherwise this method does nothing and returns.
+ \note Execution is synchronous in the context of the caller; run() does not
+       spawn a new thread of execution (contrast with start()).
  */
  /************************************************************************/
 
@@ -111,6 +128,13 @@ public:
  The result is that two threads are running concurrently: 
  the current thread (which returns from the call to the start method) 
  and the other thread (which executes its run method).
+ \note The new thread is created in the detached state
+       (PTHREAD_CREATE_DETACHED), so its resources are reclaimed automatically
+       on termination and it cannot be joined.
+ \warning If the underlying pthread_create call fails, the failure is not
+          reported: no exception is thrown and no status is returned, so the
+          caller cannot detect that the thread was not started.
+          Documented as-is.
  */
 /***********************************************************************/
 
@@ -120,6 +144,10 @@ public:
 \brief Stops execution of thread.
 
  Forces the thread to stop executing.
+ \note This method is declared but is not defined in the OSAL sources; any
+       odr-use (actually calling it) produces an undefined-reference link
+       error. It therefore has no runtime effect on its own.
+       Documented as-is.
  */
 /***********************************************************************/
 
@@ -139,6 +167,9 @@ public:
 
  Retrieves native thread handle if thread is started other wise returns null.
  \return native thread handle.
+ \note Like stop(), this method is declared but is not defined in the OSAL
+       sources; any odr-use (calling it) produces an undefined-reference link
+       error. Documented as-is.
  */
 /***********************************************************************/
 

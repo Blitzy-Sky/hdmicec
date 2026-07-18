@@ -28,9 +28,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup osal
+* @defgroup osal OS Abstraction Layer (OSAL)
 * @{
 **/
 
@@ -129,9 +129,44 @@ ConditionVariable by calling notify/notifyAll.
 */
 /**************************************************************************/
 
+/**
+ * @param[in] timeout - Maximum time to wait, expressed in milliseconds. A value
+ *            of 0 waits indefinitely (blocks until signalled via notify() /
+ *            notifyAll()); a non-zero value performs a timed wait of that many
+ *            milliseconds.
+ * @return Signalled/timeout indicator.
+ * @retval 1 - The condition was signalled (also returned for the indefinite
+ *             wait when timeout is 0).
+ * @retval 0 - The non-zero timed wait expired before the condition was set.
+ * @note A negative timeout is not interpreted as "wait forever"; it is converted
+ *       directly to an absolute wake time at or before the current time, so the
+ *       timed wait expires without blocking for any positive duration.
+ * @warning The millisecond-to-timespec conversion only carries into tv_sec when
+ *          the nanoseconds field is strictly greater than 1,000,000,000, so a
+ *          timeout whose remainder lands exactly on the one-second boundary
+ *          leaves an invalid timespec (tv_nsec == 1,000,000,000) that the
+ *          underlying pthread_cond_timedwait() rejects with EINVAL. Because the
+ *          wait loop breaks only on ETIMEDOUT, such an error is ignored while the
+ *          condition is unset and the call busy-spins rather than timing out.
+ *          See the definition in ConditionVariable.cpp. Documented as-is.
+ */
 	long wait(long timeout);
+/**
+ * @brief Signals the condition variable, waking one thread waiting on it.
+ *
+ * Sets the associated condition and wakes a single waiting thread.
+ */
 	void notify(void);
+/**
+ * @brief Signals the condition variable, waking all threads waiting on it.
+ *
+ * Sets the associated condition and wakes every waiting thread.
+ */
 	void notifyAll(void);
+/**
+ * @brief Retrieves the opaque handle to the underlying native condition-variable implementation.
+ * @return Pointer to the native handle (the underlying pthread_cond_t*).
+ */
 	void *getNativeHandle(void);
 private:
 	Condition *cond;

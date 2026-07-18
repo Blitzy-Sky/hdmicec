@@ -19,9 +19,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -46,16 +46,53 @@ CCEC_BEGIN_NAMESPACE
 class MessageEncoder {
 
 public:
+	/**
+	 * @brief Constructs a MessageEncoder instance.
+	 *
+	 * MessageEncoder exposes only static encode() helpers and therefore holds no
+	 * instance state; the default constructor is provided for completeness.
+	 */
 	MessageEncoder(void) {};
+	/**
+	 * @brief Destroys the MessageEncoder instance.
+	 *
+	 * A MessageEncoder owns no resources, so destruction performs no work.
+	 */
 	~MessageEncoder(void) {};
 
 
+	/**
+	 * @brief Encodes a CEC message header together with a data block into an existing CECFrame.
+	 *
+	 * Serializes the header bytes first and then delegates to the data-block overload,
+	 * which appends the opcode and its operands, so that the caller-supplied frame ends
+	 * up holding the complete CEC message.
+	 *
+	 * @param[in]     h    CEC message header carrying the initiator and destination logical addresses.
+	 * @param[in]     m    CEC data block carrying the opcode and its operands.
+	 * @param[in,out] out  The @c CECFrame to which the encoded header and data-block bytes are appended.
+	 * @return Reference to @p out, now holding the fully encoded CEC message, to support call chaining.
+	 * @note POLLING special case: if @p m carries the @c POLLING opcode, no opcode
+	 *       byte is emitted (see the @c encode(const DataBlock&, CECFrame&) overload).
+	 */
 	static CECFrame & encode(const Header &h, const DataBlock &m, CECFrame &out)
     {
         h.serialize(out);
         return encode(m, out);
     }
 
+	/**
+	 * @brief Encodes a CEC message header together with a data block into a new CECFrame.
+	 *
+	 * Allocates a fresh CECFrame, serializes the header followed by the data block's
+	 * opcode and operands into it, and returns the frame by value.
+	 *
+	 * @param[in] h  CEC message header carrying the initiator and destination logical addresses.
+	 * @param[in] m  CEC data block carrying the opcode and its operands.
+	 * @return A newly constructed @c CECFrame containing the fully encoded CEC message.
+	 * @note POLLING special case: if @p m carries the @c POLLING opcode, no opcode
+	 *       byte is emitted (see the @c encode(const DataBlock&, CECFrame&) overload).
+	 */
 	static CECFrame encode(const Header &h, const DataBlock &m)
     {
         CECFrame out;
@@ -63,6 +100,21 @@ public:
         return encode(m, out);
     }
 
+	/**
+	 * @brief Encodes a CEC data block into an existing CECFrame.
+	 *
+	 * Serializes the data block's opcode followed by its operands, appending the
+	 * resulting bytes to the caller-supplied frame.
+	 *
+	 * @param[in]     m    CEC data block carrying the opcode and its operands.
+	 * @param[in,out] out  The @c CECFrame to which the encoded opcode and operand bytes are appended.
+	 * @return Reference to @p out, now holding the encoded data block, to support call chaining.
+	 * @note POLLING special case: when @p m carries the @c POLLING opcode (the
+	 *       pseudo-opcode 0x200, which is not a wire value), OpCode::serialize()
+	 *       emits NO opcode byte, so only the data block's operands follow (none,
+	 *       for a polling message). Every other opcode is written as a single
+	 *       leading byte before its operands.
+	 */
 	static CECFrame & encode(const DataBlock &m, CECFrame &out)
 	{
         OpCode(m.opCode()).serialize(out);
@@ -70,6 +122,17 @@ public:
         return out;
 	}
 
+	/**
+	 * @brief Encodes a CEC data block into a new CECFrame.
+	 *
+	 * Allocates a fresh CECFrame and serializes the data block's opcode followed by
+	 * its operands into it, returning the frame by value.
+	 *
+	 * @param[in] m  CEC data block carrying the opcode and its operands.
+	 * @return A newly constructed @c CECFrame containing the encoded data block.
+	 * @note POLLING special case: if @p m carries the @c POLLING opcode, no opcode
+	 *       byte is emitted (see the @c encode(const DataBlock&, CECFrame&) overload).
+	 */
 	static CECFrame encode(const DataBlock &m) {
         CECFrame out;
         return encode(m, out);

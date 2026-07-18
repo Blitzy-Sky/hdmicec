@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup osal
+* @defgroup osal OS Abstraction Layer (OSAL)
 * @{
 **/
 
@@ -34,9 +34,27 @@
 
 CCEC_OSAL_BEGIN_NAMESPACE
 
+/**
+ * @brief Interface for tasks that can be executed by a Thread.
+ *
+ * A class that requires thread functionality implements this interface and is
+ * passed to a Thread on construction. The bound Thread drives run() either
+ * synchronously via Thread::run() (on the calling thread) or asynchronously via
+ * Thread::start() (on a new thread of execution).
+ */
 class Runnable {
 
 public:
+/**
+ * @brief Pure-virtual work entry point implemented by tasks.
+ *
+ * Implementations perform the task's work in this method. It is invoked by the
+ * bound Thread, and its execution context depends on how it is driven:
+ * synchronously on the calling thread when invoked via Thread::run(), or
+ * asynchronously on a new thread of execution when invoked via Thread::start().
+ * This interface itself does not guarantee a single execution context.
+ * @see Thread::run(), Thread::start()
+ */
 	virtual void  run(void) = 0;
 };
 
