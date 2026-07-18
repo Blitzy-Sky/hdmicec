@@ -258,16 +258,22 @@ Build and run:
 
 ```bash
 # From a clean checkout, first bootstrap the Autotools build (generates
-# ./configure), then configure with L1 tests enabled and build/run via the
-# check target. Run these from the module root (hdmicec/).
+# ./configure), then configure with L1 tests enabled and build the module
+# libraries. Run these from the module root (hdmicec/).
 autoreconf -fi
 ./configure --enable-l1tests
-make check
-
-# Or build and run the L1 test binary explicitly
-cd tests/L1Tests
 make
-./run_L1Tests
+
+# Then build and run the L1 suite from the tests/L1Tests directory, whose
+# `make check` invokes the Automake TESTS target: it builds run_L1Tests and
+# executes it. To run the built binary directly instead, use ./run_L1Tests.
+cd tests/L1Tests
+make check
+# ./run_L1Tests   # direct alternative to `make check`
+
+# NOTE: a bare `make check` from the module root does NOT run the L1 suite.
+# The top-level Makefile.am lists `tests` only in DIST_SUBDIRS (used by
+# `make dist`), not in SUBDIRS, so `make check` does not recurse into tests/.
 ```
 
 `Source: hdmicec/tests/L1Tests/README.md`.
