@@ -42,7 +42,11 @@ run_L1Tests_SOURCES = \
     ccec/test_Operands.cpp \
     ccec/test_Driver_Mock.cpp \
     ccec/test_Driver.cpp \
+    ccec/test_DriverImpl_Async.cpp \
+    ccec/test_Util.cpp \
     osal/test_ConditionVariable.cpp \
+    osal/test_Mutex.cpp \
+    osal/test_Thread.cpp \
     $(top_srcdir)/mocks/hdmicec/hdmi_cec_driver_mock.cpp
 
 run_L1Tests_LDADD = \
