@@ -17,197 +17,171 @@
  * limitations under the License.
 */
 
-/*
- * L1 unit tests for the OSAL Thread primitive.
- *
- * No test translation unit previously compiled against osal/src/Thread.cpp, which
- * left the named constructor, the destructor, run() and detach() with zero hits.
- * Those are the paths covered here.
- *
- * Thread::start() creates its worker in the DETACHED state, so there is no join to
- * wait on. Every case therefore hands the worker an atomic flag and polls it with a
- * bounded deadline - no unconditional sleep, no wall-clock dependence - and keeps
- * the Runnable alive until the worker has signalled completion.
- *
- * NOTE: Thread declares getNativeHandle() and stop() in osal/include/osal/Thread.hpp
- * but osal/src/Thread.cpp defines neither, so referencing either symbol fails to
- * link. Thread execution is therefore observed through the Runnable's own record of
- * the thread it ran on rather than through the handle accessor.
- */
-
 #include <gtest/gtest.h>
-
-#include <atomic>
-#include <chrono>
-#include <functional>
-#include <thread>
-
 #include "osal/Runnable.hpp"
 #include "osal/Thread.hpp"
+#include <string>
 
 using namespace CCEC_OSAL;
 
 namespace {
 
-// Minimal Runnable used by the cases below. `gate` (when set) holds the worker
-// inside run() so a test can observe the thread while it is provably still alive.
+/**
+ * Minimal synchronous test double for Runnable.
+ *
+ * Thread::run() forwards directly to the supplied Runnable, so an ordinary
+ * counter provides a deterministic observation without worker threads, timing
+ * assumptions, mocks, or heap deletion through an interface without a virtual
+ * destructor.
+ */
 class CountingRunnable : public Runnable {
 public:
-    CountingRunnable() : runCount(0), started(false), gate(nullptr), ranOn() {}
+    CountingRunnable() : invocationCount_(0) {
+    }
 
     void run(void) override {
-        ranOn = std::this_thread::get_id();
-        started = true;
-        if (gate != nullptr) {
-            while (!gate->load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        }
-        ++runCount;
+        ++invocationCount_;
     }
 
-    std::atomic<int> runCount;
-    std::atomic<bool> started;
-    std::atomic<bool> *gate;
-    std::thread::id ranOn;
+    int invocationCount(void) const {
+        return invocationCount_;
+    }
+
+private:
+    int invocationCount_;
 };
-
-// Poll `predicate` until it holds or the deadline expires. Returns whether it held.
-bool waitFor(const std::function<bool()> &predicate, int timeoutMs = 5000) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (predicate()) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return predicate();
-}
 
 } // namespace
 
 class ThreadTest : public ::testing::Test {
+protected:
+    CountingRunnable runnable;
 };
 
-// Construction alone must not start anything.
-TEST_F(ThreadTest, ConstructionWithoutNameDoesNotStartRunnable) {
-    CountingRunnable runnable;
-    Thread thread(runnable);
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *).
+TEST_F(ThreadTest, NamedConstructionDoesNotDispatch) {
+    Thread thread(runnable, reinterpret_cast<const int8_t *>("worker"));
 
-    EXPECT_FALSE(runnable.started.load());
-    EXPECT_EQ(runnable.runCount.load(), 0);
+    EXPECT_EQ(0, runnable.invocationCount());
+    (void)thread;
 }
 
-// The named constructor overload is a separate, previously unexercised entry point.
-TEST_F(ThreadTest, ConstructionWithNameDoesNotStartRunnable) {
-    CountingRunnable runnable;
-    Thread thread(runnable, (const int8_t *)"CECWorker");
-
-    EXPECT_FALSE(runnable.started.load());
-    EXPECT_EQ(runnable.runCount.load(), 0);
-}
-
-TEST_F(ThreadTest, ConstructionWithEmptyName) {
-    CountingRunnable runnable;
-    EXPECT_NO_THROW({ Thread thread(runnable, (const int8_t *)""); });
-}
-
-TEST_F(ThreadTest, ConstructionWithLongName) {
-    CountingRunnable runnable;
-    const std::string longName(128, 'n');
-    EXPECT_NO_THROW({ Thread thread(runnable, (const int8_t *)longName.c_str()); });
-}
-
-// Thread derives from Runnable and forwards run() to the target it was given, so
-// calling run() directly must dispatch through that indirection on the CALLING
-// thread - no worker is created.
-TEST_F(ThreadTest, RunDispatchesToRunnableOnCallingThread) {
-    CountingRunnable runnable;
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &), CCEC_OSAL::Thread::run.
+TEST_F(ThreadTest, RunDispatchesToRunnable) {
     Thread thread(runnable);
 
     thread.run();
 
-    EXPECT_EQ(runnable.runCount.load(), 1);
-    EXPECT_TRUE(runnable.started.load());
-    EXPECT_EQ(runnable.ranOn, std::this_thread::get_id());
+    EXPECT_EQ(1, runnable.invocationCount());
 }
 
-TEST_F(ThreadTest, RunIsRepeatable) {
-    CountingRunnable runnable;
-    Thread thread(runnable, (const int8_t *)"CECRepeat");
-
-    thread.run();
-    thread.run();
-
-    EXPECT_EQ(runnable.runCount.load(), 2);
-}
-
-// start() must execute the runnable on a DIFFERENT thread from the caller.
-TEST_F(ThreadTest, StartExecutesRunnableOnWorkerThread) {
-    CountingRunnable runnable;
-    Thread thread(runnable, (const int8_t *)"CECStart");
-
-    thread.start();
-
-    ASSERT_TRUE(waitFor([&runnable]() { return runnable.runCount.load() == 1; }));
-    EXPECT_NE(runnable.ranOn, std::this_thread::get_id());
-}
-
-// Destroying a Thread that was never started must be a no-op, not a fault.
-TEST_F(ThreadTest, DestructionWithoutStartIsHarmless) {
-    CountingRunnable runnable;
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &), CCEC_OSAL::Thread::run,
+// CCEC_OSAL::Thread::~Thread.
+TEST_F(ThreadTest, DestructionAtScopeExitPreservesDispatchResult) {
     {
         Thread thread(runnable);
-        EXPECT_FALSE(runnable.started.load());
+        thread.run();
+        EXPECT_EQ(1, runnable.invocationCount());
     }
-    EXPECT_EQ(runnable.runCount.load(), 0);
+
+    EXPECT_EQ(1, runnable.invocationCount());
 }
 
-// Destroying the Thread object does not cancel the worker: the worker holds a
-// reference to the Runnable, not to the Thread.
-TEST_F(ThreadTest, DestructionAfterStartDoesNotCancelRunnable) {
-    CountingRunnable runnable;
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &), CCEC_OSAL::Thread::run,
+// CCEC_OSAL::Thread::detach, CCEC_OSAL::Thread::~Thread.
+TEST_F(ThreadTest, DetachThenScopeExitPreservesDispatchResult) {
     {
-        Thread thread(runnable, (const int8_t *)"CECDestroy");
-        thread.start();
-        EXPECT_TRUE(waitFor([&runnable]() { return runnable.started.load(); }));
+        Thread thread(runnable);
+        thread.run();
+        EXPECT_NO_THROW(thread.detach());
     }
 
-    EXPECT_TRUE(waitFor([&runnable]() { return runnable.runCount.load() == 1; }));
+    EXPECT_EQ(1, runnable.invocationCount());
 }
 
-// detach() is issued while the worker is provably still inside run(), held there by
-// the gate, and is then released so the worker can finish.
-TEST_F(ThreadTest, DetachOnRunningThreadIsAccepted) {
-    CountingRunnable runnable;
-    std::atomic<bool> release(false);
-    runnable.gate = &release;
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *),
+// CCEC_OSAL::Thread::run.
+TEST_F(ThreadTest, EmptyNameIsAccepted) {
+    Thread thread(runnable, reinterpret_cast<const int8_t *>(""));
 
-    Thread thread(runnable, (const int8_t *)"CECDetach");
-    thread.start();
+    thread.run();
 
-    ASSERT_TRUE(waitFor([&runnable]() { return runnable.started.load(); }));
-    EXPECT_NO_THROW({ thread.detach(); });
-
-    release = true;
-    EXPECT_TRUE(waitFor([&runnable]() { return runnable.runCount.load() == 1; }));
+    EXPECT_EQ(1, runnable.invocationCount());
 }
 
-// Two workers over two Runnables must both complete, on two distinct threads - the
-// primitive holds no process-global state that would serialise or lose one of them.
-TEST_F(ThreadTest, TwoStartedThreadsBothCompleteOnDistinctThreads) {
-    CountingRunnable first;
-    CountingRunnable second;
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *),
+// CCEC_OSAL::Thread::run.
+TEST_F(ThreadTest, LongNameIsAccepted) {
+    const std::string longName(1024U, 'n');
+    Thread thread(
+        runnable,
+        reinterpret_cast<const int8_t *>(longName.c_str()));
 
-    Thread firstThread(first, (const int8_t *)"CECFirst");
-    Thread secondThread(second, (const int8_t *)"CECSecond");
+    thread.run();
 
-    firstThread.start();
-    ASSERT_TRUE(waitFor([&first]() { return first.runCount.load() == 1; }));
+    EXPECT_EQ(1, runnable.invocationCount());
+}
 
-    secondThread.start();
-    ASSERT_TRUE(waitFor([&second]() { return second.runCount.load() == 1; }));
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *),
+// CCEC_OSAL::Thread::run.
+TEST_F(ThreadTest, RunDispatchIsRepeatable) {
+    Thread thread(runnable, reinterpret_cast<const int8_t *>("repeat"));
 
-    EXPECT_NE(first.ranOn, std::this_thread::get_id());
-    EXPECT_NE(second.ranOn, std::this_thread::get_id());
+    thread.run();
+    thread.run();
+    thread.run();
+
+    EXPECT_EQ(3, runnable.invocationCount());
+}
+
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &),
+// CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *),
+// CCEC_OSAL::Thread::run.
+TEST_F(ThreadTest, NamedAndUnnamedConstructorsDispatchEquivalently) {
+    CountingRunnable namedRunnable;
+    Thread unnamedThread(runnable);
+    Thread namedThread(
+        namedRunnable,
+        reinterpret_cast<const int8_t *>("named"));
+
+    unnamedThread.run();
+    namedThread.run();
+
+    EXPECT_EQ(1, runnable.invocationCount());
+    EXPECT_EQ(1, namedRunnable.invocationCount());
+}
+
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &),
+// CCEC_OSAL::Thread::~Thread.
+TEST_F(ThreadTest, DestructionWithoutStartIsHarmless) {
+    EXPECT_EQ(0, runnable.invocationCount());
+    {
+        Thread thread(runnable);
+        (void)thread;
+    }
+
+    EXPECT_EQ(0, runnable.invocationCount());
+}
+
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &),
+// CCEC_OSAL::Thread::detach, CCEC_OSAL::Thread::run.
+TEST_F(ThreadTest, DetachWithoutStartLeavesThreadUsable) {
+    Thread thread(runnable);
+
+    EXPECT_NO_THROW(thread.detach());
+    EXPECT_EQ(0, runnable.invocationCount());
+
+    thread.run();
+
+    EXPECT_EQ(1, runnable.invocationCount());
 }

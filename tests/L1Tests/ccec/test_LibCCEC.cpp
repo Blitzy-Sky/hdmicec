@@ -176,3 +176,110 @@ TEST_F(LibCCECTest, GetLogicalAddressForDifferentDeviceTypes) {
 
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
+
+// #gap-mw-libccec; §6.2 rank 23, P1; LibCCEC::term.
+TEST_F(LibCCECTest, TermThrowsWhenNotInitialized) {
+    LibCCEC& lib = LibCCEC::getInstance();
+
+    EXPECT_NO_THROW({ lib.term(); });
+    EXPECT_THROW(lib.term(), InvalidStateException);
+    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+}
+
+// #gap-mw-libccec; §6.2 rank 23, P1; LibCCEC::addLogicalAddress.
+TEST_F(LibCCECTest, AddLogicalAddressThrowsWhenNotInitialized) {
+    HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
+    LibCCEC& lib = LibCCEC::getInstance();
+
+    EXPECT_NO_THROW({ lib.term(); });
+
+    EXPECT_CALL(*mock, HdmiCecAddLogicalAddress(_, _)).Times(0);
+    LogicalAddress address(LogicalAddress::PLAYBACK_DEVICE_1);
+    EXPECT_THROW(lib.addLogicalAddress(address), InvalidStateException);
+    ::testing::Mock::VerifyAndClearExpectations(mock);
+
+    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+}
+
+// #gap-mw-libccec; §6.2 rank 23, P1; LibCCEC::getLogicalAddress.
+TEST_F(LibCCECTest, GetLogicalAddressThrowsWhenNotInitialized) {
+    HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
+    LibCCEC& lib = LibCCEC::getInstance();
+
+    EXPECT_NO_THROW({ lib.term(); });
+
+    EXPECT_CALL(*mock, HdmiCecGetLogicalAddress(_, _)).Times(0);
+    // This reaches the uninitialized guard, not the already-covered zero-address guard at :166.
+    EXPECT_THROW(lib.getLogicalAddress(DeviceType::PLAYBACK_DEVICE), InvalidStateException);
+    ::testing::Mock::VerifyAndClearExpectations(mock);
+
+    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+}
+
+// #gap-mw-libccec; §6.2 rank 23, P1; LibCCEC::getPhysicalAddress.
+TEST_F(LibCCECTest, GetPhysicalAddressThrowsWhenNotInitialized) {
+    HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
+    LibCCEC& lib = LibCCEC::getInstance();
+
+    EXPECT_NO_THROW({ lib.term(); });
+
+    EXPECT_CALL(*mock, HdmiCecGetPhysicalAddress(_, _)).Times(0);
+    unsigned int physicalAddress = 0;
+    EXPECT_THROW(lib.getPhysicalAddress(&physicalAddress), InvalidStateException);
+    ::testing::Mock::VerifyAndClearExpectations(mock);
+
+    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+}
+
+// #gap-mw-libccec; §6.2 rank 23, P1; LibCCEC::init.
+TEST_F(LibCCECTest, InitWithNullNameClearsLogPrefix) {
+    LibCCEC& lib = LibCCEC::getInstance();
+
+    EXPECT_NO_THROW({ lib.term(); });
+    EXPECT_NO_THROW({ lib.init(NULL); });
+    EXPECT_NO_THROW({ lib.term(); });
+    // Restore the process-global prefix expected by the shared test environment.
+    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+}
+
+// #gap-mw-libccec; §6.2 rank 23, P1; LibCCEC::init,
+// LibCCEC::addLogicalAddress, LibCCEC::getLogicalAddress, LibCCEC::getPhysicalAddress.
+TEST_F(LibCCECTest, MultipleInitTermCycles) {
+    HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
+    LibCCEC& lib = LibCCEC::getInstance();
+
+    EXPECT_NO_THROW({ lib.term(); });
+    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+
+    const unsigned int expectedPhysicalAddress = 0x2100;
+    EXPECT_CALL(*mock, HdmiCecAddLogicalAddress(_, LogicalAddress::PLAYBACK_DEVICE_1))
+        .Times(1)
+        .WillOnce(Return(HDMI_CEC_IO_SUCCESS));
+    EXPECT_CALL(*mock, HdmiCecGetLogicalAddress(_, _))
+        .Times(1)
+        .WillOnce(Invoke([](int, int* address) -> int {
+            if (address) *address = LogicalAddress::AUDIO_SYSTEM;
+            return HDMI_CEC_IO_SUCCESS;
+        }));
+    EXPECT_CALL(*mock, HdmiCecGetPhysicalAddress(_, _))
+        .Times(1)
+        .WillOnce(Invoke([expectedPhysicalAddress](int, unsigned int* address) -> int {
+            if (address) *address = expectedPhysicalAddress;
+            return HDMI_CEC_IO_SUCCESS;
+        }));
+
+    LogicalAddress address(LogicalAddress::PLAYBACK_DEVICE_1);
+    int addResult = 0;
+    EXPECT_NO_THROW(addResult = lib.addLogicalAddress(address));
+    EXPECT_TRUE(addResult);
+
+    int logicalAddress = 0;
+    EXPECT_NO_THROW(logicalAddress = lib.getLogicalAddress(DeviceType::PLAYBACK_DEVICE));
+    EXPECT_EQ(logicalAddress, LogicalAddress::AUDIO_SYSTEM);
+
+    unsigned int physicalAddress = 0;
+    EXPECT_NO_THROW(lib.getPhysicalAddress(&physicalAddress));
+    EXPECT_EQ(physicalAddress, expectedPhysicalAddress);
+
+    ::testing::Mock::VerifyAndClearExpectations(mock);
+}

@@ -1403,3 +1403,20 @@ TEST_F(ConnectionTest, ConcurrentListenerOperations) {
     
     conn.close();
 }
+
+// Test heap deletion invokes the virtual deleting destructor without leaving a Bus listener
+TEST_F(ConnectionTest, HeapAllocatedConnectionDeleteInvokesDestructor) {
+    TestFrameListener listener;
+    Connection *conn = new Connection(LogicalAddress::PLAYBACK_DEVICE_1, true, "HeapConnection");
+
+    ASSERT_NE(conn, nullptr);
+    EXPECT_EQ(conn->getSource().toInt(), LogicalAddress::PLAYBACK_DEVICE_1);
+    EXPECT_NO_THROW(conn->addFrameListener(&listener));
+    const int frameCountBeforeDelete = listener.frameCount;
+
+    EXPECT_NO_THROW(conn->close());
+    EXPECT_NO_THROW(delete conn);
+    conn = nullptr;
+
+    EXPECT_EQ(listener.frameCount, frameCountBeforeDelete);
+}

@@ -18,27 +18,29 @@
 */
 
 /*
- * L1 unit tests for the CEC logging utility.
+ * Dedicated L1 tests for the CEC logging utility.
  *
- * No test translation unit previously compiled against ccec/src/Util.cpp. Only the
- * early-return arm of check_cec_log_status() had ever run - the arm taken when the
- * log-level configuration file cannot be opened. The success path (read a line,
- * match it against the log-level table, convert the value, close the handle) and the
- * hexadecimal buffer dump that executes only at debug verbosity were both untouched.
+ * Util.cpp already receives incidental coverage through CECFrame's HexDump cases.
+ * These tests directly cover its configuration reader, verbosity gates and buffer
+ * formatter without claiming to provide the unit's first coverage.
  *
- * check_cec_log_status() reads a process-global path and mutates a process-global
- * log level, so the fixture captures both and restores them in TearDown - never an
- * unconditional delete. The log level is restored to LOG_INFO, which is the value
- * the translation unit's static initialiser establishes at program start.
+ * The configuration reader selects a fixed table entry by key prefix; numeric
+ * values are not parsed from the file. Consequently, malformed numeric-value
+ * scenarios are unreachable and intentionally excluded from this suite.
+ *
+ * Both the hardcoded configuration file and the file-static log level are shared
+ * process state. The fixture restores the log level to INFO and then restores the
+ * file byte-for-byte so later LibCCEC and DriverImpl tests cannot inherit verbosity.
  */
 
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <cstdio>
 #include <fstream>
-#include <functional>
+#include <iterator>
 #include <string>
-#include <unistd.h>
+#include <sys/stat.h>
 
 #include "ccec/Util.hpp"
 
@@ -46,54 +48,48 @@ namespace {
 
 const char *kLogConfigPath = "/tmp/cec_log_enabled";
 
-// Redirect file descriptor 1 for the duration of `body` and return what was
-// written. The unit under test logs with printf(), so the capture has to happen at
-// the descriptor level rather than on a C++ stream.
-std::string captureStdout(const std::function<void()> &body) {
-    char templatePath[] = "/tmp/cec_util_stdoutXXXXXX";
-    int captureFd = mkstemp(templatePath);
-    if (captureFd < 0) {
+struct LogLevelCase {
+    const char *key;
+    int value;
+};
+
+const LogLevelCase kLogLevels[] = {
+    { "FATAL", LOG_FATAL },
+    { "ERROR", LOG_ERROR },
+    { "WARN", LOG_WARN },
+    { "EXP", LOG_EXP },
+    { "NOTICE", LOG_NOTICE },
+    { "INFO", LOG_INFO },
+    { "DEBUG", LOG_DEBUG },
+    { "TRACE", LOG_TRACE }
+};
+
+template <typename Callable>
+std::string captureStdout(Callable body) {
+    ::testing::internal::CaptureStdout();
+    try {
         body();
-        return std::string();
+    } catch (...) {
+        (void)::testing::internal::GetCapturedStdout();
+        throw;
     }
-
-    fflush(stdout);
-    int savedStdout = dup(STDOUT_FILENO);
-    dup2(captureFd, STDOUT_FILENO);
-
-    body();
-
-    fflush(stdout);
-    dup2(savedStdout, STDOUT_FILENO);
-    close(savedStdout);
-    lseek(captureFd, 0, SEEK_SET);
-
-    std::string captured;
-    char buffer[512];
-    ssize_t bytesRead;
-    while ((bytesRead = read(captureFd, buffer, sizeof(buffer))) > 0) {
-        captured.append(buffer, static_cast<size_t>(bytesRead));
-    }
-
-    close(captureFd);
-    unlink(templatePath);
-    return captured;
+    return ::testing::internal::GetCapturedStdout();
 }
 
-void writeLogConfig(const std::string &contents) {
-    std::ofstream out(kLogConfigPath, std::ios::trunc);
-    out << contents;
+bool writeLogConfig(const std::string &contents) {
+    std::ofstream out(kLogConfigPath, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return false;
+    }
+
+    out.write(contents.data(), static_cast<std::streamsize>(contents.size()));
     out.close();
+    return out.good();
 }
 
-// dump_buffer() only emits when the configured level is at or above LOG_DEBUG, so
-// its output is the observable proxy for the level check_cec_log_status() applied.
-bool debugLoggingIsActive() {
-    // A deliberately distinctive probe pattern so a concurrent log line from another
-    // component cannot be mistaken for the dump's own output.
-    unsigned char probe[] = { 0xA5, 0x5A, 0xA5 };
-    std::string output = captureStdout([&probe]() { dump_buffer(probe, 3); });
-    return output.find("A5 5A A5") != std::string::npos;
+bool fileExists(const char *path) {
+    struct stat fileStatus;
+    return stat(path, &fileStatus) == 0;
 }
 
 } // namespace
@@ -101,161 +97,247 @@ bool debugLoggingIsActive() {
 class UtilTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Capture the pre-existing configuration file so it can be put back exactly
-        // as it was, whether or not it existed.
-        std::ifstream in(kLogConfigPath);
-        savedFileExisted = in.good();
-        if (savedFileExisted) {
-            savedFileContents.assign((std::istreambuf_iterator<char>(in)),
-                                     std::istreambuf_iterator<char>());
+        savedFileExisted_ = fileExists(kLogConfigPath);
+        if (savedFileExisted_) {
+            std::ifstream in(kLogConfigPath, std::ios::binary);
+            EXPECT_TRUE(in.is_open());
+            if (in.is_open()) {
+                savedFileContents_.assign(std::istreambuf_iterator<char>(in),
+                                          std::istreambuf_iterator<char>());
+            }
         }
-        in.close();
+
+        EXPECT_TRUE(writeLogConfig("INFO\n"));
+        EXPECT_NO_THROW(check_cec_log_status());
     }
 
     void TearDown() override {
-        // Restore the process-global log level to the translation unit's initial
-        // value (LOG_INFO) before restoring the file itself.
-        writeLogConfig("INFO\n");
-        check_cec_log_status();
+        const bool resetFileWritten = writeLogConfig("INFO\n");
+        EXPECT_TRUE(resetFileWritten);
+        if (resetFileWritten) {
+            EXPECT_NO_THROW(check_cec_log_status());
+        }
 
-        if (savedFileExisted) {
-            writeLogConfig(savedFileContents);
+        if (savedFileExisted_) {
+            EXPECT_TRUE(writeLogConfig(savedFileContents_));
         } else {
-            unlink(kLogConfigPath);
+            errno = 0;
+            const int removeResult = std::remove(kLogConfigPath);
+            EXPECT_TRUE(removeResult == 0 || errno == ENOENT);
         }
     }
 
-    bool savedFileExisted = false;
-    std::string savedFileContents;
+    void applyLogConfig(const std::string &contents) {
+        EXPECT_TRUE(writeLogConfig(contents));
+        EXPECT_NO_THROW(check_cec_log_status());
+    }
+
+    std::string captureLog(int level, const std::string &marker) {
+        return captureStdout([level, &marker]() {
+            CCEC_LOG(level, "%s", marker.c_str());
+        });
+    }
+
+    std::string captureDump(unsigned char *buffer, int length) {
+        return captureStdout([buffer, length]() {
+            dump_buffer(buffer, length);
+        });
+    }
+
+private:
+    bool savedFileExisted_ = false;
+    std::string savedFileContents_;
 };
 
-// The previously covered arm: the configuration file is absent, so the reader logs
-// and returns without touching the level. Kept as a regression guard.
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
+// check_cec_log_status().
 TEST_F(UtilTest, MissingConfigFileLeavesLogLevelUnchanged) {
-    unlink(kLogConfigPath);
+    applyLogConfig("DEBUG\n");
+    EXPECT_EQ(0, std::remove(kLogConfigPath));
 
-    EXPECT_NO_THROW({ check_cec_log_status(); });
-    // The default level is LOG_INFO, which is below LOG_DEBUG.
-    EXPECT_FALSE(debugLoggingIsActive());
-}
-
-// The success path: a recognised key is read, matched against the table and
-// converted, and the file handle is closed.
-TEST_F(UtilTest, DebugLevelInConfigFileRaisesLogLevel) {
-    writeLogConfig("DEBUG\n");
-
-    EXPECT_NO_THROW({ check_cec_log_status(); });
-    EXPECT_TRUE(debugLoggingIsActive());
-}
-
-TEST_F(UtilTest, TraceLevelInConfigFileRaisesLogLevelAboveDebug) {
-    writeLogConfig("TRACE\n");
-
-    EXPECT_NO_THROW({ check_cec_log_status(); });
-    EXPECT_TRUE(debugLoggingIsActive());
-}
-
-// Every remaining entry in the log-level table must also be matched and applied.
-// All of these sit below LOG_DEBUG, so the buffer dump must stay silent.
-TEST_F(UtilTest, LevelsBelowDebugSuppressBufferDump) {
-    const char *levelsBelowDebug[] = { "FATAL", "ERROR", "WARN", "EXP", "NOTICE", "INFO" };
-
-    for (const char *level : levelsBelowDebug) {
-        writeLogConfig(std::string(level) + "\n");
+    std::string readerOutput;
+    EXPECT_NO_THROW(readerOutput = captureStdout([]() {
         check_cec_log_status();
-        EXPECT_FALSE(debugLoggingIsActive()) << "level " << level << " must not enable the dump";
+    }));
+    EXPECT_NE(readerOutput.find("cec_log_enabled"), std::string::npos);
+
+    unsigned char probe[] = { 0xA5, 0x5A, 0xA5 };
+    const std::string dumpOutput = captureDump(probe, 3);
+    EXPECT_NE(dumpOutput.find("A5 5A A5"), std::string::npos);
+}
+
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
+// check_cec_log_status(), CCEC_LOG() and dump_buffer().
+TEST_F(UtilTest, EveryRecognisedLevelMapsToItsNumericSetting) {
+    unsigned char dumpProbe[] = { 0xD3, 0x7B };
+
+    for (const LogLevelCase &levelCase : kLogLevels) {
+        SCOPED_TRACE(levelCase.key);
+        applyLogConfig(std::string(levelCase.key) + "\n");
+
+        const std::string thresholdMarker =
+            std::string("UTIL_THRESHOLD_") + levelCase.key;
+        const std::string thresholdOutput =
+            captureLog(levelCase.value, thresholdMarker);
+        EXPECT_NE(thresholdOutput.find(thresholdMarker), std::string::npos);
+
+        if (levelCase.value + 1 < LOG_MAX) {
+            const std::string aboveMarker =
+                std::string("UTIL_ABOVE_") + levelCase.key;
+            const std::string aboveOutput =
+                captureLog(levelCase.value + 1, aboveMarker);
+            EXPECT_EQ(aboveOutput.find(aboveMarker), std::string::npos);
+        }
+
+        const std::string dumpOutput = captureDump(dumpProbe, 2);
+        if (levelCase.value >= LOG_DEBUG) {
+            EXPECT_NE(dumpOutput.find("D3 7B"), std::string::npos);
+        } else {
+            EXPECT_EQ(dumpOutput.find("D3 7B"), std::string::npos);
+        }
     }
 }
 
-// An unrecognised key matches nothing in the table, so the loop runs to completion
-// and the level is left exactly as it was.
-TEST_F(UtilTest, UnrecognisedLevelLeavesLogLevelUnchanged) {
-    writeLogConfig("DEBUG\n");
-    check_cec_log_status();
-    ASSERT_TRUE(debugLoggingIsActive());
-
-    writeLogConfig("NOT_A_LEVEL\n");
-    EXPECT_NO_THROW({ check_cec_log_status(); });
-    // Unchanged means still DEBUG, not reset to the default.
-    EXPECT_TRUE(debugLoggingIsActive());
-}
-
-// An empty file opens successfully but yields no line, so the table is never
-// consulted and the handle is still closed.
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
+// check_cec_log_status().
 TEST_F(UtilTest, EmptyConfigFileLeavesLogLevelUnchanged) {
-    writeLogConfig("");
+    applyLogConfig("INFO\n");
+    applyLogConfig("");
 
-    EXPECT_NO_THROW({ check_cec_log_status(); });
-    EXPECT_FALSE(debugLoggingIsActive());
+    const std::string infoMarker = "UTIL_EMPTY_FILE_INFO";
+    const std::string infoOutput = captureLog(LOG_INFO, infoMarker);
+    EXPECT_NE(infoOutput.find(infoMarker), std::string::npos);
+
+    const std::string debugMarker = "UTIL_EMPTY_FILE_DEBUG";
+    const std::string debugOutput = captureLog(LOG_DEBUG, debugMarker);
+    EXPECT_EQ(debugOutput.find(debugMarker), std::string::npos);
 }
 
-// The comparison is a prefix match of a fixed length, so trailing content after a
-// recognised key is tolerated.
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
+// check_cec_log_status().
+TEST_F(UtilTest, UnrecognisedLevelLeavesLogLevelUnchanged) {
+    applyLogConfig("TRACE\n");
+    applyLogConfig("NOT_A_LEVEL\n");
+
+    const std::string marker = "UTIL_UNRECOGNISED_RETAINS_TRACE";
+    const std::string output = captureLog(LOG_TRACE, marker);
+    EXPECT_NE(output.find(marker), std::string::npos);
+}
+
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
+// check_cec_log_status().
+TEST_F(UtilTest, ShortPrefixDoesNotMatchRecognisedLevel) {
+    applyLogConfig("INFO\n");
+    applyLogConfig("DEBU\n");
+
+    const std::string infoMarker = "UTIL_SHORT_PREFIX_INFO";
+    const std::string infoOutput = captureLog(LOG_INFO, infoMarker);
+    EXPECT_NE(infoOutput.find(infoMarker), std::string::npos);
+
+    const std::string debugMarker = "UTIL_SHORT_PREFIX_DEBUG";
+    const std::string debugOutput = captureLog(LOG_DEBUG, debugMarker);
+    EXPECT_EQ(debugOutput.find(debugMarker), std::string::npos);
+}
+
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
+// check_cec_log_status() and dump_buffer().
 TEST_F(UtilTest, RecognisedLevelWithTrailingContentIsAccepted) {
-    writeLogConfig("DEBUG extra trailing text\n");
+    applyLogConfig("DEBUG extra trailing text\n");
 
-    EXPECT_NO_THROW({ check_cec_log_status(); });
-    EXPECT_TRUE(debugLoggingIsActive());
+    unsigned char probe[] = { 0xC3, 0x5E };
+    const std::string output = captureDump(probe, 2);
+    EXPECT_NE(output.find("C3 5E"), std::string::npos);
 }
 
-TEST_F(UtilTest, RepeatedReadsAreIdempotent) {
-    writeLogConfig("DEBUG\n");
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
+// dump_buffer().
+TEST_F(UtilTest, DumpBufferEmitsAtDebugAndTraceLevels) {
+    const char *enablingLevels[] = { "DEBUG", "TRACE" };
+    unsigned char probe[] = { 0x00, 0x0F, 0xA6, 0xFF };
 
-    check_cec_log_status();
-    check_cec_log_status();
-    check_cec_log_status();
+    for (const char *level : enablingLevels) {
+        SCOPED_TRACE(level);
+        applyLogConfig(std::string(level) + "\n");
 
-    EXPECT_TRUE(debugLoggingIsActive());
+        const std::string output = captureDump(probe, 4);
+        EXPECT_NE(output.find("00"), std::string::npos);
+        EXPECT_NE(output.find("0F"), std::string::npos);
+        EXPECT_NE(output.find("A6"), std::string::npos);
+        EXPECT_NE(output.find("FF"), std::string::npos);
+    }
 }
 
-TEST_F(UtilTest, DumpBufferEmitsEveryByteAsUppercaseHexAtDebugLevel) {
-    writeLogConfig("DEBUG\n");
-    check_cec_log_status();
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
+// dump_buffer().
+TEST_F(UtilTest, DumpBufferIsSilentBelowDebug) {
+    unsigned char probe[] = { 0xA5, 0x5A, 0xA5 };
 
-    unsigned char frame[] = { 0x00, 0x0F, 0x36, 0xFF };
-    std::string output = captureStdout([&frame]() { dump_buffer(frame, 4); });
+    for (const LogLevelCase &levelCase : kLogLevels) {
+        if (levelCase.value >= LOG_DEBUG) {
+            continue;
+        }
 
-    EXPECT_NE(output.find("00"), std::string::npos);
-    EXPECT_NE(output.find("0F"), std::string::npos);
-    EXPECT_NE(output.find("36"), std::string::npos);
-    EXPECT_NE(output.find("FF"), std::string::npos);
+        SCOPED_TRACE(levelCase.key);
+        applyLogConfig(std::string(levelCase.key) + "\n");
+        const std::string output = captureDump(probe, 3);
+        EXPECT_EQ(output.find("A5 5A A5"), std::string::npos);
+    }
 }
 
-// A zero length must produce no output even at debug verbosity: the guard is passed
-// but the loop body never runs.
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
+// dump_buffer().
 TEST_F(UtilTest, DumpBufferWithZeroLengthEmitsNothing) {
-    writeLogConfig("DEBUG\n");
-    check_cec_log_status();
+    applyLogConfig("DEBUG\n");
 
-    unsigned char frame[] = { 0xA5, 0x5A, 0xA5 };
-    std::string output = captureStdout([&frame]() { dump_buffer(frame, 0); });
-
+    unsigned char probe[] = { 0xA5, 0x5A, 0xA5 };
+    const std::string output = captureDump(probe, 0);
     EXPECT_EQ(output.find("A5 5A A5"), std::string::npos);
 }
 
-// CCEC_LOG filters on both the requested level and the configured level.
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
+// dump_buffer().
+TEST_F(UtilTest, DumpBufferEmitsMaximumLengthBuffer) {
+    applyLogConfig("DEBUG\n");
+
+    unsigned char buffer[256];
+    for (unsigned int index = 0; index < sizeof(buffer); ++index) {
+        buffer[index] = static_cast<unsigned char>(index);
+    }
+
+    const std::string output = captureDump(buffer, sizeof(buffer));
+    EXPECT_EQ(sizeof(buffer) * 3, output.size());
+
+    for (unsigned int value = 0; value < sizeof(buffer); ++value) {
+        char expectedToken[4];
+        std::snprintf(expectedToken, sizeof(expectedToken), "%02X ",
+                      static_cast<unsigned int>(buffer[value]));
+        EXPECT_NE(output.find(expectedToken), std::string::npos)
+            << "missing uppercase token for value " << value;
+    }
+}
+
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 - CCEC_LOG().
 TEST_F(UtilTest, LogEmitsAtOrBelowConfiguredLevel) {
-    writeLogConfig("DEBUG\n");
-    check_cec_log_status();
+    applyLogConfig("INFO\n");
 
-    std::string emitted = captureStdout([]() { CCEC_LOG(LOG_ERROR, "cec-util-test-emitted\r\n"); });
-    EXPECT_NE(emitted.find("cec-util-test-emitted"), std::string::npos);
+    const std::string lowerMarker = "UTIL_LOG_LOWER_LEVEL";
+    const std::string lowerOutput = captureLog(LOG_ERROR, lowerMarker);
+    EXPECT_NE(lowerOutput.find(lowerMarker), std::string::npos);
+
+    const std::string thresholdMarker = "UTIL_LOG_THRESHOLD_LEVEL";
+    const std::string thresholdOutput = captureLog(LOG_INFO, thresholdMarker);
+    EXPECT_NE(thresholdOutput.find(thresholdMarker), std::string::npos);
 }
 
+// Traceability: #gap-mw-util - section 6.2 rank 33, P2 - CCEC_LOG().
 TEST_F(UtilTest, LogSuppressesLevelsAboveConfiguredLevel) {
-    writeLogConfig("FATAL\n");
-    check_cec_log_status();
+    applyLogConfig("INFO\n");
 
-    std::string suppressed = captureStdout([]() { CCEC_LOG(LOG_TRACE, "cec-util-test-suppressed\r\n"); });
-    EXPECT_EQ(suppressed.find("cec-util-test-suppressed"), std::string::npos);
-}
+    const std::string aboveMarker = "UTIL_LOG_ABOVE_LEVEL";
+    const std::string aboveOutput = captureLog(LOG_DEBUG, aboveMarker);
+    EXPECT_EQ(aboveOutput.find(aboveMarker), std::string::npos);
 
-// LOG_MAX is the sentinel above the highest real level and must never be emitted,
-// whatever the configured level is.
-TEST_F(UtilTest, LogRejectsSentinelLevel) {
-    writeLogConfig("TRACE\n");
-    check_cec_log_status();
-
-    std::string suppressed = captureStdout([]() { CCEC_LOG(LOG_MAX, "cec-util-test-sentinel\r\n"); });
-    EXPECT_EQ(suppressed.find("cec-util-test-sentinel"), std::string::npos);
+    const std::string sentinelMarker = "UTIL_LOG_SENTINEL_LEVEL";
+    const std::string sentinelOutput = captureLog(LOG_MAX, sentinelMarker);
+    EXPECT_EQ(sentinelOutput.find(sentinelMarker), std::string::npos);
 }

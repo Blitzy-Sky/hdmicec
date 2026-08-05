@@ -1,0 +1,309 @@
+#
+# hdmicec/tests/L1Tests/.lcovrc_l1
+#
+# LCOV configuration for the HDMI-CEC middleware L1 unit-test suite -- the
+# GoogleTest binary `run_L1Tests`, built by `./configure --enable-l1tests` and
+# declared by `hdmicec/tests/L1Tests/Makefile.am`.
+#
+# PROVENANCE
+#   Derived from `entservices-hdmicecsink/Tests/L1Tests/.lcovrc_l1`.  Before this
+#   coverage engagement, that model was byte-identical to both the source-plugin
+#   copy and the `entservices-testframework` copy that plugin CI installs into
+#   the home directory.  The sink and source copies now also enable branch
+#   coverage; the test-framework copy preserves the pristine baseline with
+#   branch coverage off.  That shared layout is a lightly-edited copy of the
+#   historical stock system `lcovrc`, whose substantive workspace customizations
+#   are the two colour-threshold values below.  Reusing it aligns this suite with
+#   the workspace rather than inventing a middleware-only format.  Every active
+#   setting here matches the current sink model; compared with the pristine
+#   baseline, exactly ONE value intentionally differs: `lcov_branch_coverage`,
+#   which is 1 here -- see the note at the end of this file.
+#
+# WHY THIS FILE EXISTS
+#   Until now the `hdmicec` submodule shipped no lcov configuration at all.  The
+#   coverage step of `.github/workflows/L1-tests.yml` copies no `lcovrc` and
+#   passes no `--rc`, so the middleware coverage run inherits the system default,
+#   which collects function data but NOT branch data.  Branch coverage has
+#   consequently been invisible for this suite, and branch closure cannot be
+#   pursued intelligently against data that is never emitted: there is no way to
+#   see which `if`/`else` arms negative and corner-case tests still have to
+#   reach.  This file records the intended configuration in the repository, next
+#   to the tests it applies to.
+#
+# HOW IT IS CONSUMED
+#   `hdmicec/tests/L1Tests/run_coverage.sh` passes it to lcov and genhtml with
+#   `--config-file`.  It can also be used ad hoc from the submodule root:
+#       lcov --config-file tests/L1Tests/.lcovrc_l1 -c -o coverage.info -d .
+#   lcov would also read a copy placed at `~/.lcovrc`, but nothing in this suite
+#   installs one: no shared or system-level lcov configuration -- neither
+#   `/etc/lcovrc` nor `~/.lcovrc` -- is modified by this suite or by its coverage
+#   runner.
+#
+# WHAT THIS FILE DELIBERATELY DOES *NOT* DO
+#   * It is NOT read by CI.  `.github/workflows/L1-tests.yml` is the
+#     authoritative capture/filter/report recipe and is intentionally left
+#     unmodified, so GitHub Actions runs continue to inherit the system default.
+#     The honest status of this file is therefore: it aligns committed intent and
+#     serves local and future runs; CI does not currently pick it up.
+#   * It is NOT the authoritative branch-coverage switch.  The legacy
+#     `lcov_*_coverage` spellings are deprecated in lcov 2.x, so
+#     `run_coverage.sh` additionally passes `--rc branch_coverage=1` on the
+#     capture, filter and report steps.  Deliberate belt and braces.
+#   * It carries NO source-exclusion patterns.  Exclusions belong to
+#     `run_coverage.sh`'s `lcov -r` invocation and are taken verbatim from the CI
+#     workflow (`/usr/include/*`, `*/install/usr/include/*`, `*/stubs/*`,
+#     `*/mocks/*`, `*/googletest/*`, `*/tests/*`, `*/test_*.cpp`).  Keeping them
+#     there is what holds the coverage denominator to production source only, so
+#     coverage can move only by adding tests.
+#   * It carries NO coverage threshold.  The >=80% line-coverage gate is applied
+#     by `lcov --fail-under-lines 80` in `run_coverage.sh`, where it can fail a
+#     step.  A threshold expressed here would only be advisory.
+#
+# To change settings for a single user, place a customized copy of this file at
+# location ~/.lcovrc
+#
+
+# Specify an external style sheet file (same as --css-file option of genhtml)
+#genhtml_css_file = gcov.css
+
+# Specify coverage rate limits (in %) for classifying file entries
+# HI:   hi_limit <= rate <= 100         graph color: green
+# MED: med_limit <= rate <  hi_limit    graph color: orange
+# LO:         0  <= rate <  med_limit   graph color: red
+#
+# PRESENTATION ONLY -- these two values choose the colour of a row in the
+# generated HTML and are NOT the acceptance gate.  Do not read 75 as "the
+# threshold": the gate for this suite is `lcov --fail-under-lines 80`, applied by
+# `run_coverage.sh`, and a file rendered green here can still fail that gate.
+# The values are inherited verbatim from the workspace model (stock lcov uses
+# 90/75) so that the middleware report is coloured on the same scale as the two
+# plugin reports.
+genhtml_hi_limit = 75
+genhtml_med_limit = 50
+
+# Width of line coverage field in source code view
+genhtml_line_field_width = 12
+
+# Width of branch coverage field in source code view
+genhtml_branch_field_width = 16
+
+# Width of overview image (used by --frames option of genhtml)
+genhtml_overview_width = 80
+
+# Resolution of overview navigation: this number specifies the maximum
+# difference in lines between the position a user selected from the overview
+# and the position the source code window is scrolled to (used by --frames
+# option of genhtml)
+genhtml_nav_resolution = 4
+
+# Clicking a line in the overview image should show the source code view at
+# a position a bit further up so that the requested line is not the first
+# line in the window. This number specifies that offset in lines (used by
+# --frames option of genhtml)
+genhtml_nav_offset = 10
+
+# Do not remove unused test descriptions if non-zero (same as
+# --keep-descriptions option of genhtml)
+genhtml_keep_descriptions = 0
+
+# Do not remove prefix from directory names if non-zero (same as --no-prefix
+# option of genhtml)
+genhtml_no_prefix = 0
+
+# Do not create source code view if non-zero (same as --no-source option of
+# genhtml)
+#
+# Kept at 0 on purpose: the annotated source view is how an uncovered line is
+# attributed to a specific guard clause or exception handler when writing the
+# negative and corner-case tests that close it.
+genhtml_no_source = 0
+
+# Replace tabs with number of spaces in source view (same as --num-spaces
+# option of genhtml)
+genhtml_num_spaces = 8
+
+# Highlight lines with converted-only data if non-zero (same as --highlight
+# option of genhtml)
+#
+# Retained for byte-level alignment with the workspace model even though lcov
+# 2.x reports this key as deprecated *and ignored*.  It is inert -- a warning
+# only, silenced by `--ignore-errors deprecated` -- and removing it would put
+# this file out of step with the two plugin copies for no behavioural gain.
+genhtml_highlight = 0
+
+# Include color legend in HTML output if non-zero (same as --legend option of
+# genhtml)
+genhtml_legend = 0
+
+# Use FILE as HTML prolog for generated pages (same as --html-prolog option of
+# genhtml)
+#genhtml_html_prolog = FILE
+
+# Use FILE as HTML epilog for generated pages (same as --html-epilog option of
+# genhtml)
+#genhtml_html_epilog = FILE
+
+# Use custom filename extension for pages (same as --html-extension option of
+# genhtml)
+#genhtml_html_extension = html
+
+# Compress all generated html files with gzip.
+#genhtml_html_gzip = 1
+
+# Include sorted overview pages (can be disabled by the --no-sort option of
+# genhtml)
+genhtml_sort = 1
+
+# Include function coverage data display (can be disabled by the
+# --no-func-coverage option of genhtml)
+#genhtml_function_coverage = 1
+
+# Include branch coverage data display (can be disabled by the
+# --no-branch-coverage option of genhtml)
+#genhtml_branch_coverage = 1
+
+# Specify the character set of all generated HTML pages
+genhtml_charset=UTF-8
+
+# Allow HTML markup in test case description text if non-zero
+genhtml_desc_html=0
+
+# Specify the precision for coverage rates
+#genhtml_precision=1
+
+# Show missed counts instead of hit counts
+#genhtml_missed=1
+
+# Demangle C++ symbols
+#genhtml_demangle_cpp=1
+
+# Name of the tool used for demangling C++ function names
+#genhtml_demangle_cpp_tool = c++filt
+
+# Specify extra parameters to be passed to the demangling tool
+#genhtml_demangle_cpp_params = ""
+
+# Location of the gcov tool (same as --gcov-info option of geninfo)
+#geninfo_gcov_tool = gcov
+
+# Adjust test names to include operating system information if non-zero
+#geninfo_adjust_testname = 0
+
+# Calculate checksum for each source code line if non-zero (same as --checksum
+# option of geninfo if non-zero, same as --no-checksum if zero)
+#geninfo_checksum = 1
+
+# Specify whether to capture coverage data for external source files (can
+# be overridden by the --external and --no-external options of geninfo/lcov)
+#geninfo_external = 1
+
+# Enable libtool compatibility mode if non-zero (same as --compat-libtool option
+# of geninfo if non-zero, same as --no-compat-libtool if zero)
+#geninfo_compat_libtool = 0
+
+# Use gcov's --all-blocks option if non-zero
+#geninfo_gcov_all_blocks = 1
+
+# Specify compatiblity modes (same as --compat option of geninfo).
+#geninfo_compat = libtool=on, hammer=auto, split_crc=auto
+
+# Adjust path to source files by removing or changing path components that
+# match the specified pattern (Perl regular expression format)
+#geninfo_adjust_src_path = /tmp/build => /usr/src
+
+# Specify if geninfo should try to automatically determine the base-directory
+# when collecting coverage data.
+#
+# Required at 1 for this suite: the middleware is an autotools build whose object
+# files live beside their sources under `ccec/src` and `osal/src`, and automatic
+# base-directory detection is what lets a single `lcov -c -d hdmicec` resolve
+# both trees in one capture, exactly as the CI recipe does.
+geninfo_auto_base = 1
+
+# Use gcov intermediate format? Valid values are 0, 1, auto
+geninfo_intermediate = auto
+
+# Specify if exception branches should be excluded from branch coverage.
+#
+# Left at the model's value (0 = do NOT exclude them) so that the numbers this
+# suite reports remain directly comparable with the two plugin suites, which use
+# the same setting.  The consequence has to be understood when reading a branch
+# percentage: gcov models branches as control-flow-graph arcs, and a C++
+# translation unit's CFG includes compiler-generated exception and static-
+# destruction arcs that no test can ever drive.  100% branch coverage is
+# therefore unattainable for most of this codebase, and a low branch figure is
+# not by itself evidence of a weak test.
+#
+# This is precisely why LINE coverage is the acceptance gate for this suite
+# (>=80% per target, enforced by `lcov --fail-under-lines 80` in
+# `run_coverage.sh`) and branch coverage is reported as movement evidence --
+# proof that negative and corner-case tests reached new arms -- and never as a
+# pass/fail criterion.
+geninfo_no_exception_branch = 0
+
+# Directory containing gcov kernel files
+# lcov_gcov_dir = /proc/gcov
+
+# Location of the insmod tool
+lcov_insmod_tool = /sbin/insmod
+
+# Location of the modprobe tool
+lcov_modprobe_tool = /sbin/modprobe
+
+# Location of the rmmod tool
+lcov_rmmod_tool = /sbin/rmmod
+
+# Location for temporary directories
+lcov_tmp_dir = /tmp
+
+# Show full paths during list operation if non-zero (same as --list-full-path
+# option of lcov)
+lcov_list_full_path = 0
+
+# Specify the maximum width for list output. This value is ignored when
+# lcov_list_full_path is non-zero.
+lcov_list_width = 80
+
+# Specify the maximum percentage of file names which may be truncated when
+# choosing a directory prefix in list output. This value is ignored when
+# lcov_list_full_path is non-zero.
+lcov_list_truncate_max = 20
+
+# Specify if function coverage data should be collected and processed.
+#
+# Kept at 1, as in the model.  Function coverage is a required output for this
+# suite -- per-file line coverage AND functional coverage both have to be
+# reported -- so lcov's function metric supplies the percentages while the
+# traceability report supplies the API-name-to-test-name mapping alongside them.
+# Note that `lcov --list` in lcov 2.x is unreliable for this: derive per-file
+# figures from the `FNF:`/`FNH:` records in the trace file, and when parsing an
+# `FN:` record take the LAST comma-separated field as the name, because lcov 2.x
+# added a third field and a naive split doubles every function denominator.
+lcov_function_coverage = 1
+
+# Specify if branch coverage data should be collected and processed.
+#
+# THE ONE VALUE THAT DIVERGES FROM THE PRISTINE WORKSPACE MODEL, AND THE REASON
+# THIS FILE EXISTS.  Branch data is neither collected nor displayed by lcov
+# unless it is switched on.  The stock-derived baseline and test-framework copy
+# ship it off, so branch coverage has never been visible for the middleware
+# suite.
+#
+# Read this honestly, though -- setting it here does NOT by itself guarantee
+# branch collection:
+#   * The `lcov_branch_coverage` spelling is DEPRECATED in lcov 2.x and defaults
+#     to 0.  lcov 2.x still honours it but warns, naming `branch_coverage` as the
+#     modern replacement and stating that backward-compatible support will be
+#     removed in a future release.  The legacy spelling is used anyway so this
+#     file stays key-for-key aligned with the workspace model; when the workspace
+#     migrates, all copies should move to `branch_coverage` together.
+#   * lcov reads this file only when it is passed `--config-file` (or when a copy
+#     is installed at `~/.lcovrc`).  CI does neither today.
+# The AUTHORITATIVE enablement for this suite is therefore the run-time
+# `--rc branch_coverage=1` override that `run_coverage.sh` applies to the
+# capture, filter and report steps; that override wins regardless of spelling
+# deprecation and regardless of whether this file was read at all.  What this
+# setting does is align the committed configuration with that intent, so a
+# developer running lcov by hand with `--config-file` gets the same branch column
+# the runner produces.
+lcov_branch_coverage = 1

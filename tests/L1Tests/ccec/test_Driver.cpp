@@ -629,7 +629,9 @@ TEST_F(DriverTest, PollAddress) {
 }
 
 // Test writeAsync
-TEST_F(DriverTest, DISABLED_WriteAsync) {
+// Traceability: section 6.2 rank 8 #gap-mw-driverimpl DriverImpl::writeAsync;
+// rank 10 #gap-hal-txasync HdmiCecTxAsync; rank 26 #gap-mw-driver Driver::getInstance.
+TEST_F(DriverTest, WriteAsync) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
         GTEST_SKIP() << "Mock is nullptr - test environment not initialized";
@@ -664,7 +666,9 @@ TEST_F(DriverTest, DISABLED_WriteAsync) {
 }
 
 // Test writeAsync with failure
-TEST_F(DriverTest, DISABLED_WriteAsyncWithFailure) {
+// Traceability: section 6.2 rank 8 #gap-mw-driverimpl DriverImpl::writeAsync;
+// rank 10 #gap-hal-txasync HdmiCecTxAsync; rank 26 #gap-mw-driver Driver::getInstance.
+TEST_F(DriverTest, WriteAsyncWithFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
         GTEST_SKIP() << "Mock is nullptr - test environment not initialized";
@@ -695,5 +699,39 @@ TEST_F(DriverTest, DISABLED_WriteAsyncWithFailure) {
     EXPECT_NO_THROW({ LibCCEC::getInstance().init("CEC_TEST"); });
 
     // Clear mock expectations
+    ::testing::Mock::VerifyAndClearExpectations(mock);
+}
+
+// Test writeAsync rejects calls while the driver is closed
+// Traceability: section 6.2 rank 8 #gap-mw-driverimpl DriverImpl::writeAsync;
+// rank 26 #gap-mw-driver Driver::getInstance.
+TEST_F(DriverTest, WriteAsyncBeforeOpenThrows) {
+    HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
+    ASSERT_NE(mock, nullptr);
+
+    Driver &driver = Driver::getInstance();
+    LibCCEC &lib = LibCCEC::getInstance();
+
+    // Normalize the shared library and driver to a coherent closed state.
+    try {
+        lib.term();
+    } catch (const InvalidStateException&) {
+        EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+        EXPECT_NO_THROW({ lib.term(); });
+    }
+
+    CECFrame frame;
+    frame.append(0x40);
+    frame.append(0x36);
+
+    EXPECT_CALL(*mock, HdmiCecTxAsync(_, _, _)).Times(0);
+    EXPECT_THROW({
+        driver.writeAsync(frame);
+    }, InvalidStateException);
+
+    // Reopen before applying the standard term/init restoration sequence.
+    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+    EXPECT_NO_THROW({ LibCCEC::getInstance().term(); });
+    EXPECT_NO_THROW({ LibCCEC::getInstance().init("CEC_TEST"); });
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
