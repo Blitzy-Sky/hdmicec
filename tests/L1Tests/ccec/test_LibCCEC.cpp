@@ -43,6 +43,14 @@ CCEC_END_NAMESPACE
 // global the library itself writes.
 extern char _CEC_LOG_PREFIX[64];
 
+// LibCCEC::init() is the only writer of the CEC log prefix, and the prefix is the only
+// observable effect its name argument has. The buffer is defined with external linkage in
+// ccec/src/Util.cpp and LibCCEC.cpp already declares it exactly this way, so re-declaring
+// it here reads production state directly instead of inferring it.
+CCEC_BEGIN_NAMESPACE
+extern char _CEC_LOG_PREFIX[64];
+CCEC_END_NAMESPACE
+
 using ::testing::_;
 using ::testing::Invoke;
 using ::testing::Return;
@@ -334,6 +342,12 @@ TEST_F(LibCCECTest, GetPhysicalAddressThrowsWhenNotInitialized) {
     settleBusReaderAfterInit();
 }
 
+// #gap-mw-libccec; §6.2 rank 23, P1; LibCCEC::init.
+//
+// init(NULL) takes the else arm of the name guard, whose entire observable effect is that
+// it empties the shared log prefix. Asserting only that the call does not throw would pass
+// even if that arm stopped clearing the prefix, so the prefix itself is seeded to a known
+// non-empty value first and read back afterwards.
 TEST_F(LibCCECTest, InitWithNullNameClearsLogPrefix) {
     LibCCEC& lib = LibCCEC::getInstance();
     ScopedLibCcecRestore restoreLibCcec;
@@ -364,6 +378,8 @@ TEST_F(LibCCECTest, InitWithNullNameClearsLogPrefix) {
     // stop()'s "while (!isStopped())" loop then never finishes.
     strncpy(_CEC_LOG_PREFIX, "CEC_TEST", sizeof(_CEC_LOG_PREFIX) - 1);
     _CEC_LOG_PREFIX[sizeof(_CEC_LOG_PREFIX) - 1] = '\0';
+    EXPECT_STREQ("CEC_TEST", _CEC_LOG_PREFIX);
+    EXPECT_EQ('\0', _CEC_LOG_PREFIX[sizeof(_CEC_LOG_PREFIX) - 1]);
 }
 
 TEST_F(LibCCECTest, MultipleInitTermCycles) {

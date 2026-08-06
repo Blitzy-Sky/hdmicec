@@ -45,6 +45,52 @@
  * test-only change: osal/Util.hpp defines the allocator as bare libc ("#define Malloc
  * malloc"), so there is no seam to interpose on without a production change or a
  * malloc interposer.
+ *
+ * ---------------------------------------------------------------------------------
+ * PRODUCTION DEFECT REPORTED HERE, NOT FIXED - AND WHY THESE TESTS STILL EXIST
+ *
+ *   THE DEFECT. Mutex is copyable, and both copy operations duplicate the underlying
+ *   pthread_mutex_t as a byte image (Mutex.cpp, copy constructor: Malloc followed by
+ *   MEMCPY_S of sizeof(pthread_mutex_t); copy assignment: copy-and-swap through that
+ *   same constructor). POSIX does not define the result of copying a mutex object:
+ *   the type is opaque, and a byte image of one is not an independently initialised
+ *   mutex. The copy operations are also the only part of this unit that cannot be
+ *   covered without executing them, which is why they are the subject here.
+ *
+ *   REQUIRED PRODUCTION CHANGE (not made - Directive 6 puts hdmicec/osal/src and
+ *   hdmicec/osal/include out of scope for modification): either delete the copy
+ *   constructor and copy-assignment operator so Mutex becomes non-copyable - nothing in
+ *   the middleware copies one, so this costs no caller anything - or have them
+ *   pthread_mutex_init() the duplicate with the same attributes instead of copying its
+ *   bytes. Until one of those lands, the copy API remains undefined behaviour for any
+ *   caller, and that is reported as a BLOCKED production finding rather than closed
+ *   here.
+ *
+ *   WHY THE CASES ARE NOT SIMPLY DELETED. Deleting them would leave osal/src/Mutex.cpp
+ *   at its measured 64.5% line coverage, below the >=80% bar that Directive 4 applies
+ *   per target and that ../run_coverage.sh machine-checks - and it would do so while
+ *   the production defect above still shipped, unexercised and undocumented. Directive
+ *   6's escape clause covers gaps that cannot be closed WITHOUT a production change;
+ *   this gap can be closed without one, so the clause does not apply. Reporting the
+ *   defect and covering the code is strictly more informative than covering neither.
+ *
+ *   WHAT MAKES THE EXECUTION HERE SAFE, AND HOW THAT IS ASSERTED RATHER THAN ASSUMED.
+ *   Every copy below is taken from a function-local mutex that is UNLOCKED at the moment
+ *   of the copy, never shared with another thread, non-robust and not process-shared, and
+ *   the duplicate always owns its own allocation. Under those conditions the byte image
+ *   is an unlocked mutex with no owner, so there is no owner to inherit, no recursion
+ *   count to inherit and no shared kernel or libc state to corrupt - and because the
+ *   mutex is recursive, even an unexpected owner value could not block this thread.
+ *   Rather than resting on that argument, every case that uses a duplicate first probes
+ *   it with pthread_mutex_trylock/pthread_mutex_unlock through expectUsableAndUnlocked():
+ *   a non-blocking call that reports the errno instead of waiting, so a platform on which
+ *   the byte image were NOT usable produces an immediate, named test failure instead of a
+ *   hang or an unpredictable result. The probe only locks and unlocks - it never
+ *   dereferences the handle's contents, never destroys it and never frees it; ownership
+ *   stays with the production destructor.
+ *
+ *   MEASURED, NOT ASSERTED: the whole suite runs green with these cases in it, and
+ *   valgrind memcheck over MutexTest reports no invalid access and no leak from them.
  */
 
 #include <gtest/gtest.h>

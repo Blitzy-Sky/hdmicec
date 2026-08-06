@@ -414,7 +414,12 @@ restore_home_lcovrc() {
     [ -n "$HOME_LCOVRC_STASH" ] || return 0
     local stash="$HOME_LCOVRC_STASH"
     HOME_LCOVRC_STASH=''
-    if [ -f "$stash" ] && [ -n "${HOME:-}" ]; then
+    # Any entry type, not just a regular file: what was moved aside is what goes back, and a
+    # ~/.lcovrc can legitimately be a symlink into a dotfiles repository or -- by mistake --
+    # a directory.  Testing -f alone would move such an entry aside and never return it,
+    # which is the one outcome a capture-and-restore scheme must never produce.  -e is false
+    # for a dangling symlink, so -L is tested too.
+    if { [ -e "$stash" ] || [ -L "$stash" ]; } && [ -n "${HOME:-}" ]; then
         if mv -f -- "$stash" "$HOME/.lcovrc" 2>/dev/null; then
             log "restored your $HOME/.lcovrc"
         else
@@ -481,10 +486,24 @@ stash_home_lcovrc() {
        Refusing to run lcov with an unknown home configuration in effect, and refusing
        to delete your file to get around it."
     chmod 700 -- "$stash_dir" 2>/dev/null || true
-    mv -f -- "$rc_path" "$stash_dir/.lcovrc" \
-        || { rmdir -- "$stash_dir" 2>/dev/null || true
-             die "could not move $rc_path aside. Fix the permissions on \$HOME and retry;
-       this script will not delete the file instead."; }
+    local mv_err
+    if ! mv_err="$(mv -f -- "$rc_path" "$stash_dir/.lcovrc" 2>&1)"; then
+        rmdir -- "$stash_dir" 2>/dev/null || true
+        # "It is gone" and "it will not move" are different situations.  The two plugin
+        # coverage runners in this workspace move the SAME $HOME/.lcovrc aside, so when one of
+        # them is running concurrently it can take the file between the existence check above
+        # and this move; the owner can also remove it in that window.  All this step requires
+        # is that no home configuration is in effect while lcov runs, and in that case none
+        # is -- so the run continues, and the other run's stash is left to the other run.
+        if [ ! -e "$rc_path" ] && [ ! -L "$rc_path" ]; then
+            log "$rc_path disappeared while being moved aside (a concurrent coverage run moved"
+            log "  it, or it was removed); no home configuration is in effect, which is all"
+            log "  this step needs"
+            return 0
+        fi
+        die "could not move $rc_path aside: ${mv_err:-mv failed}
+       Fix the permissions on \$HOME and retry; this script will not delete the file instead."
+    fi
     HOME_LCOVRC_STASH="$stash_dir/.lcovrc"
     log "moved $rc_path aside for this run (restored on exit): $HOME_LCOVRC_STASH"
 }
@@ -611,12 +630,24 @@ require_tools() {
        gcov ships with gcc; awk, find and mktemp ship with the base system.
        lcov 2.x is required: this script uses --fail-under-lines and
        --rc branch_coverage=1, neither of which exists in lcov 1.x."
+}
 
-    # Recorded rather than enforced: the trace-record spellings this script parses (FNL:,
-    # FNA:) and the gate option it relies on are lcov 2.x behaviour.  A 1.x lcov would
-    # fail later with a confusing message, so name the version now.
-    # `head -n1` can close the pipe early and hand the producer a SIGPIPE, which pipefail
-    # would otherwise turn into a fatal error over a banner line -- hence the `|| true`.
+# Recorded rather than enforced: the trace-record spellings this script parses (FNL:, FNA:)
+# and the gate option it relies on are lcov 2.x behaviour.  A 1.x lcov would fail later with
+# a confusing message, so name the version now.
+#
+# This runs AFTER stash_home_lcovrc(), and the order is not cosmetic.  lcov reads
+# $HOME/.lcovrc on EVERY invocation, `--version` included, and a file it cannot parse makes
+# every one of them fail: a home configuration setting both `lcov_branch_coverage` and
+# `genhtml_branch_coverage` makes lcov 2.0-1 answer `--version` with
+# "ERROR: unexpected ARRAY for branch_coverage value".  Printed before the stash, this banner
+# reported that error text as though it were a version string -- a line that looks like
+# provenance and is not.  With the home configuration already moved aside, what it prints is
+# the version of the tool that will actually do the measuring.
+#
+# `head -n1` can close the pipe early and hand the producer a SIGPIPE, which pipefail would
+# otherwise turn into a fatal error over a banner line -- hence the `|| true`.
+log_tool_versions() {
     log "lcov:    $( { "$LCOV_BIN"    --version 2>&1 | head -n1; } || true )"
     log "genhtml: $( { "$GENHTML_BIN" --version 2>&1 | head -n1; } || true )"
     log "gcov:    $( { "$GCOV_BIN"    --version 2>&1 | head -n1; } || true )"
@@ -1446,9 +1477,13 @@ apply_gate() {
 
 # ------------------------------------------------------------------------------------
 # main.  The order is deliberate and is the whole argument of the script:
-#   parse -> resolve artifacts -> [build] -> require an instrumented, exercised tree ->
-#   [zero + run + verify] -> move any home lcov configuration aside -> capture -> filter
-#   -> report HTML -> summarise -> per-file table -> gate.
+#   parse -> require the tools -> move any home lcov configuration aside -> name the tool
+#   versions -> resolve artifacts -> [build] -> require an instrumented, exercised tree ->
+#   [zero + run + verify] -> capture -> filter -> report HTML -> summarise -> per-file table
+#   -> gate.
+# The home configuration goes aside before the FIRST lcov invocation of the run, which is the
+# version banner, not the capture: lcov reads that file on every invocation and one it cannot
+# parse breaks all of them.
 # --restore is a standalone action and short-circuits everything else, so it can never be
 # mistaken for part of a measurement run.
 # ------------------------------------------------------------------------------------
@@ -1475,7 +1510,14 @@ main() {
     fi
     log "  branch data    : forced on with --rc branch_coverage=1 on capture, filter, genhtml and summary"
 
+    # Tool PRESENCE first (it needs no lcov invocation), then the home configuration goes
+    # aside, and only then is lcov asked anything -- including for its version.  Moving the
+    # stash ahead of every lcov call also protects the counter zeroing inside do_run, which
+    # is an lcov invocation like any other and used to run with a home configuration in
+    # effect.
     require_tools
+    stash_home_lcovrc
+    log_tool_versions
     prepare_output_dir
 
     if [ "$DO_BUILD" -eq 1 ]; then
@@ -1486,7 +1528,6 @@ main() {
         do_run
     fi
 
-    stash_home_lcovrc
     capture_coverage
     filter_coverage
     generate_html

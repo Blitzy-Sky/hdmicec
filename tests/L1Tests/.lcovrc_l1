@@ -11,13 +11,14 @@
 # applies them, and a threshold is only enforceable as a command-line check
 # (`lcov --summary <trace> --fail-under-lines 80`).
 #
-# Activation status, stated plainly: nothing in this submodule reads this file
-# today. `.github/workflows/L1-tests.yml` passes no `--config-file` and no `--rc`,
-# so the CI coverage step still inherits the system default and middleware branch
-# visibility is developer-opt-in. A middleware `run_coverage.sh` is planned as a
-# sibling of the sink plugin's and is specified to pass this file the same way;
-# like that runner, it must move a CI-planted `~/.lcovrc` aside and put it back
-# afterwards rather than delete it. No shared or system-level lcov configuration
+# Activation status, stated plainly: CI does not read this file.
+# `.github/workflows/L1-tests.yml` passes no `--config-file` and no `--rc`, so the
+# CI coverage step still inherits the system default and middleware branch
+# visibility is developer-opt-in. The in-tree consumer is
+# `tests/L1Tests/run_coverage.sh`, which passes this file to lcov and genhtml with
+# `--config-file` and additionally forces `--rc branch_coverage=1`; like the sink
+# plugin's runner it moves a CI-planted `~/.lcovrc` aside and puts it back
+# afterwards rather than deleting it. No shared or system-level lcov configuration
 # is modified by this suite.
 #
 

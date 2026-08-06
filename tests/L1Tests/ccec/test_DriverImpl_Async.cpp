@@ -347,6 +347,8 @@ TEST_F(DriverImplAsyncTest, DriverRemainsUsableAfterAsyncFailure) {
 // success arm while appearing to test acknowledged-transmit handling - which is the
 // contract drift described at the top of this file. Acknowledged-transmit handling is
 // covered separately, and honestly, by AckedTransmitIsReportedAsUnacknowledged.
+// Traceability: section 6.2 rank 9 #gap-hal-settxcallback HdmiCecSetTxCallback;
+// rank 8 #gap-mw-driverimpl DriverImpl::DriverTransmitCallback. Positive result arm.
 TEST_F(DriverImplAsyncTest, TransmitCompletionCallbackHandlesSuccessResult) {
     ASSERT_NE(mock, nullptr);
     ASSERT_NE(mock->txCallback, nullptr) << "open() must have registered a transmit callback";
