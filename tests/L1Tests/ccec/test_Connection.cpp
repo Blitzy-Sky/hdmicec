@@ -1404,7 +1404,6 @@ TEST_F(ConnectionTest, ConcurrentListenerOperations) {
     conn.close();
 }
 
-// Test heap deletion invokes the virtual deleting destructor without leaving a Bus listener
 TEST_F(ConnectionTest, HeapAllocatedConnectionDeleteInvokesDestructor) {
     TestFrameListener listener;
     Connection *conn = new Connection(LogicalAddress::PLAYBACK_DEVICE_1, true, "HeapConnection");

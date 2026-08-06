@@ -49,12 +49,22 @@ protected:
         // CRITICAL: Restore default ON_CALL behaviors that may have been overridden
         // This is necessary because some tests use ON_CALL to change default behavior
         if (mock != nullptr) {
-            // Restore default HdmiCecOpen behavior
+            // Restore default HdmiCecOpen behavior.
+            //
+            // The action must NOT capture this fixture: it is installed on the
+            // PROCESS-GLOBAL mock and therefore outlives the fixture, which GoogleTest
+            // destroys as soon as this TearDown returns. Capturing `this` (and reading the
+            // `mock` member through it) left a dangling closure on the global mock, so the
+            // next HdmiCecOpen from anywhere in the binary read freed memory - a latent
+            // crash that stayed hidden only because nothing re-opened the shared driver
+            // after this suite. The mock is resolved from its own accessor at call time
+            // instead, which is valid under any execution order and captures nothing.
             ON_CALL(*mock, HdmiCecOpen(::testing::_))
                 .WillByDefault(::testing::Invoke(
-                    [this](int* handle) {
-                        if (handle) {
-                            *handle = mock->currentHandle;
+                    [](int* handle) {
+                        HdmiCecDriverMock* current = HdmiCecDriverMock::getInstance();
+                        if (handle && current) {
+                            *handle = current->currentHandle;
                             return HDMI_CEC_IO_SUCCESS;
                         }
                         return HDMI_CEC_IO_INVALID_ARGUMENT;

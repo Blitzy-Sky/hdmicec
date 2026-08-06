@@ -21,6 +21,10 @@
 #include "osal/Runnable.hpp"
 #include "osal/Thread.hpp"
 #include <string>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <pthread.h>
 
 using namespace CCEC_OSAL;
 
@@ -51,6 +55,50 @@ private:
     int invocationCount_;
 };
 
+/**
+ * Test double for the one path that genuinely leaves this translation unit:
+ * Thread::start() hands Thread::CEntry to pthread_create, so run() is invoked on
+ * another thread and the caller has no join to wait on -- start() creates the
+ * thread with PTHREAD_CREATE_DETACHED, and Thread::stop() and
+ * Thread::getNativeHandle() are declared in the header but never defined
+ * anywhere in the component, so neither can be called.
+ *
+ * The dispatch is therefore observed the only way it can be: the runnable itself
+ * signals a condition variable, and the test waits on that with a bound.  It
+ * records the thread it ran on as well, which is what distinguishes "start()
+ * dispatched asynchronously" from "start() happened to call run() inline".
+ */
+class SignallingRunnable : public Runnable {
+public:
+    SignallingRunnable() : dispatched_(false), dispatchThread_() {
+    }
+
+    void run(void) override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        dispatchThread_ = pthread_self();
+        dispatched_ = true;
+        condition_.notify_all();
+    }
+
+    /* Returns true once run() has executed, false if it has not within the bound. */
+    bool waitForDispatch(int timeoutMs) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                                  [this]() { return dispatched_; });
+    }
+
+    pthread_t dispatchThread(void) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return dispatchThread_;
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool dispatched_;
+    pthread_t dispatchThread_;
+};
+
 } // namespace
 
 class ThreadTest : public ::testing::Test {
@@ -58,8 +106,6 @@ protected:
     CountingRunnable runnable;
 };
 
-// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
-// Symbols: CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *).
 TEST_F(ThreadTest, NamedConstructionDoesNotDispatch) {
     Thread thread(runnable, reinterpret_cast<const int8_t *>("worker"));
 
@@ -67,8 +113,6 @@ TEST_F(ThreadTest, NamedConstructionDoesNotDispatch) {
     (void)thread;
 }
 
-// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
-// Symbols: CCEC_OSAL::Thread::Thread(Runnable &), CCEC_OSAL::Thread::run.
 TEST_F(ThreadTest, RunDispatchesToRunnable) {
     Thread thread(runnable);
 
@@ -77,9 +121,6 @@ TEST_F(ThreadTest, RunDispatchesToRunnable) {
     EXPECT_EQ(1, runnable.invocationCount());
 }
 
-// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
-// Symbols: CCEC_OSAL::Thread::Thread(Runnable &), CCEC_OSAL::Thread::run,
-// CCEC_OSAL::Thread::~Thread.
 TEST_F(ThreadTest, DestructionAtScopeExitPreservesDispatchResult) {
     {
         Thread thread(runnable);
@@ -90,9 +131,6 @@ TEST_F(ThreadTest, DestructionAtScopeExitPreservesDispatchResult) {
     EXPECT_EQ(1, runnable.invocationCount());
 }
 
-// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
-// Symbols: CCEC_OSAL::Thread::Thread(Runnable &), CCEC_OSAL::Thread::run,
-// CCEC_OSAL::Thread::detach, CCEC_OSAL::Thread::~Thread.
 TEST_F(ThreadTest, DetachThenScopeExitPreservesDispatchResult) {
     {
         Thread thread(runnable);
@@ -103,9 +141,6 @@ TEST_F(ThreadTest, DetachThenScopeExitPreservesDispatchResult) {
     EXPECT_EQ(1, runnable.invocationCount());
 }
 
-// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
-// Symbols: CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *),
-// CCEC_OSAL::Thread::run.
 TEST_F(ThreadTest, EmptyNameIsAccepted) {
     Thread thread(runnable, reinterpret_cast<const int8_t *>(""));
 
@@ -114,9 +149,6 @@ TEST_F(ThreadTest, EmptyNameIsAccepted) {
     EXPECT_EQ(1, runnable.invocationCount());
 }
 
-// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
-// Symbols: CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *),
-// CCEC_OSAL::Thread::run.
 TEST_F(ThreadTest, LongNameIsAccepted) {
     const std::string longName(1024U, 'n');
     Thread thread(
@@ -128,9 +160,6 @@ TEST_F(ThreadTest, LongNameIsAccepted) {
     EXPECT_EQ(1, runnable.invocationCount());
 }
 
-// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
-// Symbols: CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *),
-// CCEC_OSAL::Thread::run.
 TEST_F(ThreadTest, RunDispatchIsRepeatable) {
     Thread thread(runnable, reinterpret_cast<const int8_t *>("repeat"));
 
@@ -141,10 +170,6 @@ TEST_F(ThreadTest, RunDispatchIsRepeatable) {
     EXPECT_EQ(3, runnable.invocationCount());
 }
 
-// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
-// Symbols: CCEC_OSAL::Thread::Thread(Runnable &),
-// CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *),
-// CCEC_OSAL::Thread::run.
 TEST_F(ThreadTest, NamedAndUnnamedConstructorsDispatchEquivalently) {
     CountingRunnable namedRunnable;
     Thread unnamedThread(runnable);
@@ -159,9 +184,6 @@ TEST_F(ThreadTest, NamedAndUnnamedConstructorsDispatchEquivalently) {
     EXPECT_EQ(1, namedRunnable.invocationCount());
 }
 
-// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
-// Symbols: CCEC_OSAL::Thread::Thread(Runnable &),
-// CCEC_OSAL::Thread::~Thread.
 TEST_F(ThreadTest, DestructionWithoutStartIsHarmless) {
     EXPECT_EQ(0, runnable.invocationCount());
     {
@@ -172,9 +194,6 @@ TEST_F(ThreadTest, DestructionWithoutStartIsHarmless) {
     EXPECT_EQ(0, runnable.invocationCount());
 }
 
-// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
-// Symbols: CCEC_OSAL::Thread::Thread(Runnable &),
-// CCEC_OSAL::Thread::detach, CCEC_OSAL::Thread::run.
 TEST_F(ThreadTest, DetachWithoutStartLeavesThreadUsable) {
     Thread thread(runnable);
 
@@ -184,4 +203,41 @@ TEST_F(ThreadTest, DetachWithoutStartLeavesThreadUsable) {
     thread.run();
 
     EXPECT_EQ(1, runnable.invocationCount());
+}
+
+// Traceability: #gap-mw-thread; COVERAGE_GAPS.md section 6.2 rank 34; P2.
+// Symbols: CCEC_OSAL::Thread::Thread(Runnable &, const int8_t *),
+// CCEC_OSAL::Thread::start, CCEC_OSAL::Thread::CEntry, CCEC_OSAL::Thread::~Thread.
+//
+// The remaining two symbols of the unit, and the only asynchronous behaviour it has:
+// start() configures a detached pthread attribute set and passes Thread::CEntry to
+// pthread_create, and CEntry casts its argument back to the Runnable and calls run().
+// Waiting on the runnable's own signal rather than on a fixed sleep keeps the case
+// deterministic: it returns as soon as the dispatch lands and fails rather than hangs
+// if it never does.
+TEST_F(ThreadTest, StartDispatchesRunnableOnAnotherThread) {
+    SignallingRunnable asyncRunnable;
+    const pthread_t callingThread = pthread_self();
+
+    {
+        Thread thread(asyncRunnable, reinterpret_cast<const int8_t *>("l1-start"));
+
+        thread.start();
+
+        // Bounded, and deliberately generous rather than tight: this runs inside a suite whose
+        // Bus reader threads can be CPU-bound, and a tight bound would turn scheduling pressure
+        // into a spurious failure (measured: one such failure in 25 full-suite runs at 5 s).
+        // Fatal on purpose - start() creates the worker DETACHED and swallows a pthread_create
+        // failure, so the only way this times out is that no worker exists, and continuing would
+        // assert on a dispatch that never happened.
+        ASSERT_TRUE(asyncRunnable.waitForDispatch(30000));
+    }
+
+    // Dispatch really crossed a thread boundary; start() did not degrade to an
+    // inline call on the caller.
+    EXPECT_EQ(0, pthread_equal(callingThread, asyncRunnable.dispatchThread()));
+
+    // The worker was created detached, so scope exit above is a complete teardown:
+    // ~Thread has no join to perform and must not block or fail.
+    EXPECT_TRUE(asyncRunnable.waitForDispatch(0));
 }

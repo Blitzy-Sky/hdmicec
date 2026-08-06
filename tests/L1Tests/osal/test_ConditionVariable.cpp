@@ -79,8 +79,7 @@ TEST_F(ConditionVariableTest, SignaledBeforeTimeout) {
     EXPECT_EQ(result.load(), 1L); // signaled before timeout → returns 1
 }
 
-// COVERAGE_GAPS.md #gap-mw-conditionvariable, §6.2 rank 36, P2:
-// CCEC_OSAL::ConditionVariable::getNativeHandle; compare pointers only, never dereference them.
+// Compare pointers only, never dereference them.
 TEST_F(ConditionVariableTest, GetNativeHandle) {
     void *handle = condVar.getNativeHandle();
 
