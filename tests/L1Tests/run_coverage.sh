@@ -355,7 +355,31 @@ MKTEMP_BIN="$(resolve_tool mktemp)"
 # stat is how the ancestry of every artifact path is checked (owner, mode, type) before a
 # byte is written to it.  It is coreutils, like the rest of the primitives above.
 STAT_BIN="$(resolve_tool stat)"
-readonly LCOV_BIN GENHTML_BIN GCOV_BIN AWK_BIN FIND_BIN MKTEMP_BIN STAT_BIN
+# timeout is how a hung suite becomes a reported outcome instead of a job the CI runner kills
+# with no diagnosis attached.  It is resolved here, alongside the other primitives, because the
+# --run path below references it: an earlier revision described the resolution and the probe in
+# a comment at the point of use but never performed either, so with `set -u` in effect the
+# documented `--run` invocation aborted with "TIMEOUT_BIN: unbound variable" before the suite
+# started.  The sibling runner entservices-hdmicecsink/Tests/run_coverage.sh sets the shape.
+TIMEOUT_BIN="$(resolve_tool timeout)"
+readonly LCOV_BIN GENHTML_BIN GCOV_BIN AWK_BIN FIND_BIN MKTEMP_BIN STAT_BIN TIMEOUT_BIN
+
+# --kill-after is desirable (a suite that ignores SIGTERM still dies) but is NOT universally
+# safe: this workspace's `timeout` is uutils coreutils, and with -k it reports a timeout as
+# exit 125 rather than GNU's 124 -- and 125 also means "timeout itself failed", so the two
+# become indistinguishable and a hang would be misreported as a broken invocation.  One cheap
+# probe settles it for this host instead of inferring it from a version string: a 1s bound on a
+# 3s sleep must yield exactly 124 before -k is used at all.
+TIMEOUT_KILL_AFTER=()
+if [ -n "$TIMEOUT_BIN" ]; then
+    timeout_probe=0
+    "$TIMEOUT_BIN" -k 1 1 sleep 3 >/dev/null 2>&1 || timeout_probe=$?
+    if [ "$timeout_probe" -eq 124 ]; then
+        TIMEOUT_KILL_AFTER=(-k 30)
+    fi
+    unset timeout_probe
+fi
+readonly TIMEOUT_KILL_AFTER
 
 # ------------------------------------------------------------------------------------
 # Configuration.  Every value is overridable from the environment, and the defaults are
@@ -366,6 +390,36 @@ COVERAGE_MIN="${COVERAGE_MIN:-80}"
 # that are below the bar with no authorised test reaching them, at the same figures as before
 # this project.  COVERAGE_PER_FILE_GATE=1 or --per-file-gate turns it on.
 COVERAGE_PER_FILE_GATE="${COVERAGE_PER_FILE_GATE:-0}"
+
+# Files excused from the PER-FILE half of the gate only.  They stay in the trace and stay in
+# the AGGREGATE denominator, so nothing is hidden and no percentage is flattered; the listing
+# suppresses one pass/fail vote and nothing else, which is why each entry carries its reason
+# here rather than in a commit message.  The GATE section of this header states the same set
+# and the same measured figures.
+#
+# All three are template-heavy headers under ccec/include that were never part of this pass's
+# named target set (ccec/src and osal/src), and each sits at exactly the figure it sat at
+# before this project's tests, so they are a pre-existing property of the suite rather than a
+# regression this pass introduced:
+#     ccec/include/ccec/Operand.hpp     0.0% (0/6)     -- pure abstract operand base; every
+#                                                        instantiated line lives in a derived
+#                                                        header, so no test in this suite's
+#                                                        authorised inventory reaches it
+#     ccec/include/ccec/Exception.hpp  33.3% (4/12)    -- the untaken arms are constructors of
+#                                                        exception types the mock driver never
+#                                                        raises
+#     ccec/include/ccec/Messages.hpp   76.5% (228/298) -- one inline accessor per unexercised
+#                                                        CEC message type
+# Excusing the vote is NOT excusing the gap: each is enumerated with its uncovered line
+# numbers on every run, and --per-file-gate is the right setting the moment a translation unit
+# covering these headers is authorised.  This variable is deliberately NOT environment-
+# overridable: an exemption is a documented decision, not a knob a caller may widen at the
+# point of measurement to make a red run green.
+COVERAGE_GATE_EXEMPT_FILES="ccec/include/ccec/Operand.hpp
+ccec/include/ccec/Exception.hpp
+ccec/include/ccec/Messages.hpp"
+readonly COVERAGE_GATE_EXEMPT_FILES
+
 # Artifact directory.  EMPTY BY DEFAULT, and that is the security-relevant part: with no
 # explicit choice this script creates its root with `mktemp -d` under $TMPDIR, so the name
 # is unpredictable and the directory is created atomically at mode 0700 (see
@@ -386,6 +440,11 @@ fi
 # Prefix providing libgtest/libgmock and their headers.  CI uses $GITHUB_WORKSPACE/install/usr.
 GTEST_PREFIX="${GTEST_PREFIX:-$WS/install/usr}"
 GTEST_EXTRA_ARGS="${GTEST_EXTRA_ARGS:-}"
+# Wall-clock bound on the L1 suite under --run, in seconds.  Defaulted HERE rather than at
+# the point of use because `set -u` is in effect: with the variable merely documented and
+# never initialised, the documented `--run` invocation aborted with "SUITE_TIMEOUT: unbound
+# variable" before the suite started.  900s is the value the USAGE block states.
+SUITE_TIMEOUT="${SUITE_TIMEOUT:-900}"
 
 DO_BUILD=0
 DO_RUN=0
@@ -997,6 +1056,11 @@ require_tools() {
     [ -n "$FIND_BIN" ]    || { warn "find not found on PATH";    missing=1; }
     [ -n "$MKTEMP_BIN" ]  || { warn "mktemp not found on PATH";  missing=1; }
     [ -n "$STAT_BIN" ]    || { warn "stat not found on PATH";    missing=1; }
+    # Only --run needs it, so it is required only then: a measure-only invocation on a host
+    # with a restricted PATH still works, and the bounded run still refuses to start unbounded.
+    if [ "$DO_RUN" -eq 1 ]; then
+        [ -n "$TIMEOUT_BIN" ] || { warn "timeout not found on PATH (required by --run)"; missing=1; }
+    fi
     [ "$missing" -eq 0 ] || die "missing coverage tooling.
        lcov, genhtml and gcov are what this script measures with, and awk, find and
        mktemp are how it parses and stages.  On a Debian/Ubuntu host:
