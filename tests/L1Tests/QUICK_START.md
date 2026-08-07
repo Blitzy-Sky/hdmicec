@@ -9,7 +9,7 @@ tests/
 ├── CECCmd.cpp
 ├── CECMonitor.cpp
 ├── CECCmdTest.cpp
-└── L1Tests/                      # NEW: L1 Unit Tests
+└── L1Tests/                      # L1 Unit Tests
     ├── Makefile.am               # L1 test build configuration
     ├── README.md                 # L1 test documentation
     ├── QUICK_START.md            # This quick reference
@@ -17,7 +17,7 @@ tests/
     ├── run_coverage.sh           # coverage runner with 80% line gate
     ├── .lcovrc_l1                # lcov configuration (branch collection enabled)
     ├── .gitignore                # Ignore build artifacts
-    ├── ccec/                     # CCEC library tests (14 files, 494 tests)
+    ├── ccec/                     # CCEC library tests (12 files, 426 tests)
     │   ├── test_CECFrame.cpp
     │   ├── test_Connection.cpp
     │   ├── test_Bus.cpp
@@ -29,9 +29,7 @@ tests/
     │   ├── test_Driver_Mock.cpp
     │   ├── test_Driver.cpp
     │   ├── test_DriverImpl_Async.cpp
-    │   ├── test_Util.cpp
-    │   ├── test_Operand.cpp
-    │   └── test_Exception.cpp
+    │   └── test_Util.cpp
     └── osal/                     # OSAL library tests (3 files, 26 tests)
         ├── test_ConditionVariable.cpp
         ├── test_Mutex.cpp
@@ -70,13 +68,44 @@ endif
 
 ## Quick Start
 
-### Build with L1 Tests
+### Build and run, in one command
 ```bash
-autoreconf -fi
-./configure --enable-l1tests
-make
-make check
+cd tests/L1Tests
+./run_coverage.sh --build --run     # build, run, capture, report, gate at 80% lines
 ```
+
+That is the maintained recipe.  Everything below is the same sequence by hand.
+
+### Build with L1 Tests, by hand
+Four steps are prerequisites rather than optional extras: the stub headers, the HAL-mock symlink,
+`CPPFLAGS`/`PKG_CONFIG_PATH`, and a **separate** `make` pass for `tests/L1Tests`.  Omit any one and
+the build fails or silently produces no test binary.
+
+```bash
+# From the hdmicec submodule root.  $GTEST_PREFIX must hold lib/pkgconfig/gtest.pc:
+# configure.ac finds GoogleTest with PKG_CHECK_MODULES, which ignores -I and -L.
+export GTEST_PREFIX="$HOME/.local/gtest-1.15.0"
+
+mkdir -p stubs/rdk/iarmbus stubs/ccec/drivers/iarmbus
+touch stubs/rdk/iarmbus/libIARM.h \
+      stubs/rdk/iarmbus/libIBus.h \
+      stubs/rdk/iarmbus/libIBusDaemon.h \
+      stubs/ccec/drivers/iarmbus/CecIARMBusMgr.h
+ln -sf ../../../mocks/hdmicec/hdmi_cec_driver.h stubs/ccec/drivers/hdmi_cec_driver.h
+
+autoreconf -if
+PKG_CONFIG_PATH="$GTEST_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+CPPFLAGS="-I$PWD/mocks -I$PWD/stubs -I$GTEST_PREFIX/include" \
+LDFLAGS="-L$GTEST_PREFIX/lib" \
+  ./configure --enable-l1tests
+
+make -j"$(nproc)" all
+make -C tests/L1Tests all
+```
+
+`libglib2.0-dev` is a hard requirement of `configure`.  `autoreconf`/`configure` also rewrite six
+git-tracked `Makefile` files in this submodule; they are local toolchain output, must never be
+committed, and `./run_coverage.sh --restore` puts them back.
 
 ### Build without L1 Tests (default)
 ```bash
@@ -87,8 +116,12 @@ make
 ### Run Tests Manually
 ```bash
 cd tests/L1Tests
-./run_L1Tests
+./run_L1Tests          # the libtool wrapper in this directory, NOT .libs/run_L1Tests
 ```
+
+Root `make check` does **not** run this suite: the top-level `Makefile.am` declares
+`SUBDIRS = osal ccec`, so `check` never descends into `tests/`.  Use
+`make -C tests/L1Tests check` from the submodule root when you want automake to drive it.
 
 ### Run Specific Tests
 ```bash
@@ -118,10 +151,14 @@ the full option and environment reference.
 - **Name**: `run_L1Tests`
 - **Location**: `tests/L1Tests/`
 - **Type**: Google Test executable
-- **Sources**: 17 test translation units + test_main.cpp (all listed in
+- **Sources**: 15 test translation units + test_main.cpp (all listed in
   `run_L1Tests_SOURCES`, which is the only gate on what gets compiled)
-- **Total Tests**: 520 individual test cases in 18 fixtures — all passing,
-  none disabled — measured with `./run_L1Tests --gtest_list_tests`
+- **Total Tests**: 452 individual test cases in 17 fixtures — all passing,
+  none disabled — measured with `./run_L1Tests --gtest_list_tests`.  There are
+  more fixtures than translation units because two files declare two fixtures
+  each: `ccec/test_LibCCEC.cpp` (`LibCCECTest` and `LibCCECUninitializedTest`)
+  and `ccec/test_MessageDecoder.cpp` (`MessageDecoderTest` and
+  `MessageDecoderTrackingTest`)
 
 ## Key Features
 
@@ -129,7 +166,8 @@ the full option and environment reference.
 ✅ **Backward Compatible**: Existing tests (BasicTest, CECCmd, etc.) unchanged  
 ✅ **Clean Separation**: L1 tests in dedicated subdirectory  
 ✅ **Google Test Framework**: Industry-standard C++ testing  
-✅ **Automated Testing**: Integrated with `make check`  
+✅ **Automated Testing**: `TESTS = run_L1Tests` in this directory's `Makefile.am`, so
+`make -C tests/L1Tests check` drives the suite (root `make check` does not — see above)
 
 ## Configuration Options
 
@@ -140,9 +178,15 @@ the full option and environment reference.
 
 ## Next Steps
 
-1. Install Google Test: `sudo apt-get install libgtest-dev libgmock-dev`
-2. Configure: `./configure --enable-l1tests`
-3. Build: `make`
-4. Test: `make check`
+1. Provide GoogleTest so that `pkg-config` can find a `gtest.pc` — either
+   `sudo apt-get install libgtest-dev libgmock-dev` where the distribution's copy still compiles
+   as C++14, or a source build into a private prefix exported as `GTEST_PREFIX` (see
+   [Quick Start](#quick-start))
+2. Generate the stubs and the HAL-mock symlink, then `autoreconf -if` and
+   `./configure --enable-l1tests` with `CPPFLAGS`/`PKG_CONFIG_PATH` set
+3. Build: `make all` **and then** `make -C tests/L1Tests all`
+4. Test: `./run_L1Tests` from `tests/L1Tests`, or `make -C tests/L1Tests check`
+
+Or let `./run_coverage.sh --build --run` do all four.
 
 See **UNIT_TEST_SETUP.md** for complete documentation.

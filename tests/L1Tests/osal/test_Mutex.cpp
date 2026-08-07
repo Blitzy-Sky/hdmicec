@@ -74,29 +74,52 @@
  *   this gap can be closed without one, so the clause does not apply. Reporting the
  *   defect and covering the code is strictly more informative than covering neither.
  *
- *   WHAT MAKES THE EXECUTION HERE SAFE, AND HOW THAT IS ASSERTED RATHER THAN ASSUMED.
+ *   WHAT MAKES THE EXECUTION HERE SAFE, AND HOW THAT IS PROVED RATHER THAN ARGUED.
  *   Every copy below is taken from a function-local mutex that is UNLOCKED at the moment
  *   of the copy, never shared with another thread, non-robust and not process-shared, and
  *   the duplicate always owns its own allocation. Under those conditions the byte image
  *   is an unlocked mutex with no owner, so there is no owner to inherit, no recursion
  *   count to inherit and no shared kernel or libc state to corrupt - and because the
  *   mutex is recursive, even an unexpected owner value could not block this thread.
- *   Rather than resting on that argument, every case that uses a duplicate first probes
- *   it with pthread_mutex_trylock/pthread_mutex_unlock through expectUsableAndUnlocked():
- *   a non-blocking call that reports the errno instead of waiting, so a platform on which
- *   the byte image were NOT usable produces an immediate, named test failure instead of a
- *   hang or an unpredictable result. The probe only locks and unlocks - it never
- *   dereferences the handle's contents, never destroys it and never frees it; ownership
- *   stays with the production destructor.
  *
- *   MEASURED, NOT ASSERTED: the whole suite runs green with these cases in it, and
- *   valgrind memcheck over MutexTest reports no invalid access and no leak from them.
+ *   That argument is not what these cases rest on, because an argument is not a proof and
+ *   the operation it excuses is undefined. Every case that uses a duplicate FIRST calls
+ *   duplicateIsIndistinguishableFromFresh(), which compares the duplicate's object
+ *   representation with that of a freshly pthread_mutex_init'd recursive mutex and makes NO
+ *   pthread call to do so - reading an object's bytes through unsigned char is defined
+ *   behaviour whatever those bytes mean. Only once the images match, which establishes that
+ *   the duplicate is indistinguishable from a mutex the platform's own initialiser produced,
+ *   is any pthread call made on it: the non-blocking trylock/unlock probe in
+ *   expectUsableAndUnlocked(), then the lock/unlock the case is actually about. On a platform
+ *   where a byte copy is NOT equivalent, the proof fails first and the case returns without
+ *   touching the object, so the outcome is a named failure naming the differing offset rather
+ *   than a hang, a corruption or a pass by luck.
+ *
+ *   An earlier revision used the trylock probe itself as the safety check. That was the wrong
+ *   way round: trylock IS a pthread call on the duplicate, so the check could only report a
+ *   problem by performing the very operation whose validity was in question.
+ *
+ *   THE ONE UNGATED CALL, stated rather than glossed over: ~Mutex() calls
+ *   pthread_mutex_destroy on the duplicate at scope exit. It is the production destructor, it
+ *   runs whether or not the proof passed, and avoiding it would mean never constructing a
+ *   duplicate - which would abandon the coverage these cases exist to provide. It is the
+ *   residual exposure of exercising a copy API that should not exist, and it is part of the
+ *   case for the production change reported above.
+ *
+ *   MEASURED, NOT ASSERTED: on this platform sizeof(pthread_mutex_t) is 40, two independently
+ *   initialised recursive mutexes are byte-identical, a copy of one matches a fresh
+ *   initialisation exactly, and a source that has been locked and unlocked returns to the same
+ *   image - so the proof does not false-fail on a mutex that was used before being copied. The
+ *   whole suite runs green with these cases in it, and valgrind memcheck over MutexTest reports
+ *   no invalid access and no leak from them.
  */
 
 #include <gtest/gtest.h>
 
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
+#include <ios>
 #include <pthread.h>
 
 #include "osal/Mutex.hpp"
@@ -106,14 +129,130 @@ using namespace CCEC_OSAL;
 namespace {
 
 /*
+ * A mutex initialised exactly the way Mutex::Mutex(void) initialises one: recursive
+ * attributes, pthread_mutex_init, attributes destroyed again. It is the REFERENCE IMAGE the
+ * validity proof below compares a duplicate against, and it is a legitimately initialised
+ * mutex in its own right, so every pthread call this class makes is defined behaviour.
+ */
+class FreshRecursiveMutex {
+public:
+    FreshRecursiveMutex() : initialised(false) {
+        pthread_mutexattr_t attr;
+        if (pthread_mutexattr_init(&attr) != 0) {
+            return;
+        }
+        if (pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE_NP) == 0 &&
+            pthread_mutex_init(&mutex, &attr) == 0) {
+            initialised = true;
+        }
+        pthread_mutexattr_destroy(&attr);
+    }
+
+    ~FreshRecursiveMutex() {
+        if (initialised) {
+            pthread_mutex_destroy(&mutex);
+        }
+    }
+
+    bool valid(void) const { return initialised; }
+    const void *image(void) const { return &mutex; }
+
+private:
+    FreshRecursiveMutex(const FreshRecursiveMutex &);
+    FreshRecursiveMutex &operator = (const FreshRecursiveMutex &);
+
+    pthread_mutex_t mutex;
+    bool initialised;
+};
+
+/*
+ * THE VALIDITY PROOF, AND WHY IT COMES BEFORE EVERY OTHER USE OF A DUPLICATE.
+ *
+ * A duplicate produced by Mutex's copy constructor is a byte image of another mutex, and
+ * POSIX does not define what a pthread call does with one. That makes the ORDER of operations
+ * here the whole point: this function reads the duplicate's object representation and compares
+ * it with the representation of a freshly pthread_mutex_init'd recursive mutex, and it makes NO
+ * pthread call on the duplicate to do so. Reading an object's bytes through unsigned char is
+ * defined behaviour whatever those bytes mean, so the proof itself can never be the undefined
+ * operation it exists to guard against.
+ *
+ * What a match establishes is narrow and exactly what is needed: the duplicate is
+ * INDISTINGUISHABLE, byte for byte, from a mutex the platform's own initialiser produced. Any
+ * pthread call made on it afterwards is therefore a call on a bit pattern the platform itself
+ * creates and supports - no owner recorded, no recursion count, no waiters, no shared kernel or
+ * libc state - rather than on an image whose validity was assumed.
+ *
+ * A mismatch fails the calling test with the offending offset and both byte values, and the
+ * caller returns WITHOUT touching the duplicate. On a platform where a byte copy is not
+ * equivalent to an initialised mutex, this suite therefore reports a named failure instead of
+ * hanging, corrupting libc state, or passing by luck.
+ *
+ * Measured on this platform: sizeof(pthread_mutex_t) is 40, two independently initialised
+ * recursive mutexes are byte-identical, a copy of one matches a fresh initialisation exactly,
+ * and a source that has been through a lock/unlock cycle returns to the same image - so the
+ * proof does not false-fail on a mutex that was used before it was copied.
+ *
+ * THE ONE CALL THAT CANNOT BE GATED, stated plainly rather than glossed over: ~Mutex() calls
+ * pthread_mutex_destroy on the duplicate at scope exit. It is the production destructor, it
+ * runs whether or not the proof passed, and the only way to avoid it would be never to
+ * construct a duplicate - which would abandon the copy-semantics coverage these cases exist to
+ * provide. It is the residual exposure of exercising a copy API that should not exist, and it
+ * is part of the case for the production change reported at the top of this file.
+ */
+// Takes a non-const reference because Mutex::getNativeHandle() is non-const in production;
+// nothing here modifies the object.
+bool duplicateIsIndistinguishableFromFresh(Mutex &duplicate, const char *what) {
+    const void *duplicateHandle = duplicate.getNativeHandle();
+    if (duplicateHandle == NULL) {
+        ADD_FAILURE() << what << ": native handle is null, so there is no image to validate";
+        return false;
+    }
+
+    FreshRecursiveMutex reference;
+    if (!reference.valid()) {
+        ADD_FAILURE() << what
+                      << ": could not initialise a reference recursive mutex, so the duplicate's"
+                         " image cannot be validated and must not be used";
+        return false;
+    }
+
+    unsigned char duplicateImage[sizeof(pthread_mutex_t)];
+    unsigned char referenceImage[sizeof(pthread_mutex_t)];
+    std::memcpy(duplicateImage, duplicateHandle, sizeof(duplicateImage));
+    std::memcpy(referenceImage, reference.image(), sizeof(referenceImage));
+
+    if (std::memcmp(duplicateImage, referenceImage, sizeof(duplicateImage)) == 0) {
+        return true;
+    }
+
+    for (size_t offset = 0; offset < sizeof(duplicateImage); ++offset) {
+        if (duplicateImage[offset] != referenceImage[offset]) {
+            ADD_FAILURE() << what
+                          << ": the duplicated pthread_mutex_t is NOT byte-identical to a freshly"
+                             " initialised recursive mutex - first difference at offset " << offset
+                          << " (duplicate 0x" << std::hex << static_cast<unsigned>(duplicateImage[offset])
+                          << ", fresh 0x" << static_cast<unsigned>(referenceImage[offset]) << std::dec
+                          << "). Copying a mutex is undefined by POSIX and this platform does not"
+                             " make it harmless, so no pthread call is made on this object.";
+            break;
+        }
+    }
+    return false;
+}
+
+/*
  * Confirm that a mutex is usable and currently unowned, without ever blocking.
  *
  * pthread_mutex_trylock returns immediately in every case: 0 when it acquired the lock,
  * EBUSY when another thread holds it, and EINVAL when the object is not a usable mutex.
- * That makes it the one probe that can distinguish "this duplicate is a working, unlocked
- * mutex" from "this duplicate is not usable" without risking the whole single-process test
- * binary on the answer. The lock taken by the probe is released again immediately, so the
- * object is left exactly as it was found.
+ * That makes it the one probe that can distinguish "this mutex is working and unlocked"
+ * from "this mutex is not usable" without risking the whole single-process test binary on
+ * the answer. The lock taken by the probe is released again immediately, so the object is
+ * left exactly as it was found.
+ *
+ * This is a pthread call, so on a DUPLICATE it is only ever reached after
+ * duplicateIsIndistinguishableFromFresh() has passed. On a legitimately constructed mutex it
+ * needs no such gate.
  */
 void expectUsableAndUnlocked(Mutex &mutex, const char *what) {
     void *handle = mutex.getNativeHandle();
@@ -206,6 +345,12 @@ TEST_F(MutexTest, CopyConstructionAllocatesDistinctNativeHandle) {
     EXPECT_TRUE(copy.getNativeHandle() != nullptr);
     EXPECT_NE(copy.getNativeHandle(), original.getNativeHandle());
 
+    // VALIDITY PROOF FIRST, and it makes no pthread call: the duplicate's image is compared
+    // with a freshly initialised recursive mutex's. Only once that matches is any pthread call
+    // made on it, which is what keeps the probe below from being a call on an image whose
+    // validity was assumed.
+    ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(copy, "copy-constructed mutex"));
+
     // The duplicate is a working, unowned mutex - asserted rather than assumed, and
     // asserted without blocking, so an unusable byte image fails here by name.
     expectUsableAndUnlocked(copy, "copy-constructed mutex");
@@ -217,6 +362,10 @@ TEST_F(MutexTest, CopyConstructionAllocatesDistinctNativeHandle) {
 TEST_F(MutexTest, CopyConstructedMutexIsIndependentlyUsable) {
     Mutex original;                 // unlocked at the moment of the copy
     Mutex copy(original);
+
+    // No pthread call touches the duplicate until its image has been proved equivalent to a
+    // freshly initialised one - including the lock/unlock pair further down.
+    ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(copy, "copy-constructed mutex"));
 
     expectUsableAndUnlocked(original, "copy source before use");
     expectUsableAndUnlocked(copy, "copy-constructed mutex before use");
@@ -246,6 +395,7 @@ TEST_F(MutexTest, DestroyingCopyLeavesOriginalUsable) {
     {
         Mutex copy(original);       // unlocked at the moment of the copy
         EXPECT_NE(copy.getNativeHandle(), originalHandle);
+        ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(copy, "copy-constructed mutex"));
         expectUsableAndUnlocked(copy, "copy-constructed mutex before use");
         copy.lock();
         copy.unlock();
@@ -276,6 +426,11 @@ TEST_F(MutexTest, CopyAssignmentReplacesNativeHandle) {
     EXPECT_NE(target.getNativeHandle(), handleBeforeAssignment);
     EXPECT_NE(target.getNativeHandle(), source.getNativeHandle());
 
+    // Copy-and-swap leaves the TARGET holding the temporary's duplicated image, so the target
+    // is the object that needs the proof; the source ends up on the block the target legitimately
+    // constructed and needs none.
+    ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(target, "assignment target after the swap"));
+
     expectUsableAndUnlocked(target, "assignment target after the swap");
     expectUsableAndUnlocked(source, "assignment source after the swap");
 
@@ -301,6 +456,7 @@ TEST_F(MutexTest, CopyAssignmentReturnsReferenceToTarget) {
     EXPECT_EQ(&result, &target);
     EXPECT_EQ(result.getNativeHandle(), target.getNativeHandle());
     EXPECT_TRUE(result.getNativeHandle() != nullptr);
+    ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(result, "assignment result"));
     expectUsableAndUnlocked(result, "assignment result");
 }
 
@@ -318,6 +474,11 @@ TEST_F(MutexTest, ChainedCopyAssignmentGivesEachTargetItsOwnHandle) {
     EXPECT_NE(first.getNativeHandle(), second.getNativeHandle());
     EXPECT_NE(first.getNativeHandle(), source.getNativeHandle());
     EXPECT_NE(second.getNativeHandle(), source.getNativeHandle());
+
+    // Both chained targets hold duplicated images - `first` a duplicate of `second`, which is
+    // itself a duplicate of `source` - so both are proved before either is locked.
+    ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(first, "first chained assignment target"));
+    ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(second, "second chained assignment target"));
 
     expectUsableAndUnlocked(first, "first chained assignment target");
     expectUsableAndUnlocked(second, "second chained assignment target");
@@ -344,6 +505,9 @@ TEST_F(MutexTest, SelfAssignmentLeavesMutexUsable) {
 
     EXPECT_TRUE(mutex.getNativeHandle() != nullptr);
     EXPECT_NE(mutex.getNativeHandle(), handleBeforeAssignment);
+    // Self-assignment routes through the same copy constructor, so the object now holds a
+    // duplicated image of itself and is proved before it is locked.
+    ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(mutex, "self-assigned mutex"));
     expectUsableAndUnlocked(mutex, "self-assigned mutex");
     EXPECT_NO_THROW({
         mutex.lock();

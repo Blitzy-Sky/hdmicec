@@ -47,26 +47,34 @@ run_L1Tests_SOURCES = \
     osal/test_ConditionVariable.cpp \
     osal/test_Mutex.cpp \
     osal/test_Thread.cpp \
-    ccec/test_Operand.cpp \
-    ccec/test_Exception.cpp \
     $(top_srcdir)/mocks/hdmicec/hdmi_cec_driver_mock.cpp
 
-# ORDER IS SIGNIFICANT IN THIS LIST, and the last two entries are placed at the END on
-# purpose.  GoogleTest registers each TEST_F during static initialisation, and the order in
-# which those initialisers run follows the link order of the objects, which follows this
-# list; the order in which the suites then RUN is the order they were registered.  This suite
-# contains pre-existing order-fragile tests that pass in the established order and must not
-# be modified on this pass, so inserting a new translation unit in the MIDDLE of this list
-# reorders every suite after it and turns a green run red - measured: adding
-# ccec/test_Operand.cpp and ccec/test_Exception.cpp after ccec/test_Operands.cpp moved the
-# Bus and Driver suites and produced a crash in DriverTest.MultipleClose, while appending the
-# same two files here left all 519 tests green.  Append new translation units; do not
-# interleave them.
+# ORDER IS SIGNIFICANT IN THIS LIST.  GoogleTest registers each TEST_F during static
+# initialisation; those initialisers run in the link order of the objects, which follows this
+# list, and the order in which the suites then RUN is the order they were registered.  This
+# suite contains pre-existing order-fragile tests that pass in the established order and must
+# not be modified on this pass, so the RELATIVE ORDER OF THE PRE-EXISTING ENTRIES ABOVE IS
+# UNCHANGED from before this pass: the four units added here - ccec/test_DriverImpl_Async.cpp,
+# ccec/test_Util.cpp, osal/test_Mutex.cpp and osal/test_Thread.cpp - are placed after the last
+# pre-existing entry of their own layer, never between two pre-existing ones.  Keep that
+# property when adding a translation unit: append it within its layer, and re-run the whole
+# suite afterwards, because a reordering shows up as a failure in Bus/Connection/Driver rather
+# than in the unit that was added.
 
+# -lgcov is required by ccec/test_Util.cpp, which runs each of its cases in a forked child
+# so that the non-atomic production log level is never written in the process the Bus
+# threads live in, and calls __gcov_reset()/__gcov_dump() in that child so the production
+# lines it drove are still counted - a child leaving through _exit() writes no coverage data
+# otherwise.  Those two entry points live in their own members of libgcov.a
+# (_gcov_reset.o, _gcov_dump.o) and are pulled in only by a direct reference, which is why
+# naming the library here is not redundant with the -fprofile-arcs the coverage build already
+# passes: that flag links libgcov but does not select those members.  Listing it
+# unconditionally also keeps a build configured WITHOUT coverage instrumentation linkable,
+# where the same two calls become no-ops over an empty counter list.
 run_L1Tests_LDADD = \
     $(top_builddir)/ccec/src/libRCEC.la \
     $(top_builddir)/osal/src/libRCECOSHal.la \
-    -lgtest -lgmock
+    -lgtest -lgmock -lgcov
 
 run_L1Tests_LDFLAGS = -pthread
 

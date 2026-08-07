@@ -677,28 +677,9 @@ TEST_F(BusTest, SendSucceedsBeforeTimeoutExpiry) {
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::steady_clock::now() - start).count();
 
-    // WHAT PROVES "IT STOPPED EARLY" IS THE DRIVER CALL COUNT, NOT THE WALL CLOCK.
-    // The EXPECT_CALL above is .Times(2): if send had consumed its whole retry budget it
-    // would have made three driver calls, and VerifyAndClearExpectations below would fail.
-    // That is a causal assertion and it cannot be perturbed by machine load.
-    //
-    // This test used to add `EXPECT_LT(elapsed, 500)` on top of it, and that assertion was
-    // FLAKY: the nominal path is one 251 ms inter-retry sleep, leaving only ~249 ms of
-    // headroom under the 500 ms bound, which scheduling delay on a loaded host exceeds.
-    // Measured at this suite's own HEAD, before any change in this pass: 1 failure in 60
-    // consecutive runs of the unmodified suite, reporting 546 ms and 554 ms against the
-    // 500 ms bound, with the suite otherwise green.  An upper bound cannot be made both
-    // meaningful and robust here - anything loose enough to survive load is looser than the
-    // 500 ms budget it was meant to police, so it would no longer distinguish the early
-    // return from the exhausted one, which is precisely what .Times(2) already does.
-    //
-    // The timing assertion kept below is a LOWER bound, which load can only ever help: it
-    // proves the retry path was actually taken (one inter-retry sleep elapsed) rather than
-    // the first attempt having silently succeeded, which .Times(2) alone would not catch if
-    // the mock's action ordering were ever changed.  Nominal is ~251 ms; 200 ms leaves room
-    // for sleep granularity while still being far above a no-sleep path's few microseconds.
-    EXPECT_GE(elapsed, 200) << "send returned without an inter-retry sleep, so the retry "
-                               "path was not exercised (elapsed " << elapsed << " ms)";
+    // Completed after 1 inter-retry sleep (~251ms), so must be strictly less
+    // than the full 500ms timeout budget.
+    EXPECT_LT(elapsed, 500);
 
     conn.close();
     ::testing::Mock::VerifyAndClearExpectations(mock);

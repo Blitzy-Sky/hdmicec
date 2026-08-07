@@ -12,33 +12,79 @@ This directory contains the L1 unit tests for the hdmicec library using Google T
 
 ## Prerequisites
 
-Install Google Test development package:
+Install the Google Test development packages.  Elevated privilege is needed for the package
+manager and for nothing else:
 
 ```bash
 # Ubuntu/Debian
 sudo apt-get install libgtest-dev libgmock-dev
-
-# Build from source if needed
-cd /usr/src/gtest
-sudo cmake .
-sudo make
-sudo cp lib/*.a /usr/lib
 ```
+
+If the distribution packages ship headers without the static libraries, build GoogleTest from
+source **unprivileged** and install it into a prefix you own.  Compiling as root is unnecessary,
+and writing archives straight into `/usr/lib` puts files the package manager does not know about
+where they can shadow a later distribution update:
+
+```bash
+cmake -S /usr/src/googletest -B "$HOME/gtest-build" \
+      -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+cmake --build "$HOME/gtest-build"
+cmake --install "$HOME/gtest-build"        # writes only under $HOME/.local
+```
+
+Point `configure` at that prefix so the build finds it without any system-wide change:
+
+```bash
+CPPFLAGS="-I$HOME/.local/include" LDFLAGS="-L$HOME/.local/lib" ./configure --enable-l1tests
+```
+
+and put `$HOME/.local/lib` on `LD_LIBRARY_PATH` when running `run_L1Tests` if the shared
+libraries were built there.
 
 ## Building Tests
 
+**The short answer:** `./run_coverage.sh --build --run` from this directory does the whole
+sequence below — build, run, capture, report and gate — and is the recipe this suite is
+maintained against.
+
+The long answer, for building by hand.  Four prerequisites are easy to miss, and every one of
+them is fatal rather than degrading:
+
+1. **`stubs/` must exist.**  The middleware includes IARM bus headers it does not ship.
+2. **The HAL driver mock must be symlinked over the driver header.**  That symlink is the entire
+   mocking seam; without it the build looks for a real HDMI-CEC driver.
+3. **`CPPFLAGS` must carry `mocks/` and `stubs/`, and `PKG_CONFIG_PATH` must reach a `gtest.pc`.**
+4. **`make` at the top level does not build this suite.**  `tests/L1Tests` needs its own
+   `make` pass — see [Running Tests](#running-tests) for why root `make check` does not help
+   either.
+
 ```bash
-# Configure with L1 tests enabled
-./configure --enable-l1tests
+# From the hdmicec submodule root
+export GTEST_PREFIX="$HOME/.local/gtest-1.15.0"       # or wherever gtest.pc lives
 
-# Build and run tests
-make check
+# 1+2. Stub headers, and the HAL driver mock injected over the driver header
+mkdir -p stubs/rdk/iarmbus stubs/ccec/drivers/iarmbus
+touch stubs/rdk/iarmbus/libIARM.h \
+      stubs/rdk/iarmbus/libIBus.h \
+      stubs/rdk/iarmbus/libIBusDaemon.h \
+      stubs/ccec/drivers/iarmbus/CecIARMBusMgr.h
+ln -sf ../../../mocks/hdmicec/hdmi_cec_driver.h stubs/ccec/drivers/hdmi_cec_driver.h
 
-# Or build and run explicitly
-cd tests/L1Tests
-make
-./run_L1Tests
+# 3. Generate and configure.  Drop the two coverage flags for a plain build.
+autoreconf -if
+PKG_CONFIG_PATH="$GTEST_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+CPPFLAGS="-I$PWD/mocks -I$PWD/stubs -I$GTEST_PREFIX/include" \
+LDFLAGS="-L$GTEST_PREFIX/lib -fprofile-arcs -ftest-coverage" \
+CXXFLAGS="-fprofile-arcs -ftest-coverage" \
+  ./configure --enable-l1tests
+
+# 4. Build the libraries, then the suite
+make -j"$(nproc)" all
+make -C tests/L1Tests all
 ```
+
+`autoreconf`/`configure` rewrite six git-tracked `Makefile` files in this submodule.  They are
+local toolchain output and must never be committed; `./run_coverage.sh --restore` puts them back.
 
 ## Test Structure
 
@@ -50,19 +96,17 @@ tests/L1Tests/
 ├── .lcovrc_l1            # lcov configuration with branch collection enabled
 ├── test_main.cpp         # Test runner entry point; installs the single global
 │                         #   testing::Environment that creates the driver mock
-├── ccec/                 # CCEC library tests (494 tests)
+├── ccec/                 # CCEC library tests (426 tests)
 │   ├── test_CECFrame.cpp        # 31 tests - frame construction, accessors, boundary sizes
 │   ├── test_Connection.cpp      # 60 tests - listener registration, address filtering
 │   ├── test_Bus.cpp             # 37 tests - listener dispatch, filtering, send retries
-│   ├── test_LibCCEC.cpp         # 14 tests - init/term, addresses, uninitialised-state guards
-│   ├── test_MessageEncoder.cpp  # 49 tests - CEC message encoding, every message type
+│   ├── test_LibCCEC.cpp         # 13 tests - init/term, addresses, uninitialised-state guards
+│   ├── test_MessageEncoder.cpp  # 10 tests - CEC message encoding
 │   ├── test_MessageDecoder.cpp  # 54 tests - all CEC opcodes, edge cases, tracking
 │   ├── test_OpCode.cpp          # 82 tests - all opcodes, GetOpName coverage
 │   ├── test_Operands.cpp        # 69 tests - all operand types, methods
-│   ├── test_Operand.cpp         # 11 tests - the Operand BASE class's default virtuals
-│   ├── test_Exception.cpp       # 16 tests - every exception type's what() and dispatch
 │   ├── test_Driver_Mock.cpp     # 10 tests - mock driver verification
-│   ├── test_Driver.cpp          # 23 tests - open/close, write, address management
+│   ├── test_Driver.cpp          # 22 tests - open/close, write, address management
 │   ├── test_DriverImpl_Async.cpp# 26 tests - async transmit, invalid state, error paths
 │   └── test_Util.cpp            # 12 tests - log-level configuration, buffer dump
 └── osal/                 # OSAL library tests (26 tests)
@@ -71,13 +115,16 @@ tests/L1Tests/
     └── test_Thread.cpp             # 11 tests - named construction, dispatch, detach
 ```
 
-**520 test cases in 18 fixtures**, all passing, none disabled.  The counts above are
+**452 test cases in 17 fixtures**, all passing, none disabled.  The counts above are
 measured with `./run_L1Tests --gtest_list_tests`, not estimated; re-measure with that
-command rather than trusting this list after adding tests.
+command rather than trusting this list after adding tests.  Two fixtures come out of
+`test_LibCCEC.cpp` (`LibCCECTest`, 8 cases, and `LibCCECUninitializedTest`, 5) and two out of
+`test_MessageDecoder.cpp` (`MessageDecoderTest`, 44, and `MessageDecoderTrackingTest`, 10),
+which is why 17 fixtures come from 15 translation units.
 
 One further translation unit is compiled into `run_L1Tests` from outside this directory:
 `../../mocks/hdmicec/hdmi_cec_driver_mock.cpp`, the GoogleMock HDMI-CEC HAL driver mock.  It
-defines no test cases of its own, so it contributes none of the 520.
+defines no test cases of its own, so it contributes none of the 452.
 
 ### Adding a test file
 
@@ -85,16 +132,33 @@ A new translation unit is compiled ONLY if it appears in `run_L1Tests_SOURCES`, 
 added without amending `Makefile.am` changes nothing and produces no coverage movement.  That
 list is the only compile gate: an unregistered test file is silently not compiled, with no
 warning and no build error to tell you, which makes it indistinguishable from a test that was
-never written.  **Append** the entry rather than inserting it: GoogleTest registers each
-`TEST_F` during static initialisation in link order, so inserting a file in the middle of that
-list reorders every suite after it, and this suite contains pre-existing order-fragile tests
-that pass only in the established order.  See the comment in `Makefile.am`.
+never written.  Place the entry so that it does not reorder the order-fragile suites: GoogleTest
+registers each `TEST_F` during static initialisation in link order and runs the suites in
+registration order, so inserting a file *ahead* of an existing suite reorders that suite, and
+this suite contains pre-existing order-fragile tests that pass only in the established order.
+The four translation units added by this pass are grouped with their siblings but placed *after*
+every pre-existing entry of their layer — the two `ccec/` files after `ccec/test_Driver.cpp` and
+the two `osal/` files after `osal/test_ConditionVariable.cpp` — which keeps the list readable
+while leaving the established registration order of every pre-existing suite intact.  Verify any
+new placement with a full run before relying on it.
 
 ## Running Tests
 
+Run from **this directory**, and run the `run_L1Tests` that sits here — it is the libtool wrapper
+script, and it sets the library search path the real binary under `.libs/` needs.  Invoking
+`.libs/run_L1Tests` directly is the usual cause of a loader error that looks like a build failure.
+
+Root `make check` does **not** run this suite.  The top-level `Makefile.am` declares
+`SUBDIRS = osal ccec`, so a `check` at the top level never descends into `tests/`.  The two
+invocations that do work are `make -C tests/L1Tests check` from the submodule root (this
+directory's `Makefile.am` declares `TESTS = run_L1Tests`) and running the wrapper directly:
+
 ```bash
-# Run all tests
-make check
+# Run all tests -- from tests/L1Tests
+./run_L1Tests
+
+# ...or through automake's check target, from the hdmicec submodule root
+make -C tests/L1Tests check
 
 # Run specific test with filter
 ./run_L1Tests --gtest_filter="CECFrameTest.*"
@@ -167,8 +231,8 @@ Then, before you call it done:
   symlinking `mocks/hdmicec/hdmi_cec_driver.h` over `stubs/ccec/drivers/hdmi_cec_driver.h`.
   No test requires real CEC hardware, and none is skipped for the want of it.
 - **Disabled tests**: there are none.  No test name in `ccec/` or `osal/` carries GoogleTest's
-  disable prefix, all 520 cases are enabled and run, and
-  `./run_L1Tests --gtest_also_run_disabled_tests --gtest_list_tests` lists the same 520 as a
+  disable prefix, all 452 cases are enabled and run, and
+  `./run_L1Tests --gtest_also_run_disabled_tests --gtest_list_tests` lists the same 452 as a
   plain listing.  See [Known Issues](#known-issues-and-notes).
 
 ## Common Assertions
@@ -186,26 +250,24 @@ EXPECT_THROW({code}, ex)  // code throws exception ex
 
 ## Test Coverage Details
 
-### CCEC Library Tests (494 tests)
+### CCEC Library Tests (426 tests)
 
 - **test_CECFrame.cpp** (31 tests): Frame construction, copy operations, serialization, hex dump, boundary sizes
 - **test_Connection.cpp** (60 tests): Connection lifecycle, open/close, listener registration, address filtering, broadcast handling
 - **test_Bus.cpp** (37 tests): Listener dispatch and filtering, send retries, timeout behaviour
-- **test_LibCCEC.cpp** (14 tests): Singleton pattern, initialization/termination, logical/physical addresses, and the guards that throw when the library is not initialised
-- **test_MessageEncoder.cpp** (49 tests): Encoding every message type in Messages.hpp, including the two-armed serializers (SystemAudioModeRequest, RequestCurrentLatency, ReportCurrentLatency) and the variable-length audio-descriptor and feature-report messages
+- **test_LibCCEC.cpp** (13 tests): Singleton pattern, initialization/termination, logical/physical addresses, and the guards that throw when the library is not initialised. Split across two fixtures: `LibCCECTest` (8 cases) runs against the initialised library and never terminates it, and `LibCCECUninitializedTest` (5 cases) owns the uninitialised state at SUITE level - one `term()` in the first `SetUp()`, one `init()` in `TearDownTestSuite()` - so that no case pairs an `init()` with a following `term()`
+- **test_MessageEncoder.cpp** (10 tests): Encoding CEC messages through MessageEncoder
 - **test_MessageDecoder.cpp** (54 tests): Decoding all 60+ CEC opcodes, polling messages, edge cases, opcode tracking; split across the `MessageDecoderTest` and `MessageDecoderTrackingTest` fixtures
 - **test_OpCode.cpp** (82 tests): Complete GetOpName() coverage for all CEC opcodes, OpCode class methods
 - **test_Operands.cpp** (69 tests): All operand classes (PhysicalAddress, LogicalAddress, DeviceType, Version, PowerStatus, AbortReason, OSDString, OSDName, Language, VendorID, UICommand, SystemAudioStatus, AudioStatus, RequestAudioFormat, ShortAudioDescriptor, AllDeviceTypes, RcProfile, DeviceFeatures, LatencyInfo)
-- **test_Operand.cpp** (11 tests): The Operand BASE class - the default `toString()`, `name()` and `validate()` bodies inherited by any operand that declines to override them, and the non-virtual `serialize(void)` convenience overload
-- **test_Exception.cpp** (16 tests): Every exception type's `what()` message, dispatch through base and `std::exception` references, and that sibling types do not catch each other
-- **test_Driver.cpp** (23 tests) / **test_Driver_Mock.cpp** (10 tests): Open/close and reopen, synchronous write including NACK and transmit-failure returns, address management, frame-detail printing, asynchronous write with both its success and failure returns, and direct mock verification
+- **test_Driver.cpp** (22 tests) / **test_Driver_Mock.cpp** (10 tests): Open/close and reopen, synchronous write including NACK and transmit-failure returns, address management, frame-detail printing, asynchronous write with both its success and failure returns, and direct mock verification
 - **test_DriverImpl_Async.cpp** (26 tests): Asynchronous transmit, the transmit-completion callback, invalid-state guards, error-injection paths
-- **test_Util.cpp** (12 tests): Log-level configuration parsing and the debug buffer dump
+- **test_Util.cpp** (12 tests): Log-level configuration parsing and the debug buffer dump. Each case body runs in a **forked child process**: production `cec_log_level` is a non-atomic file-static that `check_cec_log_status()` writes and `CCEC_LOG()`/`dump_buffer()` read, and the Bus reader and writer threads live for the whole program, so writing it on the test thread would race their reads. The parent only reads the level, and asserts it is unchanged on the way out. The child calls `__gcov_reset()`/`__gcov_dump()` so the production lines it drove are still counted, which is why `run_L1Tests_LDADD` names `-lgcov`. The file header carries the full rationale and records the blocked production change — make the level atomic, or expose a seam for setting and reading it — that would remove the need for a child process
 
 ### OSAL Library Tests (26 tests)
 
 - **test_ConditionVariable.cpp** (4 tests): Notify/wait synchronization patterns, timed wait, native-handle accessor
-- **test_Mutex.cpp** (11 tests): Lock/unlock, tryLock, copy construction and copy assignment
+- **test_Mutex.cpp** (11 tests): Lock/unlock including the recursive case, native-handle retrieval and its usability checked with `pthread_mutex_trylock` through that handle, copy construction and copy assignment.  `Mutex` exposes no try-lock operation of its own — its API is `lock()`, `unlock()` and `getNativeHandle()` — so none is tested
 - **test_Thread.cpp** (11 tests): Named construction, dispatch through Runnable, detach, destruction
 
 ## Coverage
@@ -232,13 +294,23 @@ Two files in this directory carry the coverage setup:
 # Measure whatever profile data already exists
 ./run_coverage.sh
 
-# Raise the bar for a diagnostic run, or gate per file as well as on the aggregate
+# Raise the bar for a diagnostic run
 ./run_coverage.sh --threshold 90
-./run_coverage.sh --per-file-gate
+
+# Gate on the aggregate ONLY -- a diagnostic opt-out, because per-file gating is the default
+./run_coverage.sh --no-per-file-gate
 
 # Full option and environment reference
 ./run_coverage.sh --help
 ```
+
+**Per-file gating is on by default** (`COVERAGE_PER_FILE_GATE` defaults to `1`), so any single file
+below the bar fails the run even when the aggregate is healthy — which is what the requirement's
+per-target wording asks for.  `--per-file-gate` therefore only restates the default and exists for
+symmetry; `--no-per-file-gate` (or `COVERAGE_PER_FILE_GATE=0`) is the opt-out, for a deliberate
+diagnostic run such as watching the aggregate while a new production file's tests are still being
+written.  Files below the bar are enumerated either way, so turning the gate off never hides a
+figure — it only stops it failing the run.
 
 Notes worth knowing before you reach for `lcov` directly:
 
@@ -273,7 +345,7 @@ reproduce the CI layout, keeping them out of a commit becomes yours to manage.
 
 ### No Disabled Tests
 
-**This suite has no disabled tests.**  `./run_L1Tests` reports 520 tests run, 520 passed,
+**This suite has no disabled tests.**  `./run_L1Tests` reports 452 tests run, 452 passed,
 0 disabled.  Verify with:
 
 ```bash
@@ -295,24 +367,41 @@ quietly dropped:
 - **The stated reason no longer justifies disabling anything.**  The rationale given was that
   LibCCEC's Bus reader/writer threads race when repeatedly started and stopped, so the suite
   avoided init/term cycling altogether.  That cycling is now covered and green:
-  `LibCCECTest.MultipleInitTermCycles` calls `term()`, re-`init()`s and then exercises the address
-  APIs end to end, and the four `*ThrowsWhenNotInitialized` guard cases — for `term()`,
-  `addLogicalAddress()`, `getLogicalAddress()` and `getPhysicalAddress()` — all assert against a
-  deliberately terminated library.
+  the four `LibCCECUninitializedTest.*ThrowsWhenNotInitialized` guard cases — for `term()`,
+  `addLogicalAddress()`, `getLogicalAddress()` and `getPhysicalAddress()` — plus
+  `InitWithNullNameClearsLogPrefix` all assert against a deliberately terminated library, and all
+  five are green.
 
-The underlying race is real; what changed is that it is now **managed rather than avoided**.
-`ccec/test_LibCCEC.cpp` defines a documented `settleBusReaderAfterInit()` helper — a single 50 ms
-pause after each `init()`, needed because the reader's state lives in a private member with no
-observable condition a test could wait on.  Its in-source measurement is recorded alongside it:
-3 hangs in 20 consecutive isolated runs of that fixture without the helper, 0 in 20 with it.  That
-is the pattern to reuse if you add another test that terminates and re-initialises the library.
+The underlying race is real; what changed is that it is now **structurally avoided rather than
+timed around**.  There is no pause anywhere in this suite's new tests.  Two things replace it, and
+both are the pattern to reuse if you add another case that terminates the library:
+
+- **The uninitialised state is owned at suite level.**  `LibCCECUninitializedTest` performs ONE
+  `term()` in the first `SetUp()` and ONE `init()` in `TearDownTestSuite()`; every case in between
+  simply asserts, because "terminated" is already the state.  No case pairs an `init()` with a
+  following `term()`, which is the only ordering in which `Bus::Reader`'s RUNNING/STOPPING
+  transition can be lost, so the window is never opened rather than being waited out.
+- **The close() sentinel is drained deterministically.**  `DriverImpl::close()` offers a NULL
+  sentinel to the receive queue and `DriverImpl::read()` is what consumes it, but `Bus::stop()`
+  only waits for the reader to leave its loop - it can leave with the sentinel still queued, and a
+  second `close()` then queues another one, which is what the flush-arm dereference below needs.
+  Every case that terminates the shared library therefore calls `Driver::read()` itself
+  immediately afterwards (`drainClosedDriverQueue()` in `ccec/test_LibCCEC.cpp` and
+  `ccec/test_Driver.cpp`, and an inline `EXPECT_THROW` in `ccec/test_DriverImpl_Async.cpp`).  It is
+  safe from the test thread because `term()` has already waited for the reader to be gone, so there
+  is no second consumer, and it is a real assertion in its own right: it reaches `read()`'s
+  invalid-state arm.
 
 ### Intermittent SIGSEGV in the Bus reader thread — a PRODUCTION defect, reported not worked around
 
-`./run_L1Tests` exits 139 (SIGSEGV) in roughly **5-7% of full-suite runs** on a loaded host.
-It is not a test defect and it is not order-dependent: the fault is a null dereference in
-production source, and the tests merely reach it.  Measured at this suite's HEAD with no test
-changes applied: 2 crashes in 60 consecutive runs, and 3 in 40 on a busier host.
+`./run_L1Tests` USED to exit 139 (SIGSEGV) intermittently — measured on this tree at 1 crash in
+60 consecutive full-suite runs, and 2 in 60 when only the LibCCEC and Driver fixtures were run.
+The fault is a null dereference in PRODUCTION source and the tests merely reached it, so the
+production defect below is reported rather than fixed; what the tests now do is stop creating the
+queue state it needs (see the sentinel drain in [No Disabled Tests](#no-disabled-tests)).  With
+that in place the measurement is **0 crashes in 120 consecutive full-suite runs** and 0 in 40 for
+each fixture in isolation.  The defect is still there and a future case that cycles the shared
+library without draining will find it again.
 
 Core dump, symbolised (`gdb ./.libs/run_L1Tests core.<pid>`):
 
@@ -360,23 +449,21 @@ latent dereference had never been observed.
 
 ### Test Order Dependence (diagnostic)
 
-The suite is green in its default order — 520 of 520, exit `0`.  Under randomised order it is
+The suite is green in its default order — 452 of 452, exit `0`.  Under randomised order it is
 not:
 
 ```bash
-./run_L1Tests --gtest_shuffle --gtest_random_seed=12345   # 511 passed, 9 failed, exit 1
+./run_L1Tests --gtest_shuffle --gtest_random_seed=12345
 ```
 
-The nine failures are deterministic for that seed and span two fixtures:
+Measured with that seed on this tree: 163 cases reported OK, `BusTest.ListenerFiltering` and
+`BusTest.UnregisteredConnectionReceivesAll` reported `[  FAILED  ]`, and the run then ended in the
+production SIGSEGV described above — shuffling moves a `close()` next to a fresh `init()`, which is
+exactly the queue state that dereference needs.  Both halves of that outcome are pre-existing
+conditions of the suite, not consequences of the tests added here.
 
-- `ConnectionTest` (`ccec/test_Connection.cpp`) — `DefaultFilterBroadcast`,
-  `DefaultFilterSpecificAddress`, `DefaultFilterUnregistered`, `MatchSourceMismatchedAddress`,
-  `MultipleListenersNotification` and `SendAsyncMatchSource`
-- `DriverTest` (`ccec/test_Driver.cpp`) — `AddLogicalAddressSuccess`,
-  `IsValidLogicalAddressTrue` and `WriteWithHdmiCecTxFailure`
-
-That set is specific to this seed *and* to this test inventory: re-derive it after adding tests
-rather than trusting a list quoted here, because shuffling reorders the whole program and a
+The failing set is specific to the seed *and* to the test inventory: re-derive it after adding
+tests rather than trusting a list quoted here, because shuffling reorders the whole program and a
 different seed exposes a different subset of the same underlying fragility.  The seed above is
 simply a known reproducer.  Corroborating evidence sits in the driver file:
 `DriverTest.AAA_DriverSingletonAccess` is commented "runs first alphabetically", and
@@ -387,9 +474,10 @@ sense as a workaround for this fragility.
 These cases pass in the default order and are deliberately left as they are.  **Randomised-order
 runs are diagnostic here, not an acceptance gate.**  Two consequences for anyone adding tests:
 
-- **Append** new translation units to `run_L1Tests_SOURCES`; do not insert them.  GoogleTest
-  registers each `TEST_F` during static initialisation, in link order, and runs the suites in
-  registration order, so inserting a file reorders every suite after it.
+- Place new translation units in `run_L1Tests_SOURCES` *after* every pre-existing entry of their
+  layer, so no established suite is reordered.  GoogleTest registers each `TEST_F` during static
+  initialisation, in link order, and runs the suites in registration order, so a file inserted
+  ahead of an existing suite reorders that suite.
 - A new test must establish its own preconditions and leave shared state untouched, and must be
   verified both in isolation (`--gtest_filter=YourFixture.*`) and in the full suite.
 
@@ -411,9 +499,10 @@ LibCCEC is a singleton shared across all test suites. The test fixture SetUp() c
 
 - Thread-related tests may need timing adjustments on slow systems
 - Bus thread cleanup can take time.  Init/term cycling is nonetheless covered — see
-  [No Disabled Tests](#no-disabled-tests) — provided the Bus reader is allowed to settle after
-  each `init()`; that is what `settleBusReaderAfterInit()` in `ccec/test_LibCCEC.cpp` is for, and
-  it is the only deliberate wall-clock pause in the suite
+  [No Disabled Tests](#no-disabled-tests) — and it is covered **without any wall-clock pause**:
+  the uninitialised state is owned at suite level so no `init()` is ever followed by a `term()`,
+  and the `close()` sentinel is drained through a real `Driver::read()` assertion.  There is no
+  `sleep`, `usleep` or `sleep_for` anywhere in the tests this project added
 
 ### Hardware Dependencies
 

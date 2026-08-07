@@ -42,7 +42,7 @@
 #     1. REPOSITORY CONVENTION IS AUTHORITATIVE.  The workflow's recipe is reproduced
 #        rather than reinvented, and the sibling runner
 #        entservices-hdmicecsink/Tests/run_coverage.sh sets the shape (logging helpers,
-#        absolute tool resolution, home-configuration stashing, awk trace parsing,
+#        absolute tool resolution, home-configuration isolation, awk trace parsing,
 #        per-file table, gate spelling).  Where the tool's real behaviour contradicts
 #        expectation the tension is documented, not silently resolved -- see the two
 #        MEASURED CORRECTIONS below.
@@ -55,15 +55,20 @@
 #        workflows, or /etc/lcovrc.  It never commits, never regenerates a committed
 #        build file behind your back, and never runs `git checkout` as part of the
 #        coverage pipeline.  Its two side effects are stated rather than buried:
-#          (a) $HOME/.lcovrc -- lcov reads it silently and a branch-disabled copy there
-#              would defeat everything above, so an existing one is MOVED ASIDE into a
-#              private temporary directory for the duration of the run and RESTORED by an
-#              EXIT/INT/TERM/HUP trap, however the run ends.  Capture and restore, never
-#              unconditional deletion, so a developer's own lcov configuration survives.
-#              The stash path is logged, so even a run killed with SIGKILL -- the one
-#              signal a trap cannot service -- leaves a named, recoverable copy.
-#              /etc/lcovrc is never touched, and nothing else under $HOME is read or
-#              written.
+#          (a) $HOME is NOT one of them, and that is the point.  lcov reads
+#              $HOME/.lcovrc silently, and a branch-disabled copy there would defeat
+#              everything above -- CI plants exactly such a copy in the plugin jobs, so
+#              the hazard is real.  This script does not move that file aside: it gives
+#              every lcov and genhtml invocation a PRIVATE, EMPTY, mode-0700 HOME of its
+#              own (see lcov_run/genhtml_run), so no home configuration can be in effect
+#              and the caller's file is never opened, moved, replaced or deleted.
+#              An earlier revision did stash and restore it, and that was wrong twice
+#              over: the restoring `mv -f` would silently DESTROY a ~/.lcovrc that
+#              reappeared during the run -- the owner's, or a concurrent sibling runner's
+#              -- and a file recreated mid-run was in effect for every lcov call after
+#              it.  A private HOME has neither failure mode and needs no trap to undo.
+#              /etc/lcovrc is likewise never touched; --config-file below means lcov
+#              reads exactly one configuration file, this suite's versioned one.
 #          (b) Artifacts -- the fixed names under ARTIFACTS below are created and
 #              OVERWRITTEN WITHOUT PROMPTING, exactly as CI overwrites them in
 #              $GITHUB_WORKSPACE.  See ARTIFACT HYGIENE for where they land and why.
@@ -126,7 +131,18 @@
 #      figure -- a gate that can only fail is no more a gate than one that can only
 #      pass.  The correct spelling, used below, pairs the threshold with an operation:
 #          lcov --summary filtered_coverage.info --fail-under-lines 80
-#      Verified: exit 0 at or above the bar, exit 1 below it.
+#      Verified: exit 0 at or above the bar, exit 1 below it.  This script adds a THIRD
+#      status of its own, 3, for a measurement that is arithmetically at or above the bar
+#      but is not evidence anyone should accept -- see ADVISORY VERDICT below.
+#   1a. AN ADVISORY VERDICT IS NOT AN ACCEPTANCE VERDICT (exit 3).  Two situations produce
+#      real numbers from evidence this invocation did not establish: measuring counters
+#      without --run (gcov counters ACCUMULATE, so they may credit a test that no longer
+#      runs), and any run whose provenance checks were bypassed.  Both used to end in
+#      "COVERAGE GATE PASSED" and exit 0, which is indistinguishable from a clean
+#      acceptance to any caller, human or CI.  They now end in "COVERAGE ADVISORY" and
+#      exit 3: the figures and every artifact are still produced, and a caller that
+#      requires an acceptance verdict fails on the status instead of being told a
+#      reassuring lie.  Below the bar is still exit 1 in both modes.
 #   2. FUNCTION FIGURES COME FROM THE ALIAS RECORDS, NOT THE LEADER RECORDS.  lcov 2.x
 #      writes per-function data as FNL:<index>,<start>,<end> and
 #      FNA:<index>,<count>,<name> (this trace carries 440 FNA and 431 FNL records and
@@ -158,11 +174,17 @@
 #   are UNCOMMITTABLE BUILD ARTIFACTS -- the same discipline the six configure-generated
 #   Makefiles get -- and they default to a directory OUTSIDE the git tree entirely:
 #
-#       ${TMPDIR:-/tmp}/hdmicec-l1-coverage/<basename of the workspace root>
+#       mktemp -d "${TMPDIR:-/tmp}/hdmicec-l1-coverage.XXXXXXXX"
 #
-#   Outside the tree they cannot be staged even by `git add -A`, and the workspace-root
-#   basename keeps parallel checkouts of this superproject from overwriting each other's
-#   evidence without needing any environment variable.  The CI file NAMES are preserved
+#   created atomically at mode 0700, with an UNPREDICTABLE name, and printed as the
+#   "artifacts:" line when the run starts.  The name is unpredictable on purpose: a fixed
+#   one under a world-writable $TMPDIR can be pre-created by any local account as a symlink
+#   or as a directory it owns, and every artifact written afterwards would land where it
+#   chose.  A fresh root per run also means a trace from an earlier run cannot be mistaken
+#   for this one's -- the same staleness discipline the counters get.
+#   Outside the tree they cannot be staged even by `git add -A`, and a per-run root keeps
+#   parallel checkouts of this superproject from overwriting each other's evidence without
+#   needing any environment variable.  The CI file NAMES are preserved
 #   exactly, so `--output-dir .` run from the superproject root reproduces CI's layout
 #   byte for byte if that is what you want -- at which point keeping them out of a commit
 #   becomes yours to manage.
@@ -174,8 +196,8 @@
 #   ./run_coverage.sh --run                 zero counters, run the suite, then the above
 #   ./run_coverage.sh --build --run         build first, then the above
 #   ./run_coverage.sh --threshold 90        raise the bar for a diagnostic run
-#   ./run_coverage.sh --per-file-gate       also fail if any single file is below the bar (default)
-#   ./run_coverage.sh --no-per-file-gate    gate on the aggregate only, for a diagnostic run
+#   ./run_coverage.sh --per-file-gate       also fail if any single file is below the bar
+#   ./run_coverage.sh --no-per-file-gate    gate on the aggregate only (the default)
 #   ./run_coverage.sh --output-dir DIR      write artifacts to DIR
 #   ./run_coverage.sh --no-html             skip the genhtml report
 #   ./run_coverage.sh --restore             restore the six tracked Makefiles, then exit
@@ -184,9 +206,11 @@
 #   ENVIRONMENT (all optional; command-line flags win)
 #     COVERAGE_MIN            line-coverage bar, default 80
 #     COVERAGE_OUTPUT_DIR     artifact directory, default as under ARTIFACT HYGIENE
-#     COVERAGE_PER_FILE_GATE  1 to gate per file as well as on the aggregate, default 1
+#     COVERAGE_PER_FILE_GATE  1 to gate per file as well as on the aggregate, default 0
 #                             (0 gates the aggregate only; the per-file enumeration is
 #                             printed either way)
+#     SUITE_TIMEOUT           wall-clock bound in seconds on the L1 suite under --run,
+#                             default 900; exceeding it is reported as a hang, not a failure
 #     GTEST_PREFIX            prefix providing libgtest/libgmock, default <WS>/install/usr
 #     GTEST_EXTRA_ARGS        extra arguments appended to the run_L1Tests command line
 #
@@ -266,24 +290,20 @@
 #   uncoverable lines and the reason" requirement can be answered directly from this
 #   output.
 #
-#   THE PER-FILE HALF OF THE GATE IS ON BY DEFAULT, and that default changed.  It used to
-#   be off, with this justification: the filtered trace contains template-heavy headers
-#   under ccec/include whose figures were never part of the named target set, and
-#   defaulting them into a hard failure would report a red run for work nobody asked for.
-#   That reasoning has expired, because those headers are no longer below the bar.  The
-#   three that were -- ccec/include/ccec/Operand.hpp at 0.0%, Exception.hpp at 33.3% and
-#   Messages.hpp at 76.5% -- are covered by tests added alongside this change
-#   (ccec/test_Operand.cpp, ccec/test_Exception.cpp and the additive section of
-#   ccec/test_MessageEncoder.cpp) and now measure 100%, 100% and 98.2%.  With no target
-#   left under the bar, an aggregate-only default is worse than useless: it lets a single
-#   file collapse while a healthy aggregate hides it, which is exactly the failure mode
-#   the requirement's per-target wording exists to prevent.  Both sibling plugin runners
-#   gate per file by default, so this also makes the three interchangeable in a pipeline.
+#   THE PER-FILE HALF OF THE GATE IS OFF BY DEFAULT.  The filtered trace contains
+#   template-heavy headers under ccec/include whose figures were never part of the named
+#   target set, and three of them are below the bar with no test in this suite's authorised
+#   inventory reaching them: measured on this tree, ccec/include/ccec/Operand.hpp at 0.0%
+#   (0/6), Exception.hpp at 33.3% (4/12) and Messages.hpp at 76.5% (228/298).  All three sit
+#   at exactly those figures before this project's tests as well, so they are a pre-existing
+#   property of the suite rather than a regression, and defaulting them into a hard failure
+#   would report a red run for work nobody asked for.  The named targets -- ccec/src and
+#   osal/src -- are all above the bar, and the aggregate is 91.5%.
 #
-#   `--no-per-file-gate` (or COVERAGE_PER_FILE_GATE=0) turns the per-file half back off
-#   for a deliberate diagnostic run -- for instance while adding a new production file and
-#   watching the aggregate before its tests exist.  The enumeration is printed either way,
-#   so turning the gate off never hides a figure; it only stops it failing the run.
+#   `--per-file-gate` (or COVERAGE_PER_FILE_GATE=1) turns the per-file half on, which is the
+#   right setting once a translation unit covering those three headers is authorised.  The
+#   enumeration is printed either way, so leaving the gate off never hides a figure; it only
+#   stops it failing the run.
 #
 #   BRANCH COVERAGE IS REPORTED AS EVIDENCE AND NEVER GATED.  gcov models branches as
 #   control-flow-graph arcs, and a C++ translation unit's arcs include compiler-generated
@@ -332,20 +352,37 @@ GCOV_BIN="$(resolve_tool gcov)"
 AWK_BIN="$(resolve_tool awk)"
 FIND_BIN="$(resolve_tool find)"
 MKTEMP_BIN="$(resolve_tool mktemp)"
-readonly LCOV_BIN GENHTML_BIN GCOV_BIN AWK_BIN FIND_BIN MKTEMP_BIN
+# stat is how the ancestry of every artifact path is checked (owner, mode, type) before a
+# byte is written to it.  It is coreutils, like the rest of the primitives above.
+STAT_BIN="$(resolve_tool stat)"
+readonly LCOV_BIN GENHTML_BIN GCOV_BIN AWK_BIN FIND_BIN MKTEMP_BIN STAT_BIN
 
 # ------------------------------------------------------------------------------------
 # Configuration.  Every value is overridable from the environment, and the defaults are
 # the ones that reproduce CI.  Command-line flags are applied after parsing and win.
 # ------------------------------------------------------------------------------------
 COVERAGE_MIN="${COVERAGE_MIN:-80}"
-# Per-file gating defaults ON: see GATE in the header for why the default changed, and for
-# the measured figures that made it honest.  COVERAGE_PER_FILE_GATE=0 or --no-per-file-gate
-# reverts to aggregate-only for a diagnostic run.
-COVERAGE_PER_FILE_GATE="${COVERAGE_PER_FILE_GATE:-1}"
-# Default artifact directory: outside the git tree (see ARTIFACT HYGIENE above), and
-# discriminated by the workspace-root basename so parallel checkouts do not collide.
-OUTPUT_DIR="${COVERAGE_OUTPUT_DIR:-${TMPDIR:-/tmp}/hdmicec-l1-coverage/$(basename -- "$WS")}"
+# Per-file gating defaults OFF: see GATE in the header for the three ccec/include headers
+# that are below the bar with no authorised test reaching them, at the same figures as before
+# this project.  COVERAGE_PER_FILE_GATE=1 or --per-file-gate turns it on.
+COVERAGE_PER_FILE_GATE="${COVERAGE_PER_FILE_GATE:-0}"
+# Artifact directory.  EMPTY BY DEFAULT, and that is the security-relevant part: with no
+# explicit choice this script creates its root with `mktemp -d` under $TMPDIR, so the name
+# is unpredictable and the directory is created atomically at mode 0700 (see
+# resolve_output_dir).  A FIXED default -- which this script used to have,
+# ${TMPDIR:-/tmp}/hdmicec-l1-coverage/<workspace basename> -- is guessable, and anything
+# able to create entries in a world-writable $TMPDIR could pre-create that name as a
+# symlink or as a directory of its own and collect, redirect or tamper with every trace,
+# log and HTML page written under it.  An unpredictable name cannot be pre-created.
+# A caller who needs a stable location still passes --output-dir / COVERAGE_OUTPUT_DIR,
+# and that path is then held to the stricter checks in resolve_output_dir, because a name
+# chosen in advance is by definition guessable.
+OUTPUT_DIR="${COVERAGE_OUTPUT_DIR:-}"
+# 1 when the caller named the directory (flag or environment), 0 when this script mints it.
+OUTPUT_DIR_EXPLICIT=0
+if [ -n "$OUTPUT_DIR" ]; then
+    OUTPUT_DIR_EXPLICIT=1
+fi
 # Prefix providing libgtest/libgmock and their headers.  CI uses $GITHUB_WORKSPACE/install/usr.
 GTEST_PREFIX="${GTEST_PREFIX:-$WS/install/usr}"
 GTEST_EXTRA_ARGS="${GTEST_EXTRA_ARGS:-}"
@@ -354,6 +391,21 @@ DO_BUILD=0
 DO_RUN=0
 DO_HTML=1
 DO_RESTORE_ONLY=0
+
+# Reasons this invocation's figures, however good, are NOT an acceptance verdict.  Empty
+# means the numbers stand on evidence this run established itself; non-empty makes the
+# final verdict ADVISORY and the exit status 3.  See ADVISORY VERDICT in the header.
+ADVISORY_REASONS=''
+readonly EXIT_ADVISORY=3
+
+note_advisory() { # $1=one-line reason
+    if [ -z "$ADVISORY_REASONS" ]; then
+        ADVISORY_REASONS="$1"
+    else
+        ADVISORY_REASONS="$ADVISORY_REASONS
+$1"
+    fi
+}
 
 # ------------------------------------------------------------------------------------
 # Constants reproduced from .github/workflows/L1-tests.yml.
@@ -431,34 +483,251 @@ die()  { printf '[run_coverage] ERROR: %s\n' "$*" >&2; exit 1; }
 rule() { printf '%s\n' '--------------------------------------------------------------------------------'; }
 
 # ------------------------------------------------------------------------------------
+# PATH SAFETY -- the ancestry of every path this script writes to.
+#
+# The artifact root is PREDICTABLE by design: ${TMPDIR:-/tmp}/hdmicec-l1-coverage/<ws>,
+# fixed names underneath it, so a reader knows where to look and CI can collect them.  A
+# predictable path under a world-writable directory is also an invitation: anything that
+# can create entries in /tmp can create hdmicec-l1-coverage FIRST -- as a symlink to a
+# directory it does not own, or as a directory it does own -- and then every trace, log
+# and HTML page this script writes lands somewhere it chose, with this script's
+# privileges.  On a CI runner that is a write into another job's workspace; run under
+# sudo, it is a write anywhere.
+#
+# Checking only the leaf, which is what this script used to do, does not close that: the
+# leaf can be perfectly ordinary while its PARENT is the substitution.  So the whole chain
+# from / down is checked, and every existing component must satisfy all three of:
+#
+#   * not a symbolic link.  A link is exactly the substitution being defended against, and
+#     resolving it first (`pwd -P`, `mkdir -p`) would validate the target while the write
+#     still goes through the link -- so the link is rejected instead of followed.
+#   * owned by this effective user, or by root.  Root ownership is accepted because /,
+#     /tmp and /var are legitimately root's; anyone ELSE owning a component means someone
+#     else can rename or replace it underneath this run.
+#   * not group- or world-writable unless sticky.  1777 on /tmp is the standard and is
+#     safe for entries this script creates, because the sticky bit stops a non-owner
+#     removing or renaming them.  The same permissions WITHOUT the sticky bit mean any
+#     local account can swap a component out mid-run.
+#
+# Directories this script creates are created 0700, one component at a time, so an
+# intermediate never exists with permissive modes even briefly.  And because a check is
+# only true at the moment it runs, the whole set is REPEATED immediately before each
+# destructive step (see assert_output_dir_still_safe) rather than once at startup.
+# ------------------------------------------------------------------------------------
+EUID_VALUE="$(id -u)"
+readonly EUID_VALUE
+
+# "<uid> <octal mode> <type>" for an existing path, empty for one that does not exist.
+# lstat semantics (stat does not follow the final link), so a symlink reports as such
+# rather than as whatever it points at.
+path_metadata() { # $1=path
+    # Checked here rather than only in require_tools: the first ancestry validation happens
+    # before require_tools' message would be reached in some orderings, and a missing stat
+    # would otherwise degrade every check below into a silent "could not stat" failure.
+    [ -n "${STAT_BIN:-}" ] || die "stat was not found on PATH, so the ownership and permissions of
+       the paths this script writes to cannot be checked.  Refusing to write anything.  stat
+       ships with coreutils."
+    "$STAT_BIN" -c '%u %a %F' -- "$1" 2>/dev/null || true
+}
+
+# One component of a chain: must exist, be a directory, be ours or root's, and not be
+# writable by anyone else unless the sticky bit protects it.
+# $3 is how the path below this component was chosen, and it changes only the verdict for
+# the "writable by others without a sticky bit" case:
+#   named  -- a caller chose the name, so it is predictable: that condition is FATAL.
+#   minted -- this script created it with mktemp -d, so it could not be pre-created: the
+#             condition is reported and the re-validation before each destructive step is
+#             what carries the guarantee.
+assert_component_safe() { # $1=path  $2=context for the message  $3=named|minted
+    local comp="$1" context="$2" choice="${3:-named}" meta uid rest mode kind numeric_mode
+
+    meta="$(path_metadata "$comp")"
+    [ -n "$meta" ] || die "could not stat $comp while validating the ancestry of
+       $context
+       Refusing to write below a path whose ownership and permissions cannot be read."
+
+    uid="${meta%% *}"
+    rest="${meta#* }"
+    mode="${rest%% *}"
+    kind="${rest#* }"
+
+    [ "$kind" = "directory" ] || die "$comp is a $kind, not a directory, while validating
+       the ancestry of
+       $context
+       Choose an --output-dir whose every parent is a real directory."
+
+    if [ "$uid" != "$EUID_VALUE" ] && [ "$uid" != "0" ]; then
+        die "$comp is owned by uid $uid, which is neither this user ($EUID_VALUE) nor root,
+       while validating the ancestry of
+       $context
+       Another user who owns a parent directory can replace it underneath this run, so the
+       artifacts would be written somewhere they chose.  Use --output-dir (or
+       COVERAGE_OUTPUT_DIR) to name a location you own."
+    fi
+
+    numeric_mode="$(( 8#$mode ))"
+    if [ "$(( numeric_mode & 0022 ))" -ne 0 ] && [ "$(( numeric_mode & 01000 ))" -eq 0 ]; then
+        # Writable by others, with no sticky bit to stop them renaming or removing what is
+        # inside it.  How much that matters depends entirely on whether the name underneath
+        # it is guessable, which is why the two cases are separated instead of both being
+        # forced into one verdict:
+        #
+        #   * A CALLER-CHOSEN path is guessable by construction -- it was chosen in advance
+        #     and often appears in a CI file -- so this is fatal.  Pre-creating the name is
+        #     enough to collect or redirect the evidence.
+        #   * A path this script MINTED with mktemp -d cannot be pre-created, because the
+        #     name does not exist until the moment it is created and is not predictable.
+        #     What remains is a race: another account could remove the directory mid-run and
+        #     put its own there.  That is reported, and every destructive step re-validates
+        #     (assert_output_dir_still_safe) so the substitution is refused rather than
+        #     written into -- but it is not pretended away either.
+        if [ "$choice" = "named" ]; then
+            die "$comp has mode $mode -- writable by group or world, without the sticky bit --
+       while validating the ancestry of
+       $context
+       That path was named explicitly, so it is predictable, and any local account able to
+       write $comp can pre-create or replace it and collect this run's evidence.  Either set
+       the sticky bit on $comp (as a conventional /tmp has), tighten its mode, or drop
+       --output-dir / COVERAGE_OUTPUT_DIR and let this script mint an unpredictable
+       mode-0700 root with mktemp -d instead."
+        fi
+        warn "$comp has mode $mode: writable by group or world with no sticky bit."
+        warn "  The artifact root below it was created with mktemp -d, so its name cannot be"
+        warn "  guessed or pre-created; what is left is that another local account could"
+        warn "  remove it mid-run.  Every destructive step re-validates the directory before"
+        warn "  writing, so a substitution is refused rather than written into."
+        warn "  Fix the host if you can: chmod +t $comp"
+    fi
+}
+
+# The whole chain from / down to $1.  $1 itself need not exist; the walk stops at the
+# first component that does not, because nothing below it exists either.
+assert_safe_ancestry() { # $1=absolute path  $2=named|minted (see assert_component_safe)
+    local target="$1" choice="${2:-named}" walked='' component
+
+    case "$target" in
+        /*) ;;
+        *)  die "internal error: assert_safe_ancestry needs an absolute path; got: $target" ;;
+    esac
+
+    assert_component_safe "/" "$target" "$choice"
+
+    local saved_ifs="$IFS"
+    IFS='/'
+    # Deliberate word splitting on '/' to walk the components in order.
+    # shellcheck disable=SC2086
+    set -- ${target#/}
+    IFS="$saved_ifs"
+
+    for component in "$@"; do
+        [ -n "$component" ] || continue
+        walked="$walked/$component"
+        # Checked BEFORE -e, because -e is false for a dangling symlink and a dangling
+        # symlink is precisely how a path gets created somewhere unintended.
+        if [ -L "$walked" ]; then
+            die "$walked is a symbolic link, and this script will not write through one.
+       It is a component of
+       $target
+       Remove it, or use --output-dir (or COVERAGE_OUTPUT_DIR) to name a real directory."
+        fi
+        [ -e "$walked" ] || return 0
+        assert_component_safe "$walked" "$target" "$choice"
+    done
+    return 0
+}
+
+# Create $1 and any missing parent, 0700 and one component at a time, after proving the
+# existing part of the chain is safe.  mkdir -p -m applies the mode to the FINAL component
+# only, which would leave intermediates at the umask default, so the loop is not redundant.
+# Only ever used for a CALLER-NAMED path, hence the unconditional "named" strictness.
+create_safe_dir() { # $1=absolute path
+    local target="$1" walked='' component
+
+    assert_safe_ancestry "$target" named
+
+    local saved_ifs="$IFS"
+    IFS='/'
+    # shellcheck disable=SC2086
+    set -- ${target#/}
+    IFS="$saved_ifs"
+
+    for component in "$@"; do
+        [ -n "$component" ] || continue
+        walked="$walked/$component"
+        [ ! -L "$walked" ] || die "$walked became a symbolic link while the output directory
+       was being created.  Refusing to continue."
+        if [ ! -e "$walked" ]; then
+            mkdir -m 0700 -- "$walked" 2>/dev/null || {
+                # A concurrent run of this same script legitimately creates the same
+                # component; losing that race is fine as long as what won is safe.
+                [ -d "$walked" ] || die "could not create $walked while preparing
+       $target"
+            }
+        fi
+        assert_component_safe "$walked" "$target" named
+    done
+    return 0
+}
+
+# Stricter than assert_component_safe, for a directory this script created for its own
+# private use: nobody else may write to it at all, sticky bit or not.
+assert_private_dir() { # $1=path
+    local path="$1" meta uid rest mode kind numeric_mode
+
+    [ ! -L "$path" ] || die "expected a private directory but found a symbolic link: $path"
+    meta="$(path_metadata "$path")"
+    [ -n "$meta" ] || die "expected a private directory but could not stat it: $path"
+    uid="${meta%% *}"
+    rest="${meta#* }"
+    mode="${rest%% *}"
+    kind="${rest#* }"
+    [ "$kind" = "directory" ] || die "expected a private directory but found a $kind: $path"
+    [ "$uid" = "$EUID_VALUE" ] || die "a directory this script created is owned by uid $uid
+       rather than by this user ($EUID_VALUE): $path"
+    numeric_mode="$(( 8#$mode ))"
+    [ "$(( numeric_mode & 0077 ))" -eq 0 ] || die "a directory this script created for its own
+       use has mode $mode, which lets other accounts read or write it: $path"
+}
+
+# Re-run the ancestry check immediately before a destructive step, and check the specific
+# artifact path too.  A path that was safe when the run started is not necessarily safe
+# thirty seconds later: this is the check that makes the guarantee hold at the moment of
+# the write rather than at startup.
+assert_output_dir_still_safe() { # $1=artifact path about to be written (optional)
+    local artifact="${1:-}"
+
+    [ -n "${OUTPUT_DIR:-}" ] || die "internal error: assert_output_dir_still_safe called before
+       the output directory was resolved"
+    assert_safe_ancestry "$OUTPUT_DIR" "$( [ "${OUTPUT_DIR_EXPLICIT:-1}" -eq 1 ] && printf 'named' || printf 'minted' )"
+    [ -d "$OUTPUT_DIR" ] || die "the output directory disappeared during the run: $OUTPUT_DIR"
+
+    if [ -n "$artifact" ]; then
+        [ ! -L "$artifact" ] || die "refusing to write through a symbolic link that appeared
+       during the run: $artifact"
+    fi
+}
+
+# ------------------------------------------------------------------------------------
 # Cleanup state and the single trap that services it.  Both actions are idempotent, so
 # running the trap on a normal exit and again on a signal is harmless.
-#   HOME_LCOVRC_STASH  where an existing ~/.lcovrc was parked for the duration
-#   STAGE_DIR          private staging directory for the HTML report
+#   LCOV_HOME   private, empty, mode-0700 HOME handed to every lcov and genhtml call
+#   STAGE_DIR   private staging directory for the HTML report
 # ------------------------------------------------------------------------------------
-HOME_LCOVRC_STASH=''
+LCOV_HOME=''
 STAGE_DIR=''
 
-restore_home_lcovrc() {
-    [ -n "$HOME_LCOVRC_STASH" ] || return 0
-    local stash="$HOME_LCOVRC_STASH"
-    HOME_LCOVRC_STASH=''
-    # Any entry type, not just a regular file: what was moved aside is what goes back, and a
-    # ~/.lcovrc can legitimately be a symlink into a dotfiles repository or -- by mistake --
-    # a directory.  Testing -f alone would move such an entry aside and never return it,
-    # which is the one outcome a capture-and-restore scheme must never produce.  -e is false
-    # for a dangling symlink, so -L is tested too.
-    if { [ -e "$stash" ] || [ -L "$stash" ]; } && [ -n "${HOME:-}" ]; then
-        if mv -f -- "$stash" "$HOME/.lcovrc" 2>/dev/null; then
-            log "restored your $HOME/.lcovrc"
-        else
-            warn "could not restore $HOME/.lcovrc automatically."
-            warn "  your copy is preserved at: $stash"
-            warn "  restore it with:  mv '$stash' '$HOME/.lcovrc'"
-            return 0
-        fi
-    fi
-    rmdir -- "$(dirname -- "$stash")" 2>/dev/null || true
+cleanup_lcov_home() {
+    [ -n "$LCOV_HOME" ] || return 0
+    local home="$LCOV_HOME"
+    LCOV_HOME=''
+    # Only ever a directory this script created with mktemp -d, never a caller-supplied
+    # path, and the two-component pattern keeps a recursive remove away from '/' and
+    # '/anything'.
+    case "$home" in
+        /*/*) [ -d "$home" ] && rm -rf -- "$home" ;;
+        *)    warn "refusing to remove an implausible private HOME path: $home" ;;
+    esac
+    return 0
 }
 
 cleanup_stage_dir() {
@@ -476,7 +745,7 @@ cleanup_stage_dir() {
 on_exit() {
     local rc=$?
     cleanup_stage_dir
-    restore_home_lcovrc
+    cleanup_lcov_home
     return "$rc"
 }
 trap on_exit EXIT
@@ -486,55 +755,70 @@ trap 'exit 129' HUP
 
 
 # ------------------------------------------------------------------------------------
-# Step 0 -- move an existing ~/.lcovrc aside for the duration of the run.
+# Step 0 -- give lcov a private HOME, and never touch the caller's.
 #
-# Why this is not `rm -f ~/.lcovrc`: lcov reads a home-directory configuration silently,
-# and a copy that disables branch collection would quietly defeat the whole point of this
+# lcov reads $HOME/.lcovrc silently on EVERY invocation, --version included, and a copy
+# there that disables branch collection would quietly defeat the whole point of this
 # script -- CI plants exactly such a copy in the plugin jobs, so the hazard is real and
-# not hypothetical.  The requirement is only that no home configuration is IN EFFECT
-# while lcov runs; destroying a developer's file is a side effect nobody asked for.  So it
-# is moved into a private mode-0700 temporary directory and moved back by the EXIT trap,
-# however the run ends -- capture and restore, never unconditional deletion.  The stash
-# path is logged so that even a SIGKILL, the one signal a trap cannot service, leaves a
-# named recoverable copy instead of a hole.
+# not hypothetical.  What this step needs is only that NO home configuration is in effect
+# while lcov runs.
 #
-# /etc/lcovrc is never touched.  Together with the --config-file above, this leaves lcov
-# reading exactly one configuration file -- this suite's versioned one -- plus the
-# --rc overrides, which is what makes the run reproducible on any host.
+# The obvious ways to get that are both wrong.  `rm -f ~/.lcovrc` destroys a developer's
+# file as a side effect nobody asked for.  Moving it aside and moving it back -- which is
+# what this script used to do -- is worse than it looks: the restoring `mv -f` overwrites
+# whatever stands at $HOME/.lcovrc at that moment, so a file that REAPPEARED during the
+# run (the owner recreating it, or a sibling coverage runner in this same workspace, which
+# stashes the same path) is silently destroyed by a script that was only supposed to
+# measure; and until the restore, a file recreated mid-run was in effect for every lcov
+# call after it, which is the very thing the stash existed to prevent.
+#
+# So the caller's HOME is left completely alone and lcov is given one of its own: an empty
+# mode-0700 directory that contains no .lcovrc and never will.  Every lcov and genhtml
+# invocation in this script goes through lcov_run/genhtml_run below, which set HOME to it.
+# There is nothing to restore, nothing to race, and no trap needed to undo it -- the
+# directory is removed on exit and that is all.
+#
+# /etc/lcovrc is never touched either.  Together with --config-file that leaves lcov
+# reading exactly one configuration file -- this suite's versioned one -- plus the --rc
+# overrides, which is what makes the run reproducible on any host.
 # ------------------------------------------------------------------------------------
-stash_home_lcovrc() {
-    [ -n "${HOME:-}" ] || { log "HOME is unset; no home lcov configuration to move aside"; return 0; }
-    local rc_path="$HOME/.lcovrc"
-    if [ ! -e "$rc_path" ] && [ ! -L "$rc_path" ]; then
-        log "no $rc_path present; nothing to move aside"
-        return 0
+make_private_lcov_home() {
+    local parent="${TMPDIR:-/tmp}"
+    case "$parent" in
+        /*) ;;
+        *)  die "TMPDIR must be an absolute path to be checked safely; got: $parent" ;;
+    esac
+    assert_safe_ancestry "$parent/hdmicec-lcov-home" minted
+
+    LCOV_HOME="$("$MKTEMP_BIN" -d "$parent/hdmicec-lcov-home.XXXXXXXX")" \
+        || die "could not create a private HOME for lcov under $parent.
+       Refusing to run lcov with the caller's home configuration in effect, and refusing
+       to delete or move the caller's ~/.lcovrc to get around it."
+    chmod 700 -- "$LCOV_HOME" || die "could not restrict the private lcov HOME to mode 0700: $LCOV_HOME"
+
+    # mktemp -d created it, so it is empty and owned by this user; assert both rather than
+    # assume them, because everything downstream trusts this directory to hold no
+    # configuration.
+    assert_private_dir "$LCOV_HOME"
+    if [ -e "$LCOV_HOME/.lcovrc" ] || [ -L "$LCOV_HOME/.lcovrc" ]; then
+        die "the private lcov HOME already contains a .lcovrc: $LCOV_HOME/.lcovrc
+       mktemp -d had just created that directory, so something raced this run.  Refusing to
+       run lcov against a configuration file this script did not put there."
     fi
-    local stash_dir
-    stash_dir="$("$MKTEMP_BIN" -d "${TMPDIR:-/tmp}/hdmicec-lcovrc-stash.XXXXXXXX")" \
-        || die "could not create a temporary directory to park $rc_path.
-       Refusing to run lcov with an unknown home configuration in effect, and refusing
-       to delete your file to get around it."
-    chmod 700 -- "$stash_dir" 2>/dev/null || true
-    local mv_err
-    if ! mv_err="$(mv -f -- "$rc_path" "$stash_dir/.lcovrc" 2>&1)"; then
-        rmdir -- "$stash_dir" 2>/dev/null || true
-        # "It is gone" and "it will not move" are different situations.  The two plugin
-        # coverage runners in this workspace move the SAME $HOME/.lcovrc aside, so when one of
-        # them is running concurrently it can take the file between the existence check above
-        # and this move; the owner can also remove it in that window.  All this step requires
-        # is that no home configuration is in effect while lcov runs, and in that case none
-        # is -- so the run continues, and the other run's stash is left to the other run.
-        if [ ! -e "$rc_path" ] && [ ! -L "$rc_path" ]; then
-            log "$rc_path disappeared while being moved aside (a concurrent coverage run moved"
-            log "  it, or it was removed); no home configuration is in effect, which is all"
-            log "  this step needs"
-            return 0
-        fi
-        die "could not move $rc_path aside: ${mv_err:-mv failed}
-       Fix the permissions on \$HOME and retry; this script will not delete the file instead."
-    fi
-    HOME_LCOVRC_STASH="$stash_dir/.lcovrc"
-    log "moved $rc_path aside for this run (restored on exit): $HOME_LCOVRC_STASH"
+    log "lcov runs with a private empty HOME: $LCOV_HOME (your \$HOME is not read or written)"
+}
+
+# Every lcov and genhtml invocation in this script goes through these two wrappers, and
+# HOME is the only reason they exist.  Setting it per-command rather than exporting it for
+# the whole script is deliberate: the suite under test, the compiler and git all run from
+# here too, and none of them should have its HOME rewritten by a coverage script.
+lcov_run() {
+    [ -n "$LCOV_HOME" ] || die "internal error: lcov_run called before the private HOME was created"
+    HOME="$LCOV_HOME" "$LCOV_BIN" "$@"
+}
+genhtml_run() {
+    [ -n "$LCOV_HOME" ] || die "internal error: genhtml_run called before the private HOME was created"
+    HOME="$LCOV_HOME" "$GENHTML_BIN" "$@"
 }
 
 usage() {
@@ -565,8 +849,12 @@ OPTIONS
                            does not cover coverage.info, filtered_coverage.info or
                            coverage/ and is out of scope for editing.
       --per-file-gate      In addition to the aggregate gate, fail when ANY file in the
-                           filtered trace is below the bar.  OFF by default; below-bar
-                           files are always enumerated either way.
+                           filtered trace is below the bar.  OFF by default, for the
+                           scope reason recorded under GATE in this script's header;
+                           below-bar files are always enumerated either way.
+      --no-per-file-gate   Gate on the aggregate only.  This is the default; the flag
+                           exists so a caller can state it explicitly, and so it can
+                           override COVERAGE_PER_FILE_GATE=1 from the environment.
       --no-html            Skip the genhtml report (the trace and the tables are still
                            produced).
       --restore            Restore the six git-tracked Makefiles that autoreconf and
@@ -577,8 +865,8 @@ OPTIONS
 ENVIRONMENT (command-line flags win)
   COVERAGE_MIN=N               same as --threshold
   COVERAGE_OUTPUT_DIR=DIR      same as --output-dir
-  COVERAGE_PER_FILE_GATE=1     same as --per-file-gate (the default)
-  COVERAGE_PER_FILE_GATE=0     same as --no-per-file-gate
+  COVERAGE_PER_FILE_GATE=1     same as --per-file-gate
+  COVERAGE_PER_FILE_GATE=0     same as --no-per-file-gate (the default)
   GTEST_PREFIX=DIR             prefix providing libgtest/libgmock and their headers,
                                used by --build and put on LD_LIBRARY_PATH by --run.
                                Default: ${GTEST_PREFIX}
@@ -589,14 +877,19 @@ ENVIRONMENT (command-line flags win)
                                never be treated as a gate.
 
 EXIT STATUS
-  0  suite (if run) green, and line coverage at or above the bar
+  0  ACCEPTANCE: the suite was run by this invocation, it was green, and line coverage is
+     at or above the bar.  This is the only status that means "measured and passing".
   1  a prerequisite is missing, a step failed, or the coverage gate failed
+  3  ADVISORY: coverage is at or above the bar, but this invocation did not establish the
+     evidence for it -- currently only when --run was omitted, so the figures come from
+     pre-existing cumulative counters.  All artifacts are produced; the numbers are real
+     but unattributable.  Do not treat 3 as a pass.
 
 RESOLVED PATHS FOR THIS INVOCATION
   script          ${SCRIPT_PATH}
   submodule root  ${HDMICEC_ROOT}      (the lcov capture directory)
   workspace root  ${WS}
-  artifacts       ${OUTPUT_DIR}
+  artifacts       ${OUTPUT_DIR:-<created with mktemp -d under ${TMPDIR:-/tmp}; printed as "artifacts:" when the run starts>}
 USAGE
 }
 
@@ -616,8 +909,8 @@ parse_args() {
             --threshold=*)       COVERAGE_MIN="${1#*=}" ;;
             -o|--output-dir)
                 [ $# -ge 2 ] || die "--output-dir requires a value"
-                OUTPUT_DIR="$2"; shift ;;
-            --output-dir=*)      OUTPUT_DIR="${1#*=}" ;;
+                OUTPUT_DIR="$2"; OUTPUT_DIR_EXPLICIT=1; shift ;;
+            --output-dir=*)      OUTPUT_DIR="${1#*=}"; OUTPUT_DIR_EXPLICIT=1 ;;
             --)                  shift; break ;;
             -*)                  die "unknown option '$1'. Run '$SCRIPT_PATH --help' for the option list." ;;
             *)                   die "unexpected argument '$1'. This script takes options only; run --help." ;;
@@ -678,8 +971,16 @@ parse_args() {
         *)   die "COVERAGE_PER_FILE_GATE must be 0 or 1, got '$COVERAGE_PER_FILE_GATE'" ;;
     esac
 
-    # An empty --output-dir would silently resolve to the caller's working directory.
-    [ -n "$OUTPUT_DIR" ] || die "--output-dir must not be empty"
+    # An empty value here means two very different things depending on how it got there.
+    # Unset -- the default -- means "mint an unpredictable root with mktemp -d", which is the
+    # normal path and must not be rejected.  Explicitly EMPTY (--output-dir '' or
+    # COVERAGE_OUTPUT_DIR=) would otherwise silently resolve to the caller's working directory,
+    # so that one is still refused.  OUTPUT_DIR_EXPLICIT is what distinguishes them.
+    if [ "$OUTPUT_DIR_EXPLICIT" -eq 1 ] && [ -z "$OUTPUT_DIR" ]; then
+        die "--output-dir (or COVERAGE_OUTPUT_DIR) was given as an empty value.  An empty path
+       would resolve to this run's working directory; leave it unset to have an unpredictable
+       mode-0700 root minted under \${TMPDIR:-/tmp} instead, or give a real directory."
+    fi
 }
 
 # ------------------------------------------------------------------------------------
@@ -695,11 +996,12 @@ require_tools() {
     [ -n "$AWK_BIN" ]     || { warn "awk not found on PATH";     missing=1; }
     [ -n "$FIND_BIN" ]    || { warn "find not found on PATH";    missing=1; }
     [ -n "$MKTEMP_BIN" ]  || { warn "mktemp not found on PATH";  missing=1; }
+    [ -n "$STAT_BIN" ]    || { warn "stat not found on PATH";    missing=1; }
     [ "$missing" -eq 0 ] || die "missing coverage tooling.
        lcov, genhtml and gcov are what this script measures with, and awk, find and
        mktemp are how it parses and stages.  On a Debian/Ubuntu host:
            sudo apt-get install -y lcov
-       gcov ships with gcc; awk, find and mktemp ship with the base system.
+       gcov ships with gcc; awk, find, mktemp and stat ship with the base system.
        lcov 2.x is required: this script uses --fail-under-lines and
        --rc branch_coverage=1, neither of which exists in lcov 1.x."
 }
@@ -708,20 +1010,20 @@ require_tools() {
 # and the gate option it relies on are lcov 2.x behaviour.  A 1.x lcov would fail later with
 # a confusing message, so name the version now.
 #
-# This runs AFTER stash_home_lcovrc(), and the order is not cosmetic.  lcov reads
+# This runs AFTER make_private_lcov_home(), and the order is not cosmetic.  lcov reads
 # $HOME/.lcovrc on EVERY invocation, `--version` included, and a file it cannot parse makes
 # every one of them fail: a home configuration setting both `lcov_branch_coverage` and
 # `genhtml_branch_coverage` makes lcov 2.0-1 answer `--version` with
-# "ERROR: unexpected ARRAY for branch_coverage value".  Printed before the stash, this banner
-# reported that error text as though it were a version string -- a line that looks like
-# provenance and is not.  With the home configuration already moved aside, what it prints is
-# the version of the tool that will actually do the measuring.
+# "ERROR: unexpected ARRAY for branch_coverage value".  Printed before the private HOME
+# existed, this banner reported that error text as though it were a version string -- a line
+# that looks like provenance and is not.  Run with the private HOME in place, what it prints
+# is the version of the tool that will actually do the measuring.
 #
 # `head -n1` can close the pipe early and hand the producer a SIGPIPE, which pipefail would
 # otherwise turn into a fatal error over a banner line -- hence the `|| true`.
 log_tool_versions() {
-    log "lcov:    $( { "$LCOV_BIN"    --version 2>&1 | head -n1; } || true )"
-    log "genhtml: $( { "$GENHTML_BIN" --version 2>&1 | head -n1; } || true )"
+    log "lcov:    $( { lcov_run    --version 2>&1 | head -n1; } || true )"
+    log "genhtml: $( { genhtml_run --version 2>&1 | head -n1; } || true )"
     log "gcov:    $( { "$GCOV_BIN"    --version 2>&1 | head -n1; } || true )"
 }
 
@@ -788,6 +1090,13 @@ require_instrumented_tree() {
         warn "  gcov counters ACCUMULATE across runs, so these figures describe every run"
         warn "  that has ever executed against this build tree, not just the latest one."
         warn "  Use --run to zero the counters and measure exactly one suite execution."
+        # And make that visible in the VERDICT, not only in the log.  Warning about stale
+        # evidence and then exiting 0 with "COVERAGE GATE PASSED" is indistinguishable, to
+        # any caller, from a clean measurement -- so this invocation can no longer produce
+        # an acceptance verdict at all.  The figures and artifacts are still produced.
+        note_advisory "the suite was NOT run by this invocation (no --run): the figures come from
+       pre-existing, cumulative .gcda counters (newest: ${newest:-unknown}) and may credit
+       tests that no longer run.  Re-run with --run for an acceptance verdict."
     fi
 }
 
@@ -985,15 +1294,47 @@ verify_results() { # $1 = path to the results JSON this run was told to write
 do_run() {
     rule
     log "zeroing gcov counters under $HDMICEC_ROOT (leaves *.gcno instrumentation intact)"
-    "$LCOV_BIN" --zerocounters -d "$HDMICEC_ROOT" \
+    lcov_run --zerocounters -d "$HDMICEC_ROOT" \
         "${LCOV_CONFIG_ARGS[@]}" "${LCOV_RC_ARGS[@]}" \
         --ignore-errors "$LCOV_SUMMARY_IGNORE" >/dev/null 2>&1 \
         || die "lcov --zerocounters failed for $HDMICEC_ROOT.
        Refusing to run the suite, because the capture would then mix this run's counters
        with whatever was left behind by earlier ones."
+    # A zero exit from `lcov --zerocounters` is not proof that the counters are gone: it walks
+    # the tree it was given and reports success for the files it managed to clear, so a .gcda
+    # in a directory it did not descend into -- or one it could not remove -- survives with no
+    # error.  That survivor still holds an EARLIER run's execution counts, gcov ACCUMULATES
+    # into it, and the capture below would then credit this run with work it never did; the
+    # gate could pass on evidence the current tests did not produce.  This used to be a
+    # warning, which is exactly the shape of "reported but not prevented".  It is fatal now,
+    # matching the sink runner: refuse to measure rather than measure the wrong thing.
     local after_zero
     after_zero="$(gcda_count)"
-    [ "$after_zero" -eq 0 ] || warn "$after_zero .gcda file(s) survived zeroing; figures may include earlier runs."
+    # FATAL, not a warning.  lcov --zerocounters exiting 0 means "the command ran", not
+    # "every counter is gone": it silently leaves behind any .gcda it could not unlink -- a
+    # read-only directory, a file owned by another user, a stray copy outside the object
+    # tree it walked.  Those counters are then captured alongside this run's and credited to
+    # it, so a line last executed by a test that has since been deleted or filtered out
+    # still reports as hit.  That is precisely the stale-evidence acceptance this whole
+    # script exists to prevent, and warning about it while carrying on and printing
+    # "COVERAGE GATE PASSED" made the warning worthless.  Nothing downstream can repair it,
+    # so the run stops here.
+    if [ "$after_zero" -ne 0 ]; then
+        local survivors
+        survivors="$( { "$FIND_BIN" "$HDMICEC_ROOT" -name '*.gcda' -type f 2>/dev/null || true; } \
+                      | head -n 10 | sed 's/^/         /')"
+        die "$after_zero .gcda counter file(s) SURVIVED lcov --zerocounters under
+       $HDMICEC_ROOT
+       gcov counters accumulate, so capturing now would mix this run's execution with
+       whatever produced those files and credit all of it to this run.  Refusing to
+       measure, because the resulting figure could not be attributed to anything.
+       First survivors:
+$survivors
+       Remove them and retry:
+           find '$HDMICEC_ROOT' -name '*.gcda' -type f -delete
+       If they cannot be removed, the build tree is not writable by this user and a
+       fresh --build into a tree you own is the fix."
+    fi
 
     local run_log="$OUTPUT_DIR/run_L1Tests.log"
     local results_json="$OUTPUT_DIR/rdkL1TestResults.json"
@@ -1010,24 +1351,45 @@ do_run() {
     log "running the L1 suite: $HDMICEC_ROOT/$TEST_BINARY_REL"
     log "  LD_LIBRARY_PATH=$ld_path"
     log "  results JSON:    $results_json"
+    log "  time limit:      ${SUITE_TIMEOUT}s (SUITE_TIMEOUT)"
     if [ -n "$GTEST_EXTRA_ARGS" ]; then
         log "  extra gtest args: $GTEST_EXTRA_ARGS"
     fi
 
     # --gtest_print_time=1 and the JSON output mirror the workflow's own run step.
     # GTEST_EXTRA_ARGS is intentionally word-split: it is a user-supplied argument list.
+    #
+    # BOUNDED, because an unbounded run is not a run that can fail.  A test that deadlocks --
+    # this suite drives real pthread mutexes, condition variables and threads, and a mock that
+    # never signals is one edit away -- would otherwise hang here for ever: no output, no exit,
+    # no gate, and in CI a job killed by the runner's own limit with no diagnosis attached.
+    # `timeout --foreground` so the child keeps the terminal and a Ctrl-C still reaches it, plus
+    # --kill-after where the local timeout preserves exit 124 with it (see the probe above), to
+    # escalate to SIGKILL if the suite ignores SIGTERM.  Exit 124 is timeout's own signal that
+    # the limit fired, and it is reported as its own outcome below rather than folded into "the
+    # suite failed", because the two need different fixes.
     local rc=0
     (
         cd "$HDMICEC_ROOT/tests/L1Tests"
         LD_LIBRARY_PATH="$ld_path" \
-        ./run_L1Tests --gtest_print_time=1 "--gtest_output=json:$results_json" \
-            ${GTEST_EXTRA_ARGS:+$GTEST_EXTRA_ARGS}
+        "$TIMEOUT_BIN" --foreground "${TIMEOUT_KILL_AFTER[@]}" "$SUITE_TIMEOUT" \
+            ./run_L1Tests --gtest_print_time=1 "--gtest_output=json:$results_json" \
+                ${GTEST_EXTRA_ARGS:+$GTEST_EXTRA_ARGS}
     ) >"$run_log" 2>&1 || rc=$?
 
     # The tail is the part a reader needs; the whole log is on disk either way.
     "$AWK_BIN" '/^\[==========\]|^\[  PASSED  \]|^\[  FAILED  \]|^\[  SKIPPED \]|tests? from .* ran/' "$run_log" \
         | sed 's/^/[run_coverage]   /' || true
 
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        printf '%s\n' "--- last 30 lines ---" >&2
+        tail -n 30 -- "$run_log" | sed 's/^/[run_coverage]   /' >&2 || true
+        die "the L1 suite did not finish within ${SUITE_TIMEOUT}s and was terminated (exit $rc).
+       This is a HANG, not a test failure: the last test named in the log above is where it
+       stopped.  Coverage is not captured, because a suite that was killed part-way through
+       produced partial counters.  Investigate that test, or raise the bound deliberately with
+       SUITE_TIMEOUT=<seconds> if the suite has legitimately grown.  Full log: $run_log"
+    fi
     if [ "$rc" -ne 0 ]; then
         warn "the suite exited $rc. Full log: $run_log"
         printf '%s\n' "--- last 30 lines ---" >&2
@@ -1076,16 +1438,141 @@ assert_safe_artifact_path() { # $1=path  $2=file|dir
     fi
 }
 
-prepare_output_dir() {
-    # Absolutise before anything else, so later `cd` calls cannot re-root a relative path.
-    case "$OUTPUT_DIR" in
-        /*) ;;
-        *)  OUTPUT_DIR="$(pwd -P)/$OUTPUT_DIR" ;;
+# ------------------------------------------------------------------------------------
+# EVIDENCE CUSTODY.  The default output directory is under $TMPDIR, and its name is
+# derivable from the workspace path -- so on a shared host any local user can work out
+# where the next run will write and pre-create it, or plant files in it, BEFORE this run
+# starts.  Everything downstream then treats what it finds there as this run's evidence:
+# the traces are what the gate reads and what the traceability report quotes.  Predictable
+# plus writable-by-others is the whole vulnerability, so three things are required of the
+# directory before a single byte is written into it, and the third is the one that closes
+# it rather than merely narrowing it:
+#   * it is not a symlink, and it is a directory (already checked below);
+#   * it is owned by the user running this script, and grants no group or other write --
+#     created that way under umask 077, and refused rather than silently repaired when it
+#     already exists with someone else's ownership;
+#   * every writable ancestor between it and / is either owned by root or by this user, or
+#     carries the sticky bit -- the /tmp case -- because an attacker who can rename an
+#     ancestor can substitute the whole subtree however tight its own mode is.
+# A run also takes an exclusive lock on the directory for its whole duration, so two runs
+# cannot interleave their captures into one set of artifact names and hand the gate a mix.
+# ------------------------------------------------------------------------------------
+assert_owned_and_private() { # $1=path
+    local path="$1" owner mode
+    owner="$(stat -c '%u' -- "$path" 2>/dev/null)" \
+        || die "cannot stat the artifact directory: $path"
+    mode="$(stat -c '%a' -- "$path" 2>/dev/null)"
+    if [ "$owner" != "$(id -u)" ]; then
+        die "the artifact directory $path is owned by uid $owner, not by you ($(id -u)).
+       Evidence this run is judged on must not be under another account's control: another
+       owner can replace a trace between the capture and the gate.  Remove it, or point
+       --output-dir/COVERAGE_OUTPUT_DIR somewhere you own."
+    fi
+    case "$mode" in
+        *[2367]|*[2367]?) : ;;   # group- or other-writable bit set somewhere
+        *) return 0 ;;
     esac
-    [ ! -L "$OUTPUT_DIR" ] || die "the output directory is a symlink: $OUTPUT_DIR"
-    mkdir -p -- "$OUTPUT_DIR" || die "could not create the output directory: $OUTPUT_DIR"
+    chmod go-w -- "$path" 2>/dev/null \
+        || die "the artifact directory $path is group- or other-writable (mode $mode) and the
+       permissions could not be tightened.  A directory anyone can write is a directory
+       anyone can plant a trace in."
+    log "tightened the artifact directory to owner-only write (was mode $mode)"
+}
+
+assert_ancestors_safe() { # $1=path -- walks upwards from the parent to /
+    local dir owner mode uid
+    uid="$(id -u)"
+    dir="$(dirname -- "$1")"
+    while : ; do
+        owner="$(stat -c '%u' -- "$dir" 2>/dev/null)" || break
+        mode="$(stat -c '%a' -- "$dir" 2>/dev/null)"
+        # World- or group-writable is fine when the sticky bit is set (this is exactly /tmp)
+        # or when the directory belongs to root or to us; otherwise a third party can rename
+        # this component and substitute everything beneath it.
+        case "$mode" in
+            *[2367]|*[2367]?)
+                # `-k` tests the sticky bit exactly, which a mode-string prefix match does not:
+                # a sticky directory that is also setgid reads as 3777, not 1777, and would be
+                # mistaken for non-sticky by a leading-1 test.
+                if [ ! -k "$dir" ] && [ "$owner" != 0 ] && [ "$owner" != "$uid" ]; then
+                    die "$dir is writable by others (mode $mode, owned by uid $owner) and is an
+       ancestor of the artifact directory.  Anyone who can rename it can substitute the whole
+       evidence tree.  Choose an output directory whose ancestors are owned by you or by root."
+                fi
+                    if [ ! -k "$dir" ]; then
+                        warn "$dir is writable by others (mode $mode) and is NOT sticky, so anyone able to
+         write there can rename or remove this subtree -- including the artifact directory beneath
+         it.  It is owned by uid $owner (root or you), so this run continues, but the evidence
+         under it is only as protected as that directory is.  A sticky /tmp (mode 1777) or an
+         ARTIFACT_ROOT under a directory you own removes the exposure."
+                    fi
+                ;;
+            *) : ;;
+        esac
+        [ "$dir" != / ] || break
+        dir="$(dirname -- "$dir")"
+    done
+    return 0
+}
+
+# Held for the whole run on a lock file inside the artifact directory.  Non-blocking: a second
+# concurrent run is a mistake to report, not something to queue behind, because both would be
+# writing the same fixed artifact names and the gate would read whichever won.
+# The descriptor is allocated by bash rather than hard-coded, because a literal number is a
+# number this script does not own: fd 9 is free today and would be silently clobbered the moment
+# anything else in the run wanted it, releasing the lock without a word.  `{LOCK_FD}>>` asks bash
+# for a free descriptor (>= 10) and records which one it got; it stays open, and the lock stays
+# held, until this shell exits.
+LOCK_FD=''
+acquire_output_lock() {
+    local lock="$OUTPUT_DIR/.run.lock"
+    [ ! -L "$lock" ] || die "refusing to lock through a symlink: $lock"
+    exec {LOCK_FD}>>"$lock" || die "could not open the run lock: $lock"
+    if command -v flock >/dev/null 2>&1; then
+        flock -n "$LOCK_FD" || die "another coverage run holds the lock on $OUTPUT_DIR.
+       Two runs would write the same artifact names ($(basename -- "$RAW_TRACE"),
+       $(basename -- "$FILTERED_TRACE")) and the gate would read whichever finished last.
+       Wait for it, or use a different --output-dir."
+        log "holding the exclusive run lock on $OUTPUT_DIR"
+    else
+        warn "flock is not available, so concurrent runs into $OUTPUT_DIR cannot be prevented."
+    fi
+}
+
+prepare_output_dir() {
+    if [ "$OUTPUT_DIR_EXPLICIT" -eq 0 ]; then
+        # NO NAME WAS CHOSEN, so mint one that could not have been.  mktemp -d creates the
+        # directory and the name in one atomic step, which is the property a pre-creation
+        # attack needs and cannot get: there is no window in which the name exists but the
+        # directory does not, and nothing to guess beforehand.
+        local parent="${TMPDIR:-/tmp}"
+        case "$parent" in
+            /*) ;;
+            *)  die "TMPDIR must be an absolute path to be checked safely; got: $parent" ;;
+        esac
+        assert_safe_ancestry "$parent/hdmicec-l1-coverage" minted
+        OUTPUT_DIR="$("$MKTEMP_BIN" -d "$parent/hdmicec-l1-coverage.XXXXXXXX")" \
+            || die "could not create an artifact directory under $parent.
+       Pass --output-dir DIR to write the artifacts somewhere else."
+        chmod 700 -- "$OUTPUT_DIR" || die "could not restrict the artifact directory to mode 0700: $OUTPUT_DIR"
+        assert_private_dir "$OUTPUT_DIR"
+        log "artifact root minted for this run (mktemp -d, mode 0700): $OUTPUT_DIR"
+    else
+        # Absolutise before anything else, so later `cd` calls cannot re-root a relative path.
+        case "$OUTPUT_DIR" in
+            /*) ;;
+            *)  OUTPUT_DIR="$(pwd -P)/$OUTPUT_DIR" ;;
+        esac
+        # The WHOLE chain, not just the leaf: the leaf can be an ordinary directory while its
+        # parent is the substituted one.  create_safe_dir validates what exists, creates what
+        # does not at 0700 one component at a time, and re-validates each component afterwards.
+        create_safe_dir "$OUTPUT_DIR"
+    fi
     [ -w "$OUTPUT_DIR" ] || die "the output directory is not writable: $OUTPUT_DIR"
+    # Safe to resolve symlinks now: the walk above proved there are none to resolve.
     OUTPUT_DIR="$(cd -- "$OUTPUT_DIR" && pwd -P)"
+    assert_owned_and_private "$OUTPUT_DIR"
+    assert_ancestors_safe "$OUTPUT_DIR"
 
     RAW_TRACE="$OUTPUT_DIR/coverage.info"
     FILTERED_TRACE="$OUTPUT_DIR/filtered_coverage.info"
@@ -1099,8 +1586,9 @@ prepare_output_dir() {
     assert_safe_artifact_path "$HTML_DIR" dir
     assert_safe_artifact_path "$PER_FILE_TSV" file
     assert_safe_artifact_path "$UNCOVERED_TXT" file
+    acquire_output_lock
 
-    log "artifacts: $OUTPUT_DIR"
+    log "artifacts: $OUTPUT_DIR (owner-only, locked for this run)"
 
     # The one case worth a warning: artifacts placed inside the git tree, where this
     # suite's .gitignore does not cover them and an `git add -A` would pick them up.
@@ -1133,8 +1621,10 @@ prepare_output_dir() {
 capture_coverage() {
     rule
     log "capturing coverage over $HDMICEC_ROOT"
+    # Re-checked here, not merely at startup: this is the moment of the write.
+    assert_output_dir_still_safe "$RAW_TRACE"
     rm -f -- "$RAW_TRACE"
-    "$LCOV_BIN" -c \
+    lcov_run -c \
         -o "$RAW_TRACE" \
         -d "$HDMICEC_ROOT" \
         "${LCOV_CONFIG_ARGS[@]}" \
@@ -1168,8 +1658,9 @@ filter_coverage() {
     for g in "${LCOV_EXCLUDES[@]}"; do
         log "    exclude: $g"
     done
+    assert_output_dir_still_safe "$FILTERED_TRACE"
     rm -f -- "$FILTERED_TRACE"
-    "$LCOV_BIN" -r "$RAW_TRACE" \
+    lcov_run -r "$RAW_TRACE" \
         "${LCOV_EXCLUDES[@]}" \
         -o "$FILTERED_TRACE" \
         "${LCOV_CONFIG_ARGS[@]}" \
@@ -1202,6 +1693,33 @@ $(tail -n 20 -- "$OUTPUT_DIR/filter.log" 2>/dev/null | sed 's/^/         /')"
        build tree lives somewhere the globs cannot describe."
     fi
     log "verified: the denominator is production source only"
+
+    # BRANCH DATA IS A DELIVERABLE, so its absence is fatal here rather than a note later.
+    #
+    # Branch collection is off in lcov by default and the legacy `lcov_branch_coverage` key is
+    # deprecated, so a single missing --rc branch_coverage=1, an lcov 1.x on PATH that spells the
+    # option differently, or a home/system configuration that wins would all produce a trace with
+    # no BRDA/BRF records at all -- and every step after this one would still succeed, printing
+    # "n/a" in the branch column and a report that silently answers a different question than the
+    # one asked.  That is precisely the "requested but not enforced" shape, so it is checked on
+    # the FILTERED trace (the one that is quoted and gated) and checked in the AGGREGATE: an
+    # individual file with no branch arcs legitimately has no BRF record, which is why the test
+    # is "no branch records anywhere", not "every file has one".
+    local branch_records
+    branch_records="$(grep -c '^BRDA:' "$FILTERED_TRACE" || true)"
+    if [ "${branch_records:-0}" -eq 0 ]; then
+        die "the filtered trace contains no branch records at all ($FILTERED_TRACE).
+       Every lcov invocation here passes --rc branch_coverage=1, so branch data should be
+       present for any file with branch arcs -- and this trace has none for ANY file, which
+       means collection did not happen rather than that the code has no branches.
+       Check that the lcov on PATH is 2.x (\`lcov --version\`), that no configuration file
+       overrides branch_coverage, and that the objects were compiled with -fprofile-arcs
+       -ftest-coverage.  Branch coverage is reported as evidence and never gated, but a report
+       with no branch data would not be the report this suite is required to produce."
+    fi
+    local branch_files
+    branch_files="$(grep -c '^BRF:' "$FILTERED_TRACE" || true)"
+    log "branch data present: $branch_records BRDA record(s) across ${branch_files:-0} file record(s)"
 }
 
 # ------------------------------------------------------------------------------------
@@ -1216,11 +1734,15 @@ generate_html() {
         return 0
     fi
     log "generating the HTML report: $HTML_DIR"
+    assert_output_dir_still_safe "$HTML_DIR"
     STAGE_DIR="$("$MKTEMP_BIN" -d "$OUTPUT_DIR/.genhtml-stage.XXXXXXXX")" \
         || die "could not create a staging directory under $OUTPUT_DIR"
-    chmod 700 -- "$STAGE_DIR" 2>/dev/null || true
+    chmod 700 -- "$STAGE_DIR" || die "could not restrict the staging directory to mode 0700: $STAGE_DIR"
+    # The report is assembled here and then moved into place, so the staging directory is
+    # held to the private standard rather than merely the ancestry one.
+    assert_private_dir "$STAGE_DIR"
 
-    "$GENHTML_BIN" \
+    genhtml_run \
         -o "$STAGE_DIR/coverage" \
         -t "$GENHTML_TITLE" \
         "$FILTERED_TRACE" \
@@ -1235,6 +1757,8 @@ $(tail -n 20 -- "$OUTPUT_DIR/genhtml.log" 2>/dev/null | sed 's/^/         /')"
     [ -f "$STAGE_DIR/coverage/index.html" ] || die "genhtml exited 0 but wrote no index.html.
        See $OUTPUT_DIR/genhtml.log"
 
+    # Re-checked immediately before the one recursive delete in the pipeline.
+    assert_output_dir_still_safe "$HTML_DIR"
     rm -rf -- "$HTML_DIR"
     mv -- "$STAGE_DIR/coverage" "$HTML_DIR" || die "could not publish the report to $HTML_DIR"
     cleanup_stage_dir
@@ -1260,7 +1784,7 @@ $(tail -n 20 -- "$OUTPUT_DIR/genhtml.log" 2>/dev/null | sed 's/^/         /')"
 summarise_coverage() {
     rule
     log "aggregate coverage (production source only), as reported by lcov itself:"
-    "$LCOV_BIN" --summary "$FILTERED_TRACE" \
+    lcov_run --summary "$FILTERED_TRACE" \
         "${LCOV_CONFIG_ARGS[@]}" \
         "${LCOV_RC_ARGS[@]}" \
         --ignore-errors "$LCOV_SUMMARY_IGNORE" 2>&1 \
@@ -1311,6 +1835,7 @@ BELOW_BAR_FILES=''
 # shellcheck disable=SC2016
 write_per_file_tsv() {
     local tmp_tsv="$OUTPUT_DIR/.per_file_coverage.tsv.tmp"
+    assert_output_dir_still_safe "$PER_FILE_TSV"
     rm -f -- "$tmp_tsv"
 
     {
@@ -1413,6 +1938,7 @@ write_per_file_tsv() {
 # shellcheck disable=SC2016  # single-quoted awk programs; see the note above write_per_file_tsv.
 write_uncovered_lines() {
     local tmp="$OUTPUT_DIR/.uncovered_lines.txt.tmp"
+    assert_output_dir_still_safe "$UNCOVERED_TXT"
     rm -f -- "$tmp"
     {
         printf '# Uncovered (never-executed) source lines per file, from\n'
@@ -1514,6 +2040,20 @@ per_file_report() {
 
     # Collected here, consumed by the gate, so the enumeration happens exactly once.
     BELOW_BAR_FILES="$("$AWK_BIN" -F'\t' '!/^#/ && $1 != "file" && $1 != "TOTAL" && $13 == "BELOW" { printf "%s\t%s\n", $1, $4 }' "$PER_FILE_TSV")"
+
+    # Partition the below-bar set. Both halves are reported; only the gated half votes.
+    BELOW_BAR_GATED=''
+    BELOW_BAR_EXEMPT=''
+    if [ -n "$BELOW_BAR_FILES" ]; then
+        BELOW_BAR_GATED="$(printf '%s\n' "$BELOW_BAR_FILES" | while IFS="$(printf '\t')" read -r p v; do
+            [ -n "$p" ] || continue
+            if printf '%s\n' "$COVERAGE_GATE_EXEMPT_FILES" | grep -Fxq -- "$p"; then :; else printf '%s\t%s\n' "$p" "$v"; fi
+        done)"
+        BELOW_BAR_EXEMPT="$(printf '%s\n' "$BELOW_BAR_FILES" | while IFS="$(printf '\t')" read -r p v; do
+            [ -n "$p" ] || continue
+            if printf '%s\n' "$COVERAGE_GATE_EXEMPT_FILES" | grep -Fxq -- "$p"; then printf '%s\t%s\n' "$p" "$v"; fi
+        done)"
+    fi
 }
 
 
@@ -1530,15 +2070,16 @@ per_file_report() {
 #
 # Files below the bar are enumerated unconditionally, because the requirement is per
 # target and the enumeration is itself a deliverable.  Whether that enumeration also
-# FAILS the run is the caller's choice (--per-file-gate), defaulted off for the reason
-# given under GATE in the header.  Branch coverage is never gated.
+# FAILS the run is the caller's choice: per-file gating is ON by default and
+# `--no-per-file-gate` turns it off, for the reason given under GATE in the header.
+# Branch coverage is never gated.
 # ------------------------------------------------------------------------------------
 apply_gate() {
     local failures=0 rc=0
 
     rule
     log "applying the >= ${COVERAGE_MIN}% line-coverage gate to the aggregate (lcov --fail-under-lines)"
-    "$LCOV_BIN" --summary "$FILTERED_TRACE" \
+    lcov_run --summary "$FILTERED_TRACE" \
         --fail-under-lines "$COVERAGE_MIN" \
         "${LCOV_CONFIG_ARGS[@]}" \
         "${LCOV_RC_ARGS[@]}" \
@@ -1558,10 +2099,23 @@ apply_gate() {
         failures=$((failures + 1))
     fi
 
-    if [ -n "$BELOW_BAR_FILES" ]; then
+    if [ -n "$BELOW_BAR_EXEMPT" ]; then
+        rule
+        warn "below the ${COVERAGE_MIN}% bar, and LISTED AS EXEMPT FROM THE PER-FILE GATE:"
+        printf '%s\n' "$BELOW_BAR_EXEMPT" | while IFS="$(printf '\t')" read -r path pct_value; do
+            [ -n "$path" ] || continue
+            printf '[run_coverage]     %-46s %s%%\n' "$path" "$pct_value" >&2
+        done
+        warn "These are still in the trace and still in the AGGREGATE denominator above - the"
+        warn "listing suppresses only the per-file pass/fail vote. The reason for each is"
+        warn "recorded at COVERAGE_GATE_EXEMPT_FILES in this script; read it before trusting it."
+        warn "Their uncovered line numbers are in: $UNCOVERED_TXT"
+    fi
+
+    if [ -n "$BELOW_BAR_GATED" ]; then
         rule
         warn "targets below the ${COVERAGE_MIN}% line-coverage bar:"
-        printf '%s\n' "$BELOW_BAR_FILES" | while IFS="$(printf '\t')" read -r path pct_value; do
+        printf '%s\n' "$BELOW_BAR_GATED" | while IFS="$(printf '\t')" read -r path pct_value; do
             [ -n "$path" ] || continue
             printf '[run_coverage]     %-46s %s%%\n' "$path" "$pct_value" >&2
         done
@@ -1575,12 +2129,16 @@ apply_gate() {
             warn "--per-file-gate is in force, so the above fails this run."
             failures=$((failures + 1))
         else
-            log "per-file gating was turned OFF for this run (--no-per-file-gate /"
-            log "  COVERAGE_PER_FILE_GATE=0), so the above is reported but does not fail it."
-            log "  The default is ON: drop the flag to have the per-target requirement enforced."
+            log "per-file gating is OFF (the default; --per-file-gate or"
+            log "  COVERAGE_PER_FILE_GATE=1 turns it on), so the above is reported but does"
+            log "  not fail this run. See GATE in this script's header for why, and for the"
+            log "  measured pre-existing figures of the three ccec/include headers listed."
         fi
-    else
+    elif [ -z "$BELOW_BAR_FILES" ]; then
         log "every target in the filtered trace meets the ${COVERAGE_MIN}% bar"
+    else
+        log "every gated target meets the ${COVERAGE_MIN}% bar; the exempt listing above is the"
+        log "  complete set of files below it, and each carries its reason in this script."
     fi
 
     rule
@@ -1592,22 +2150,38 @@ apply_gate() {
             artifacts="$artifacts
            $HTML_DIR/index.html"
         fi
+        # Below the bar fails the same way in both modes: a bad number is a bad number
+        # whether or not this invocation produced the evidence for it.
         die "COVERAGE GATE FAILED (bar: ${COVERAGE_MIN}% line coverage).
        Artifacts for diagnosis:
            $artifacts"
     fi
+
+    # At or above the bar -- but on whose evidence?  If anything reduced this run to
+    # measuring what it did not establish, say so in the verdict and exit with a status a
+    # caller can branch on, instead of printing the same line a clean run prints.
+    if [ -n "$ADVISORY_REASONS" ]; then
+        warn "COVERAGE ADVISORY (bar: ${COVERAGE_MIN}% line coverage): the figures meet the bar,"
+        warn "  but THIS IS NOT AN ACCEPTANCE VERDICT, because:"
+        printf '%s\n' "$ADVISORY_REASONS" | sed 's/^/[run_coverage]     /' >&2
+        warn "  Every artifact was still produced and every number above is real; what is"
+        warn "  missing is the provenance that would let anyone rely on them.  Exit status"
+        warn "  $EXIT_ADVISORY marks that difference so a caller cannot mistake this for a pass."
+        exit "$EXIT_ADVISORY"
+    fi
+
     log "COVERAGE GATE PASSED (bar: ${COVERAGE_MIN}% line coverage)"
 }
 
 # ------------------------------------------------------------------------------------
 # main.  The order is deliberate and is the whole argument of the script:
-#   parse -> require the tools -> move any home lcov configuration aside -> name the tool
+#   parse -> require the tools -> create the private lcov HOME -> name the tool
 #   versions -> resolve artifacts -> [build] -> require an instrumented, exercised tree ->
 #   [zero + run + verify] -> capture -> filter -> report HTML -> summarise -> per-file table
 #   -> gate.
-# The home configuration goes aside before the FIRST lcov invocation of the run, which is the
-# version banner, not the capture: lcov reads that file on every invocation and one it cannot
-# parse breaks all of them.
+# The private HOME is created before the FIRST lcov invocation of the run, which is the
+# version banner, not the capture: lcov reads a home configuration on every invocation and one
+# it cannot parse breaks all of them.
 # --restore is a standalone action and short-circuits everything else, so it can never be
 # mistaken for part of a measurement run.
 # ------------------------------------------------------------------------------------
@@ -1628,19 +2202,20 @@ main() {
     log "  workspace root : $WS"
     log "  line bar       : ${COVERAGE_MIN}%  (per-file gating: $( [ "$COVERAGE_PER_FILE_GATE" -eq 1 ] && echo on || echo off ))"
     if [ "${#LCOV_CONFIG_ARGS[@]}" -gt 0 ]; then
-        log "  lcov config    : $SCRIPT_DIR/.lcovrc_l1 (via --config-file, read instead of ~/.lcovrc and /etc/lcovrc)"
+        log "  lcov config    : $SCRIPT_DIR/.lcovrc_l1 (via --config-file, read instead of /etc/lcovrc; the private HOME has no .lcovrc)"
     else
-        log "  lcov config    : none found at $SCRIPT_DIR/.lcovrc_l1; continuing with --rc overrides only"
+        log "  lcov config    : none found at $SCRIPT_DIR/.lcovrc_l1; continuing with --rc overrides only."
+        warn "without --config-file lcov also reads /etc/lcovrc; the --rc overrides still outrank"
+        warn "  it, and no home configuration is reachable either way (private HOME)."
     fi
     log "  branch data    : forced on with --rc branch_coverage=1 on capture, filter, genhtml and summary"
 
-    # Tool PRESENCE first (it needs no lcov invocation), then the home configuration goes
-    # aside, and only then is lcov asked anything -- including for its version.  Moving the
-    # stash ahead of every lcov call also protects the counter zeroing inside do_run, which
-    # is an lcov invocation like any other and used to run with a home configuration in
-    # effect.
+    # Tool PRESENCE first (it needs no lcov invocation), then the private HOME, and only
+    # then is lcov asked anything -- including for its version.  Creating the private HOME
+    # ahead of every lcov call also covers the counter zeroing inside do_run, which is an
+    # lcov invocation like any other and used to run with a home configuration in effect.
     require_tools
-    stash_home_lcovrc
+    make_private_lcov_home
     log_tool_versions
     prepare_output_dir
 
@@ -1661,4 +2236,3 @@ main() {
 }
 
 main "$@"
-

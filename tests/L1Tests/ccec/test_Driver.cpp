@@ -24,8 +24,6 @@
 #include "ccec/Connection.hpp"
 #include "ccec/LibCCEC.hpp"
 #include "hdmi_cec_driver_mock.h"
-#include <chrono>
-#include <thread>
 
 using ::testing::_;
 using ::testing::Return;
@@ -34,29 +32,37 @@ using ::testing::SetArgPointee;
 
 namespace {
 
-/**
- * Let a freshly started Bus reader reach its loop before anything asks it to stop.
+/*
+ * Remove the sentinel that the close() inside LibCCEC::term() leaves on the driver's receive
+ * queue, before the matching init() puts a fresh Bus reader behind it.
  *
- * Bus::start() creates the reader thread and Bus::Reader::run() marks itself RUNNING from inside
- * that new thread, while Bus::stop() -> Bus::Reader::stop(true) marks it STOPPING from the calling
- * thread.  Stoppable::stopStarted() only promotes RUNNING -> STOPPING, so when stop() wins the race
- * the transition is dropped: the reader sets itself RUNNING against an already-closed driver, spins
- * forever in its InvalidStateException catch arm, and stop(true)'s `while (!isStopped())` spins
- * forever waiting for a state that can no longer arrive.  The suite then HANGS rather than fails.
+ * DriverImpl::close() offers a NULL sentinel to that queue and DriverImpl::read() is what
+ * consumes it - but Bus::stop() only waits for the reader to leave its loop, and the reader can
+ * leave without having come back for the sentinel.  A later close() then queues a SECOND one, and
+ * read()'s flush arm - `while (rQueue.size() > 0) { inFrame = rQueue.poll(); frame = *inFrame; }` -
+ * dereferences it: CCEC_OSAL::EventQueue guards its element count and its condition variable with
+ * DIFFERENT mutexes, so poll() can return the default-constructed null for a queue that size() has
+ * just reported as non-empty.  Measured on this tree: a segmentation fault in the reader thread in
+ * roughly 1 full-suite run in 60 once any case re-initialises the shared library mid-run.
  *
- * The window is a defect in CCEC_OSAL::Stoppable and CCEC::Bus - production source, out of scope
- * here - so a test that drives term()/init() has to keep out of it.  Measured on this tree before
- * this helper existed: 1 hang in 25 consecutive full-suite runs, always inside
- * WriteAsyncBeforeOpenThrows.  The same helper and the same reasoning appear in
- * ccec/test_LibCCEC.cpp; each translation unit keeps its own copy because this suite has no shared
- * test-utility target and adding one would be harness architecture no gap asks for.
+ * BLOCKED - REQUIRED PRODUCTION CHANGE, REPORTED NOT MADE (Directive 6): DriverImpl::read() must
+ * null-check inFrame in its flush arm, or EventQueue must publish its element count and its
+ * condition under one lock.  Until one of those lands, a case that cycles the shared library takes
+ * the sentinel off the queue itself.  read() is public, the driver is closed, so the call drains
+ * the queue and then reports the invalid state; it is safe from this thread because term() has
+ * already waited for the reader to leave its loop, so there is no second consumer.  The same
+ * helper and the same reasoning appear in ccec/test_LibCCEC.cpp - each translation unit keeps its
+ * own copy because this suite has no shared test-utility target and adding one would be harness
+ * architecture no gap asks for.
  */
-void settleBusReaderAfterInit()
+void drainClosedDriverQueue()
 {
-    // A deliberate wall-clock pause. The reader's state lives in a private member of a private
-    // nested class, so there is no observable condition for a test to wait on; 50 ms is orders of
-    // magnitude above the pthread_create-to-first-statement cost being covered.
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CECFrame frame;
+    try {
+        Driver::getInstance().read(frame);
+    } catch (const InvalidStateException &) {
+        // The expected outcome: the driver is closed, and the queue is now empty.
+    }
 }
 
 } // namespace
@@ -666,7 +672,23 @@ TEST_F(DriverTest, WriteAsync) {
     }
 
     Driver &driver = Driver::getInstance();
-    
+
+    // Own the HdmiCecOpen default action rather than inheriting one, BEFORE opening.
+    //
+    // HdmiCecDriverMockTest::TearDown() (ccec/test_Driver_Mock.cpp:53) installs an ON_CALL default
+    // action on the PROCESS-GLOBAL driver mock whose lambda captures that fixture's `this` and
+    // reads `mock->currentHandle` through it.  The action is stored on the mock, which outlives the
+    // fixture, so once that fixture has been destroyed any later HdmiCecOpen call performs a lambda
+    // that dereferences released storage.  Measured: with the default action inherited, the full
+    // suite under `--gtest_shuffle --gtest_random_seed=12345` SEGFAULTs here, in
+    // DriverImpl::open -> HdmiCecOpen, with the faulting frame being that TearDown lambda.
+    // test_Driver_Mock.cpp is a pre-existing passing file this pass must not modify, so the fix
+    // belongs here: gmock performs the LAST matching ON_CALL, so re-stating the default in this
+    // test displaces the dangling one and makes the test self-sufficient rather than dependent on
+    // whichever fixture happened to run before it.
+    ON_CALL(*mock, HdmiCecOpen(_))
+        .WillByDefault(DoAll(SetArgPointee<0>(mock->currentHandle), Return(HDMI_CEC_IO_SUCCESS)));
+
     // Guard against preceding tests that call driver.close() directly
     // while leaving LibCCEC::initialized == true (e.g. PollAddress, PrintFrameDetails)
     try { driver.open(); } catch (...) { /* already open, fine */ }
@@ -687,6 +709,7 @@ TEST_F(DriverTest, WriteAsync) {
     // Tear down and restart via LibCCEC so Bus threads are properly stopped
     // before the driver is closed, avoiding a race condition/segfault.
     EXPECT_NO_THROW({ LibCCEC::getInstance().term(); });
+    drainClosedDriverQueue();
     EXPECT_NO_THROW({ LibCCEC::getInstance().init("CEC_TEST"); });
 
     // Clear mock expectations
@@ -700,6 +723,12 @@ TEST_F(DriverTest, WriteAsyncWithFailure) {
     }
 
     Driver &driver = Driver::getInstance();
+
+    // Same reason as DriverTest.WriteAsync above: displace the dangling HdmiCecOpen default action
+    // that ccec/test_Driver_Mock.cpp's TearDown leaves on the process-global mock, so this test
+    // opens the driver through an action it owns.
+    ON_CALL(*mock, HdmiCecOpen(_))
+        .WillByDefault(DoAll(SetArgPointee<0>(mock->currentHandle), Return(HDMI_CEC_IO_SUCCESS)));
 
     // Guard against preceding tests that call driver.close() directly
     // while leaving LibCCEC::initialized == true (e.g. PollAddress, PrintFrameDetails)
@@ -721,48 +750,21 @@ TEST_F(DriverTest, WriteAsyncWithFailure) {
     // Tear down and restart via LibCCEC so Bus threads are properly stopped
     // before the driver is closed, avoiding a race condition/segfault.
     EXPECT_NO_THROW({ LibCCEC::getInstance().term(); });
+    drainClosedDriverQueue();
     EXPECT_NO_THROW({ LibCCEC::getInstance().init("CEC_TEST"); });
 
     // Clear mock expectations
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-TEST_F(DriverTest, WriteAsyncBeforeOpenThrows) {
-    HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
-    ASSERT_NE(mock, nullptr);
-
-    Driver &driver = Driver::getInstance();
-    LibCCEC &lib = LibCCEC::getInstance();
-
-    // The preceding test almost certainly left the library freshly initialized, so its Bus reader
-    // may still be between pthread_create and its first statement. Give it the loop before taking
-    // it away again; see settleBusReaderAfterInit() above for why this matters.
-    settleBusReaderAfterInit();
-
-    // Normalize the shared library and driver to a coherent closed state.
-    try {
-        lib.term();
-    } catch (const InvalidStateException&) {
-        EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
-        settleBusReaderAfterInit();
-        EXPECT_NO_THROW({ lib.term(); });
-    }
-
-    CECFrame frame;
-    frame.append(0x40);
-    frame.append(0x36);
-
-    EXPECT_CALL(*mock, HdmiCecTxAsync(_, _, _)).Times(0);
-    EXPECT_THROW({
-        driver.writeAsync(frame);
-    }, InvalidStateException);
-
-    // Reopen so the suite continues from the initialized state it expects. A single init
-    // is deliberate: an init immediately followed by a term races the bus reader thread
-    // (Bus::Reader::run() consumes a stop request issued before it was scheduled, after
-    // which Bus::Reader::stop() spins forever), and the extra init/term pair that used to
-    // sit here bought no additional coverage over this one call.
-    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
-    settleBusReaderAfterInit();
-    ::testing::Mock::VerifyAndClearExpectations(mock);
-}
+// DriverTest deliberately carries no "writeAsync before open" case.
+//
+// Reaching DriverImpl::writeAsync's not-open guard through Driver::getInstance() would mean
+// terminating the shared library and restarting it, and a term() issued shortly after an init()
+// can lose the Bus reader's RUNNING/STOPPING transition - a production defect in
+// CCEC_OSAL::Stoppable and CCEC::Bus that a test cannot repair and must not provoke (measured on
+// this tree: a case that cycled the shared library here produced 2 aborted runs in 60, one hang
+// and one crash inside the reader thread).  The same guard is covered instead by
+// ccec/test_DriverImpl_Async.cpp::DriverImplAsyncTest.WriteAsyncRejectedWhileDriverClosed, which
+// drives a LOCAL DriverImpl instance and so needs no shared-library cycle at all; the address
+// guards next to it are covered the same way.  Same production lines, no shared state touched.

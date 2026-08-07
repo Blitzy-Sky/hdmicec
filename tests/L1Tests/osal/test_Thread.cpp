@@ -80,7 +80,19 @@ public:
         condition_.notify_all();
     }
 
-    /* Returns true once run() has executed, false if it has not within the bound. */
+    /*
+     * Returns true once run() has executed, false if it has not within the bound.
+     *
+     * This is a PREDICATE wait, not a pause: wait_for returns the instant run() signals, so the
+     * case costs microseconds on the passing path and never sleeps for a fixed span.  The
+     * millisecond argument is a FAILURE DEADLINE - the only thing that stops a dispatch which
+     * never happens from hanging the suite - and is never the amount of time actually waited.
+     * There is no other way to observe this particular behaviour: start() creates the worker with
+     * PTHREAD_CREATE_DETACHED and Thread::stop()/getNativeHandle() are declared but never defined
+     * anywhere in the component, so the caller has no join and no handle to wait on, and the
+     * dispatch itself is what is under test rather than something a captured callback could stand
+     * in for.
+     */
     bool waitForDispatch(int timeoutMs) {
         std::unique_lock<std::mutex> lock(mutex_);
         return condition_.wait_for(lock, std::chrono::milliseconds(timeoutMs),

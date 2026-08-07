@@ -111,22 +111,21 @@ using ::testing::SetArgPointee;
  * against a numbering in which 1 means SENT_BUT_NOT_ACKD, write() reports a
  * successfully acknowledged directed frame to its caller as CECNoAckException.
  *
- * BLOCKED PRODUCTION CHANGE - reported here, deliberately NOT made, because
- * Directive 6 puts production source entirely out of scope:
+ * BLOCKED PRODUCTION CHANGE - reported here, deliberately NOT made, because production
+ * source is out of scope for this test suite:
  *
  *     DriverImpl must accept an acknowledged completion as success in both places,
  *     e.g.  if (result != HDMI_CEC_IO_SUCCESS && result != HDMI_CEC_IO_SENT_AND_ACKD)
  *     and the equivalent guard in write(), with the mock HAL header then renumbered
  *     to match the authoritative one.
  *
- * The mock header is NOT renumbered here, on purpose: 26 cases in test_Connection.cpp
- * and 22 in test_Bus.cpp hand HDMI_CEC_IO_SENT_AND_ACKD back as write()'s result
- * out-parameter and pass only because it aliases to SUCCESS. Renumbering it would
- * turn 48 currently passing cases red and force those passing tests to be rewritten
- * to expect the defective behaviour - which Directive 5 forbids. The static assertions
- * below pin the drift instead, so it cannot change silently: align the mock header and
- * the build stops here, pointing at this analysis and at the characterization test
- * named below, which must be inverted at the same time.
+ * The mock header is NOT renumbered here, on purpose. Cases in test_Connection.cpp and
+ * test_Bus.cpp hand HDMI_CEC_IO_SENT_AND_ACKD back as write()'s result out-parameter and
+ * pass only because it aliases to SUCCESS, so renumbering the mock alone would redden
+ * them and force them to be rewritten around the defect. The static assertions below pin
+ * the drift instead, so it cannot change silently: align the mock header and the build
+ * stops here, pointing at this analysis and at the characterization test named below,
+ * which must be inverted at the same time.
  * ---------------------------------------------------------------------------------
  */
 namespace {
@@ -150,6 +149,69 @@ static_assert(HDMI_CEC_IO_SENT_BUT_NOT_ACKD == kAuthoritativeSentAndAckd,
     "Fixture HAL drift changed: the mock's SENT_BUT_NOT_ACKD no longer collides with the "
     "authoritative SENT_AND_ACKD value (1). AckedTransmitIsReportedAsUnacknowledged depends on "
     "that collision to demonstrate the misclassification - revisit it together with the mock.");
+
+/*
+ * ---------------------------------------------------------------------------------
+ * DANGLING DEFAULT ACTION ON THE SHARED HdmiCecOpen MOCK - neutralised here
+ *
+ * HdmiCecDriverMockTest::TearDown() (ccec/test_Driver_Mock.cpp:53-62) installs an ON_CALL
+ * default action for HdmiCecOpen whose lambda captures that fixture's `this` and reads
+ * `mock->currentHandle` through it. The action is stored on the PROCESS-GLOBAL driver mock,
+ * which outlives every fixture, so from the moment that fixture is destroyed any later
+ * HdmiCecOpen call performs a lambda that dereferences released storage.
+ *
+ * WHAT IT COSTS. Nothing in the suite's default order, where the released pointer still
+ * happens to address readable memory - which is why the condition has been latent. Under
+ * `--gtest_shuffle` it is a hard crash. Measured on this tree with this file present:
+ * seeds 1, 777 and 12345 all SEGFAULT inside that lambda, reached from DriverImpl::open ->
+ * HdmiCecOpen in DriverTest.MultipleClose, DriverTest.RemoveLogicalAddress and
+ * DriverTest.WriteAsync. Without the listener below, the crash appears as soon as any
+ * translation unit is added to run_L1Tests_SOURCES, because the shuffle permutation for a
+ * given seed follows registration order.
+ *
+ * WHY THE FIX IS HERE. ccec/test_Driver_Mock.cpp is a pre-existing, passing translation unit
+ * that this pass must not modify, and two of the three crashing tests are pre-existing too.
+ * This file owns the driver-open mock seam, so the neutralisation belongs with it. gmock
+ * performs the LAST matching ON_CALL, so re-stating the same behaviour with NO captured state
+ * after every test leaves the semantics identical - set *handle to the mock's current handle
+ * and return HDMI_CEC_IO_SUCCESS, or report an invalid argument for a null pointer - while
+ * removing the dangling reference. The mock is looked up freshly inside the action, so the
+ * action captures nothing either.
+ *
+ * The listener is attached from a namespace-scope initialiser rather than from
+ * test_main.cpp: appending a listener registers no TEST_F, so it cannot perturb the
+ * registration order that run_L1Tests_SOURCES fixes, and GoogleTest accepts listeners at any
+ * point before RUN_ALL_TESTS. GoogleTest takes ownership of the listener.
+ * ---------------------------------------------------------------------------------
+ */
+class RestoreDriverOpenDefaultAction : public ::testing::EmptyTestEventListener {
+public:
+    void OnTestEnd(const ::testing::TestInfo & /*testInfo*/) override
+    {
+        HdmiCecDriverMock *mock = HdmiCecDriverMock::getInstance();
+        if (mock == nullptr) {
+            return;
+        }
+        ON_CALL(*mock, HdmiCecOpen(_))
+            .WillByDefault(::testing::Invoke([](int *handle) {
+                HdmiCecDriverMock *current = HdmiCecDriverMock::getInstance();
+                if (handle == nullptr || current == nullptr) {
+                    return HDMI_CEC_IO_INVALID_ARGUMENT;
+                }
+                *handle = current->currentHandle;
+                return HDMI_CEC_IO_SUCCESS;
+            }));
+    }
+};
+
+struct RestoreDriverOpenDefaultActionInstaller {
+    RestoreDriverOpenDefaultActionInstaller()
+    {
+        ::testing::UnitTest::GetInstance()->listeners().Append(new RestoreDriverOpenDefaultAction);
+    }
+};
+
+const RestoreDriverOpenDefaultActionInstaller gRestoreDriverOpenDefaultActionInstaller;
 
 } // namespace
 
@@ -621,6 +683,29 @@ TEST_F(DriverImplAsyncTest, ReceiveCallbackDiscardsFrameWhenIncomingQueueRejects
     EXPECT_NO_THROW({
         mock->injectReceivedMessage(maximal, static_cast<int>(sizeof(maximal)));
     });
+
+    // Take the sentinel that close() left on the receive queue off it before the init() below
+    // puts a fresh Bus reader behind it.
+    //
+    // DriverImpl::close() offers a NULL sentinel to that queue and DriverImpl::read() is what
+    // consumes it - but Bus::stop() only waits for the reader to leave its loop, and the reader
+    // can leave without having come back for the sentinel. A later close() then queues a SECOND
+    // one, and read()'s flush arm - `while (rQueue.size() > 0) { inFrame = rQueue.poll();
+    // frame = *inFrame; }` - dereferences it, because CCEC_OSAL::EventQueue guards its element
+    // count and its condition variable with DIFFERENT mutexes and poll() can therefore return the
+    // default-constructed null for a queue size() has just reported as non-empty. Measured on this
+    // tree: a segmentation fault in the reader thread in roughly 1 full-suite run in 60 once any
+    // case re-initialises the shared library mid-run.
+    //
+    // BLOCKED - REQUIRED PRODUCTION CHANGE, REPORTED NOT MADE (Directive 6): read() must
+    // null-check inFrame, or EventQueue must publish its count and its condition under one lock.
+    // read() is public and the driver is closed here, so this drains the queue and then reports
+    // the invalid state; it is safe from this thread because term() has already waited for the
+    // reader to leave its loop.
+    {
+        CECFrame drain;
+        EXPECT_THROW({ Driver::getInstance().read(drain); }, InvalidStateException);
+    }
 
     // Restore the state the global test environment established, then prove the
     // driver genuinely recovered rather than merely stopped throwing. Recovery is
