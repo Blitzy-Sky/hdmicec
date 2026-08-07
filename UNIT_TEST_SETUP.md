@@ -27,37 +27,57 @@ A comprehensive L1 unit test framework has been created for the hdmicec library 
 ```
 tests/L1Tests/
 ├── README.md                     # Documentation
-├── Makefile.am                   # Build configuration
+├── QUICK_START.md                # Build-and-run quick reference
+├── Makefile.am                   # Build configuration; run_L1Tests_SOURCES is the only
+│                                 #   gate on what is compiled, and its order matters
+├── run_coverage.sh               # gcov/lcov runner with the >=80% line-coverage gate
+├── .lcovrc_l1                    # lcov configuration, branch collection enabled
 ├── test_main.cpp                 # Test runner entry point
 ├── ccec/                         # CCEC library tests
 │   ├── test_CECFrame.cpp        # CECFrame class tests
 │   ├── test_Connection.cpp      # Connection class tests
+│   ├── test_Bus.cpp             # Bus dispatch, filtering and send-retry tests
 │   ├── test_LibCCEC.cpp         # LibCCEC singleton tests
-│   ├── test_MessageEncoder.cpp  # Message encoding tests
+│   ├── test_MessageEncoder.cpp  # Message encoding tests, every message type
 │   ├── test_MessageDecoder.cpp  # Message decoding tests
 │   ├── test_OpCode.cpp          # OpCode enum/class tests
-│   └── test_Operands.cpp        # PhysicalAddress/LogicalAddress tests
+│   ├── test_Operands.cpp        # PhysicalAddress/LogicalAddress tests
+│   ├── test_Operand.cpp         # Operand BASE class default-virtual tests
+│   ├── test_Exception.cpp       # Exception hierarchy what()/dispatch tests
+│   ├── test_Driver_Mock.cpp     # Mock driver verification
+│   ├── test_Driver.cpp          # Driver open/close/write/address tests
+│   ├── test_DriverImpl_Async.cpp# Async transmit, invalid state, error paths
+│   └── test_Util.cpp            # Log-level configuration and buffer dump
 └── osal/                         # OSAL library tests
-    └── test_ConditionVariable.cpp # Condition variable tests
+    ├── test_ConditionVariable.cpp # Condition variable tests
+    ├── test_Mutex.cpp             # Mutex lock/unlock and copy-semantics tests
+    └── test_Thread.cpp            # Thread construction, dispatch and detach tests
 ```
 
 ## Test Coverage
 
-### CCEC Library Tests (10+ test files, 195+ tests)
-- **CECFrame** (9 tests): Constructor, copy operations, serialization, buffer management, hex dump
-- **Connection** (4 tests): Object creation, lifecycle management, open/close operations
-- **LibCCEC** (14 tests): Singleton pattern, initialization/termination, logical/physical address management
-  - *Note: 3 tests disabled due to thread safety with repeated init/term cycles*
-- **MessageEncoder** (10 tests): Encoding CEC messages (ImageViewOn, TextViewOn, ActiveSource, Standby, etc.)
-- **MessageDecoder** (31 tests): Comprehensive decoding of all 60+ CEC opcodes, polling messages, error handling
-- **OpCode** (68 tests): Complete GetOpName() coverage for all CEC opcodes, OpCode class methods (constructor, serialize, print)
+### CCEC Library Tests (14 test translation units, 494 tests)
+Counts below are measured with `./run_L1Tests --gtest_list_tests`; re-measure with that
+command after adding tests rather than trusting this list.
+- **CECFrame** (31 tests): Constructor, copy operations, serialization, buffer management, hex dump, boundary sizes
+- **Connection** (60 tests): Object creation, lifecycle management, open/close, listener registration, address filtering
+- **Bus** (37 tests): Listener dispatch and filtering, send retries and timeout behaviour
+- **LibCCEC** (14 tests): Singleton pattern, initialization/termination, logical/physical address management, and the uninitialised-state guards that throw
+- **MessageEncoder** (49 tests): Encoding every message type in Messages.hpp, including the two-armed serializers and the variable-length audio-descriptor and latency messages
+- **MessageDecoder** (54 tests): Comprehensive decoding of all 60+ CEC opcodes, polling messages, error handling, opcode tracking
+- **OpCode** (82 tests): Complete GetOpName() coverage for all CEC opcodes, OpCode class methods (constructor, serialize, print)
 - **Operands** (69 tests): All operand types including PhysicalAddress, LogicalAddress, DeviceType, Version, PowerStatus, AbortReason, OSDString, OSDName, Language, VendorID, UICommand, SystemAudioStatus, AudioStatus, RequestAudioFormat, ShortAudioDescriptor, AllDeviceTypes, RcProfile, DeviceFeatures, LatencyInfo
-- **Driver**: Mock driver tests, driver implementation tests
-- **Bus**: Bus communication and threading tests
+- **Operand base class** (11 tests): The default `toString()`, `name()` and `validate()` bodies the base supplies to any operand that declines to override them, plus the non-virtual `serialize(void)` convenience overload
+- **Exception hierarchy** (16 tests): Every exception type's `what()` message, dispatch through base and `std::exception` references, and that sibling types do not catch each other
+- **Driver** (23 tests) and **mock driver** (10 tests): Open/close, synchronous write, address management, mock verification
+- **DriverImpl async** (26 tests): Asynchronous transmit, the transmit-completion callback, invalid-state guards and error-injection paths
 
-### OSAL Library Tests (3 test files, 10+ tests)
-- **Mutex**: Lock/unlock operations, concurrency protection, tryLock behavior
-- **Thread**: Thread creation, execution with Runnable interface, lifecycle management
+### OSAL Library Tests (3 test translation units, 26 tests)
+- **ConditionVariable** (4 tests): Wait, signal, timed wait, native-handle accessor
+- **Mutex** (11 tests): Lock/unlock operations, tryLock behavior, copy construction and copy assignment
+- **Thread** (11 tests): Named construction, execution through the Runnable interface, detach and destruction
+
+**520 test cases in 18 fixtures, all passing, none disabled.**
 - **ConditionVariable**: Notify/wait synchronization patterns, timeout behavior
 
 ## Installation Steps
@@ -243,11 +263,18 @@ jobs:
 
 ## Next Steps
 
-1. **Enable hardware mocking**: Implement mock drivers for hardware-dependent tests (marked with `DISABLED_`)
-2. **Increase coverage**: Add more test cases for edge cases and error paths
-3. **Integration tests**: Consider adding integration tests in a separate directory
-4. **Code coverage**: Integrate gcov/lcov for coverage reporting
-5. **Continuous testing**: Set up CI/CD pipeline with automated test execution
+1. **Integration tests**: Consider adding integration tests in a separate directory
+2. **Order independence**: this suite contains pre-existing order-fragile tests -- a
+   `--gtest_shuffle` run is expected to fail, and new translation units must be APPENDED to
+   `run_L1Tests_SOURCES` rather than inserted, because static-initialisation order decides
+   the order the suites run in
+3. **Continuous testing**: the L1 workflow already runs this suite; `run_coverage.sh`
+   reproduces its capture, filter and report steps locally with branch data enabled and a
+   machine-checked >=80% line-coverage gate
+
+Hardware mocking is already in place (`mocks/hdmicec/hdmi_cec_driver_mock.h`, injected by
+symlinking it over the driver header the production code includes) and no test in this suite
+is disabled.  gcov/lcov coverage reporting is wired: see `run_coverage.sh`.
 
 ## Troubleshooting
 
@@ -287,7 +314,7 @@ gdb --args ./run_L1Tests --gtest_filter="FailingTest.*"
 ## Summary
 
 The L1 unit test framework provides:
-- ✅ 10+ test suites with 200+ individual tests
+- ✅ 18 test fixtures with 520 individual tests, all passing, none disabled
 - ✅ Comprehensive coverage for both CCEC and OSAL libraries
   - Complete CEC opcode coverage (60+ opcodes tested)
   - All operand types tested (19 classes, 69 tests)

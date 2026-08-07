@@ -82,8 +82,10 @@ cd tests/L1Tests
 - **Name**: `run_L1Tests`
 - **Location**: `tests/L1Tests/`
 - **Type**: Google Test executable
-- **Sources**: 10+ test files + test_main.cpp
-- **Total Tests**: 200+ individual test cases
+- **Sources**: 17 test translation units + test_main.cpp (all listed in
+  `run_L1Tests_SOURCES`, which is the only gate on what gets compiled)
+- **Total Tests**: 520 individual test cases in 18 fixtures, measured with
+  `./run_L1Tests --gtest_list_tests`
 
 ## Key Features
 

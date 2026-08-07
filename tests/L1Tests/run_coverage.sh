@@ -79,6 +79,15 @@
 #        refuses to capture unless the suite produced fresh ones; without `--run` the
 #        script reports how many counter files it found and when they were last written,
 #        so a stale measurement is visible rather than silent.
+#        A ZERO EXIT STATUS IS NOT TAKEN AS PROOF THAT ANY TEST RAN.  GoogleTest exits 0
+#        when a filter selects nothing, so `GTEST_EXTRA_ARGS=--gtest_filter=NoSuchTest.*`
+#        used to be reported as "the L1 suite passed" and then measured at 0.0% -- a run
+#        that failed only because the number happened to be zero, not because anything
+#        asserted it had tested nothing.  A filter that still cleared the bar would have
+#        been reported as a pass.  `--run` therefore DELETES the results file before the
+#        binary starts and then requires it to exist, to report a non-zero test count, and
+#        to name at least one of this suite's own fixtures -- the same three checks the
+#        sibling plugin runners apply, for the same reason.
 #     5. DETERMINISTIC AND ISOLATED.  Fixed artifact names, no timestamps in output, no
 #        wall-clock sleeps, no reliance on the caller's working directory: every path is
 #        resolved absolutely from BASH_SOURCE, so running this script from its own
@@ -165,7 +174,8 @@
 #   ./run_coverage.sh --run                 zero counters, run the suite, then the above
 #   ./run_coverage.sh --build --run         build first, then the above
 #   ./run_coverage.sh --threshold 90        raise the bar for a diagnostic run
-#   ./run_coverage.sh --per-file-gate       also fail if any single file is below the bar
+#   ./run_coverage.sh --per-file-gate       also fail if any single file is below the bar (default)
+#   ./run_coverage.sh --no-per-file-gate    gate on the aggregate only, for a diagnostic run
 #   ./run_coverage.sh --output-dir DIR      write artifacts to DIR
 #   ./run_coverage.sh --no-html             skip the genhtml report
 #   ./run_coverage.sh --restore             restore the six tracked Makefiles, then exit
@@ -174,7 +184,9 @@
 #   ENVIRONMENT (all optional; command-line flags win)
 #     COVERAGE_MIN            line-coverage bar, default 80
 #     COVERAGE_OUTPUT_DIR     artifact directory, default as under ARTIFACT HYGIENE
-#     COVERAGE_PER_FILE_GATE  1 to gate per file as well as on the aggregate, default 0
+#     COVERAGE_PER_FILE_GATE  1 to gate per file as well as on the aggregate, default 1
+#                             (0 gates the aggregate only; the per-file enumeration is
+#                             printed either way)
 #     GTEST_PREFIX            prefix providing libgtest/libgmock, default <WS>/install/usr
 #     GTEST_EXTRA_ARGS        extra arguments appended to the run_L1Tests command line
 #
@@ -252,12 +264,26 @@
 #   script's, and its non-zero exit is what fails the run.  Every file below the bar is
 #   ALWAYS enumerated -- with its uncovered line numbers, so the "enumerate the specific
 #   uncoverable lines and the reason" requirement can be answered directly from this
-#   output -- and `--per-file-gate` additionally turns that enumeration into a failure
-#   for callers who want the per-target form enforced.  It is OFF by default, honestly:
-#   the filtered trace legitimately contains template-heavy headers under ccec/include
-#   whose figures were never part of the named target set, and defaulting them into a
-#   hard failure would mean this script reports a red run for work nobody asked for.
-#   They are printed either way.
+#   output.
+#
+#   THE PER-FILE HALF OF THE GATE IS ON BY DEFAULT, and that default changed.  It used to
+#   be off, with this justification: the filtered trace contains template-heavy headers
+#   under ccec/include whose figures were never part of the named target set, and
+#   defaulting them into a hard failure would report a red run for work nobody asked for.
+#   That reasoning has expired, because those headers are no longer below the bar.  The
+#   three that were -- ccec/include/ccec/Operand.hpp at 0.0%, Exception.hpp at 33.3% and
+#   Messages.hpp at 76.5% -- are covered by tests added alongside this change
+#   (ccec/test_Operand.cpp, ccec/test_Exception.cpp and the additive section of
+#   ccec/test_MessageEncoder.cpp) and now measure 100%, 100% and 98.2%.  With no target
+#   left under the bar, an aggregate-only default is worse than useless: it lets a single
+#   file collapse while a healthy aggregate hides it, which is exactly the failure mode
+#   the requirement's per-target wording exists to prevent.  Both sibling plugin runners
+#   gate per file by default, so this also makes the three interchangeable in a pipeline.
+#
+#   `--no-per-file-gate` (or COVERAGE_PER_FILE_GATE=0) turns the per-file half back off
+#   for a deliberate diagnostic run -- for instance while adding a new production file and
+#   watching the aggregate before its tests exist.  The enumeration is printed either way,
+#   so turning the gate off never hides a figure; it only stops it failing the run.
 #
 #   BRANCH COVERAGE IS REPORTED AS EVIDENCE AND NEVER GATED.  gcov models branches as
 #   control-flow-graph arcs, and a C++ translation unit's arcs include compiler-generated
@@ -313,7 +339,10 @@ readonly LCOV_BIN GENHTML_BIN GCOV_BIN AWK_BIN FIND_BIN MKTEMP_BIN
 # the ones that reproduce CI.  Command-line flags are applied after parsing and win.
 # ------------------------------------------------------------------------------------
 COVERAGE_MIN="${COVERAGE_MIN:-80}"
-COVERAGE_PER_FILE_GATE="${COVERAGE_PER_FILE_GATE:-0}"
+# Per-file gating defaults ON: see GATE in the header for why the default changed, and for
+# the measured figures that made it honest.  COVERAGE_PER_FILE_GATE=0 or --no-per-file-gate
+# reverts to aggregate-only for a diagnostic run.
+COVERAGE_PER_FILE_GATE="${COVERAGE_PER_FILE_GATE:-1}"
 # Default artifact directory: outside the git tree (see ARTIFACT HYGIENE above), and
 # discriminated by the workspace-root basename so parallel checkouts do not collide.
 OUTPUT_DIR="${COVERAGE_OUTPUT_DIR:-${TMPDIR:-/tmp}/hdmicec-l1-coverage/$(basename -- "$WS")}"
@@ -548,7 +577,8 @@ OPTIONS
 ENVIRONMENT (command-line flags win)
   COVERAGE_MIN=N               same as --threshold
   COVERAGE_OUTPUT_DIR=DIR      same as --output-dir
-  COVERAGE_PER_FILE_GATE=1     same as --per-file-gate
+  COVERAGE_PER_FILE_GATE=1     same as --per-file-gate (the default)
+  COVERAGE_PER_FILE_GATE=0     same as --no-per-file-gate
   GTEST_PREFIX=DIR             prefix providing libgtest/libgmock and their headers,
                                used by --build and put on LD_LIBRARY_PATH by --run.
                                Default: ${GTEST_PREFIX}
@@ -576,6 +606,7 @@ parse_args() {
             -b|--build)          DO_BUILD=1 ;;
             -r|--run)            DO_RUN=1 ;;
             --per-file-gate)     COVERAGE_PER_FILE_GATE=1 ;;
+            --no-per-file-gate)  COVERAGE_PER_FILE_GATE=0 ;;
             --no-html)           DO_HTML=0 ;;
             --restore)           DO_RESTORE_ONLY=1 ;;
             -h|--help)           usage; exit 0 ;;
@@ -595,11 +626,52 @@ parse_args() {
     done
     [ $# -eq 0 ] || die "unexpected trailing arguments: $*"
 
+    # THRESHOLD SHAPE AND RANGE.  The accepted spelling is deliberately the same as the two
+    # plugin runners': digits, or digits.digits.  This runner used to accept integers only,
+    # which meant the three runners in this workspace disagreed about what a threshold is --
+    # `COVERAGE_MIN=80.5` was a working diagnostic bar for the plugins and a hard error here,
+    # so the three could not be wired interchangeably into one pipeline.  lcov's
+    # --fail-under-lines takes a fractional bar, so accepting one costs nothing and refusing
+    # it bought nothing.
+    #
+    # What is NOT accepted is anything that would have to be guessed at: an empty value, a
+    # letter (`8O` for `80` is the classic typo), a sign, surrounding spaces, or more than one
+    # decimal point.  A bar that cannot be read exactly is refused rather than coerced,
+    # because a coerced bar produces a gate verdict for a percentage nobody asked for.
     case "$COVERAGE_MIN" in
-        ''|*[!0-9]*) die "threshold must be a non-negative integer percentage, got '$COVERAGE_MIN'" ;;
-        *)           ;;   # a run of digits: valid, nothing to do
+        ''|*[!0-9.]*|*.*.*|.*|*.)
+            die "threshold must be a number spelled as digits or digits.digits -- for example
+       80, 0, 100 or 80.5 -- and between 0 and 100 (got '$COVERAGE_MIN').  A threshold that
+       cannot be read exactly is refused rather than rounded: a coerced bar would produce a
+       gate verdict for a percentage nobody asked for." ;;
     esac
-    [ "$COVERAGE_MIN" -le 100 ] || die "threshold must be 0-100, got '$COVERAGE_MIN'"
+    # Range and the not-80 diagnostic are decided from the value's own digits rather than
+    # with awk or shell arithmetic.  `[ 80.5 -le 100 ]` is a syntax error in every POSIX
+    # shell, and awk cannot be used here because this validation runs BEFORE require_tools()
+    # -- deliberately, so that a bad threshold is refused before anything else happens -- so
+    # an absent awk would surface as a threshold error, which would be a lie.
+    local min_int="${COVERAGE_MIN%%.*}"          # digits before the point, "" for ".5"
+    local min_frac=""
+    case "$COVERAGE_MIN" in
+        *.*) min_frac="${COVERAGE_MIN#*.}" ;;
+    esac
+    : "${min_int:=0}"
+    # A leading run of digits can be arbitrarily long ("00080"); strip it to a plain integer
+    # so the comparison below is on a value the shell can hold.
+    while [ "${#min_int}" -gt 1 ] && [ "${min_int#0}" != "$min_int" ]; do
+        min_int="${min_int#0}"
+    done
+    if [ "$min_int" -gt 100 ] || { [ "$min_int" -eq 100 ] && [ -n "${min_frac//0/}" ]; }; then
+        die "threshold must be between 0 and 100 (got '$COVERAGE_MIN').  A bar above 100% can
+       never be met, so the gate could only ever fail and would say nothing about the tests."
+    fi
+    # 80 is this submodule's acceptance bar.  Any other value is a diagnostic, and saying so
+    # out loud is what stops a --threshold run's verdict being quoted as an acceptance result.
+    # 80, 80.0 and 80.00 are the same bar; 80.5 is not.
+    if [ "$min_int" -ne 80 ] || [ -n "${min_frac//0/}" ]; then
+        warn "the line bar is ${COVERAGE_MIN}%, not the required 80%.  This is a DIAGNOSTIC run:"
+        warn "    its verdict is NOT the acceptance verdict for this submodule."
+    fi
 
     case "$COVERAGE_PER_FILE_GATE" in
         0|1) ;;
@@ -865,6 +937,51 @@ do_restore() {
 # exiting early.  Without the zeroing step a gate could be satisfied by an earlier run's
 # evidence; without the verification an empty capture could be reported as a real figure.
 # ------------------------------------------------------------------------------------
+# A zero exit status from run_L1Tests means "nothing failed", which is NOT the same as
+# "something ran".  GoogleTest exits 0 for an empty selection, so a mistyped or overly narrow
+# --gtest_filter produced a green line and a coverage figure measured over no execution at
+# all.  Three things are therefore required of the results file the run writes.  The file was
+# deleted immediately beforehand, so:
+#   * it exists            -> this run wrote it, rather than an earlier one;
+#   * "tests" is > 0       -> the binary selected at least one case;
+#   * it names one of this suite's own fixtures -> what ran was THIS suite, not, say, only
+#     a GoogleTest self-test or a case from an unrelated binary that happened to be on PATH.
+# The fixture list is deliberately a stable subset rather than every fixture in the suite: it
+# names the four oldest, largest fixtures, so adding or renaming a test file does not require
+# editing this list, while a run that exercised none of them is not this suite.
+readonly EXPECTED_SUITE_PATTERN='"(classname|name)"[[:space:]]*:[[:space:]]*"(CECFrameTest|ConnectionTest|BusTest|DriverTest|LibCCECTest|OpCodeTest|MessageDecoderTest|MessageEncoderTest|OperandsTest)'
+
+verify_results() { # $1 = path to the results JSON this run was told to write
+    local results="$1" count
+
+    [ -f "$results" ] || die "run_L1Tests exited 0 but wrote no results file at
+       $results
+       The file was deleted immediately before the run, so its absence means the binary
+       produced no results at all.  A coverage figure cannot be attributed to a run that
+       left no evidence it executed anything."
+
+    # The GoogleTest JSON header carries the run's totals; the first "tests" key is the
+    # top-level count.  sed rather than a JSON parser, because this script adds no
+    # dependency beyond the POSIX tools it already needs.
+    count="$(sed -n 's/^[[:space:]]*"tests"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$results" | head -1)"
+    if [ -z "$count" ] || [ "$count" -le 0 ]; then
+        die "run_L1Tests exited 0 but $results reports no tests (\"tests\": ${count:-absent}).
+       An empty run cannot substantiate a coverage figure: every line would be reported
+       unhit and the gate would fail for the wrong reason, or -- worse, with a partial
+       filter -- a subset's figure would be reported as the suite's.
+       If a --gtest_filter was passed through GTEST_EXTRA_ARGS, it selected nothing."
+    fi
+
+    grep -Eq "$EXPECTED_SUITE_PATTERN" "$results" || die "run_L1Tests exited 0 and $results
+       reports $count test case(s), but not one of them belongs to a known middleware L1
+       fixture.  Whatever ran was not this suite, while the capture would credit this
+       submodule's objects.  Check that ./run_L1Tests in tests/L1Tests is the binary built
+       from this tree and that GTEST_EXTRA_ARGS is not restricting the run to unrelated
+       cases."
+
+    log "run_L1Tests reported $count test case(s) in $results, including known middleware fixtures"
+}
+
 do_run() {
     rule
     log "zeroing gcov counters under $HDMICEC_ROOT (leaves *.gcno instrumentation intact)"
@@ -881,6 +998,11 @@ do_run() {
     local run_log="$OUTPUT_DIR/run_L1Tests.log"
     local results_json="$OUTPUT_DIR/rdkL1TestResults.json"
     local ld_path="${LD_LIBRARY_PATH:-}"
+
+    # Deleted BEFORE the binary starts, so a results file that exists afterwards can only
+    # have been written by this run.  Without this, a binary that produced nothing would be
+    # judged against whatever an earlier invocation left at the same path.
+    rm -f -- "$results_json"
     if [ -d "$GTEST_PREFIX/lib" ]; then
         ld_path="$GTEST_PREFIX/lib${ld_path:+:$ld_path}"
     fi
@@ -916,6 +1038,7 @@ do_run() {
        ever be produced from one."
     fi
     log "the L1 suite passed (exit 0)"
+    verify_results "$results_json"
 
     local fresh
     fresh="$(gcda_count)"
@@ -1452,8 +1575,9 @@ apply_gate() {
             warn "--per-file-gate is in force, so the above fails this run."
             failures=$((failures + 1))
         else
-            log "per-file gating is off (default), so the above is reported but does not fail"
-            log "  this run. Enable it with --per-file-gate or COVERAGE_PER_FILE_GATE=1."
+            log "per-file gating was turned OFF for this run (--no-per-file-gate /"
+            log "  COVERAGE_PER_FILE_GATE=0), so the above is reported but does not fail it."
+            log "  The default is ON: drop the flag to have the per-target requirement enforced."
         fi
     else
         log "every target in the filtered trace meets the ${COVERAGE_MIN}% bar"

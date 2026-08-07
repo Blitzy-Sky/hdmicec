@@ -47,7 +47,21 @@ run_L1Tests_SOURCES = \
     osal/test_ConditionVariable.cpp \
     osal/test_Mutex.cpp \
     osal/test_Thread.cpp \
+    ccec/test_Operand.cpp \
+    ccec/test_Exception.cpp \
     $(top_srcdir)/mocks/hdmicec/hdmi_cec_driver_mock.cpp
+
+# ORDER IS SIGNIFICANT IN THIS LIST, and the last two entries are placed at the END on
+# purpose.  GoogleTest registers each TEST_F during static initialisation, and the order in
+# which those initialisers run follows the link order of the objects, which follows this
+# list; the order in which the suites then RUN is the order they were registered.  This suite
+# contains pre-existing order-fragile tests that pass in the established order and must not
+# be modified on this pass, so inserting a new translation unit in the MIDDLE of this list
+# reorders every suite after it and turns a green run red - measured: adding
+# ccec/test_Operand.cpp and ccec/test_Exception.cpp after ccec/test_Operands.cpp moved the
+# Bus and Driver suites and produced a crash in DriverTest.MultipleClose, while appending the
+# same two files here left all 519 tests green.  Append new translation units; do not
+# interleave them.
 
 run_L1Tests_LDADD = \
     $(top_builddir)/ccec/src/libRCEC.la \
