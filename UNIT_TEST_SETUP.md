@@ -32,27 +32,35 @@ tests/L1Tests/
 │                                 #   gate on what is compiled, and its order matters
 ├── run_coverage.sh               # gcov/lcov runner with the >=80% line-coverage gate
 ├── .lcovrc_l1                    # lcov configuration, branch collection enabled
+├── .gitignore                    # Ignores the build output: *.o, .deps/, .libs/, Makefile,
+│                                 #   run_L1Tests and the *.log/*.trs/*.xml result files
 ├── test_main.cpp                 # Test runner entry point
 ├── ccec/                         # CCEC library tests
-│   ├── test_CECFrame.cpp        # CECFrame class tests
-│   ├── test_Connection.cpp      # Connection class tests
-│   ├── test_Bus.cpp             # Bus dispatch, filtering and send-retry tests
-│   ├── test_LibCCEC.cpp         # LibCCEC singleton tests
-│   ├── test_MessageEncoder.cpp  # Message encoding tests, every message type
-│   ├── test_MessageDecoder.cpp  # Message decoding tests
-│   ├── test_OpCode.cpp          # OpCode enum/class tests
-│   ├── test_Operands.cpp        # PhysicalAddress/LogicalAddress tests
-│   ├── test_Operand.cpp         # Operand BASE class default-virtual tests
-│   ├── test_Exception.cpp       # Exception hierarchy what()/dispatch tests
-│   ├── test_Driver_Mock.cpp     # Mock driver verification
-│   ├── test_Driver.cpp          # Driver open/close/write/address tests
-│   ├── test_DriverImpl_Async.cpp# Async transmit, invalid state, error paths
-│   └── test_Util.cpp            # Log-level configuration and buffer dump
+│   ├── test_CECFrame.cpp         # CECFrame class tests
+│   ├── test_Connection.cpp       # Connection class tests
+│   ├── test_Bus.cpp              # Bus dispatch, filtering and send-retry tests
+│   ├── test_LibCCEC.cpp          # LibCCEC singleton tests
+│   ├── test_MessageEncoder.cpp   # Message encoding tests, every message type
+│   ├── test_MessageDecoder.cpp   # Message decoding tests
+│   ├── test_OpCode.cpp           # OpCode enum/class tests
+│   ├── test_Operands.cpp         # PhysicalAddress/LogicalAddress tests
+│   ├── test_Operand.cpp          # Operand BASE class default-virtual tests
+│   ├── test_Exception.cpp        # Exception hierarchy what()/dispatch tests
+│   ├── test_Driver_Mock.cpp      # Mock driver verification
+│   ├── test_Driver.cpp           # Driver open/close/write/address tests
+│   ├── test_DriverImpl_Async.cpp # Async transmit, invalid state, error paths
+│   └── test_Util.cpp             # Log-level configuration and buffer dump
 └── osal/                         # OSAL library tests
     ├── test_ConditionVariable.cpp # Condition variable tests
     ├── test_Mutex.cpp             # Mutex lock/unlock and copy-semantics tests
     └── test_Thread.cpp            # Thread construction, dispatch and detach tests
 ```
+
+Every file listed above exists on disk and is git-tracked: `git ls-files tests/L1Tests`
+returns exactly these 24 files and nothing else (`ccec/` and `osal/` are the two
+directories holding them).  Anything else you see in that directory after a build --
+`*.o`, `*.gcno`, `*.gcda`, `.deps/`, `.libs/`, `Makefile`, `Makefile.in`, `run_L1Tests`,
+`*.log`, `*.trs` -- is generated output matched by `.gitignore`.
 
 ## Test Coverage
 
@@ -71,14 +79,17 @@ command after adding tests rather than trusting this list.
 - **Exception hierarchy** (16 tests): Every exception type's `what()` message, dispatch through base and `std::exception` references, and that sibling types do not catch each other
 - **Driver** (23 tests) and **mock driver** (10 tests): Open/close, synchronous write, address management, mock verification
 - **DriverImpl async** (26 tests): Asynchronous transmit, the transmit-completion callback, invalid-state guards and error-injection paths
+- **Util** (12 tests): The log-level configuration read path -- every recognised level mapped to its numeric setting, plus the missing-file, empty-file, unrecognised-key and short-prefix arms that leave it unchanged -- and the hex buffer dump: emitted at debug and trace, silent below them, with zero-length and maximum-length buffers
+
+The counts above sum to the 494 in the heading -- 14 figures across 13 bullets, because
+**Driver** and **mock driver** are separate translation units counted on one line.
 
 ### OSAL Library Tests (3 test translation units, 26 tests)
-- **ConditionVariable** (4 tests): Wait, signal, timed wait, native-handle accessor
-- **Mutex** (11 tests): Lock/unlock operations, tryLock behavior, copy construction and copy assignment
-- **Thread** (11 tests): Named construction, execution through the Runnable interface, detach and destruction
+- **ConditionVariable** (4 tests): Notify/wait synchronization patterns, signalling, timed wait and timeout behavior, and the native-handle accessor
+- **Mutex** (11 tests): Default construction, lock/unlock including the recursive case where each `lock()` needs a matching `unlock()`, native-handle retrieval, copy construction, copy assignment, chained and self-assignment, and a copy owning a distinct handle usable independently of the original. `Mutex` has no try-lock operation, so none is tested
+- **Thread** (11 tests): Both constructor overloads (unnamed, and named with empty and long names), `run()` dispatching to the `Runnable`, `start()` dispatching it on another thread, `detach()`, and destruction -- at scope exit, after `detach()`, and without a `start()`. `stop()` and `getNativeHandle()` are declared in `Thread.hpp` but never defined, so neither links; there is no join operation
 
 **520 test cases in 18 fixtures, all passing, none disabled.**
-- **ConditionVariable**: Notify/wait synchronization patterns, timeout behavior
 
 ## Installation Steps
 
@@ -156,9 +167,18 @@ make check
 # Run tests directly
 ./tests/L1Tests/run_L1Tests
 
-# Run with verbose output
-./tests/L1Tests/run_L1Tests --gtest_verbose
+# Turn the output UP: print each test's elapsed time
+./tests/L1Tests/run_L1Tests --gtest_print_time=1
+
+# Turn the output DOWN: report failures only, suppressing the per-test progress lines
+./tests/L1Tests/run_L1Tests --gtest_brief=1
 ```
+
+> **Always take flag names from `./run_L1Tests --help`.**  GoogleTest has no general
+> "verbose" switch -- the two flags above are how you raise and lower its output -- and it
+> handles an unrecognised `--gtest_*` argument by printing its help text, running **no tests
+> at all**, and still exiting `0`.  A misspelled flag therefore produces a run that looks
+> successful but tested nothing, which no exit-status check will catch.
 
 ### Advanced Usage
 
@@ -169,7 +189,7 @@ cd tests/L1Tests
 # Run specific test suite
 ./run_L1Tests --gtest_filter="CECFrameTest.*"
 
-# Run multiple test patterns
+# Run multiple test patterns (this one selects the 22 OSAL Mutex and Thread cases)
 ./run_L1Tests --gtest_filter="*Mutex*:*Thread*"
 
 # List all available tests
@@ -181,9 +201,16 @@ cd tests/L1Tests
 # Repeat tests for flakiness detection
 ./run_L1Tests --gtest_repeat=100
 
-# Shuffle test execution order
-./run_L1Tests --gtest_shuffle
+# Shuffle test execution order (diagnostic only -- see "Order independence" below;
+# --gtest_random_seed pins the order so a finding is reproducible)
+./run_L1Tests --gtest_shuffle --gtest_random_seed=12345
 ```
+
+`--gtest_shuffle` is a diagnostic, not a gate: this suite has pre-existing order-fragile
+cases, so a shuffled run is expected to fail while the default-order run is green.  Measured
+with seed `12345`: 520 ran, 511 passed, 9 failed, exit 1 -- against 520/520 and exit 0 in
+default order.  Use it to check that a test you just wrote is self-sufficient, and compare
+against that baseline rather than reading any shuffled failure as a new regression.
 
 ## Writing New Tests
 
@@ -297,8 +324,14 @@ export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
 ### Test failures
 ```bash
-# Run with more verbosity
-./run_L1Tests --gtest_verbose --gtest_print_time
+# Run with per-test timings
+./run_L1Tests --gtest_print_time=1
+
+# Stop at the first failure instead of running the whole suite
+./run_L1Tests --gtest_break_on_failure
+
+# Capture a machine-readable result file to inspect the failure detail
+./run_L1Tests --gtest_output=json:l1_results.json
 
 # Debug specific test
 gdb --args ./run_L1Tests --gtest_filter="FailingTest.*"
@@ -324,5 +357,10 @@ The L1 unit test framework provides:
 - ✅ Integrated with build system via `--enable-l1tests`
 - ✅ CI/CD ready with XML output support
 - ✅ Production-grade testing infrastructure
-- ✅ Lessons learned from threading and singleton patterns documented
+- ✅ Singleton and global-state handling documented: `test_main.cpp` registers a single
+  `CecTestEnvironment` (a `testing::Environment`) that installs the HAL driver mock and
+  calls `LibCCEC::getInstance().init("CEC_TEST")` once for the whole program, so no fixture
+  re-initialises the library. A test that must observe an uninitialised-state guard uses the
+  `term()` -> provoke -> `init()` idiom and restores the singleton before it returns, which
+  is what lets the async and `LibCCEC` guard cases run inside the shared environment
 
