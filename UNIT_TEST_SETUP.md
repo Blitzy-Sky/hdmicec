@@ -62,22 +62,22 @@ directories holding them).  Anything else you see in that directory after a buil
 
 ## Test Coverage
 
-### CCEC Library Tests (12 test translation units, 426 tests)
+### CCEC Library Tests (12 test translation units, 456 tests)
 Counts below are measured with `./run_L1Tests --gtest_list_tests`; re-measure with that
 command after adding tests rather than trusting this list.
 - **CECFrame** (31 tests): Constructor, copy operations, serialization, buffer management, hex dump, boundary sizes
-- **Connection** (60 tests): Object creation, lifecycle management, open/close, listener registration, address filtering
+- **Connection** (66 tests): Object creation, lifecycle management, open/close, listener registration, address filtering, and the `IntegrationFlowTest` cross-layer cases (6) declared in the same translation unit
 - **Bus** (37 tests): Listener dispatch and filtering, send retries and timeout behaviour
-- **LibCCEC** (13 tests): Singleton pattern, initialization/termination, logical/physical address management, and the uninitialised-state guards that throw.  Split across two fixtures: `LibCCECTest` (8 cases) never terminates the library, and `LibCCECUninitializedTest` (5 cases) owns the uninitialised state at SUITE level -- one `term()` in the first `SetUp()`, one `init()` in `TearDownTestSuite()` -- so no case pairs an `init()` with a following `term()`
-- **MessageEncoder** (10 tests): Encoding CEC messages through MessageEncoder
+- **LibCCEC** (14 tests): Singleton pattern, initialization/termination, logical/physical address management, and the uninitialised-state guards that throw.  Split across two fixtures: `LibCCECTest` (8 cases) never terminates the library, and `LibCCECUninitializedTest` (6 cases) owns the library's lifecycle per case -- `SetUp()` reaches the uninitialised state through `ensureTerminated()`, which waits for the bus reader to publish RUNNING before calling `term()`, and `TearDown()` restores the initialised `CEC_TEST` state through `ensureInitialized()` -- so no other fixture ever observes an uninitialised library
+- **MessageEncoder** (27 tests): Encoding CEC messages through MessageEncoder
 - **MessageDecoder** (54 tests): Comprehensive decoding of all 60+ CEC opcodes, polling messages, error handling, opcode tracking
 - **OpCode** (82 tests): Complete GetOpName() coverage for all CEC opcodes, OpCode class methods (constructor, serialize, print)
-- **Operands** (69 tests): All operand types including PhysicalAddress, LogicalAddress, DeviceType, Version, PowerStatus, AbortReason, OSDString, OSDName, Language, VendorID, UICommand, SystemAudioStatus, AudioStatus, RequestAudioFormat, ShortAudioDescriptor, AllDeviceTypes, RcProfile, DeviceFeatures, LatencyInfo
+- **Operands** (75 tests): All operand types including PhysicalAddress, LogicalAddress, DeviceType, Version, PowerStatus, AbortReason, OSDString, OSDName, Language, VendorID, UICommand, SystemAudioStatus, AudioStatus, RequestAudioFormat, ShortAudioDescriptor, AllDeviceTypes, RcProfile, DeviceFeatures, LatencyInfo
 - **Driver** (22 tests) and **mock driver** (10 tests): Open/close, synchronous write, address management, mock verification
 - **DriverImpl async** (26 tests): Asynchronous transmit, the transmit-completion callback, invalid-state guards and error-injection paths
 - **Util** (12 tests): The log-level configuration read path -- every recognised level mapped to its numeric setting, plus the missing-file, empty-file, unrecognised-key and short-prefix arms that leave it unchanged -- and the hex buffer dump: emitted at debug and trace, silent below them, with zero-length and maximum-length buffers
 
-The counts above sum to the 426 in the heading -- 12 figures across 11 bullets, because
+The counts above sum to the 456 in the heading -- 12 figures across 11 bullets, because
 **Driver** and **mock driver** are separate translation units counted on one line, and
 **LibCCEC** and **MessageDecoder** each declare two fixtures inside one translation unit.
 
@@ -86,7 +86,7 @@ The counts above sum to the 426 in the heading -- 12 figures across 11 bullets, 
 - **Mutex** (11 tests): Default construction, lock/unlock including the recursive case where each `lock()` needs a matching `unlock()`, native-handle retrieval, copy construction, copy assignment, chained and self-assignment, and a copy owning a distinct handle usable independently of the original. `Mutex` has no try-lock operation, so none is tested
 - **Thread** (11 tests): Both constructor overloads (unnamed, and named with empty and long names), `run()` dispatching to the `Runnable`, `start()` dispatching it on another thread, `detach()`, and destruction -- at scope exit, after `detach()`, and without a `start()`. `stop()` and `getNativeHandle()` are declared in `Thread.hpp` but never defined, so neither links; there is no join operation
 
-**452 test cases in 17 fixtures, all passing, none disabled.**  There are more fixtures
+**482 test cases in 18 fixtures, all passing, none disabled.**  There are more fixtures
 than translation units because `ccec/test_LibCCEC.cpp` declares `LibCCECTest` and
 `LibCCECUninitializedTest`, and `ccec/test_MessageDecoder.cpp` declares `MessageDecoderTest`
 and `MessageDecoderTrackingTest`.
@@ -284,15 +284,15 @@ cd tests/L1Tests
 ./run_L1Tests --gtest_shuffle --gtest_random_seed=12345
 ```
 
-`--gtest_shuffle` is a diagnostic, not a gate: this suite has pre-existing order-fragile
-cases, so a shuffled run is expected to fail while the default-order run is green.  Measured
-with seed `12345`: `BusTest.ListenerFiltering` and `BusTest.UnregisteredConnectionReceivesAll`
-fail, and the run then ends in the production SIGSEGV documented in
-`tests/L1Tests/README.md` -- because shuffling moves a `close()` next to a fresh `init()`,
-which is the queue state that null dereference needs.  Default order is 452/452, exit 0.
-Both shuffled outcomes are pre-existing conditions of the suite.  Use the flag to check that
-a test you just wrote is self-sufficient, and compare against that baseline rather than
-reading any shuffled failure as a new regression.
+`--gtest_shuffle` is a diagnostic, not a gate.  Measured on this tree with seed `12345`:
+**482/482 passed, exit 0**, matching the default order.  An earlier revision of this suite
+failed that seed with `BusTest.ListenerFiltering` and `BusTest.UnregisteredConnectionReceivesAll`
+and then ended in the production SIGSEGV documented in `tests/L1Tests/README.md`, because
+shuffling moved a `close()` next to a fresh `init()` -- the queue state that null dereference
+needs.  The fixtures that own the shared library's lifecycle now wait for the bus reader to
+publish RUNNING before terminating it, so that window is not opened.  One green seed is not a
+proof of order independence: use the flag to check that a test you just wrote is self-sufficient,
+and re-derive the outcome after adding tests rather than trusting the figure quoted here.
 
 ## Writing New Tests
 
@@ -455,8 +455,9 @@ Three notes on that example:
 ## Next Steps
 
 1. **Integration tests**: Consider adding integration tests in a separate directory
-2. **Order independence**: this suite contains pre-existing order-fragile tests -- a
-   `--gtest_shuffle` run is expected to fail, and new translation units must be APPENDED to
+2. **Order independence**: a `--gtest_shuffle --gtest_random_seed=12345` run of this suite now
+   passes 482 of 482 on this tree, but one green seed is not a proof -- re-derive it after
+   adding tests, and new translation units must still be APPENDED to
    `run_L1Tests_SOURCES` rather than inserted, because static-initialisation order decides
    the order the suites run in
 3. **Continuous testing**: the L1 workflow already runs this suite; `run_coverage.sh`
@@ -511,10 +512,10 @@ gdb --args ./run_L1Tests --gtest_filter="FailingTest.*"
 ## Summary
 
 The L1 unit test framework provides:
-- ✅ 17 test fixtures with 452 individual tests, all passing, none disabled
+- ✅ 18 test fixtures with 482 individual tests, all passing, none disabled
 - ✅ Comprehensive coverage for both CCEC and OSAL libraries
   - Complete CEC opcode coverage (60+ opcodes tested)
-  - All operand types tested (19 classes, 69 tests)
+  - All operand types tested (19 classes, 75 tests)
   - Message encoding/decoding thoroughly tested
   - All OpCode GetOpName() cases covered
 - ✅ Easy to extend and maintain
@@ -524,7 +525,8 @@ The L1 unit test framework provides:
 - ✅ Singleton and global-state handling documented: `test_main.cpp` registers a single
   `CecTestEnvironment` (a `testing::Environment`) that installs the HAL driver mock and
   calls `LibCCEC::getInstance().init("CEC_TEST")` once for the whole program, so no fixture
-  re-initialises the library. A test that must observe an uninitialised-state guard uses the
-  `term()` -> provoke -> `init()` idiom and restores the singleton before it returns, which
-  is what lets the async and `LibCCEC` guard cases run inside the shared environment
+  re-initialises the library. A test that must observe an uninitialised-state guard runs under
+  `LibCCECUninitializedTest`, whose `SetUp()` reaches the uninitialised state and whose
+  `TearDown()` restores the initialised `CEC_TEST` state, so the custody belongs to the
+  fixture rather than to the test body and no sibling fixture can observe the gap
 

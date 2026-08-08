@@ -49,12 +49,25 @@ protected:
         // CRITICAL: Restore default ON_CALL behaviors that may have been overridden
         // This is necessary because some tests use ON_CALL to change default behavior
         if (mock != nullptr) {
-            // Restore default HdmiCecOpen behavior
+            // Restore default HdmiCecOpen behavior.
+            //
+            // THE LAMBDA CAPTURES NOTHING, AND THAT IS THE FIX.  It used to capture `this`
+            // and read `mock->currentHandle` through it.  The action is stored on the
+            // PROCESS-GLOBAL driver mock, which outlives this fixture, so from the moment
+            // the fixture was destroyed every later HdmiCecOpen call performed a lambda that
+            // dereferenced released storage.  It was latent in the suite's default order,
+            // where the released pointer still happened to address readable memory, and a
+            // hard crash under --gtest_shuffle: measured on this tree, seeds 1, 777 and
+            // 12345 all segfaulted inside it, reached from DriverImpl::open in
+            // DriverTest.MultipleClose, DriverTest.RemoveLogicalAddress and
+            // DriverTest.WriteAsync.  Looking the mock up freshly inside the action gives
+            // the identical behaviour with no reference to this object's lifetime at all.
             ON_CALL(*mock, HdmiCecOpen(::testing::_))
                 .WillByDefault(::testing::Invoke(
-                    [this](int* handle) {
-                        if (handle) {
-                            *handle = mock->currentHandle;
+                    [](int* handle) {
+                        HdmiCecDriverMock* current = HdmiCecDriverMock::getInstance();
+                        if (handle && current) {
+                            *handle = current->currentHandle;
                             return HDMI_CEC_IO_SUCCESS;
                         }
                         return HDMI_CEC_IO_INVALID_ARGUMENT;

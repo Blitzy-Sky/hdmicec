@@ -290,20 +290,25 @@
 #   uncoverable lines and the reason" requirement can be answered directly from this
 #   output.
 #
-#   THE PER-FILE HALF OF THE GATE IS OFF BY DEFAULT.  The filtered trace contains
-#   template-heavy headers under ccec/include whose figures were never part of the named
-#   target set, and three of them are below the bar with no test in this suite's authorised
-#   inventory reaching them: measured on this tree, ccec/include/ccec/Operand.hpp at 0.0%
-#   (0/6), Exception.hpp at 33.3% (4/12) and Messages.hpp at 76.5% (228/298).  All three sit
-#   at exactly those figures before this project's tests as well, so they are a pre-existing
-#   property of the suite rather than a regression, and defaulting them into a hard failure
-#   would report a red run for work nobody asked for.  The named targets -- ccec/src and
-#   osal/src -- are all above the bar, and the aggregate is 91.5%.
+#   THE PER-FILE HALF OF THE GATE IS ON BY DEFAULT.  Directive 4 sets the bar PER TARGET,
+#   so an aggregate that clears 80% while one file sits at 33% clears a total and misses the
+#   requirement.  Every file in this suite's filtered trace is now at or above the bar, so
+#   there is nothing for the per-file half to be lenient about.
 #
-#   `--per-file-gate` (or COVERAGE_PER_FILE_GATE=1) turns the per-file half on, which is the
-#   right setting once a translation unit covering those three headers is authorised.  The
-#   enumeration is printed either way, so leaving the gate off never hides a figure; it only
-#   stops it failing the run.
+#   That includes the three template-heavy headers under ccec/include that used to sit below
+#   it -- measured on this tree before: ccec/include/ccec/Operand.hpp 0.0% (0/6),
+#   Exception.hpp 33.3% (4/12), Messages.hpp 76.5% (228/298).  Each was closed the only way a
+#   coverage bar may be closed, by ADDING TESTS: Operand's three default virtuals and all
+#   seven Exception::what() overrides are exercised from ccec/test_Operands.cpp, and the
+#   previously unserialised message types from ccec/test_MessageEncoder.cpp.  None of them
+#   was exempted, and none was excluded from the trace.
+#
+#   `--no-per-file-gate` (or COVERAGE_PER_FILE_GATE=0) downgrades the per-file half to a
+#   report, for a diagnostic run that wants the table without the verdict.  It is not a
+#   setting an acceptance run uses.  COVERAGE_GATE_EXEMPT_FILES -- empty by default -- can
+#   suppress one named file's vote, and the rules for when that is admissible are stated at
+#   its definition below.  The enumeration prints in every mode, so neither switch can hide a
+#   figure; they only decide whether it fails the run.
 #
 #   BRANCH COVERAGE IS REPORTED AS EVIDENCE AND NEVER GATED.  gcov models branches as
 #   control-flow-graph arcs, and a C++ translation unit's arcs include compiler-generated
@@ -352,24 +357,18 @@ GCOV_BIN="$(resolve_tool gcov)"
 AWK_BIN="$(resolve_tool awk)"
 FIND_BIN="$(resolve_tool find)"
 MKTEMP_BIN="$(resolve_tool mktemp)"
-# stat is how the ancestry of every artifact path is checked (owner, mode, type) before a
-# byte is written to it.  It is coreutils, like the rest of the primitives above.
-STAT_BIN="$(resolve_tool stat)"
-# timeout is how a hung suite becomes a reported outcome instead of a job the CI runner kills
-# with no diagnosis attached.  It is resolved here, alongside the other primitives, because the
-# --run path below references it: an earlier revision described the resolution and the probe in
-# a comment at the point of use but never performed either, so with `set -u` in effect the
-# documented `--run` invocation aborted with "TIMEOUT_BIN: unbound variable" before the suite
-# started.  The sibling runner entservices-hdmicecsink/Tests/run_coverage.sh sets the shape.
+
+# `timeout` bounds the suite run, and its absence is not fatal: --run degrades to an unbounded
+# run and says so.  Resolved here with everything else so a later PATH change cannot swap it.
 TIMEOUT_BIN="$(resolve_tool timeout)"
-readonly LCOV_BIN GENHTML_BIN GCOV_BIN AWK_BIN FIND_BIN MKTEMP_BIN STAT_BIN TIMEOUT_BIN
 
 # --kill-after is desirable (a suite that ignores SIGTERM still dies) but is NOT universally
-# safe: this workspace's `timeout` is uutils coreutils, and with -k it reports a timeout as
-# exit 125 rather than GNU's 124 -- and 125 also means "timeout itself failed", so the two
-# become indistinguishable and a hang would be misreported as a broken invocation.  One cheap
-# probe settles it for this host instead of inferring it from a version string: a 1s bound on a
-# 3s sleep must yield exactly 124 before -k is used at all.
+# safe: this workspace's `timeout` is uutils coreutils, and with -k it reports a timeout as exit
+# 125 rather than GNU's 124 -- and 125 also means "timeout itself failed", so the two become
+# indistinguishable and a hang would be misreported as a broken invocation.  One cheap probe
+# settles it for this host instead of inferring it from a version string: a 1s bound on a 3s
+# sleep must yield exactly 124 before -k is used at all.  This is the probe the run step's
+# comment refers to.
 TIMEOUT_KILL_AFTER=()
 if [ -n "$TIMEOUT_BIN" ]; then
     timeout_probe=0
@@ -379,47 +378,58 @@ if [ -n "$TIMEOUT_BIN" ]; then
     fi
     unset timeout_probe
 fi
-readonly TIMEOUT_KILL_AFTER
+readonly TIMEOUT_BIN TIMEOUT_KILL_AFTER
+# stat is how the ancestry of every artifact path is checked (owner, mode, type) before a
+# byte is written to it.  It is coreutils, like the rest of the primitives above.
+STAT_BIN="$(resolve_tool stat)"
+readonly LCOV_BIN GENHTML_BIN GCOV_BIN AWK_BIN FIND_BIN MKTEMP_BIN STAT_BIN
 
 # ------------------------------------------------------------------------------------
 # Configuration.  Every value is overridable from the environment, and the defaults are
 # the ones that reproduce CI.  Command-line flags are applied after parsing and win.
 # ------------------------------------------------------------------------------------
 COVERAGE_MIN="${COVERAGE_MIN:-80}"
-# Per-file gating defaults OFF: see GATE in the header for the three ccec/include headers
-# that are below the bar with no authorised test reaching them, at the same figures as before
-# this project.  COVERAGE_PER_FILE_GATE=1 or --per-file-gate turns it on.
-COVERAGE_PER_FILE_GATE="${COVERAGE_PER_FILE_GATE:-0}"
+# Per-file gating defaults ON, because Directive 4 states the bar PER TARGET: an aggregate
+# that clears 80% while one target sits at 33% satisfies the letter of a total and none of
+# the intent.  `--no-per-file-gate` / COVERAGE_PER_FILE_GATE=0 downgrades it to a report for
+# a diagnostic run; it is not a setting an acceptance run uses.  See GATE in the header.
+COVERAGE_PER_FILE_GATE="${COVERAGE_PER_FILE_GATE:-1}"
 
-# Files excused from the PER-FILE half of the gate only.  They stay in the trace and stay in
-# the AGGREGATE denominator, so nothing is hidden and no percentage is flattered; the listing
-# suppresses one pass/fail vote and nothing else, which is why each entry carries its reason
-# here rather than in a commit message.  The GATE section of this header states the same set
-# and the same measured figures.
+# ------------------------------------------------------------------------------------
+# THE PER-FILE GATE'S EXEMPTION LIST -- newline-separated trace paths, matched WHOLE-LINE
+# against the `file` column of per_file_coverage.tsv (which is relative to $WS).
 #
-# All three are template-heavy headers under ccec/include that were never part of this pass's
-# named target set (ccec/src and osal/src), and each sits at exactly the figure it sat at
-# before this project's tests, so they are a pre-existing property of the suite rather than a
-# regression this pass introduced:
-#     ccec/include/ccec/Operand.hpp     0.0% (0/6)     -- pure abstract operand base; every
-#                                                        instantiated line lives in a derived
-#                                                        header, so no test in this suite's
-#                                                        authorised inventory reaches it
-#     ccec/include/ccec/Exception.hpp  33.3% (4/12)    -- the untaken arms are constructors of
-#                                                        exception types the mock driver never
-#                                                        raises
-#     ccec/include/ccec/Messages.hpp   76.5% (228/298) -- one inline accessor per unexercised
-#                                                        CEC message type
-# Excusing the vote is NOT excusing the gap: each is enumerated with its uncovered line
-# numbers on every run, and --per-file-gate is the right setting the moment a translation unit
-# covering these headers is authorised.  This variable is deliberately NOT environment-
-# overridable: an exemption is a documented decision, not a knob a caller may widen at the
-# point of measurement to make a red run green.
-COVERAGE_GATE_EXEMPT_FILES="ccec/include/ccec/Operand.hpp
-ccec/include/ccec/Exception.hpp
-ccec/include/ccec/Messages.hpp"
-readonly COVERAGE_GATE_EXEMPT_FILES
+# EMPTY BY DEFAULT, AND THAT IS THE POINT.  Every file in the filtered trace of this suite
+# is at or above the bar, including the three template-heavy ccec/include headers that used
+# to sit below it -- Operand.hpp (was 0/6), Exception.hpp (was 4/12) and Messages.hpp (was
+# 228/298).  They were closed the only way a coverage bar may be closed: by adding tests
+# (ccec/test_Operands.cpp and ccec/test_MessageEncoder.cpp), never by listing them here.
+#
+# WHAT AN ENTRY HERE MEANS, AND WHAT IT DOES NOT.  An entry suppresses one file's per-file
+# pass/fail VOTE.  It does not remove the file from the trace, from the aggregate
+# denominator, from the per-file table, or from the uncovered-line enumeration -- all four
+# still report it, and apply_gate() prints every exempt file with its figure and a pointer
+# back to this comment.  So an exemption is a visible, argued decision, not a filter.
+#
+# THE ONLY ADMISSIBLE REASON is that a line cannot be reached from a test-only change --
+# Directive 6 puts production source out of scope, and Directive 4 then requires the
+# specific lines and the reason to be enumerated in the traceability report.  "No test
+# covers it yet" is not that reason: it is a gap, and the answer to a gap is a test.
+# An entry added for any other reason lowers the bar while appearing to hold it.
+#
+# FORMAT, with the reason on the line above each path, e.g.
+#     COVERAGE_GATE_EXEMPT_FILES="hdmicec/ccec/src/Example.cpp"
+# and for more than one, one path per line inside the quotes.
+# ------------------------------------------------------------------------------------
+COVERAGE_GATE_EXEMPT_FILES="${COVERAGE_GATE_EXEMPT_FILES-}"
 
+# Wall-clock bound in seconds on the run_L1Tests invocation under --run.  This suite normally
+# finishes in about two seconds, so 600 is generous by two orders of magnitude and exists only
+# so that a deadlock -- this suite drives real pthread mutexes, condition variables and threads
+# -- is reported as a HANG with the last test named, instead of blocking for ever with no
+# output, no exit status and no gate verdict.  0 is refused rather than honoured, because
+# timeout(1) reads it as "no limit" and would silently restore the unbounded run.
+SUITE_TIMEOUT="${SUITE_TIMEOUT:-600}"
 # Artifact directory.  EMPTY BY DEFAULT, and that is the security-relevant part: with no
 # explicit choice this script creates its root with `mktemp -d` under $TMPDIR, so the name
 # is unpredictable and the directory is created atomically at mode 0700 (see
@@ -440,11 +450,6 @@ fi
 # Prefix providing libgtest/libgmock and their headers.  CI uses $GITHUB_WORKSPACE/install/usr.
 GTEST_PREFIX="${GTEST_PREFIX:-$WS/install/usr}"
 GTEST_EXTRA_ARGS="${GTEST_EXTRA_ARGS:-}"
-# Wall-clock bound on the L1 suite under --run, in seconds.  Defaulted HERE rather than at
-# the point of use because `set -u` is in effect: with the variable merely documented and
-# never initialised, the documented `--run` invocation aborted with "SUITE_TIMEOUT: unbound
-# variable" before the suite started.  900s is the value the USAGE block states.
-SUITE_TIMEOUT="${SUITE_TIMEOUT:-900}"
 
 DO_BUILD=0
 DO_RUN=0
@@ -490,7 +495,13 @@ readonly LCOV_EXCLUDES=(
     '*/test_*.cpp'
 )
 
-readonly GENHTML_TITLE='hdmicec coverage'
+GENHTML_TITLE='hdmicec coverage'
+# NOT readonly: write_provenance() appends the superproject's short SHA so that every page of
+# the HTML report carries the revision it was produced from. A trace or a report that does not
+# say which tree it came from cannot be relied on, which is exactly how a previous round's
+# artifacts ended up unusable - they were produced in one clone and read as though they applied
+# to another.
+PROVENANCE_TXT=''
 
 # Error classes tolerated per step.  `category` is NOT a documented class and is
 # deliberately absent from all three lists -- do not add it.  `deprecated` appears
@@ -880,6 +891,154 @@ genhtml_run() {
     HOME="$LCOV_HOME" "$GENHTML_BIN" "$@"
 }
 
+
+# ------------------------------------------------------------------------------------
+# Words the reference audit must NOT treat as a command or as a shell variable, each
+# with the reason it is not one.  The scanner reads shell text with grep, so it cannot
+# distinguish a shell command from a word inside a single-quoted awk program, a heredoc
+# or a filename literal; this list is the complete set of such words in this script and
+# anything not listed has to resolve.  Keep it short -- a growing list is the sign that
+# the audit is being worked around rather than satisfied.
+#   br_cell            awk-local in the per-file table program (write_per_file_tsv / per_file_report)
+#   func_cell          awk-local in the per-file table program
+#   line_cell          awk-local in the per-file table program
+# ------------------------------------------------------------------------------------
+SELFTEST_NOT_A_COMMAND='br_cell
+func_cell
+line_cell'
+readonly SELFTEST_NOT_A_COMMAND
+
+# ------------------------------------------------------------------------------------
+# SELF-REFERENCE AUDIT, and the `selftest` subcommand built on it.
+#
+# WHY THIS EXISTS.  This script is long, it runs under `set -euo pipefail`, and bash resolves
+# a command name only when control reaches it.  A call to a function that does not exist, or an
+# expansion of a variable that was never defined, is therefore invisible to `bash -n`, invisible
+# to shellcheck, and invisible until the run is already under way -- at which point it aborts
+# with `command not found` or `unbound variable` after the banner has printed, having produced
+# no measurement.  Two real defects of exactly that shape were found in this workspace's
+# runners: calls to a `prepare_lcov_home` that was never defined alongside wrappers built over
+# an undefined `LCOV_HOME_DIR`, and a per-file gate that expanded an undefined
+# `COVERAGE_GATE_EXEMPT_FILES` the moment any file fell below the bar.
+#
+# WHAT IT CHECKS.  Two things, statically, over this script's own text:
+#   1. Every snake_case word in a command position resolves -- to a function defined here, a
+#      variable this script assigns, a shell builtin, or an executable on PATH.
+#   2. Every ${UPPER_CASE} expansion is either assigned by this script, written with a default
+#      (${X:-...}, ${X-...}, ${X+...}), or already exported in the environment.
+#
+# THE ONE BLIND SPOT, NAMED RATHER THAN GLOSSED OVER.  The scanner reads shell text with grep,
+# so it cannot tell a shell command from a word inside a single-quoted awk program, a
+# heredoc, or a filename literal.  Those tokens are listed in SELFTEST_NOT_A_COMMAND below,
+# each with the reason it is not a call.  Everything else must resolve; the list is the
+# complete set of exceptions and a reader can check every entry against the source.
+#
+# WHEN IT RUNS.  Always, as main()'s first act, before any validation, any filesystem write and
+# any lcov invocation -- so a script that cannot resolve its own references reports exactly
+# that and touches nothing.  `selftest` runs the audit plus the tooling pre-flight and stops
+# there: no suite, no counters zeroed, no capture, no artifact directory.
+# ------------------------------------------------------------------------------------
+reference_audit() {
+    local body defined assigned locals called globals defaulted setglob w failures=0
+    [ -r "$SCRIPT_PATH" ] || die "cannot read this script back for the reference audit: $SCRIPT_PATH"
+
+    body="$(grep -vE '^[[:space:]]*#' -- "$SCRIPT_PATH" || true)"
+    defined="$(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' -- "$SCRIPT_PATH" | tr -d '()' | sort -u)"
+    assigned="$(printf '%s\n' "$body" | grep -oE '(^|[[:space:]]|\(|;)[a-z][a-z0-9_]*=' | grep -oE '[a-z][a-z0-9_]*' | sort -u)"
+    locals="$(printf '%s\n' "$body" | grep -oE '\b(local|read -r|read)[[:space:]]+([a-z][a-z0-9_]*[[:space:]]*)+' | grep -oE '[a-z][a-z0-9_]*' | sort -u)"
+    called="$(printf '%s\n' "$body" \
+        | grep -oE '(^|[[:space:]]|;|\||&|\(|!)[[:space:]]*[a-z][a-z0-9]*(_[a-z0-9]+)+([[:space:]]|$|\))' \
+        | grep -oE '[a-z][a-z0-9]*(_[a-z0-9]+)+' | sort -u)"
+
+    for w in $called; do
+        printf '%s\n' "$defined"                | grep -qx -- "$w" && continue
+        printf '%s\n' "$assigned"               | grep -qx -- "$w" && continue
+        printf '%s\n' "$locals"                 | grep -qx -- "$w" && continue
+        printf '%s\n' "$SELFTEST_NOT_A_COMMAND" | grep -qx -- "$w" && continue
+        command -v -- "$w" >/dev/null 2>&1 && continue
+        warn "reference audit: '$w' is used in a command position but is not a function defined"
+        warn "    here, not a variable this script assigns, not a builtin and not on PATH."
+        failures=$((failures + 1))
+    done
+
+    globals="$(printf '%s\n' "$body" | grep -oE '\$\{?[A-Z][A-Z0-9_]*' | grep -oE '[A-Z][A-Z0-9_]*' | sort -u)"
+    defaulted="$(printf '%s\n' "$body" | grep -oE '\$\{[A-Z][A-Z0-9_]*[:+-]' | grep -oE '[A-Z][A-Z0-9_]*' | sort -u)"
+    setglob="$(grep -oE '^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+|local[[:space:]]+|declare[[:space:]]+-[a-zA-Z]+[[:space:]]+)?[A-Z][A-Z0-9_]*(=|\+=|\()' -- "$SCRIPT_PATH" \
+        | grep -oE '[A-Z][A-Z0-9_]*' | sort -u)"
+    for w in $globals; do
+        printf '%s\n' "$setglob"                | grep -qx -- "$w" && continue
+        printf '%s\n' "$defaulted"              | grep -qx -- "$w" && continue
+        printf '%s\n' "$SELFTEST_NOT_A_COMMAND" | grep -qx -- "$w" && continue
+        [ -n "${!w+x}" ] && continue
+        warn "reference audit: \$$w is expanded but is never assigned here, has no default form"
+        warn "    (\${$w:-...}) and is not set in the environment; under 'set -u' that aborts the run."
+        failures=$((failures + 1))
+    done
+
+    # STAGE 3: a reference written WITH a default but never assigned anywhere.
+    #
+    # Stage 2 deliberately accepts \${X:-...} because it cannot abort under 'set -u'.  That is
+    # exactly what let a real defect through: the sink runner read \${STAT_BIN:-} in path_metadata()
+    # but never assigned STAT_BIN, so the guard was permanently empty and every run died at the
+    # first artifact-ancestry check with "stat was not found on PATH" while /usr/bin/stat was on
+    # PATH all along.  Safe from 'set -u', and wrong in every run - so the default form has to be
+    # audited too, not treated as proof of resolution.
+    #
+    # Names that are genuinely read from the environment and are MEANT to be unassigned here are
+    # listed below with the reason.  Every other tool handle, path and tunable this script uses is
+    # assigned in one place, so the list stays short by construction.
+    #   TMPDIR       - a standard environment variable; \${TMPDIR:-/tmp} is the documented way
+    #                  to read it
+    #   X            - not a variable: it appears as \${X:-...} inside this audit's own
+    #                  explanatory comment, describing the default FORM rather than naming a
+    #                  real reference
+    #   CLONE_INDEX  - set by the workspace environment to distinguish parallel clones.  Read
+    #                  only by write_provenance, and only to RECORD which clone produced an
+    #                  artifact; "unset" is a truthful value there, so an empty read is correct
+    #                  behaviour rather than a silent failure
+    #   CXX          - the standard compiler environment variable.  write_provenance reads it to
+    #                  record which compiler produced the instrumentation, falling back to g++,
+    #                  which is the same convention the build itself uses
+    for w in $defaulted; do
+        printf '%s\n' "$setglob" | grep -qx -- "$w" && continue
+        case " $w " in
+            " TMPDIR " | " X " | " CLONE_INDEX " | " CXX ") continue ;;
+        esac
+        warn "reference audit: \$$w is only ever read with a default (\${$w:-...}) and is never"
+        warn "    assigned by this script.  It cannot abort the run, so it will silently be empty"
+        warn "    every time - which makes whatever depends on it dead or permanently failing."
+        warn "    Either assign it, or add it to this stage's environment-only list with a reason."
+        failures=$((failures + 1))
+    done
+
+    if [ "$failures" -ne 0 ]; then
+        die "the reference audit found $failures unresolved name(s) in this script.
+       Every one of them would abort a real run part-way through, after the banner and
+       before any measurement.  Fix the name, or -- if it is genuinely not a shell
+       command (a word inside an embedded awk program, a heredoc, or a filename) -- add
+       it to SELFTEST_NOT_A_COMMAND with the reason."
+    fi
+    return 0
+}
+
+selftest() {
+    rule
+    log "SELF-TEST: no suite is run, no counters are zeroed, nothing is captured and no"
+    log "  artifact directory is created."
+    rule
+    log "1/3 re-parsing this script"
+    bash -n -- "$SCRIPT_PATH" || die "this script does not parse: $SCRIPT_PATH"
+    log "    parses cleanly"
+    log "2/3 auditing every internal function and variable reference"
+    reference_audit
+    log "    every reference resolves"
+    log "3/3 measurement tooling pre-flight"
+    require_tools
+    log "    tooling present and usable"
+    rule
+    log "SELF-TEST PASSED"
+}
+
 usage() {
     cat <<USAGE
 Usage: run_coverage.sh [OPTIONS]
@@ -907,25 +1066,37 @@ OPTIONS
                            which is outside the git tree because this suite's .gitignore
                            does not cover coverage.info, filtered_coverage.info or
                            coverage/ and is out of scope for editing.
-      --per-file-gate      In addition to the aggregate gate, fail when ANY file in the
-                           filtered trace is below the bar.  OFF by default, for the
-                           scope reason recorded under GATE in this script's header;
-                           below-bar files are always enumerated either way.
-      --no-per-file-gate   Gate on the aggregate only.  This is the default; the flag
-                           exists so a caller can state it explicitly, and so it can
-                           override COVERAGE_PER_FILE_GATE=1 from the environment.
+      --per-file-gate      In addition to the aggregate gate, fail when ANY non-exempt file
+                           in the filtered trace is below the bar.  ON by default, because
+                           Directive 4 states the bar per target; the flag exists so a
+                           caller can state it explicitly and override
+                           COVERAGE_PER_FILE_GATE=0 from the environment.
+      --no-per-file-gate   Gate on the aggregate only, for a diagnostic run that wants the
+                           per-file table without its verdict.  NOT a setting an acceptance
+                           run uses.  Below-bar files are enumerated either way.
       --no-html            Skip the genhtml report (the trace and the tables are still
                            produced).
       --restore            Restore the six git-tracked Makefiles that autoreconf and
                            configure rewrite, then exit.  This is the ONLY code path in
                            this script that runs git, and it only ever runs on request.
   -h, --help               Print this help and exit.
+      --selftest           Audit every internal function and variable reference in this
+                           script, re-parse it, and verify the measurement tooling -- then
+                           exit.  Runs no suite, zeroes no counters, captures nothing and
+                           creates no artifact directory.  The same audit runs at the start
+                           of every real invocation.
 
 ENVIRONMENT (command-line flags win)
   COVERAGE_MIN=N               same as --threshold
   COVERAGE_OUTPUT_DIR=DIR      same as --output-dir
-  COVERAGE_PER_FILE_GATE=1     same as --per-file-gate
-  COVERAGE_PER_FILE_GATE=0     same as --no-per-file-gate (the default)
+  COVERAGE_PER_FILE_GATE=1     same as --per-file-gate (the default)
+  COVERAGE_PER_FILE_GATE=0     same as --no-per-file-gate
+  COVERAGE_GATE_EXEMPT_FILES   newline-separated trace paths whose per-file VOTE is
+                               suppressed.  Empty by default and meant to stay that way;
+                               the only admissible reason for an entry, and what an entry
+                               does and does not do, are stated at its definition in this
+                               script.  Exempt files are still traced, still counted in
+                               the aggregate, and still printed with their figures.
   GTEST_PREFIX=DIR             prefix providing libgtest/libgmock and their headers,
                                used by --build and put on LD_LIBRARY_PATH by --run.
                                Default: ${GTEST_PREFIX}
@@ -962,6 +1133,7 @@ parse_args() {
             --no-html)           DO_HTML=0 ;;
             --restore)           DO_RESTORE_ONLY=1 ;;
             -h|--help)           usage; exit 0 ;;
+            --selftest)          selftest; exit 0 ;;
             -t|--threshold)
                 [ $# -ge 2 ] || die "--threshold requires a value"
                 COVERAGE_MIN="$2"; shift ;;
@@ -1056,11 +1228,6 @@ require_tools() {
     [ -n "$FIND_BIN" ]    || { warn "find not found on PATH";    missing=1; }
     [ -n "$MKTEMP_BIN" ]  || { warn "mktemp not found on PATH";  missing=1; }
     [ -n "$STAT_BIN" ]    || { warn "stat not found on PATH";    missing=1; }
-    # Only --run needs it, so it is required only then: a measure-only invocation on a host
-    # with a restricted PATH still works, and the bounded run still refuses to start unbounded.
-    if [ "$DO_RUN" -eq 1 ]; then
-        [ -n "$TIMEOUT_BIN" ] || { warn "timeout not found on PATH (required by --run)"; missing=1; }
-    fi
     [ "$missing" -eq 0 ] || die "missing coverage tooling.
        lcov, genhtml and gcov are what this script measures with, and awk, find and
        mktemp are how it parses and stages.  On a Debian/Ubuntu host:
@@ -1356,6 +1523,14 @@ verify_results() { # $1 = path to the results JSON this run was told to write
 }
 
 do_run() {
+    # A run has to be BOUNDED, so `timeout` is a hard requirement of this path rather than an
+    # optional nicety: the L1 suite drives real pthread mutexes, condition variables and threads,
+    # and without a bound a deadlocked case hangs here for ever with no output, no exit status and
+    # no gate.  Checked here, before a single counter is zeroed, so the tree is left untouched.
+    [ -n "$TIMEOUT_BIN" ] || die "timeout was not found on PATH, and the suite will not be run
+       without it, because the run would then be unbounded.  timeout ships with coreutils:
+           sudo apt-get install -y coreutils
+       Then re-run, or invoke this script without --run against counters produced elsewhere."
     rule
     log "zeroing gcov counters under $HDMICEC_ROOT (leaves *.gcno instrumentation intact)"
     lcov_run --zerocounters -d "$HDMICEC_ROOT" \
@@ -1897,6 +2072,107 @@ BELOW_BAR_FILES=''
 # suppression is scoped to these functions rather than to the whole file so that a future
 # quoting mistake anywhere else is still reported.
 # shellcheck disable=SC2016
+# ------------------------------------------------------------------------------------
+# PROVENANCE.  Who produced these artifacts, from which tree, with which script.
+#
+# Coverage numbers are only evidence if they can be tied to a revision. Numbers with no
+# revision are indistinguishable from numbers produced by a different checkout, a different
+# runner body, or a different toolchain - and once separated from their tree they cannot be
+# re-attached, because nothing in an lcov trace records where it came from.
+#
+# So attribution is written three ways, deliberately redundantly:
+#   * provenance.txt, the full manifest, beside the traces;
+#   * the superproject's short SHA appended to the genhtml title, which puts it on EVERY page
+#     of the HTML report rather than in one file that can be separated from it;
+#   * a header block in the per-file TSV and the uncovered-lines list, so those two remain
+#     self-describing when quoted on their own - which is how they are usually read.
+#
+# The runner's OWN sha256 is included because a trace can outlive the script that made it. If
+# the recorded hash does not match the script now on disk, the artifact was produced by a
+# different runner and its acceptance decision does not transfer.
+# ------------------------------------------------------------------------------------
+git_sha_of() { # $1 = repository path;  prints "<sha> (<branch>)<dirty marker>" or "unavailable"
+    local repo="$1" sha branch dirty=''
+    command -v git >/dev/null 2>&1 || { printf 'unavailable (no git)\n'; return 0; }
+    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'unavailable (not a repository)\n'; return 0; }
+    sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || sha=''
+    [ -n "$sha" ] || { printf 'unavailable (no HEAD)\n'; return 0; }
+    branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch='?'
+    # --porcelain over tracked paths only: untracked build residue is not a content difference
+    # and must not be reported as one, or every instrumented tree would read as dirty.
+    if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+        dirty='  [DIRTY: tracked files modified]'
+    fi
+    printf '%s (%s)%s\n' "$sha" "$branch" "$dirty"
+}
+
+sha256_of() { # $1 = file;  prints the hex digest, or a reason
+    local f="$1"
+    [ -f "$f" ] || { printf 'absent\n'; return 0; }
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$f" 2>/dev/null | "$AWK_BIN" '{print $1; exit}'
+    else
+        printf 'unavailable (no sha256sum)\n'
+    fi
+}
+
+write_provenance() {
+    PROVENANCE_TXT="$OUTPUT_DIR/provenance.txt"
+    assert_output_dir_still_safe "$PROVENANCE_TXT"
+
+    local super short
+    super="$WS"
+    short="$(git -C "$super" rev-parse --short=12 HEAD 2>/dev/null)" || short=''
+    if [ -n "$short" ]; then
+        GENHTML_TITLE="$GENHTML_TITLE @ $short"
+    else
+        GENHTML_TITLE="$GENHTML_TITLE @ revision-unavailable"
+    fi
+
+    {
+        printf 'HDMI-CEC middleware L1 coverage -- ARTIFACT PROVENANCE\n'
+        printf '=====================================================\n\n'
+        printf 'Generated (UTC)      : %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf 'unavailable')"
+        printf 'Host                 : %s\n' "$(uname -n 2>/dev/null || printf 'unavailable')"
+        printf 'Clone index          : %s\n' "${CLONE_INDEX:-unset}"
+        printf 'Workspace root       : %s\n' "$WS"
+        printf 'Submodule root       : %s\n' "$HDMICEC_ROOT"
+        printf 'Output directory     : %s\n' "$OUTPUT_DIR"
+        printf '\nREVISIONS\n'
+        printf '  superproject       : %s\n' "$(git_sha_of "$WS")"
+        local sub
+        for sub in hdmicec entservices-hdmicecsource entservices-hdmicecsink entservices-testframework \
+                   entservices-apis entservices-helpers Thunder ThunderTools; do
+            if [ -d "$WS/$sub" ]; then
+                printf '  %-18s : %s\n' "$sub" "$(git_sha_of "$WS/$sub")"
+            fi
+        done
+        printf '\nRUNNER AND CONFIGURATION\n'
+        printf '  runner path        : %s\n' "$SCRIPT_PATH"
+        printf '  runner sha256      : %s\n' "$(sha256_of "$SCRIPT_PATH")"
+        printf '  runner bytes       : %s\n' "$(wc -c <"$SCRIPT_PATH" 2>/dev/null | tr -d ' ' || printf 'unavailable')"
+        printf '  lcov config        : %s\n' "$SCRIPT_DIR/.lcovrc_l1"
+        printf '  lcov config sha256 : %s\n' "$(sha256_of "$SCRIPT_DIR/.lcovrc_l1")"
+        printf '  line bar           : %s%%  (per-file gating: %s)\n' \
+            "$COVERAGE_MIN" "$( [ "$COVERAGE_PER_FILE_GATE" -eq 1 ] && printf on || printf off )"
+        printf '  branch data        : forced on (--rc branch_coverage=1)\n'
+        printf '\nTOOLCHAIN\n'
+        printf '  lcov               : %s\n' "$(lcov_run --version 2>/dev/null | head -n1 || printf 'unavailable')"
+        printf '  gcov               : %s\n' "$(gcov --version 2>/dev/null | head -n1 || printf 'unavailable')"
+        printf '  compiler           : %s\n' "$("${CXX:-g++}" --version 2>/dev/null | head -n1 || printf 'unavailable')"
+        printf '\nHOW TO CHECK THIS ARTIFACT STILL APPLIES\n'
+        printf '  1. Compare the superproject revision above with `git rev-parse HEAD`.\n'
+        printf '  2. Compare the runner sha256 above with `sha256sum %s`.\n' "$SCRIPT_PATH"
+        printf '  If either differs, these numbers were produced from a different tree or a\n'
+        printf '  different script, and the acceptance decision they carry does not transfer.\n'
+    } >"$PROVENANCE_TXT" || die "could not write $PROVENANCE_TXT"
+
+    chmod 600 -- "$PROVENANCE_TXT" 2>/dev/null || true
+    log "provenance: $PROVENANCE_TXT"
+    log "  superproject : $(git_sha_of "$WS")"
+    log "  runner sha256: $(sha256_of "$SCRIPT_PATH")"
+}
+
 write_per_file_tsv() {
     local tmp_tsv="$OUTPUT_DIR/.per_file_coverage.tsv.tmp"
     assert_output_dir_still_safe "$PER_FILE_TSV"
@@ -1905,6 +2181,11 @@ write_per_file_tsv() {
     {
         printf '# Per-file coverage for the HDMI-CEC middleware L1 suite, derived from\n'
         printf '# %s\n' "$FILTERED_TRACE"
+        printf '# PROVENANCE  superproject %s\n' "$(git_sha_of "$WS")"
+        printf '# PROVENANCE  hdmicec      %s\n' "$(git_sha_of "$HDMICEC_ROOT")"
+        printf '# PROVENANCE  runner       %s  sha256 %s\n' "$SCRIPT_PATH" "$(sha256_of "$SCRIPT_PATH")"
+        printf '# PROVENANCE  generated    %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unavailable)"
+        printf '# Full manifest: %s\n' "${PROVENANCE_TXT:-provenance.txt}"
         printf '# Paths are relative to %s. functions_* come from the trace FNA/FNDA alias\n' "$HDMICEC_ROOT"
         printf '# records, which reconcile exactly with lcov --summary; func_leader_* are the\n'
         printf '# FNF:/FNH: per-file leader totals, which do not (aliases can share a leader).\n'
@@ -2010,6 +2291,9 @@ write_uncovered_lines() {
         printf '# Paths are relative to %s. A line is listed when its DA: record shows a hit\n' "$HDMICEC_ROOT"
         printf '# count of zero. Files with full line coverage are omitted.\n'
         printf '# Line coverage bar in force for this run: %s%%\n' "$COVERAGE_MIN"
+        printf '# PROVENANCE  superproject %s\n' "$(git_sha_of "$WS")"
+        printf '# PROVENANCE  runner       %s  sha256 %s\n' "$SCRIPT_PATH" "$(sha256_of "$SCRIPT_PATH")"
+        printf '# Full manifest: %s\n' "${PROVENANCE_TXT:-provenance.txt}"
         printf '#\n'
         # Emitted as ONE tab-separated line per file so that sorting cannot separate a
         # file's line list from its heading, then split into the two-line human form
@@ -2190,13 +2474,13 @@ apply_gate() {
         warn "gate, not a filter. Where a line genuinely cannot be reached from a test-only"
         warn "change, record it with its reason in the traceability report instead."
         if [ "$COVERAGE_PER_FILE_GATE" -eq 1 ]; then
-            warn "--per-file-gate is in force, so the above fails this run."
+            warn "per-file gating is IN FORCE (the default), so the above fails this run."
             failures=$((failures + 1))
         else
-            log "per-file gating is OFF (the default; --per-file-gate or"
-            log "  COVERAGE_PER_FILE_GATE=1 turns it on), so the above is reported but does"
-            log "  not fail this run. See GATE in this script's header for why, and for the"
-            log "  measured pre-existing figures of the three ccec/include headers listed."
+            warn "per-file gating has been turned OFF for this run (--no-per-file-gate or"
+            warn "  COVERAGE_PER_FILE_GATE=0), so the above is reported but does not fail it."
+            warn "  That is a DIAGNOSTIC setting: Directive 4 states the bar per target, so an"
+            warn "  acceptance run leaves the per-file half on. Re-run without the override."
         fi
     elif [ -z "$BELOW_BAR_FILES" ]; then
         log "every target in the filtered trace meets the ${COVERAGE_MIN}% bar"
@@ -2250,6 +2534,11 @@ apply_gate() {
 # mistaken for part of a measurement run.
 # ------------------------------------------------------------------------------------
 main() {
+    # THE REFERENCE AUDIT RUNS FIRST, before parsing, before validation and before any
+    # filesystem write.  A script that cannot resolve one of its own function or variable
+    # names must say so and stop, not discover it mid-run after the banner has printed.
+    reference_audit
+
     parse_args "$@"
 
     if [ "$DO_RESTORE_ONLY" -eq 1 ]; then
@@ -2290,6 +2579,10 @@ main() {
     if [ "$DO_RUN" -eq 1 ]; then
         do_run
     fi
+
+    # Provenance is written BEFORE the report, because it also augments the genhtml title -
+    # the mechanism that puts the revision on every page rather than in one detachable file.
+    write_provenance
 
     capture_coverage
     filter_coverage

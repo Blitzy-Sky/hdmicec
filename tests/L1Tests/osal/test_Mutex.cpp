@@ -74,44 +74,56 @@
  *   this gap can be closed without one, so the clause does not apply. Reporting the
  *   defect and covering the code is strictly more informative than covering neither.
  *
- *   WHAT MAKES THE EXECUTION HERE SAFE, AND HOW THAT IS PROVED RATHER THAN ARGUED.
- *   Every copy below is taken from a function-local mutex that is UNLOCKED at the moment
- *   of the copy, never shared with another thread, non-robust and not process-shared, and
- *   the duplicate always owns its own allocation. Under those conditions the byte image
- *   is an unlocked mutex with no owner, so there is no owner to inherit, no recursion
- *   count to inherit and no shared kernel or libc state to corrupt - and because the
- *   mutex is recursive, even an unexpected owner value could not block this thread.
+ *   WHAT THESE CASES CLAIM, AND - MORE IMPORTANTLY - WHAT THEY DO NOT.
  *
- *   That argument is not what these cases rest on, because an argument is not a proof and
- *   the operation it excuses is undefined. Every case that uses a duplicate FIRST calls
+ *   THEY DO NOT CLAIM THAT COPYING A MUTEX IS CORRECT. It is not, and no test can make it so.
+ *   POSIX gives pthread_mutex_t no copy semantics at all, so a byte image of an initialised
+ *   mutex is not an initialised mutex, and an implementation is free to keep a self-pointer,
+ *   an arena handle, a registration in a process-wide list, or anything else that a memcpy
+ *   silently invalidates. These cases are a CHARACTERISATION of what this platform's libc does
+ *   with the production copy API, not a validity argument for it, and they must not be read as
+ *   one. The API's correctness is the subject of the BLOCKED production finding above.
+ *
+ *   WHAT MAKES EXECUTING THE COPY HERE ACCEPTABLE. Every copy below is taken from a
+ *   function-local mutex that is UNLOCKED at the moment of the copy, never shared with another
+ *   thread, non-robust and not process-shared, and the duplicate always owns its own
+ *   allocation. Under those conditions the byte image is an unlocked mutex with no owner, so
+ *   on an implementation whose representation is self-contained there is no owner to inherit,
+ *   no recursion count to inherit and no shared kernel or libc state to corrupt.
+ *
+ *   THE PRECONDITION CHECK, AND ITS EXACT SCOPE. Every case that uses a duplicate first calls
  *   duplicateIsIndistinguishableFromFresh(), which compares the duplicate's object
  *   representation with that of a freshly pthread_mutex_init'd recursive mutex and makes NO
  *   pthread call to do so - reading an object's bytes through unsigned char is defined
- *   behaviour whatever those bytes mean. Only once the images match, which establishes that
- *   the duplicate is indistinguishable from a mutex the platform's own initialiser produced,
- *   is any pthread call made on it: the non-blocking trylock/unlock probe in
- *   expectUsableAndUnlocked(), then the lock/unlock the case is actually about. On a platform
- *   where a byte copy is NOT equivalent, the proof fails first and the case returns without
- *   touching the object, so the outcome is a named failure naming the differing offset rather
- *   than a hang, a corruption or a pass by luck.
+ *   behaviour whatever those bytes mean. What a match establishes is precisely this: ON THIS
+ *   BUILD, WITH THIS libc, the bytes the copy produced are the bytes this platform's own
+ *   initialiser produces. That is a platform precondition, NOT a proof of portable semantic
+ *   correctness: image equality on one implementation says nothing about another, and an
+ *   implementation could produce an equal image and still misbehave. Its value is narrower and
+ *   real - on a platform where the images DIFFER, the check fails first, names the differing
+ *   offset, and the case returns without making a single pthread call on the duplicate. So the
+ *   failure mode on an unsupported platform is a named, actionable failure rather than a hang,
+ *   a corruption, or a pass by luck.
  *
- *   An earlier revision used the trylock probe itself as the safety check. That was the wrong
- *   way round: trylock IS a pthread call on the duplicate, so the check could only report a
+ *   An earlier revision used the trylock probe itself as that check. That was the wrong way
+ *   round: trylock IS a pthread call on the duplicate, so the check could only report a
  *   problem by performing the very operation whose validity was in question.
  *
  *   THE ONE UNGATED CALL, stated rather than glossed over: ~Mutex() calls
  *   pthread_mutex_destroy on the duplicate at scope exit. It is the production destructor, it
- *   runs whether or not the proof passed, and avoiding it would mean never constructing a
- *   duplicate - which would abandon the coverage these cases exist to provide. It is the
- *   residual exposure of exercising a copy API that should not exist, and it is part of the
- *   case for the production change reported above.
+ *   runs whether or not the precondition check passed, and avoiding it would mean never
+ *   constructing a duplicate - which would abandon the coverage these cases exist to provide.
+ *   It is the residual exposure of exercising a copy API that should not exist, and it is part
+ *   of the case for the production change reported above.
  *
- *   MEASURED, NOT ASSERTED: on this platform sizeof(pthread_mutex_t) is 40, two independently
- *   initialised recursive mutexes are byte-identical, a copy of one matches a fresh
- *   initialisation exactly, and a source that has been locked and unlocked returns to the same
- *   image - so the proof does not false-fail on a mutex that was used before being copied. The
- *   whole suite runs green with these cases in it, and valgrind memcheck over MutexTest reports
- *   no invalid access and no leak from them.
+ *   MEASURED ON THIS PLATFORM ONLY - Ubuntu, glibc, x86-64, GCC 13: sizeof(pthread_mutex_t) is
+ *   40, two independently initialised recursive mutexes are byte-identical, a copy of one
+ *   matches a fresh initialisation exactly, and a source that has been locked and unlocked
+ *   returns to the same image - so the precondition check does not false-fail on a mutex that
+ *   was used before being copied. The whole suite runs green with these cases in it, and
+ *   valgrind memcheck over MutexTest reports no invalid access and no leak from them. Every one
+ *   of those statements is about this platform; none of them generalises, and none of them is
+ *   offered as evidence that the production copy operations are sound.
  */
 
 #include <gtest/gtest.h>
@@ -131,7 +143,7 @@ namespace {
 /*
  * A mutex initialised exactly the way Mutex::Mutex(void) initialises one: recursive
  * attributes, pthread_mutex_init, attributes destroyed again. It is the REFERENCE IMAGE the
- * validity proof below compares a duplicate against, and it is a legitimately initialised
+ * platform precondition check below compares a duplicate against, and it is a legitimately initialised
  * mutex in its own right, so every pthread call this class makes is defined behaviour.
  */
 class FreshRecursiveMutex {
@@ -166,35 +178,42 @@ private:
 };
 
 /*
- * THE VALIDITY PROOF, AND WHY IT COMES BEFORE EVERY OTHER USE OF A DUPLICATE.
+ * THE PLATFORM PRECONDITION CHECK - NOT A CORRECTNESS PROOF - AND WHY IT COMES BEFORE EVERY
+ * OTHER USE OF A DUPLICATE.
  *
- * A duplicate produced by Mutex's copy constructor is a byte image of another mutex, and
- * POSIX does not define what a pthread call does with one. That makes the ORDER of operations
- * here the whole point: this function reads the duplicate's object representation and compares
- * it with the representation of a freshly pthread_mutex_init'd recursive mutex, and it makes NO
+ * A duplicate produced by Mutex's copy constructor is a byte image of another mutex, and POSIX
+ * does not define what a pthread call does with one. That makes the ORDER of operations here
+ * the whole point: this function reads the duplicate's object representation and compares it
+ * with the representation of a freshly pthread_mutex_init'd recursive mutex, and it makes NO
  * pthread call on the duplicate to do so. Reading an object's bytes through unsigned char is
- * defined behaviour whatever those bytes mean, so the proof itself can never be the undefined
+ * defined behaviour whatever those bytes mean, so the check itself can never be the undefined
  * operation it exists to guard against.
  *
- * What a match establishes is narrow and exactly what is needed: the duplicate is
- * INDISTINGUISHABLE, byte for byte, from a mutex the platform's own initialiser produced. Any
- * pthread call made on it afterwards is therefore a call on a bit pattern the platform itself
- * creates and supports - no owner recorded, no recursion count, no waiters, no shared kernel or
- * libc state - rather than on an image whose validity was assumed.
+ * WHAT A MATCH DOES AND DOES NOT ESTABLISH. It establishes that ON THIS BUILD, WITH THIS libc,
+ * the duplicate's bytes are the bytes this platform's own initialiser produces, so a pthread
+ * call made on it afterwards is a call on a bit pattern the platform itself creates - no owner
+ * recorded, no recursion count, no waiters. It does NOT establish that copying a mutex is
+ * correct, here or anywhere: image equality on one implementation is not evidence about
+ * another, and an implementation is free to produce an equal image and still misbehave because
+ * the state that matters lives outside the object (a registration list, an arena handle, a
+ * self-pointer the copy has silently duplicated). These cases CHARACTERISE this platform's
+ * behaviour; the API's soundness is the BLOCKED production finding at the top of this file.
  *
- * A mismatch fails the calling test with the offending offset and both byte values, and the
- * caller returns WITHOUT touching the duplicate. On a platform where a byte copy is not
- * equivalent to an initialised mutex, this suite therefore reports a named failure instead of
- * hanging, corrupting libc state, or passing by luck.
+ * WHERE ITS VALUE ACTUALLY IS. A mismatch fails the calling test with the offending offset and
+ * both byte values, and the caller returns WITHOUT touching the duplicate. So on a platform
+ * where a byte copy is not equivalent to an initialised mutex, this suite reports a named,
+ * actionable failure instead of hanging, corrupting libc state, or passing by luck. That is a
+ * containment property, not a validity argument.
  *
- * Measured on this platform: sizeof(pthread_mutex_t) is 40, two independently initialised
- * recursive mutexes are byte-identical, a copy of one matches a fresh initialisation exactly,
- * and a source that has been through a lock/unlock cycle returns to the same image - so the
- * proof does not false-fail on a mutex that was used before it was copied.
+ * Measured on THIS platform only - Ubuntu, glibc, x86-64, GCC 13: sizeof(pthread_mutex_t) is
+ * 40, two independently initialised recursive mutexes are byte-identical, a copy of one matches
+ * a fresh initialisation exactly, and a source that has been through a lock/unlock cycle
+ * returns to the same image - so the check does not false-fail on a mutex that was used before
+ * it was copied. None of that generalises to another libc.
  *
  * THE ONE CALL THAT CANNOT BE GATED, stated plainly rather than glossed over: ~Mutex() calls
  * pthread_mutex_destroy on the duplicate at scope exit. It is the production destructor, it
- * runs whether or not the proof passed, and the only way to avoid it would be never to
+ * runs whether or not this check passed, and the only way to avoid it would be never to
  * construct a duplicate - which would abandon the copy-semantics coverage these cases exist to
  * provide. It is the residual exposure of exercising a copy API that should not exist, and it
  * is part of the case for the production change reported at the top of this file.
@@ -334,7 +353,7 @@ TEST_F(MutexTest, NativeHandleIsStableAcrossCalls) {
     EXPECT_EQ(mutex.getNativeHandle(), firstRead);
 }
 
-// Pointer inequality is the only available proof that the copy owns a distinct
+// Pointer inequality is the only available evidence that the copy owns a distinct
 // allocation rather than an alias: the handle member is private and the accessor is the
 // sole observation channel.
 TEST_F(MutexTest, CopyConstructionAllocatesDistinctNativeHandle) {
@@ -363,7 +382,7 @@ TEST_F(MutexTest, CopyConstructedMutexIsIndependentlyUsable) {
     Mutex original;                 // unlocked at the moment of the copy
     Mutex copy(original);
 
-    // No pthread call touches the duplicate until its image has been proved equivalent to a
+    // No pthread call touches the duplicate until its image has been checked against a
     // freshly initialised one - including the lock/unlock pair further down.
     ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(copy, "copy-constructed mutex"));
 
@@ -427,7 +446,7 @@ TEST_F(MutexTest, CopyAssignmentReplacesNativeHandle) {
     EXPECT_NE(target.getNativeHandle(), source.getNativeHandle());
 
     // Copy-and-swap leaves the TARGET holding the temporary's duplicated image, so the target
-    // is the object that needs the proof; the source ends up on the block the target legitimately
+    // is the object that needs the check; the source ends up on the block the target legitimately
     // constructed and needs none.
     ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(target, "assignment target after the swap"));
 
@@ -476,7 +495,7 @@ TEST_F(MutexTest, ChainedCopyAssignmentGivesEachTargetItsOwnHandle) {
     EXPECT_NE(second.getNativeHandle(), source.getNativeHandle());
 
     // Both chained targets hold duplicated images - `first` a duplicate of `second`, which is
-    // itself a duplicate of `source` - so both are proved before either is locked.
+    // itself a duplicate of `source` - so both are checked before either is locked.
     ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(first, "first chained assignment target"));
     ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(second, "second chained assignment target"));
 
@@ -506,7 +525,7 @@ TEST_F(MutexTest, SelfAssignmentLeavesMutexUsable) {
     EXPECT_TRUE(mutex.getNativeHandle() != nullptr);
     EXPECT_NE(mutex.getNativeHandle(), handleBeforeAssignment);
     // Self-assignment routes through the same copy constructor, so the object now holds a
-    // duplicated image of itself and is proved before it is locked.
+    // duplicated image of itself and is checked before it is locked.
     ASSERT_TRUE(duplicateIsIndistinguishableFromFresh(mutex, "self-assigned mutex"));
     expectUsableAndUnlocked(mutex, "self-assigned mutex");
     EXPECT_NO_THROW({

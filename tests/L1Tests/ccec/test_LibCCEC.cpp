@@ -19,9 +19,13 @@
 
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <cerrno>
 #include <cstring>
 #include <string>
+#include <time.h>
 #include "ccec/CCEC.hpp"
+#include "ccec/Connection.hpp"
+#include "ccec/FrameListener.hpp"
 #include "ccec/LibCCEC.hpp"
 #include "ccec/Exception.hpp"
 #include "ccec/Operands.hpp"
@@ -43,7 +47,127 @@ using ::testing::_;
 using ::testing::Invoke;
 using ::testing::Return;
 
+/*
+ * NO SENTINEL-DRAINING HELPER IS DECLARED OR CALLED HERE, and that is a finding rather than an
+ * omission.  An earlier revision of this fixture called a cec_l1_testsupport::drainClosedDriverQueue()
+ * defined in ccec/test_Driver.cpp, on the reasoning that a case which terminates the shared library
+ * has to take the NULL sentinel DriverImpl::close() leaves on the receive queue off that queue
+ * itself.  ccec/test_Driver.cpp now records why that call could never have done so:
+ * DriverImpl::read()'s first statement is
+ * `{AutoLock lock_(mutex); if (status != OPENED) throw InvalidStateException(); }`
+ * (DriverImpl.cpp:158-162), which runs BEFORE the poll loop, so a read() issued against an
+ * already-closed driver throws immediately and never touches rQueue at all.  The helper was a
+ * no-op describing itself as a mitigation, so it is gone from both files rather than left to
+ * mislead - removing the calls changes no behaviour, only the claim.
+ *
+ * BLOCKED - REQUIRED PRODUCTION CHANGE, REPORTED NOT MADE (Directive 6): DriverImpl::read() must
+ * null-check inFrame in its flush arm, or CCEC_OSAL::EventQueue must publish its element count and
+ * its condition variable under one lock.  Either alone removes the window; neither is a test-only
+ * change, so neither is made here.
+ */
+
 namespace {
+
+/*
+ * ---------------------------------------------------------------------------------
+ * MAKING term()-AFTER-init() SAFE, SO NO CASE IN THIS FILE DEPENDS ON ITS POSITION
+ *
+ * LibCCEC is a process singleton and term() is its only route to the uninitialised state, so
+ * the "called before init()" cases have to terminate the shared library - and one case here
+ * initialises it.  A term() issued shortly after an init() can be LOST: Bus::start() creates
+ * the reader thread, Bus::Reader::run() marks itself RUNNING from inside that new thread, and
+ * Bus::Reader::stop() promotes only a RUNNING reader to STOPPING.  A stop request that arrives
+ * before the reader was scheduled is therefore dropped, the reader re-arms itself against a
+ * closed driver, and the suite hangs or crashes.
+ *
+ * An earlier revision worked around that by declaring the initialising case LAST, so nothing
+ * ever termed after it.  That is a dependence on source order: moving the case, or adding one
+ * after it, silently re-opened the window, and nothing in the code would have said so.
+ *
+ * The dependence is removed by waiting for the transition instead of hoping it happened.
+ * awaitBusReaderRunning() injects one frame through the mock HAL and waits - bounded, on a
+ * real observable, never on a fixed sleep - until a frame listener has been notified.  A
+ * delivered frame means Bus::Reader::run() has executed the body that publishes RUNNING, so a
+ * following stop() cannot be dropped.  Every case can then restore whatever state it changed,
+ * in any order, which is what per-test isolation means here.
+ *
+ * IT RUNS ONLY WHEN THERE IS A READER TO WAIT FOR.  ensureTerminated() first asks a read-only
+ * probe whether the library is initialised at all, so in the suite's default order exactly ONE
+ * injection happens per run - at the first case in this fixture, where the global environment's
+ * library is still up.  Every later case finds it already terminated and injects nothing.  That
+ * matters because frame dispatch is not free of risk in this suite: Connection::~Connection()
+ * is EMPTY in production and never detaches its Bus listener, so any dispatch after a
+ * Connection has been destroyed without an explicit close() walks a freed listener.  That is a
+ * pre-existing production defect - it segfaults the suite under --gtest_shuffle in
+ * ConnectionTest's own pre-existing injection cases, with or without this file's change - and
+ * it is reported as BLOCKED rather than worked around.  Keeping the injection count at one, as
+ * early as possible, is this fixture's part of not making it worse.
+ *
+ * BLOCKED, REPORTED NOT FIXED (Directive 6): the underlying window is a defect in
+ * CCEC_OSAL::Stoppable and CCEC::Bus - Bus::Reader::run() must not promote a reader that has
+ * already been asked to stop, which needs an explicit STARTING state or a start that publishes
+ * RUNNING from the calling thread.  Both are production changes.  Until one lands, a test that
+ * cycles the shared library has to prove the reader is up before it stops it.
+ * ---------------------------------------------------------------------------------
+ */
+class CountingFrameListener : public FrameListener {
+public:
+    CountingFrameListener() : notified(0) {}
+
+    void notify(const CECFrame &) const override { ++notified; }
+
+    mutable int notified;
+};
+
+void sleepOneMillisecond() {
+    struct timespec interval;
+    interval.tv_sec = 0;
+    interval.tv_nsec = 1000 * 1000L;
+    while (nanosleep(&interval, &interval) != 0 && errno == EINTR) {
+        /* finish the remaining interval nanosleep wrote back */
+    }
+}
+
+/*
+ * Returns true once a frame injected through the mock HAL has been delivered to a listener,
+ * which is the observable proof that the Bus reader thread is running.  Bounded at 2 s; the
+ * delivery is normally immediate, so the bound only fires if the reader never started, which
+ * is a failure worth reporting rather than waiting out.
+ */
+bool awaitBusReaderRunning() {
+    HdmiCecDriverMock *mock = HdmiCecDriverMock::getInstance();
+    if (mock == nullptr) {
+        return false;
+    }
+
+    CountingFrameListener listener;
+    Connection probe(LogicalAddress::PLAYBACK_DEVICE_1, false, "LibCcecReaderProbe");
+    probe.open();
+    probe.addFrameListener(&listener);
+
+    /* Directed to PLAYBACK_DEVICE_1 from the TV, carrying GIVE_DEVICE_POWER_STATUS: a frame
+     * the probe connection accepts and nothing else in this translation unit is watching. */
+    const unsigned char frame[] = { 0x04, 0x8F };
+
+    bool delivered = false;
+    for (int attempt = 0; attempt < 2000 && !delivered; ++attempt) {
+        if ((attempt % 200) == 0) {
+            /* Re-injected periodically rather than once: the reader consumes the receive
+             * queue, so a frame queued before it was scheduled is still delivered, but a
+             * frame lost to a closed-then-reopened driver would otherwise strand the wait. */
+            mock->injectReceivedMessage(frame, static_cast<int>(sizeof(frame)));
+        }
+        if (listener.notified > 0) {
+            delivered = true;
+            break;
+        }
+        sleepOneMillisecond();
+    }
+
+    probe.removeFrameListener(&listener);
+    probe.close();
+    return delivered;
+}
 
 // Guarantees the shared library is left initialized under the prefix the global test
 // environment established, whatever happens to the test body - including a fatal
@@ -248,82 +372,99 @@ TEST_F(LibCCECTest, GetLogicalAddressForDifferentDeviceTypes) {
  * Fixture for the "called before init()" guard family - LibCCEC::term,
  * LibCCEC::addLogicalAddress, LibCCEC::getLogicalAddress and LibCCEC::getPhysicalAddress each
  * throw InvalidStateException when the library has not been initialised, and those four throw
- * arms are the invalid-state family this suite is required to cover.
+ * arms are the invalid-state family this suite is required to cover.  The null-name arm of
+ * init() belongs here too, because it is only reachable from the uninitialised state.
  *
- * WHY THE STATE IS OWNED BY THE FIXTURE AND NOT BY THE BODIES. LibCCEC is a process singleton
- * and term() is its only route to the uninitialised state, so these cases have to terminate the
- * shared library.  A term() issued shortly after an init() can lose the Bus reader's
- * RUNNING/STOPPING transition: Bus::start() creates the reader thread, Bus::Reader::run() marks
- * itself RUNNING from inside that new thread, and Bus::Reader::stop() promotes only a RUNNING
- * reader to STOPPING - so a stop request issued before the reader was scheduled is dropped, the
- * reader then re-arms itself against a closed driver, and the suite hangs or crashes.  That
- * window is a defect in CCEC_OSAL::Stoppable and CCEC::Bus, both production source and both out
- * of scope for this pass, so these cases must not open it rather than time their way around it.
+ * PER-TEST STATE ISOLATION, NOT DECLARATION ORDER.  LibCCEC is a process singleton, so every
+ * case here changes state the whole binary shares.  SetUp() therefore establishes the
+ * precondition each case needs - terminated - and TearDown() puts back the state the rest of
+ * the binary expects - initialised under the prefix the global environment set.  Both are
+ * idempotent, both work from whichever state the previous case left, and neither depends on
+ * which case ran before or on where a case appears in this file.  Adding a case, reordering
+ * two, or running one alone with --gtest_filter all behave identically.
  *
- * The fixture therefore performs ONE term() for the whole suite and NO init() until the suite is
- * over.  SetUp() only ensures "terminated", which is already true for every case after the first,
- * so no case here ever pairs an init() with a following term(), and no case waits on anything.
- * TearDownTestSuite() restores the initialised state the rest of the binary expects; it is the
- * only init() in this fixture, it is the last thing the fixture does, and nothing in this
- * translation unit terminates after it.
- *
- * BLOCKED, REPORTED NOT FIXED: making a term() safe immediately after an init() needs a
- * production change - CCEC_OSAL::Stoppable must not let Bus::Reader::run() promote a reader that
- * has already been asked to stop (an explicit STARTING state, or a start that publishes RUNNING
- * from the calling thread).  Until that lands, no test can cycle the shared library rapidly, and
- * DriverTest.WriteAsync / WriteAsyncWithFailure remain the only cases that do so at all.
+ * An earlier revision instead performed ONE term() for the whole fixture and NO init() until
+ * TearDownTestSuite(), which required the one initialising case to be declared LAST so that no
+ * SetUp() would term() straight after its init().  That is the fragility this replaces:
+ * ensureTerminated() now waits for the Bus reader to be observably running before it stops it
+ * (see awaitBusReaderRunning above), so a term() after an init() is safe wherever it occurs.
  */
 class LibCCECUninitializedTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        try {
-            LibCCEC::getInstance().term();
-            drainClosedDriverQueue();
-        } catch (const InvalidStateException &) {
-            // Already terminated by an earlier case in this fixture, which is the state wanted.
-        }
+        ASSERT_TRUE(ensureTerminated())
+            << "could not bring LibCCEC to the uninitialised state this case requires";
+    }
+
+    void TearDown() override {
+        /* The rest of this binary runs against an initialised library under the CEC_TEST
+         * prefix, so that is what every case here hands back - including the one that empties
+         * the prefix on purpose. */
+        EXPECT_TRUE(ensureInitialized())
+            << "could not restore the initialised LibCCEC state the rest of the suite expects";
+        strncpy(_CEC_LOG_PREFIX, "CEC_TEST", sizeof(_CEC_LOG_PREFIX) - 1);
+        _CEC_LOG_PREFIX[sizeof(_CEC_LOG_PREFIX) - 1] = '\0';
     }
 
     /*
-     * Remove the sentinel that the close() inside term() leaves on the driver's receive queue.
+     * Bring the shared library to the UNINITIALISED state, from either state.
      *
-     * DriverImpl::close() offers a NULL sentinel to that queue and DriverImpl::read() is what
-     * consumes it - but Bus::stop() only waits for the Bus reader to leave its loop, and the
-     * reader can leave without having come back for the sentinel.  A later close() then queues a
-     * SECOND one, and read()'s flush arm - `while (rQueue.size() > 0) { inFrame = rQueue.poll();
-     * frame = *inFrame; ... }` - dereferences it: EventQueue guards its element count and its
-     * condition variable with DIFFERENT mutexes, so poll() can return the default-constructed
-     * null for a queue that size() has just reported as non-empty.  Measured on this tree: that
-     * is a segmentation fault in the reader thread in roughly 1 full-suite run in 60 once any
-     * case re-initialises the shared library mid-run.
-     *
-     * BLOCKED - REQUIRED PRODUCTION CHANGE, REPORTED NOT MADE (Directive 6): DriverImpl::read()
-     * must null-check inFrame in its flush arm, or CCEC_OSAL::EventQueue must publish its element
-     * count and its condition under one lock.  Until one of those lands, a test that terminates
-     * the shared library has to take the sentinel off the queue itself, which is what this does -
-     * read() is public, the driver is closed, so the call drains the queue and then reports the
-     * invalid state.  It is safe from this thread because term() has already waited for the reader
-     * to leave its loop, so there is no second consumer.
+     * The reader-readiness wait is what makes this safe to call immediately after another
+     * case initialised the library: term() while the reader has not yet published RUNNING is
+     * the dropped-stop window described above.  The wait is skipped when the library is
+     * already terminated, because there is then no reader to wait for.
      */
-    static void drainClosedDriverQueue() {
-        CECFrame frame;
+    static bool ensureTerminated() {
+        /* ALREADY TERMINATED: there is no reader to wait for and nothing to stop.  Checked with
+         * a read-only probe - getPhysicalAddress() throws InvalidStateException when the
+         * library is uninitialised and otherwise only reads - so this path costs no state
+         * change at all.  In the suite's default order this is every case after the first. */
+        if (!isInitialized()) {
+            return true;
+        }
+
+        /* INITIALISED: the reader must be observably running before it is stopped, or the stop
+         * can be dropped.  This is the ONE frame injection this fixture performs per run. */
+        if (!awaitBusReaderRunning()) {
+            return false;
+        }
+
         try {
-            Driver::getInstance().read(frame);
+            LibCCEC::getInstance().term();
         } catch (const InvalidStateException &) {
-            // The expected outcome: the driver is closed, and the queue is now empty.
+            /* Raced to terminated by something else; that is the state wanted. */
+        }
+        return true;
+    }
+
+    /*
+     * Read-only "is the library initialised?" probe.
+     *
+     * getPhysicalAddress() is one of the four guarded accessors this fixture tests: it throws
+     * InvalidStateException before init() and otherwise reads through to the HAL, changing no
+     * library state either way.  Using init() as the probe instead - which also answers the
+     * question, by throwing when it is already up - would INITIALISE the library on the path
+     * where it was not, and that is the state change this fixture exists to avoid making
+     * incidentally.
+     */
+    static bool isInitialized() {
+        unsigned int physicalAddress = 0;
+        try {
+            LibCCEC::getInstance().getPhysicalAddress(&physicalAddress);
+            return true;
+        } catch (const InvalidStateException &) {
+            return false;
         }
     }
 
-    static void TearDownTestSuite() {
+    /* Bring the shared library to the INITIALISED state, from either state. */
+    static bool ensureInitialized() {
         try {
             LibCCEC::getInstance().init("CEC_TEST");
         } catch (const InvalidStateException &) {
-            // The last case left it initialised, which is the state wanted.
+            /* Already initialised, which is the state wanted. */
         }
-        // The prefix is part of the state the global environment established, and one case here
-        // deliberately empties it, so it is put back in place rather than through another cycle.
-        strncpy(_CEC_LOG_PREFIX, "CEC_TEST", sizeof(_CEC_LOG_PREFIX) - 1);
-        _CEC_LOG_PREFIX[sizeof(_CEC_LOG_PREFIX) - 1] = '\0';
+        return true;
     }
 };
 
@@ -376,9 +517,10 @@ TEST_F(LibCCECUninitializedTest, GetPhysicalAddressThrowsWhenNotInitialized) {
 // that arm stopped clearing the prefix, so the prefix is seeded to a known non-empty value
 // first and read back afterwards.
 //
-// DECLARED LAST IN THIS FIXTURE ON PURPOSE: it is the one case here that leaves the library
-// INITIALISED, and a following SetUp() would terminate it - the init()/term() pairing this
-// fixture exists to avoid. TearDownTestSuite() runs next instead and finds the state it wants.
+// POSITION-INDEPENDENT: this case leaves the library INITIALISED, and the fixture's TearDown()
+// is what hands that state on regardless of what runs next.  A following SetUp() terminates it
+// safely because ensureTerminated() waits for the Bus reader to be observably running first, so
+// this case no longer has to be - and is no longer - the last one declared here.
 TEST_F(LibCCECUninitializedTest, InitWithNullNameClearsLogPrefix) {
     LibCCEC& lib = LibCCEC::getInstance();
     ScopedLibCcecRestore restoreLibCcec;
@@ -399,10 +541,64 @@ TEST_F(LibCCECUninitializedTest, InitWithNullNameClearsLogPrefix) {
     // The library is otherwise fully up, which the rejected second init confirms.
     EXPECT_THROW(lib.init(NULL), InvalidStateException);
 
-    // The prefix is restored in place rather than through a term()/init() pair, and the library
-    // is deliberately left initialised - TearDownTestSuite() below expects exactly that.
+    // The prefix is restored in place rather than through a term()/init() pair.  The library is
+    // left initialised, which is what the rest of the binary expects; TearDown() re-establishes
+    // it either way, so nothing downstream depends on this case having done so.
     strncpy(_CEC_LOG_PREFIX, "CEC_TEST", sizeof(_CEC_LOG_PREFIX) - 1);
     _CEC_LOG_PREFIX[sizeof(_CEC_LOG_PREFIX) - 1] = '\0';
     EXPECT_STREQ("CEC_TEST", _CEC_LOG_PREFIX);
     EXPECT_EQ('\0', _CEC_LOG_PREFIX[sizeof(_CEC_LOG_PREFIX) - 1]);
+}
+
+
+// #gap-mw-libccec; repeated init/term cycling with the three guarded accessors read back after
+// the second init.  Placed on LibCCECUninitializedTest rather than LibCCECTest because the case
+// has to own the library's lifecycle: SetUp() hands it over terminated and TearDown() puts it
+// back initialised under the CEC_TEST prefix, so the cycling below cannot leak into a sibling.
+TEST_F(LibCCECUninitializedTest, MultipleInitTermCycles) {
+    HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
+    LibCCEC& lib = LibCCEC::getInstance();
+
+    // CYCLE 1.  The reader must be observably running before term(), or the stop can be dropped -
+    // the same window ensureTerminated() guards.
+    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+    ASSERT_TRUE(awaitBusReaderRunning());
+    EXPECT_NO_THROW({ lib.term(); });
+
+    // CYCLE 2.  A second init after a completed term must bring the library fully back up, which
+    // is what the three accessor reads below prove rather than assume.
+    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+    ASSERT_TRUE(awaitBusReaderRunning());
+
+    const unsigned int expectedPhysicalAddress = 0x2100;
+    EXPECT_CALL(*mock, HdmiCecAddLogicalAddress(_, LogicalAddress::PLAYBACK_DEVICE_1))
+        .Times(1)
+        .WillOnce(Return(HDMI_CEC_IO_SUCCESS));
+    EXPECT_CALL(*mock, HdmiCecGetLogicalAddress(_, _))
+        .Times(1)
+        .WillOnce(Invoke([](int, int* address) -> int {
+            if (address) *address = LogicalAddress::AUDIO_SYSTEM;
+            return HDMI_CEC_IO_SUCCESS;
+        }));
+    EXPECT_CALL(*mock, HdmiCecGetPhysicalAddress(_, _))
+        .Times(1)
+        .WillOnce(Invoke([expectedPhysicalAddress](int, unsigned int* address) -> int {
+            if (address) *address = expectedPhysicalAddress;
+            return HDMI_CEC_IO_SUCCESS;
+        }));
+
+    LogicalAddress address(LogicalAddress::PLAYBACK_DEVICE_1);
+    int addResult = 0;
+    EXPECT_NO_THROW(addResult = lib.addLogicalAddress(address));
+    EXPECT_TRUE(addResult);
+
+    int logicalAddress = 0;
+    EXPECT_NO_THROW(logicalAddress = lib.getLogicalAddress(DeviceType::PLAYBACK_DEVICE));
+    EXPECT_EQ(logicalAddress, LogicalAddress::AUDIO_SYSTEM);
+
+    unsigned int physicalAddress = 0;
+    EXPECT_NO_THROW(lib.getPhysicalAddress(&physicalAddress));
+    EXPECT_EQ(physicalAddress, expectedPhysicalAddress);
+
+    ::testing::Mock::VerifyAndClearExpectations(mock);
 }

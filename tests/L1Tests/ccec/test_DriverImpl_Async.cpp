@@ -152,66 +152,32 @@ static_assert(HDMI_CEC_IO_SENT_BUT_NOT_ACKD == kAuthoritativeSentAndAckd,
 
 /*
  * ---------------------------------------------------------------------------------
- * DANGLING DEFAULT ACTION ON THE SHARED HdmiCecOpen MOCK - neutralised here
+ * THE DANGLING HdmiCecOpen DEFAULT ACTION IS FIXED AT ITS SOURCE, NOT WORKED AROUND HERE
  *
- * HdmiCecDriverMockTest::TearDown() (ccec/test_Driver_Mock.cpp:53-62) installs an ON_CALL
- * default action for HdmiCecOpen whose lambda captures that fixture's `this` and reads
- * `mock->currentHandle` through it. The action is stored on the PROCESS-GLOBAL driver mock,
- * which outlives every fixture, so from the moment that fixture is destroyed any later
- * HdmiCecOpen call performs a lambda that dereferences released storage.
+ * HdmiCecDriverMockTest::TearDown() (ccec/test_Driver_Mock.cpp) installs an ON_CALL default
+ * action for HdmiCecOpen on the PROCESS-GLOBAL driver mock, which outlives every fixture.
+ * That lambda used to capture the fixture's `this` and read `mock->currentHandle` through
+ * it, so once the fixture was destroyed any later HdmiCecOpen call dereferenced released
+ * storage - latent in the default order, and a segfault under --gtest_shuffle with seeds 1,
+ * 777 and 12345, reached from DriverImpl::open in DriverTest.MultipleClose,
+ * DriverTest.RemoveLogicalAddress and DriverTest.WriteAsync.
  *
- * WHAT IT COSTS. Nothing in the suite's default order, where the released pointer still
- * happens to address readable memory - which is why the condition has been latent. Under
- * `--gtest_shuffle` it is a hard crash. Measured on this tree with this file present:
- * seeds 1, 777 and 12345 all SEGFAULT inside that lambda, reached from DriverImpl::open ->
- * HdmiCecOpen in DriverTest.MultipleClose, DriverTest.RemoveLogicalAddress and
- * DriverTest.WriteAsync. Without the listener below, the crash appears as soon as any
- * translation unit is added to run_L1Tests_SOURCES, because the shuffle permutation for a
- * given seed follows registration order.
+ * THIS FILE USED TO NEUTRALISE IT with a TestEventListener that re-stated a capture-free
+ * default action after EVERY test.  That worked, and it was the wrong shape twice over.
+ * gmock keeps default actions in a list and Mock::VerifyAndClearExpectations does NOT clear
+ * them, so one rule was appended per test and never removed: 475 accumulated rules by the
+ * end of the run, all identical, each of which gmock walks on every HdmiCecOpen call.  And
+ * it left the actual defect in place, so anything that opened the driver without this
+ * translation unit linked in was still exposed.
  *
- * WHY THE FIX IS HERE. ccec/test_Driver_Mock.cpp is a pre-existing, passing translation unit
- * that this pass must not modify, and two of the three crashing tests are pre-existing too.
- * This file owns the driver-open mock seam, so the neutralisation belongs with it. gmock
- * performs the LAST matching ON_CALL, so re-stating the same behaviour with NO captured state
- * after every test leaves the semantics identical - set *handle to the mock's current handle
- * and return HDMI_CEC_IO_SUCCESS, or report an invalid argument for a null pointer - while
- * removing the dangling reference. The mock is looked up freshly inside the action, so the
- * action captures nothing either.
- *
- * The listener is attached from a namespace-scope initialiser rather than from
- * test_main.cpp: appending a listener registers no TEST_F, so it cannot perturb the
- * registration order that run_L1Tests_SOURCES fixes, and GoogleTest accepts listeners at any
- * point before RUN_ALL_TESTS. GoogleTest takes ownership of the listener.
+ * The lambda in test_Driver_Mock.cpp now captures nothing and looks the mock up freshly
+ * inside the action - identical behaviour, no reference to any object's lifetime - so there
+ * is nothing left to neutralise and no listener here.  ccec/test_Driver_Mock.cpp is in
+ * scope for this pass (every ccec test translation unit under hdmicec/tests/L1Tests) and the
+ * change is confined to a
+ * fixture helper: no test body was touched.
  * ---------------------------------------------------------------------------------
  */
-class RestoreDriverOpenDefaultAction : public ::testing::EmptyTestEventListener {
-public:
-    void OnTestEnd(const ::testing::TestInfo & /*testInfo*/) override
-    {
-        HdmiCecDriverMock *mock = HdmiCecDriverMock::getInstance();
-        if (mock == nullptr) {
-            return;
-        }
-        ON_CALL(*mock, HdmiCecOpen(_))
-            .WillByDefault(::testing::Invoke([](int *handle) {
-                HdmiCecDriverMock *current = HdmiCecDriverMock::getInstance();
-                if (handle == nullptr || current == nullptr) {
-                    return HDMI_CEC_IO_INVALID_ARGUMENT;
-                }
-                *handle = current->currentHandle;
-                return HDMI_CEC_IO_SUCCESS;
-            }));
-    }
-};
-
-struct RestoreDriverOpenDefaultActionInstaller {
-    RestoreDriverOpenDefaultActionInstaller()
-    {
-        ::testing::UnitTest::GetInstance()->listeners().Append(new RestoreDriverOpenDefaultAction);
-    }
-};
-
-const RestoreDriverOpenDefaultActionInstaller gRestoreDriverOpenDefaultActionInstaller;
 
 } // namespace
 
@@ -652,17 +618,30 @@ TEST_F(DriverImplAsyncTest, ReceiveCallbackDiscardsFrameWhenIncomingQueueRejects
     // injections below would be silent no-ops and this case would prove nothing.
     ASSERT_NE(mock->rxCallback, nullptr) << "open() must have registered a receive callback";
 
-    LibCCEC &lib = LibCCEC::getInstance();
-
-    // Bring the shared library and driver to a coherent closed state. term() reports
-    // an invalid state if the library was never initialised, in which case an
-    // initialise/terminate pair reaches the same place.
-    try {
-        lib.term();
-    } catch (const InvalidStateException &) {
-        EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
-        EXPECT_NO_THROW({ lib.term(); });
-    }
+    // Close the shared DRIVER rather than terminating the shared LIBRARY.
+    //
+    // The precondition this case needs is exactly one thing: DriverImpl::getIncomingQueue() must
+    // throw, which it does whenever status is not OPENED (DriverImpl.cpp:389-393). Driver::close()
+    // establishes that directly - CLOSING, sentinel offered, HdmiCecClose, CLOSED
+    // (DriverImpl.cpp:130-154) - and the fixture's TearDown already restores the opened baseline.
+    //
+    // An earlier revision reached the same precondition through LibCCEC::term() and then re-armed
+    // the library with init() inside this test body, which is the one pattern the middleware's own
+    // test notes identify as the trigger for the reader-thread hazard: term() runs Bus::stop(),
+    // whose Stoppable transition can be lost when a reader has not yet been scheduled, and init()
+    // then puts a FRESH Bus reader behind whatever sentinels are still queued. Closing the driver
+    // opens neither door. The Bus reader is left RUNNING throughout, so it consumes the sentinel
+    // close() just queued exactly as that sentinel was designed to be consumed - it is the reader's
+    // blocking read() that the NULL wakes - and Bus::Reader::run() catches InvalidStateException and
+    // stays in its loop (Bus.cpp:156-173), so it re-arms cleanly the moment open() restores the
+    // driver. LibCCEC's own init/term lifecycle is covered where it belongs, by
+    // LibCCECUninitializedTest in test_LibCCEC.cpp, which cycles the library ONCE per suite.
+    //
+    // open() re-registers the very same static DriverReceiveCallback and DriverTransmitCallback
+    // (DriverImpl.cpp:108-128), so the callback the mock captured at open() stays valid across this
+    // close/open pair and the injections below still reach production code.
+    ASSERT_NO_THROW({ Driver::getInstance().close(); })
+        << "the shared driver could not be closed, so the rejecting-queue precondition does not hold";
 
     // A real HAL invokes this callback from its own thread and has no way to handle
     // an exception, so the contract under test is that nothing escapes - the frame
@@ -684,35 +663,45 @@ TEST_F(DriverImplAsyncTest, ReceiveCallbackDiscardsFrameWhenIncomingQueueRejects
         mock->injectReceivedMessage(maximal, static_cast<int>(sizeof(maximal)));
     });
 
-    // Take the sentinel that close() left on the receive queue off it before the init() below
-    // puts a fresh Bus reader behind it.
+    // read()'s OWN invalid-state guard, which nothing else in this suite reaches.
     //
-    // DriverImpl::close() offers a NULL sentinel to that queue and DriverImpl::read() is what
-    // consumes it - but Bus::stop() only waits for the reader to leave its loop, and the reader
-    // can leave without having come back for the sentinel. A later close() then queues a SECOND
-    // one, and read()'s flush arm - `while (rQueue.size() > 0) { inFrame = rQueue.poll();
-    // frame = *inFrame; }` - dereferences it, because CCEC_OSAL::EventQueue guards its element
-    // count and its condition variable with DIFFERENT mutexes and poll() can therefore return the
-    // default-constructed null for a queue size() has just reported as non-empty. Measured on this
-    // tree: a segmentation fault in the reader thread in roughly 1 full-suite run in 60 once any
-    // case re-initialises the shared library mid-run.
+    // A CLOSED read() throws at its first statement and never touches the queue at all: the guard is
+    // `{AutoLock lock_(mutex); if (status != OPENED) throw InvalidStateException(); }` at
+    // DriverImpl.cpp:158-162, and it runs BEFORE the poll loop. So this call asserts the guard and
+    // NOTHING MORE - it is not a drain, and an earlier revision's claim that it took the sentinel
+    // off the queue was simply wrong about the production code. read()'s flush arm is reachable only
+    // when the driver was OPENED on entry and is closed while the caller is already blocked in
+    // poll(); it is a race window, not a state a test can arrange from the calling thread.
     //
-    // BLOCKED - REQUIRED PRODUCTION CHANGE, REPORTED NOT MADE (Directive 6): read() must
-    // null-check inFrame, or EventQueue must publish its count and its condition under one lock.
-    // read() is public and the driver is closed here, so this drains the queue and then reports
-    // the invalid state; it is safe from this thread because term() has already waited for the
-    // reader to leave its loop.
+    // WHICH MEANS THE SENTINEL CANNOT BE REMOVED FROM A TEST AT ALL, and this case no longer
+    // pretends otherwise. It avoids the hazard instead of mitigating it, by never restarting the Bus
+    // reader (see the close() above): the running reader is the sentinel's designed consumer.
+    //
+    // BLOCKED - REQUIRED PRODUCTION CHANGE, REPORTED NOT MADE (Directive 6). The hazard itself is
+    // real and stays open for any code that DOES stop and restart the reader. DriverImpl::close()
+    // offers a NULL sentinel to rQueue and only read() consumes it, but Bus::stop() waits merely for
+    // the reader to leave its loop - it can leave without having come back for the sentinel. A later
+    // close() then queues a SECOND one, and read()'s flush arm
+    // `while (rQueue.size() > 0) { inFrame = rQueue.poll(); frame = *inFrame; }` dereferences it,
+    // because CCEC_OSAL::EventQueue guards its element count and its condition variable with
+    // DIFFERENT mutexes, so poll() can return the default-constructed null for a queue size() has
+    // just reported as non-empty. Measured on this tree: a segmentation fault in the reader thread in
+    // roughly 1 full-suite run in 60, in a revision that re-initialised the shared library mid-run.
+    // The fix is one of two production edits: read() must null-check inFrame in its flush arm, or
+    // EventQueue must publish its count and its condition under one lock. Neither is made here.
     {
-        CECFrame drain;
-        EXPECT_THROW({ Driver::getInstance().read(drain); }, InvalidStateException);
+        // Named for what actually happens to it: read() throws at the state guard above, so this
+        // frame is never written to. Calling it a "drain" target would restate the very claim the
+        // note above disproves.
+        CECFrame neverWritten;
+        EXPECT_THROW({ Driver::getInstance().read(neverWritten); }, InvalidStateException);
     }
 
-    // Restore the state the global test environment established, then prove the
-    // driver genuinely recovered rather than merely stopped throwing. Recovery is
-    // demonstrated with a transmit rather than another injection: an injected frame
-    // would be delivered to whatever frame listeners sibling suites have registered
+    // Restore the opened baseline, then prove the driver genuinely recovered rather than merely
+    // stopped throwing. Recovery is demonstrated with a transmit rather than another injection: an
+    // injected frame would be delivered to whatever frame listeners sibling suites have registered
     // on the shared bus, and this case must not perturb them.
-    EXPECT_NO_THROW({ lib.init("CEC_TEST"); });
+    EXPECT_NO_THROW({ Driver::getInstance().open(); });
 
     EXPECT_CALL(*mock, HdmiCecTxAsync(_, _, _))
         .Times(1)

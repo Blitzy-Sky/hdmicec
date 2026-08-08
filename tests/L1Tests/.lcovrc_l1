@@ -16,10 +16,28 @@
 # CI coverage step still inherits the system default and middleware branch
 # visibility is developer-opt-in. The in-tree consumer is
 # `tests/L1Tests/run_coverage.sh`, which passes this file to lcov and genhtml with
-# `--config-file` and additionally forces `--rc branch_coverage=1`; like the sink
-# plugin's runner it moves a CI-planted `~/.lcovrc` aside and puts it back
-# afterwards rather than deleting it. No shared or system-level lcov configuration
-# is modified by this suite.
+# `--config-file` and additionally forces `--rc branch_coverage=1`.
+#
+# YOUR ~/.lcovrc IS NEITHER READ, MOVED, NOR DELETED. lcov reads $HOME/.lcovrc
+# silently on every invocation, `--version` included, so the runner has to make
+# sure no home configuration is in effect for its own calls - and it does that with
+# a PRIVATE HOME rather than by touching yours. It creates an empty mode-0700
+# directory with `mktemp -d`, verifies it holds no .lcovrc, and runs every lcov and
+# genhtml invocation with HOME pointed at it, set per command rather than exported
+# so the suite under test and the build keep the real one; the directory is removed
+# at the end. Nothing in your home directory is read, copied, moved or removed, and
+# an unset HOME is not an error. An earlier revision of the runner did stash and
+# restore `~/.lcovrc`, and this note used to say so; it was replaced because the
+# restoring `mv -f` would destroy a copy that had reappeared during the run - which
+# a sibling runner in this workspace could recreate - and because its
+# "already stashed" early return made the per-level re-check a no-op. A private HOME
+# has neither failure mode and needs no trap to undo.
+#
+# PRECEDENCE, in the order lcov applies it: `--rc branch_coverage=1` on the command
+# line wins over everything; `--config-file <this file>` is read INSTEAD OF
+# ~/.lcovrc and /etc/lcovrc; ~/.lcovrc cannot apply at all, because HOME is the
+# private empty directory; /etc/lcovrc is system-wide, out of scope, and never
+# modified. No shared or system-level lcov configuration is modified by this suite.
 #
 
 # Coverage rate limits (in %) used to colour file entries in the HTML report.
@@ -72,8 +90,8 @@ genhtml_num_spaces = 8
 
 # Highlight lines with converted-only data if non-zero (same as --highlight
 # option of genhtml)
-genhtml_highlight = 0
-
+# (genhtml_highlight was set here; lcov 2.x deprecates AND ignores it, so the
+#  setting has been removed rather than carried as a no-op that emits a warning.)
 # Include color legend in HTML output if non-zero (same as --legend option of
 # genhtml)
 genhtml_legend = 0
@@ -103,7 +121,7 @@ geninfo_intermediate = auto
 # control-flow-graph arcs, and a C++ translation unit's arcs include
 # compiler-generated exception and static-destruction paths no test can drive,
 # so a low branch rate is not by itself evidence of a weak test.
-geninfo_no_exception_branch = 0
+no_exception_branch = 0
 
 # Location of the insmod tool
 lcov_insmod_tool = /sbin/insmod
@@ -131,12 +149,13 @@ lcov_list_width = 80
 lcov_list_truncate_max = 20
 
 # Specify if function coverage data should be collected and processed.
-lcov_function_coverage = 1
+function_coverage = 1
 
 # Specify if branch coverage data should be collected and processed. Enabled
 # here because lcov collects no branch data by default, and this suite reports
-# branch movement alongside line coverage. This spelling is deprecated in
-# lcov 2.x in favour of `branch_coverage`, and it is only read when this file is
-# passed with --config-file, so a caller that needs branch data unconditionally
-# should also pass `--rc branch_coverage=1`.
-lcov_branch_coverage = 1
+# branch movement alongside line coverage. This is lcov 2.x's current spelling;
+# the legacy `lcov_branch_coverage` this file used to carry is deprecated and
+# emits a warning on every invocation. It is only read when this file is passed
+# with --config-file, so a caller that needs branch data unconditionally should
+# also pass `--rc branch_coverage=1`.
+branch_coverage = 1

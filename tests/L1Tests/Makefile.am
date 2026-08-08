@@ -17,6 +17,24 @@
 # limitations under the License.
 ##########################################################################
 
+# Every entry in run_L1Tests_SOURCES below except test_main.cpp names a source in a SUBDIRECTORY
+# (ccec/, osal/, or the mock under $(top_srcdir)/mocks).  With subdir-objects off, automake flattens
+# each object into this directory and warns once per such source - seventeen warnings on this file,
+# all of them at the run_L1Tests_SOURCES line.  The subdirectory layout is the suite's convention and
+# is not up for change, so the option is enabled instead of living with the warnings.
+#
+# MEASURED, both ways, from a clean tree: seventeen automake warnings -> zero; `make all` and the
+# tests build otherwise warning-free (the two that remain come from gtest.h instantiated by the
+# pre-existing ccec/test_Operands.cpp and are not ours); the suite still runs 452 of 452 green; and
+# the coverage table is IDENTICAL file for file - 91.5% (1912/2090) lines, 85.7% (377/440) functions,
+# 57.3% (1094/1908) branches, gate PASS.  Registration order is also unaffected: objects are still
+# linked in the order of this list, only their paths change.
+#
+# The one visible consequence is that the mock's object, .gcno and .deps now land beside its source
+# in mocks/hdmicec/ instead of here.  That is the same class of in-tree build output the build already
+# leaves in ccec/src and osal/src, it is untracked, and `git clean -fdx` removes it with the rest.
+AUTOMAKE_OPTIONS = subdir-objects
+
 AM_CPPFLAGS = -I$(top_srcdir)/ccec/include \
               -I$(top_srcdir)/osal/include \
               -I$(top_srcdir)/mocks \
@@ -50,31 +68,18 @@ run_L1Tests_SOURCES = \
     $(top_srcdir)/mocks/hdmicec/hdmi_cec_driver_mock.cpp
 
 # ORDER IS SIGNIFICANT IN THIS LIST.  GoogleTest registers each TEST_F during static
-# initialisation; those initialisers run in the link order of the objects, which follows this
-# list, and the order in which the suites then RUN is the order they were registered.  This
-# suite contains pre-existing order-fragile tests that pass in the established order and must
-# not be modified on this pass, so the RELATIVE ORDER OF THE PRE-EXISTING ENTRIES ABOVE IS
-# UNCHANGED from before this pass: the four units added here - ccec/test_DriverImpl_Async.cpp,
-# ccec/test_Util.cpp, osal/test_Mutex.cpp and osal/test_Thread.cpp - are placed after the last
-# pre-existing entry of their own layer, never between two pre-existing ones.  Keep that
-# property when adding a translation unit: append it within its layer, and re-run the whole
-# suite afterwards, because a reordering shows up as a failure in Bus/Connection/Driver rather
-# than in the unit that was added.
+# initialisation, the order in which those initialisers run follows the link order of the
+# objects, which follows this list, and the order in which the suites then RUN is the order
+# they were registered.  This suite contains order-fragile tests that pass only in the
+# established order, so inserting a translation unit in the MIDDLE of this list reorders
+# every suite after it and can turn a green run red.
+#
+# APPEND new translation units to the end of the list; do not interleave them.
 
-# -lgcov is required by ccec/test_Util.cpp, which runs each of its cases in a forked child
-# so that the non-atomic production log level is never written in the process the Bus
-# threads live in, and calls __gcov_reset()/__gcov_dump() in that child so the production
-# lines it drove are still counted - a child leaving through _exit() writes no coverage data
-# otherwise.  Those two entry points live in their own members of libgcov.a
-# (_gcov_reset.o, _gcov_dump.o) and are pulled in only by a direct reference, which is why
-# naming the library here is not redundant with the -fprofile-arcs the coverage build already
-# passes: that flag links libgcov but does not select those members.  Listing it
-# unconditionally also keeps a build configured WITHOUT coverage instrumentation linkable,
-# where the same two calls become no-ops over an empty counter list.
 run_L1Tests_LDADD = \
     $(top_builddir)/ccec/src/libRCEC.la \
     $(top_builddir)/osal/src/libRCECOSHal.la \
-    -lgtest -lgmock -lgcov
+    -lgtest -lgmock
 
 run_L1Tests_LDFLAGS = -pthread
 

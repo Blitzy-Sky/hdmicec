@@ -2,7 +2,7 @@
 
 ## Directory Structure
 
-```
+```text
 tests/
 ├── Makefile.am                   # Conditionally includes L1Tests
 ├── BasicTest.cpp                 # Existing integration tests
@@ -17,7 +17,7 @@ tests/
     ├── run_coverage.sh           # coverage runner with 80% line gate
     ├── .lcovrc_l1                # lcov configuration (branch collection enabled)
     ├── .gitignore                # Ignore build artifacts
-    ├── ccec/                     # CCEC library tests (12 files, 426 tests)
+    ├── ccec/                     # CCEC library tests (12 files, 456 tests)
     │   ├── test_CECFrame.cpp
     │   ├── test_Connection.cpp
     │   ├── test_Bus.cpp
@@ -139,12 +139,17 @@ cd tests/L1Tests
 ```
 
 Artifacts (`coverage.info`, `filtered_coverage.info`, `coverage/index.html`
-and the per-file tables) default to
-`${TMPDIR:-/tmp}/hdmicec-l1-coverage/<workspace>`, deliberately outside the
-git tree because `.gitignore` does not cover them.  `--output-dir .`
-reproduces the CI layout in-tree instead, at which point they are build
-artifacts that must not be committed.  See `./run_coverage.sh --help` for
-the full option and environment reference.
+and the per-file tables) have **no fixed default path**.  With no
+`--output-dir` the script mints a fresh directory per run with
+`mktemp -d "${TMPDIR:-/tmp}/hdmicec-l1-coverage.XXXXXXXX"` at mode 0700 and
+prints it as the `artifacts:` line at startup — read that line to find the
+files.  An unpredictable name cannot be pre-created by another local
+account, and it is outside the git tree because `.gitignore` does not cover
+these names.  Pass `--output-dir DIR` (or set `COVERAGE_OUTPUT_DIR`) when
+you need a stable location; `--output-dir .` reproduces the CI layout
+in-tree, at which point they are build artifacts that must not be
+committed.  See `./run_coverage.sh --help` for the full option and
+environment reference.
 
 ## Test Executable
 
@@ -153,7 +158,7 @@ the full option and environment reference.
 - **Type**: Google Test executable
 - **Sources**: 15 test translation units + test_main.cpp (all listed in
   `run_L1Tests_SOURCES`, which is the only gate on what gets compiled)
-- **Total Tests**: 452 individual test cases in 17 fixtures — all passing,
+- **Total Tests**: 482 individual test cases in 18 fixtures — all passing,
   none disabled — measured with `./run_L1Tests --gtest_list_tests`.  There are
   more fixtures than translation units because two files declare two fixtures
   each: `ccec/test_LibCCEC.cpp` (`LibCCECTest` and `LibCCECUninitializedTest`)
@@ -162,12 +167,12 @@ the full option and environment reference.
 
 ## Key Features
 
-✅ **Conditional Build**: Only builds when `--enable-l1tests` is specified  
-✅ **Backward Compatible**: Existing tests (BasicTest, CECCmd, etc.) unchanged  
-✅ **Clean Separation**: L1 tests in dedicated subdirectory  
-✅ **Google Test Framework**: Industry-standard C++ testing  
-✅ **Automated Testing**: `TESTS = run_L1Tests` in this directory's `Makefile.am`, so
-`make -C tests/L1Tests check` drives the suite (root `make check` does not — see above)
+- ✅ **Conditional Build**: Only builds when `--enable-l1tests` is specified
+- ✅ **Backward Compatible**: Existing tests (BasicTest, CECCmd, etc.) unchanged
+- ✅ **Clean Separation**: L1 tests in dedicated subdirectory
+- ✅ **Google Test Framework**: Industry-standard C++ testing
+- ✅ **Automated Testing**: `TESTS = run_L1Tests` in this directory's `Makefile.am`, so
+  `make -C tests/L1Tests check` drives the suite (root `make check` does not — see above)
 
 ## Configuration Options
 
