@@ -72,8 +72,8 @@ public:
  * bound only elapses when the frame genuinely is not coming, which is exactly what the second
  * half of that case needs to assert.
  *
- * Add-only: the existing cases in this file keep their own timing untouched, because they pass
- * and this pass does not modify passing tests.
+ * ADD-ONLY BY RULE: the existing cases in this file keep their own timing, because they pass and
+ * a passing test is not rewritten here - new coverage arrives as new cases beside them.
  */
 bool waitForFrames(const TestFrameListener &listener, int atLeast) {
     for (int attempt = 0; attempt < 2000; ++attempt) {
@@ -85,7 +85,6 @@ bool waitForFrames(const TestFrameListener &listener, int atLeast) {
     return listener.frameCount >= atLeast;
 }
 
-// Test basic constructor with auto-open
 TEST_F(ConnectionTest, ConstructorWithAutoOpen) {
     EXPECT_NO_THROW({
         Connection conn(LogicalAddress::UNREGISTERED, true);
@@ -93,33 +92,28 @@ TEST_F(ConnectionTest, ConstructorWithAutoOpen) {
     });
 }
 
-// Test constructor without auto-open
 TEST_F(ConnectionTest, ConstructorWithoutAutoOpen) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     // Even though not opened, explicitly verify no issues
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::UNREGISTERED);
 }
 
-// Test constructor with named connection
 TEST_F(ConnectionTest, ConstructorWithName) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false, "TestConnection");
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::PLAYBACK_DEVICE_1);
 }
 
-// Test constructor with specific logical address
 TEST_F(ConnectionTest, ConstructorWithLogicalAddress) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::PLAYBACK_DEVICE_1);
 }
 
-// Test open and close
 TEST_F(ConnectionTest, OpenAndClose) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     EXPECT_NO_THROW(conn.open());
     EXPECT_NO_THROW(conn.close());
 }
 
-// Test multiple open/close cycles
 TEST_F(ConnectionTest, MultipleOpenClose) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     
@@ -129,7 +123,6 @@ TEST_F(ConnectionTest, MultipleOpenClose) {
     }
 }
 
-// Test add and remove frame listener
 TEST_F(ConnectionTest, AddAndRemoveFrameListener) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     conn.open();
@@ -141,7 +134,6 @@ TEST_F(ConnectionTest, AddAndRemoveFrameListener) {
     conn.close();
 }
 
-// Test multiple frame listeners
 TEST_F(ConnectionTest, MultipleFrameListeners) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     conn.open();
@@ -159,7 +151,6 @@ TEST_F(ConnectionTest, MultipleFrameListeners) {
     conn.close();
 }
 
-// Test send with timeout
 TEST_F(ConnectionTest, SendWithTimeout) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -187,7 +178,6 @@ TEST_F(ConnectionTest, SendWithTimeout) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test send with zero timeout
 TEST_F(ConnectionTest, SendWithZeroTimeout) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -215,7 +205,6 @@ TEST_F(ConnectionTest, SendWithZeroTimeout) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test send with default timeout
 TEST_F(ConnectionTest, SendWithDefaultTimeout) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -243,7 +232,6 @@ TEST_F(ConnectionTest, SendWithDefaultTimeout) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test send with throw parameter succeeds when driver succeeds
 TEST_F(ConnectionTest, SendWithThrowParameter) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -301,7 +289,6 @@ TEST_F(ConnectionTest, SendToSpecificAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test sendTo with timeout
 TEST_F(ConnectionTest, SendToWithTimeout) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -328,7 +315,6 @@ TEST_F(ConnectionTest, SendToWithTimeout) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test sendTo with throw parameter succeeds when driver succeeds
 TEST_F(ConnectionTest, SendToWithThrowParameter) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -487,7 +473,6 @@ TEST_F(ConnectionTest, PingAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test getSource
 TEST_F(ConnectionTest, GetSource) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     LogicalAddress source = conn.getSource();
@@ -495,7 +480,6 @@ TEST_F(ConnectionTest, GetSource) {
     // Connection destructor will be called automatically
 }
 
-// Test setSource
 TEST_F(ConnectionTest, SetSource) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     conn.setSource(LogicalAddress::PLAYBACK_DEVICE_2);
@@ -623,7 +607,6 @@ TEST_F(ConnectionTest, SendToDifferentAddresses) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test connection with different logical addresses
 TEST_F(ConnectionTest, DifferentLogicalAddresses) {
     {
         Connection conn1(LogicalAddress::TV, false);
@@ -639,7 +622,6 @@ TEST_F(ConnectionTest, DifferentLogicalAddresses) {
     }
 }
 
-// Test close clears frame listeners
 TEST_F(ConnectionTest, CloseRemovesListeners) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     conn.open();
@@ -879,7 +861,6 @@ TEST_F(ConnectionTest, MixedSyncAsync) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test listener operations while connection is closed
 TEST_F(ConnectionTest, ListenerOperationsWithoutOpen) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     TestFrameListener listener;
@@ -889,7 +870,6 @@ TEST_F(ConnectionTest, ListenerOperationsWithoutOpen) {
     // Connection destructor will be called automatically
 }
 
-// Test remove non-existent listener
 TEST_F(ConnectionTest, RemoveNonExistentListener) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     conn.open();
@@ -901,11 +881,9 @@ TEST_F(ConnectionTest, RemoveNonExistentListener) {
     conn.close();
 }
 
-// Test send with Throw_e and driver failure to trigger exception path
 TEST_F(ConnectionTest, SendWithThrowAndDriverFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
-    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SENT_FAILED));
@@ -927,11 +905,9 @@ TEST_F(ConnectionTest, SendWithThrowAndDriverFailure) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test sendTo with Throw_e and driver failure to trigger exception path
 TEST_F(ConnectionTest, SendToWithThrowAndDriverFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
-    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SENT_FAILED));
@@ -953,11 +929,9 @@ TEST_F(ConnectionTest, SendToWithThrowAndDriverFailure) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test poll with Throw_e and driver failure to trigger exception path
 TEST_F(ConnectionTest, PollWithThrowAndDriverFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
-    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SENT_BUT_NOT_ACKD));
@@ -976,11 +950,9 @@ TEST_F(ConnectionTest, PollWithThrowAndDriverFailure) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test ping with Throw_e and driver failure to trigger exception path
 TEST_F(ConnectionTest, PingWithThrowAndDriverFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
-    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SENT_BUT_NOT_ACKD));
@@ -999,11 +971,9 @@ TEST_F(ConnectionTest, PingWithThrowAndDriverFailure) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test send with exception swallowing (no Throw_e parameter)
 TEST_F(ConnectionTest, SendWithoutThrowSwallowsException) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
-    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -1025,11 +995,9 @@ TEST_F(ConnectionTest, SendWithoutThrowSwallowsException) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test sendTo with exception swallowing (no Throw_e parameter)
 TEST_F(ConnectionTest, SendToWithoutThrowSwallowsException) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
-    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -1310,7 +1278,6 @@ TEST_F(ConnectionTest, SendToAsyncHeaderConstruction) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test connection close clears all listeners
 TEST_F(ConnectionTest, CloseRemovesAllListeners) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     conn.open();
@@ -1362,13 +1329,11 @@ TEST_F(ConnectionTest, LargeFrameMatchSource) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test getSource returns correct value
 TEST_F(ConnectionTest, GetSourceReturnsCorrectValue) {
     Connection conn(LogicalAddress::RECORDING_DEVICE_1, false);
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::RECORDING_DEVICE_1);
 }
 
-// Test setSource updates logical address
 TEST_F(ConnectionTest, SetSourceUpdatesAddress) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::PLAYBACK_DEVICE_1);
@@ -1377,7 +1342,6 @@ TEST_F(ConnectionTest, SetSourceUpdatesAddress) {
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::PLAYBACK_DEVICE_2);
 }
 
-// Test connection with all different logical addresses
 TEST_F(ConnectionTest, AllLogicalAddresses) {
     int addresses[] = {
         LogicalAddress::TV,
@@ -1402,7 +1366,6 @@ TEST_F(ConnectionTest, AllLogicalAddresses) {
     }
 }
 
-// Test rapid open/close cycles
 TEST_F(ConnectionTest, RapidOpenCloseCycles) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     
@@ -1412,7 +1375,6 @@ TEST_F(ConnectionTest, RapidOpenCloseCycles) {
     }
 }
 
-// Test concurrent listener add/remove operations
 TEST_F(ConnectionTest, ConcurrentListenerOperations) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     conn.open();
@@ -1435,9 +1397,9 @@ TEST_F(ConnectionTest, ConcurrentListenerOperations) {
 /*
  * THE CLEANUP CONTRACT THIS CASE ASSERTS - AND THE ONE PRODUCTION DOES NOT PROVIDE.
  *
- * An earlier version of this case checked only that `delete` did not throw and that a
- * listener's counter had not moved - which it could not have, because no frame was ever
- * injected.  It executed the destructor and observed nothing.
+ * A destructor case that checks only that `delete` did not throw, plus a listener counter that
+ * no injection ever moved, executes the destructor and observes NOTHING.  This one is built so
+ * each step gives the next one meaning.
  *
  * WHAT IS ASSERTED, in order, so that each step gives the next one meaning:
  *   1. While the connection is OPEN, a frame addressed to its logical address REACHES its
@@ -1456,11 +1418,15 @@ TEST_F(ConnectionTest, ConcurrentListenerOperations) {
  *   dangling FrameListener* in Bus::listeners, and the next frame the Bus reader dispatches
  *   calls notify() through freed storage.
  *
- *   MEASURED, NOT INFERRED: `./run_L1Tests --gtest_shuffle --gtest_random_seed=12345`
- *   segfaults in Bus::Reader::run at Bus.cpp:165, `(*list_it)->notify(frame)`, and it does so
- *   with this file EXACTLY AS IT WAS BEFORE this case was rewritten - the crash lands in the
- *   pre-existing ConnectionTest.DefaultFilterSpecificAddress.  It is a property of the
- *   production destructor plus the fixture cases that rely on it, not of this case.
+ *   MEASURED, NOT INFERRED: `./run_L1Tests --gtest_shuffle --gtest_random_seed=54321` segfaults
+ *   in 5 runs out of 5, and under gdb the faulting thread is the Bus reader:
+ *       #0  Connection::DefaultFrameListener::notify   at Connection.cpp:335
+ *       #1  Bus::Reader::run                          at Bus.cpp:165
+ *       #2  CCEC_OSAL::Thread::CEntry                 at Thread.cpp:41
+ *   - the reader dispatching a frame through a listener whose Connection has already been
+ *   destroyed, which is precisely the contract gap above.  It is a property of the production
+ *   destructor plus the pre-existing fixture cases that destroy an open Connection, not of this
+ *   case: the same crash reproduces regardless of what this case asserts.
  *
  *   REQUIRED PRODUCTION CHANGE, REPORTED NOT MADE (Directive 6): Connection::~Connection()
  *   must call close() (or remove busFrameListener directly) so that destruction detaches.
@@ -1557,8 +1523,9 @@ TEST_F(ConnectionTest, CloseDetachesTheConnectionAndDestroyingAClosedOneLeavesTh
  * the whole of the flow that lives in this repository.  The plugin leg - HdmiCecSink/Source FrameListener
  * and its typed handlers - cannot be joined to this leg by any test-only change: the plugin L1 and L2
  * binaries link entservices-testframework CEC MOCK (Tests/mocks/HdmiCec.h), not this middleware, and
- * making them link the real library means editing the plugin Tests/L*Tests/CMakeLists.txt, which AAP
- * Sec. 0.7.4 explicitly excludes from this pass.  The residual boundary is reported, not closed:
+ * making them link the real library means editing the plugin Tests/L*Tests/CMakeLists.txt, which the
+ * AAP's test-file transformation mapping (Sec. 0.7.4) excludes.  The residual boundary is reported,
+ * not closed:
  *   REQUIRED CHANGE, REPORTED NOT MADE - build the plugin test binaries against the real hdmicec
  *   libraries (libccec/libosal) instead of the framework CEC mock, i.e. add the middleware include
  *   path and link the two archives in the plugin test CMakeLists, and drop the -include of

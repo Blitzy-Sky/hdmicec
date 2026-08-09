@@ -81,12 +81,12 @@ The counts above sum to the 456 in the heading -- 12 figures across 11 bullets, 
 **Driver** and **mock driver** are separate translation units counted on one line, and
 **LibCCEC** and **MessageDecoder** each declare two fixtures inside one translation unit.
 
-### OSAL Library Tests (3 test translation units, 26 tests)
-- **ConditionVariable** (4 tests): Notify/wait synchronization patterns, signalling, timed wait and timeout behavior, and the native-handle accessor
+### OSAL Library Tests (3 test translation units, 27 tests)
+- **ConditionVariable** (5 tests): Notify/wait synchronization patterns, signalling, timed wait and timeout behavior, the absolute-deadline computation when the requested wait carries the nanosecond field past one second (it must roll into `tv_sec` rather than reach `pthread_cond_timedwait` out of range), and the native-handle accessor
 - **Mutex** (11 tests): Default construction, lock/unlock including the recursive case where each `lock()` needs a matching `unlock()`, native-handle retrieval, copy construction, copy assignment, chained and self-assignment, and a copy owning a distinct handle usable independently of the original. `Mutex` has no try-lock operation, so none is tested
 - **Thread** (11 tests): Both constructor overloads (unnamed, and named with empty and long names), `run()` dispatching to the `Runnable`, `start()` dispatching it on another thread, `detach()`, and destruction -- at scope exit, after `detach()`, and without a `start()`. `stop()` and `getNativeHandle()` are declared in `Thread.hpp` but never defined, so neither links; there is no join operation
 
-**482 test cases in 18 fixtures, all passing, none disabled.**  There are more fixtures
+**483 test cases in 18 fixtures, all passing, none disabled.**  There are more fixtures
 than translation units because `ccec/test_LibCCEC.cpp` declares `LibCCECTest` and
 `LibCCECUninitializedTest`, and `ccec/test_MessageDecoder.cpp` declares `MessageDecoderTest`
 and `MessageDecoderTrackingTest`.
@@ -284,12 +284,15 @@ cd tests/L1Tests
 ./run_L1Tests --gtest_shuffle --gtest_random_seed=12345
 ```
 
-`--gtest_shuffle` is a diagnostic, not a gate.  Measured on this tree with seed `12345`:
-**482/482 passed, exit 0**, matching the default order.  An earlier revision of this suite
-failed that seed with `BusTest.ListenerFiltering` and `BusTest.UnregisteredConnectionReceivesAll`
-and then ended in the production SIGSEGV documented in `tests/L1Tests/README.md`, because
-shuffling moved a `close()` next to a fresh `init()` -- the queue state that null dereference
-needs.  The fixtures that own the shared library's lifecycle now wait for the bus reader to
+`--gtest_shuffle` is a diagnostic, not a gate -- and it does **not** pass.  Default order is green
+and stable (thirty consecutive runs, 483/483, no crashes), but shuffled order is not: seeds `1`,
+`2`, `42`, `100`, `500`, `777` and `20260808` fail deterministically, five of five repeats at `1`,
+`42` and `500`, and seed `54321` ends in a production SIGSEGV five of five.  Use `42` or `100` to
+reproduce the ordering failures.  Do **not** cite seed `12345` as a reproducer: it exits 0 four
+runs in five here, even though it is the seed the project's own notes recorded as failing.  The
+recurring cases are `BusTest.ListenerFiltering`, `BusTest.UnregisteredConnectionReceivesAll`,
+`ConnectionTest.MatchSourceMismatchedAddress` and `ConnectionTest.SendAsyncMatchSource`; the two
+production defects behind the crashing seed are documented in `tests/L1Tests/README.md`.  The fixtures that own the shared library's lifecycle now wait for the bus reader to
 publish RUNNING before terminating it, so that window is not opened.  One green seed is not a
 proof of order independence: use the flag to check that a test you just wrote is self-sufficient,
 and re-derive the outcome after adding tests rather than trusting the figure quoted here.
@@ -443,8 +446,8 @@ Three notes on that example:
   `tests/L1Tests/*.xml` after a bare `make check` therefore uploads nothing, and with the default
   `if-no-files-found: warn` it reports success while doing so -- which is why `error` is set here.
 - **The action majors are the ones current when this was written** (`checkout@v7`,
-  `upload-artifact@v7`).  Earlier revisions of this document pinned `@v2` for both; the v1, v2 and
-  v3 artifact actions have since been retired, so a workflow still on them fails outright.  Check
+  `upload-artifact@v7`).  Do not copy an older pin: the v1, v2 and v3 artifact actions have been
+  retired, so a workflow still on them fails outright.  Check
   each action's releases page before copying this and treat the exact major here as informative
   rather than normative -- the repository's own workflow is on different majors again.
 - **What the example leaves out.**  The real workflow additionally pins CMake to 3.16.x, runs a
@@ -455,8 +458,10 @@ Three notes on that example:
 ## Next Steps
 
 1. **Integration tests**: Consider adding integration tests in a separate directory
-2. **Order independence**: a `--gtest_shuffle --gtest_random_seed=12345` run of this suite now
-   passes 482 of 482 on this tree, but one green seed is not a proof -- re-derive it after
+2. **Order independence**: a `--gtest_shuffle --gtest_random_seed=12345` run of this suite
+   passes 483 of 483 on this tree in four runs out of five, but one green seed is not a proof --
+   the fifth run of that seed ends in the production SIGSEGV documented in
+   `tests/L1Tests/README.md`, so re-derive the outcome after
    adding tests, and new translation units must still be APPENDED to
    `run_L1Tests_SOURCES` rather than inserted, because static-initialisation order decides
    the order the suites run in
@@ -512,7 +517,7 @@ gdb --args ./run_L1Tests --gtest_filter="FailingTest.*"
 ## Summary
 
 The L1 unit test framework provides:
-- ✅ 18 test fixtures with 482 individual tests, all passing, none disabled
+- ✅ 18 test fixtures with 483 individual tests, all passing, none disabled
 - ✅ Comprehensive coverage for both CCEC and OSAL libraries
   - Complete CEC opcode coverage (60+ opcodes tested)
   - All operand types tested (19 classes, 75 tests)

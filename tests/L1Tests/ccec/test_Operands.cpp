@@ -523,9 +523,10 @@ TEST_F(OperandsTest, LatencyInfoCreation) {
  * Operand declares serialize(CECFrame&) pure virtual and supplies non-pure defaults for
  * toString(), name() and validate().  Every concrete operand in Operands.hpp overrides
  * toString(), and nothing in the middleware calls name() or validate() at all, so the three
- * default bodies had never executed: measured, ccec/include/ccec/Operand.hpp sat at 0.0%
- * (0/6) - the lowest figure in the middleware trace - purely because no test ever stood on
- * the base class itself.
+ * default bodies had never executed: in the baseline these cases were written against,
+ * ccec/include/ccec/Operand.hpp measured 0.0% (0/6) - the lowest figure in the middleware trace -
+ * purely because no test ever stood on the base class itself.  With the cases below in place it
+ * measures 100% (9/9).
  *
  * The defaults are part of the operand contract: a new operand that forgets to override
  * toString() inherits "Not Implemented" rather than failing to compile, and validate()
@@ -603,8 +604,9 @@ TEST_F(OperandsTest, OperandSerializeWithoutAFrameRoutesThroughTheOverride) {
  * Exception.hpp is a header-only hierarchy of seven classes whose entire behaviour is the
  * string each what() returns.  Three of them - OperationNotSupportedException, IOException
  * and InvalidParamException - are already exercised, because some case somewhere prints the
- * exception it caught.  The other four were never printed by any test, which is why
- * ccec/include/ccec/Exception.hpp measured 33.3% (4/12).
+ * exception it caught.  The other four were never printed by any test, which is what left
+ * ccec/include/ccec/Exception.hpp at a measured 33.3% (4/12) in that same baseline; with the cases
+ * below it measures 100% (14/14).
  *
  * These strings are the diagnostic a caller sees when a CEC operation fails, so they are
  * asserted exactly: a change to one of them changes what an operator reads in a log, and a

@@ -51,17 +51,16 @@ protected:
         if (mock != nullptr) {
             // Restore default HdmiCecOpen behavior.
             //
-            // THE LAMBDA CAPTURES NOTHING, AND THAT IS THE FIX.  It used to capture `this`
-            // and read `mock->currentHandle` through it.  The action is stored on the
-            // PROCESS-GLOBAL driver mock, which outlives this fixture, so from the moment
-            // the fixture was destroyed every later HdmiCecOpen call performed a lambda that
-            // dereferenced released storage.  It was latent in the suite's default order,
-            // where the released pointer still happened to address readable memory, and a
-            // hard crash under --gtest_shuffle: measured on this tree, seeds 1, 777 and
-            // 12345 all segfaulted inside it, reached from DriverImpl::open in
-            // DriverTest.MultipleClose, DriverTest.RemoveLogicalAddress and
-            // DriverTest.WriteAsync.  Looking the mock up freshly inside the action gives
-            // the identical behaviour with no reference to this object's lifetime at all.
+            // THE LAMBDA MUST CAPTURE NOTHING.  The action is stored on the PROCESS-GLOBAL
+            // driver mock, which outlives this fixture, so anything it captures from this
+            // object is dereferenced by every later HdmiCecOpen call - including calls made
+            // long after the fixture has been destroyed.  Capturing `this` and reading
+            // `mock->currentHandle` through it is therefore a use-after-free that is latent
+            // in the suite's default order, where the released storage still happens to be
+            // readable, and a hard crash once shuffling moves a later driver case behind
+            // this fixture.  Looking the mock up freshly inside the action gives identical
+            // behaviour with no reference to this object's lifetime at all, which is the
+            // form to keep.
             ON_CALL(*mock, HdmiCecOpen(::testing::_))
                 .WillByDefault(::testing::Invoke(
                     [](int* handle) {

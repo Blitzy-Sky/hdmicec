@@ -30,7 +30,7 @@ tests/
     │   ├── test_Driver.cpp
     │   ├── test_DriverImpl_Async.cpp
     │   └── test_Util.cpp
-    └── osal/                     # OSAL library tests (3 files, 26 tests)
+    └── osal/                     # OSAL library tests (3 files, 27 tests)
         ├── test_ConditionVariable.cpp
         ├── test_Mutex.cpp
         └── test_Thread.cpp
@@ -148,7 +148,8 @@ account, and it is outside the git tree because `.gitignore` does not cover
 these names.  Pass `--output-dir DIR` (or set `COVERAGE_OUTPUT_DIR`) when
 you need a stable location; `--output-dir .` reproduces the CI layout
 in-tree, at which point they are build artifacts that must not be
-committed.  See `./run_coverage.sh --help` for the full option and
+committed.  The per-file gate is on by default, so a single file below 80%
+fails the run.  See `./run_coverage.sh --help` for the full option and
 environment reference.
 
 ## Test Executable
@@ -158,7 +159,7 @@ environment reference.
 - **Type**: Google Test executable
 - **Sources**: 15 test translation units + test_main.cpp (all listed in
   `run_L1Tests_SOURCES`, which is the only gate on what gets compiled)
-- **Total Tests**: 482 individual test cases in 18 fixtures — all passing,
+- **Total Tests**: 483 individual test cases in 18 fixtures — all passing,
   none disabled — measured with `./run_L1Tests --gtest_list_tests`.  There are
   more fixtures than translation units because two files declare two fixtures
   each: `ccec/test_LibCCEC.cpp` (`LibCCECTest` and `LibCCECUninitializedTest`)

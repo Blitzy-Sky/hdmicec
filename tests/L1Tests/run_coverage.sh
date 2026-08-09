@@ -62,11 +62,11 @@
 #              every lcov and genhtml invocation a PRIVATE, EMPTY, mode-0700 HOME of its
 #              own (see lcov_run/genhtml_run), so no home configuration can be in effect
 #              and the caller's file is never opened, moved, replaced or deleted.
-#              An earlier revision did stash and restore it, and that was wrong twice
-#              over: the restoring `mv -f` would silently DESTROY a ~/.lcovrc that
-#              reappeared during the run -- the owner's, or a concurrent sibling runner's
-#              -- and a file recreated mid-run was in effect for every lcov call after
-#              it.  A private HOME has neither failure mode and needs no trap to undo.
+#              DO NOT REPLACE THIS WITH A STASH-AND-RESTORE OF ~/.lcovrc: the restoring
+#              `mv -f` silently DESTROYS a ~/.lcovrc that reappeared during the run --
+#              the owner's, or a concurrent sibling runner's -- and a file recreated
+#              mid-run is in effect for every lcov call after it.  A private HOME has
+#              neither failure mode and needs no trap to undo.
 #              /etc/lcovrc is likewise never touched; --config-file below means lcov
 #              reads exactly one configuration file, this suite's versioned one.
 #          (b) Artifacts -- the fixed names under ARTIFACTS below are created and
@@ -86,19 +86,22 @@
 #        so a stale measurement is visible rather than silent.
 #        A ZERO EXIT STATUS IS NOT TAKEN AS PROOF THAT ANY TEST RAN.  GoogleTest exits 0
 #        when a filter selects nothing, so `GTEST_EXTRA_ARGS=--gtest_filter=NoSuchTest.*`
-#        used to be reported as "the L1 suite passed" and then measured at 0.0% -- a run
+#        would otherwise be reported as "the L1 suite passed" and then measured at 0.0% -- a run
 #        that failed only because the number happened to be zero, not because anything
 #        asserted it had tested nothing.  A filter that still cleared the bar would have
 #        been reported as a pass.  `--run` therefore DELETES the results file before the
 #        binary starts and then requires it to exist, to report a non-zero test count, and
 #        to name at least one of this suite's own fixtures -- the same three checks the
 #        sibling plugin runners apply, for the same reason.
-#     5. DETERMINISTIC AND ISOLATED.  Fixed artifact names, no timestamps in output, no
-#        wall-clock sleeps, no reliance on the caller's working directory: every path is
+#     5. DETERMINISTIC AND ISOLATED.  Fixed artifact NAMES with no timestamp in any of them,
+#        no wall-clock sleeps, no reliance on the caller's working directory: every path is
 #        resolved absolutely from BASH_SOURCE, so running this script from its own
 #        directory, from the submodule root or from the superproject root produces
-#        identical results.  The per-file table is a pure function of the trace it reads,
-#        so the same trace always yields byte-identical output, and the HTML report is
+#        identical results.  The coverage FIGURES are a pure function of the trace, so the
+#        same trace always yields the same table -- with one deliberate exception, which is
+#        stated rather than hidden: the provenance artifact and the leading `# PROVENANCE`
+#        comment of the per-file TSV record the generation time in UTC, so an artifact found
+#        later can be dated.  Those lines are the only non-reproducible bytes.  The HTML report is
 #        built in a private staging directory and published by rename so no page from a
 #        larger earlier trace can survive into a smaller later one.
 #     6. HONEST REPORTING OVER CONVENIENT NUMBERS.  The seven exclusion globs are
@@ -197,7 +200,9 @@
 #   ./run_coverage.sh --build --run         build first, then the above
 #   ./run_coverage.sh --threshold 90        raise the bar for a diagnostic run
 #   ./run_coverage.sh --per-file-gate       also fail if any single file is below the bar
-#   ./run_coverage.sh --no-per-file-gate    gate on the aggregate only (the default)
+#                                           (the default -- Directive 4 states the bar PER TARGET)
+#   ./run_coverage.sh --no-per-file-gate    opt out: gate on the aggregate only, and report the
+#                                           per-file breaches without failing on them
 #   ./run_coverage.sh --output-dir DIR      write artifacts to DIR
 #   ./run_coverage.sh --no-html             skip the genhtml report
 #   ./run_coverage.sh --restore             restore the six tracked Makefiles, then exit
@@ -295,8 +300,8 @@
 #   requirement.  Every file in this suite's filtered trace is now at or above the bar, so
 #   there is nothing for the per-file half to be lenient about.
 #
-#   That includes the three template-heavy headers under ccec/include that used to sit below
-#   it -- measured on this tree before: ccec/include/ccec/Operand.hpp 0.0% (0/6),
+#   That includes the three template-heavy headers under ccec/include that measured below it at
+#   the engagement baseline: ccec/include/ccec/Operand.hpp 0.0% (0/6),
 #   Exception.hpp 33.3% (4/12), Messages.hpp 76.5% (228/298).  Each was closed the only way a
 #   coverage bar may be closed, by ADDING TESTS: Operand's three default virtuals and all
 #   seven Exception::what() overrides are exercised from ccec/test_Operands.cpp, and the
@@ -319,9 +324,11 @@
 #
 #   RANDOMISED-ORDER RUNS ARE NOT WIRED IN, ON PURPOSE.  `--gtest_shuffle` is a
 #   diagnostic: this suite contains pre-existing order-fragile tests that pass in the
-#   default order, and tests that pass must not be modified on this pass, so a shuffled
-#   run is expected to stay red and must never gate anything.  Nothing here enables it,
-#   and no watch mode exists or is added.
+#   default order and are not rewritten, so a shuffled run's outcome depends on the seed --
+#   green for some, assertion failures for others, and an exit 139 from a production race
+#   for others again (the measured seed table is in tests/L1Tests/README.md).  A result that
+#   depends on the seed must never gate anything.  Nothing here enables it, and no watch
+#   mode exists or is added.
 #
 # ==============================================================================
 set -euo pipefail
@@ -358,8 +365,11 @@ AWK_BIN="$(resolve_tool awk)"
 FIND_BIN="$(resolve_tool find)"
 MKTEMP_BIN="$(resolve_tool mktemp)"
 
-# `timeout` bounds the suite run, and its absence is not fatal: --run degrades to an unbounded
-# run and says so.  Resolved here with everything else so a later PATH change cannot swap it.
+# `timeout` bounds the suite run under --run, and do_run() REFUSES to run the suite without it
+# rather than degrading to an unbounded run -- an unbounded run of a suite that drives real
+# mutexes, condition variables and threads can hang for ever with no output and no verdict.
+# Resolved here with everything else so a later PATH change cannot swap it, and resolved
+# unconditionally because an invocation that only measures existing counters does not need it.
 TIMEOUT_BIN="$(resolve_tool timeout)"
 
 # --kill-after is desirable (a suite that ignores SIGTERM still dies) but is NOT universally
@@ -433,11 +443,11 @@ SUITE_TIMEOUT="${SUITE_TIMEOUT:-600}"
 # Artifact directory.  EMPTY BY DEFAULT, and that is the security-relevant part: with no
 # explicit choice this script creates its root with `mktemp -d` under $TMPDIR, so the name
 # is unpredictable and the directory is created atomically at mode 0700 (see
-# resolve_output_dir).  A FIXED default -- which this script used to have,
-# ${TMPDIR:-/tmp}/hdmicec-l1-coverage/<workspace basename> -- is guessable, and anything
-# able to create entries in a world-writable $TMPDIR could pre-create that name as a
-# symlink or as a directory of its own and collect, redirect or tamper with every trace,
-# log and HTML page written under it.  An unpredictable name cannot be pre-created.
+# resolve_output_dir).  DO NOT GIVE IT A FIXED DEFAULT: a predictable path such as
+# ${TMPDIR:-/tmp}/hdmicec-l1-coverage/<workspace basename> is guessable, and anything able to
+# create entries in a world-writable $TMPDIR could pre-create that name as a symlink or as a
+# directory of its own and collect, redirect or tamper with every trace, log and HTML page
+# written under it.  An unpredictable name cannot be pre-created.
 # A caller who needs a stable location still passes --output-dir / COVERAGE_OUTPUT_DIR,
 # and that path is then held to the stricter checks in resolve_output_dir, because a name
 # chosen in advance is by definition guessable.
@@ -564,8 +574,8 @@ rule() { printf '%s\n' '--------------------------------------------------------
 # privileges.  On a CI runner that is a write into another job's workspace; run under
 # sudo, it is a write anywhere.
 #
-# Checking only the leaf, which is what this script used to do, does not close that: the
-# leaf can be perfectly ordinary while its PARENT is the substitution.  So the whole chain
+# Checking only the leaf does not close that, and must not be reduced to it: the leaf can be
+# perfectly ordinary while its PARENT is the substitution.  So the whole chain
 # from / down is checked, and every existing component must satisfy all three of:
 #
 #   * not a symbolic link.  A link is exactly the substitution being defended against, and
@@ -834,12 +844,12 @@ trap 'exit 129' HUP
 # while lcov runs.
 #
 # The obvious ways to get that are both wrong.  `rm -f ~/.lcovrc` destroys a developer's
-# file as a side effect nobody asked for.  Moving it aside and moving it back -- which is
-# what this script used to do -- is worse than it looks: the restoring `mv -f` overwrites
-# whatever stands at $HOME/.lcovrc at that moment, so a file that REAPPEARED during the
-# run (the owner recreating it, or a sibling coverage runner in this same workspace, which
-# stashes the same path) is silently destroyed by a script that was only supposed to
-# measure; and until the restore, a file recreated mid-run was in effect for every lcov
+# file as a side effect nobody asked for.  Moving it aside and moving it back is worse than
+# it looks, and must not be introduced here: the restoring `mv -f` overwrites whatever
+# stands at $HOME/.lcovrc at that moment, so a file that REAPPEARED during the run -- the
+# owner recreating it, or a sibling coverage runner in this workspace if one were ever
+# changed to write there -- would be silently destroyed by a script whose only job is to
+# measure; and until the restore, a file recreated mid-run is in effect for every lcov
 # call after it, which is the very thing the stash existed to prevent.
 #
 # So the caller's HOME is left completely alone and lcov is given one of its own: an empty
@@ -1151,12 +1161,10 @@ parse_args() {
     [ $# -eq 0 ] || die "unexpected trailing arguments: $*"
 
     # THRESHOLD SHAPE AND RANGE.  The accepted spelling is deliberately the same as the two
-    # plugin runners': digits, or digits.digits.  This runner used to accept integers only,
-    # which meant the three runners in this workspace disagreed about what a threshold is --
-    # `COVERAGE_MIN=80.5` was a working diagnostic bar for the plugins and a hard error here,
-    # so the three could not be wired interchangeably into one pipeline.  lcov's
-    # --fail-under-lines takes a fractional bar, so accepting one costs nothing and refusing
-    # it bought nothing.
+    # plugin runners': digits, or digits.digits.  Keep the three in step -- a bar that is a
+    # working diagnostic value for one runner and a hard error in another cannot be wired
+    # through one pipeline.  Fractions are accepted because lcov's --fail-under-lines takes
+    # one, so refusing them would buy nothing.
     #
     # What is NOT accepted is anything that would have to be guessed at: an empty value, a
     # letter (`8O` for `80` is the classic typo), a sign, surrounding spaces, or more than one
@@ -1189,18 +1197,37 @@ parse_args() {
         die "threshold must be between 0 and 100 (got '$COVERAGE_MIN').  A bar above 100% can
        never be met, so the gate could only ever fail and would say nothing about the tests."
     fi
-    # 80 is this submodule's acceptance bar.  Any other value is a diagnostic, and saying so
-    # out loud is what stops a --threshold run's verdict being quoted as an acceptance result.
+    # 80 is this submodule's acceptance bar.  Any other value is a diagnostic, and saying so is
+    # not enough on its own: a warning still lets the run print the same PASS line and return
+    # the same 0 a real acceptance run returns, so `COVERAGE_MIN=0` used to buy an acceptance
+    # success with no coverage requirement behind it.  The weakening is therefore recorded as an
+    # ADVISORY REASON, which forces the final verdict to ADVISORY and the exit status to
+    # $EXIT_ADVISORY - a status a caller can branch on and cannot mistake for a pass.
     # 80, 80.0 and 80.00 are the same bar; 80.5 is not.
     if [ "$min_int" -ne 80 ] || [ -n "${min_frac//0/}" ]; then
         warn "the line bar is ${COVERAGE_MIN}%, not the required 80%.  This is a DIAGNOSTIC run:"
         warn "    its verdict is NOT the acceptance verdict for this submodule."
+        note_advisory "the line bar was set to ${COVERAGE_MIN}%, not the 80% Directive 4 requires,
+       so no verdict this run produces is an acceptance verdict for this submodule."
     fi
 
     case "$COVERAGE_PER_FILE_GATE" in
-        0|1) ;;
+        0) note_advisory "per-file gating was turned off (--no-per-file-gate /
+       COVERAGE_PER_FILE_GATE=0).  Directive 4 states the bar PER TARGET, so a run without the
+       per-file half cannot produce an acceptance verdict however good the aggregate is." ;;
+        1) ;;
         *)   die "COVERAGE_PER_FILE_GATE must be 0 or 1, got '$COVERAGE_PER_FILE_GATE'" ;;
     esac
+
+    # An exemption list suppresses a per-file vote, which is exactly the shape of weakening the
+    # aggregate cannot reveal: one file at 0% inside a large denominator moves the total by
+    # almost nothing.  Naming a file here is admissible for a diagnostic run and never for an
+    # acceptance one, so its presence is recorded rather than only printed later.
+    if [ -n "$COVERAGE_GATE_EXEMPT_FILES" ]; then
+        note_advisory "COVERAGE_GATE_EXEMPT_FILES is set, so at least one target's per-file vote
+       was suppressed.  Directive 4 admits no exemption, so this run's verdict is diagnostic:
+       $(printf '%s' "$COVERAGE_GATE_EXEMPT_FILES" | tr '\n' ' ')"
+    fi
 
     # An empty value here means two very different things depending on how it got there.
     # Unset -- the default -- means "mint an unpredictable root with mktemp -d", which is the
@@ -1491,8 +1518,29 @@ do_restore() {
 # editing this list, while a run that exercised none of them is not this suite.
 readonly EXPECTED_SUITE_PATTERN='"(classname|name)"[[:space:]]*:[[:space:]]*"(CECFrameTest|ConnectionTest|BusTest|DriverTest|LibCCECTest|OpCodeTest|MessageDecoderTest|MessageEncoderTest|OperandsTest)'
 
-verify_results() { # $1 = path to the results JSON this run was told to write
-    local results="$1" count
+# Number of test cases the binary has REGISTERED, read from the binary itself.
+#
+# --gtest_list_tests enumerates without executing, so this is cheap, and it is invoked with no
+# extra arguments at all - deliberately, because --gtest_list_tests honours --gtest_filter and a
+# filtered listing would agree with a filtered run and prove nothing.  A test line is indented by
+# exactly two spaces; a fixture line is not indented, and GoogleTest's trailing "# GetParam() ="
+# annotations are stripped before counting.
+#
+# Prints the count, or nothing when the listing could not be obtained - in which case the caller
+# treats the inventory as unknown rather than as satisfied.
+registered_test_count() {
+    local listing
+    listing="$(cd "$HDMICEC_ROOT/tests/L1Tests" \
+        && LD_LIBRARY_PATH="$1" "$TIMEOUT_BIN" --foreground 120 \
+            ./run_L1Tests --gtest_list_tests 2>/dev/null)" || return 0
+    [ -n "$listing" ] || return 0
+    printf '%s\n' "$listing" \
+        | sed -n 's/^  \([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' \
+        | grep -c . || true
+}
+
+verify_results() { # $1 = path to the results JSON this run was told to write, $2 = LD_LIBRARY_PATH
+    local results="$1" ld_path="${2:-}" count
 
     [ -f "$results" ] || die "run_L1Tests exited 0 but wrote no results file at
        $results
@@ -1500,16 +1548,46 @@ verify_results() { # $1 = path to the results JSON this run was told to write
        produced no results at all.  A coverage figure cannot be attributed to a run that
        left no evidence it executed anything."
 
-    # The GoogleTest JSON header carries the run's totals; the first "tests" key is the
-    # top-level count.  sed rather than a JSON parser, because this script adds no
-    # dependency beyond the POSIX tools it already needs.
-    count="$(sed -n 's/^[[:space:]]*"tests"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$results" | head -1)"
+    # THE DECLARED COUNT AND THE EXECUTED COUNT ARE NOT THE SAME NUMBER.
+    #
+    # The GoogleTest JSON header carries the run's totals, and its "tests" field counts every case
+    # in the selection INCLUDING the DISABLED_ ones, which are listed as entries and never
+    # executed.  Both numbers are needed here and they are used for different things:
+    #   * "declared" is what is compared against --gtest_list_tests below, because that listing
+    #     also enumerates DISABLED_ cases -- comparing an executed count against an inclusive
+    #     listing would report a phantom gap for every disabled case in the suite;
+    #   * "executed" is what is REPORTED, because it is the number a reader quotes as evidence,
+    #     and a suite with disabled cases does not execute as many as it declares.
+    # sed rather than a JSON parser, because this script adds no dependency beyond the POSIX tools
+    # it already needs; each field is taken from its first occurrence, which is the top-level
+    # header preceding the "testsuites" array.
+    local declared disabled failures errors
+    declared="$(sed -n 's/^[[:space:]]*"tests"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$results" | head -1)"
+    disabled="$(sed -n 's/^[[:space:]]*"disabled"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$results" | head -1)"
+    failures="$(sed -n 's/^[[:space:]]*"failures"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$results" | head -1)"
+    errors="$(sed -n 's/^[[:space:]]*"errors"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$results" | head -1)"
+    : "${disabled:=0}" "${failures:=0}" "${errors:=0}"
+    count="$declared"
     if [ -z "$count" ] || [ "$count" -le 0 ]; then
         die "run_L1Tests exited 0 but $results reports no tests (\"tests\": ${count:-absent}).
        An empty run cannot substantiate a coverage figure: every line would be reported
        unhit and the gate would fail for the wrong reason, or -- worse, with a partial
        filter -- a subset's figure would be reported as the suite's.
        If a --gtest_filter was passed through GTEST_EXTRA_ARGS, it selected nothing."
+    fi
+
+    local executed=$((declared - disabled))
+    if [ "$executed" -le 0 ]; then
+        die "run_L1Tests exited 0 and $results declares $declared case(s), but $disabled of them are
+       DISABLED_ and so none actually executed.  A coverage figure cannot be attributed to a run in
+       which nothing ran."
+    fi
+    # The results file is this run's evidence and a zero exit status is a different claim, so a
+    # suite that recorded a failure or an error while still exiting 0 is treated as a failing suite.
+    if [ "$failures" -ne 0 ] || [ "$errors" -ne 0 ]; then
+        die "run_L1Tests exited 0 but $results records $failures failure(s) and $errors error(s).
+       The results file is the evidence and it contradicts the exit status, so no coverage is
+       reported for this run."
     fi
 
     grep -Eq "$EXPECTED_SUITE_PATTERN" "$results" || die "run_L1Tests exited 0 and $results
@@ -1519,7 +1597,42 @@ verify_results() { # $1 = path to the results JSON this run was told to write
        from this tree and that GTEST_EXTRA_ARGS is not restricting the run to unrelated
        cases."
 
-    log "run_L1Tests reported $count test case(s) in $results, including known middleware fixtures"
+    # THE EXECUTED INVENTORY IS COMPARED AGAINST THE REGISTERED ONE.
+    #
+    # Everything above establishes that SOMETHING from this suite ran; none of it establishes
+    # that ALL of it ran.  `GTEST_EXTRA_ARGS=--gtest_filter=-SomeFailingSuite.*` leaves a
+    # positive count, keeps recognisable fixture names in the JSON, and exits 0 - so the suite
+    # reads as green while the cases that would have failed were never executed, and the
+    # coverage captured afterwards is credited to a run that skipped them.  Asking the binary
+    # what it has registered is the only way to see that gap, and it is asked without any
+    # filter of its own so that the two numbers are genuinely independent.
+    local registered
+    registered="$(registered_test_count "$ld_path")"
+    if [ -z "$registered" ] || [ "$registered" -le 0 ]; then
+        note_advisory "the complete registered test inventory could not be read from the binary
+       (--gtest_list_tests produced nothing), so it was NOT established that the run executed the
+       whole suite rather than a subset."
+    elif [ "$count" -ne "$registered" ]; then
+        # Both sides include DISABLED_ cases, so this compares the SELECTION against the
+        # INVENTORY: a difference means cases were filtered out of the run entirely, which is a
+        # different thing from a case being disabled in the source.
+        warn "the run selected $count of $registered registered test case(s)"
+        note_advisory "the run's selection covered $count test case(s) but the binary registers
+       $registered, so $((registered - count)) case(s) were never even selected and the coverage
+       below is credited to a PARTIAL execution.  A suite that exits 0 because the failing cases
+       were filtered out is not a green suite.  (Both counts include DISABLED_ cases, so a
+       disabled test does not by itself produce this gap.)"
+    else
+        log "the run selected the whole registered inventory of $registered test case(s)"
+    fi
+
+    if [ "$disabled" -gt 0 ]; then
+        log "run_L1Tests EXECUTED $executed test case(s) per $results (of $declared declared;
+       $disabled DISABLED_ and therefore not run), including known middleware fixtures"
+    else
+        log "run_L1Tests EXECUTED all $executed declared test case(s) per $results, including known
+       middleware fixtures"
+    fi
 }
 
 do_run() {
@@ -1544,9 +1657,9 @@ do_run() {
     # in a directory it did not descend into -- or one it could not remove -- survives with no
     # error.  That survivor still holds an EARLIER run's execution counts, gcov ACCUMULATES
     # into it, and the capture below would then credit this run with work it never did; the
-    # gate could pass on evidence the current tests did not produce.  This used to be a
-    # warning, which is exactly the shape of "reported but not prevented".  It is fatal now,
-    # matching the sink runner: refuse to measure rather than measure the wrong thing.
+    # gate could pass on evidence the current tests did not produce.  A warning here would be
+    # exactly the shape of "reported but not prevented", so this is FATAL, matching the sink
+    # runner: refuse to measure rather than measure the wrong thing.
     local after_zero
     after_zero="$(gcda_count)"
     # FATAL, not a warning.  lcov --zerocounters exiting 0 means "the command ran", not
@@ -1593,6 +1706,20 @@ $survivors
     log "  time limit:      ${SUITE_TIMEOUT}s (SUITE_TIMEOUT)"
     if [ -n "$GTEST_EXTRA_ARGS" ]; then
         log "  extra gtest args: $GTEST_EXTRA_ARGS"
+        # ANY caller-supplied gtest argument makes this run diagnostic, not acceptance.
+        #
+        # A filter is the obvious case - `--gtest_filter=-KnownFailingSuite.*` leaves a
+        # recognisable, positive, exit-0 run with the failures excised - but it is not the only
+        # one: --gtest_shuffle changes an order this suite is known to be fragile under,
+        # --gtest_repeat changes what the counters accumulate, and --gtest_also_run_disabled_tests
+        # changes which cases the figures came from.  Rather than enumerate a permitted subset
+        # and be wrong about the next one, every custom argument is recorded, so the verdict is
+        # ADVISORY and the exit status is $EXIT_ADVISORY.  verify_results additionally compares
+        # the executed inventory against the registered one, so a filter is reported as the
+        # specific number of cases it removed.
+        note_advisory "GTEST_EXTRA_ARGS was set to '$GTEST_EXTRA_ARGS', so the suite was NOT run
+       the way an acceptance run runs it.  Custom arguments can change which cases execute, in
+       what order and how often, so this run's figures are diagnostic."
     fi
 
     # --gtest_print_time=1 and the JSON output mirror the workflow's own run step.
@@ -1639,7 +1766,7 @@ $survivors
        ever be produced from one."
     fi
     log "the L1 suite passed (exit 0)"
-    verify_results "$results_json"
+    verify_results "$results_json" "$ld_path"
 
     local fresh
     fresh="$(gcda_count)"

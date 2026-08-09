@@ -110,13 +110,14 @@ tests/L1Tests/
 │   ├── test_Driver.cpp          # 22 tests - open/close, write, address management
 │   ├── test_DriverImpl_Async.cpp# 26 tests - async transmit, invalid state, error paths
 │   └── test_Util.cpp            # 12 tests - log-level configuration, buffer dump
-└── osal/                 # OSAL library tests (26 tests)
-    ├── test_ConditionVariable.cpp  # 4 tests - wait/signal/timed wait, native handle
+└── osal/                 # OSAL library tests (27 tests)
+    ├── test_ConditionVariable.cpp  # 5 tests - wait/signal/timed wait, deadline
+    │                                #           normalisation, native handle
     ├── test_Mutex.cpp              # 11 tests - lock/unlock, copy semantics
     └── test_Thread.cpp             # 11 tests - named construction, dispatch, detach
 ```
 
-**482 test cases in 18 fixtures**, all passing, none disabled.  The counts above are
+**483 test cases in 18 fixtures**, all passing, none disabled.  The counts above are
 measured with `./run_L1Tests --gtest_list_tests`, not estimated; re-measure with that
 command rather than trusting this list after adding tests.  Two fixtures come out of
 `test_LibCCEC.cpp` (`LibCCECTest`, 8 cases, and `LibCCECUninitializedTest`, 6) and two out of
@@ -128,7 +129,7 @@ they cannot cross), which is why 18 fixtures come from 15 translation units.
 
 One further translation unit is compiled into `run_L1Tests` from outside this directory:
 `../../mocks/hdmicec/hdmi_cec_driver_mock.cpp`, the GoogleMock HDMI-CEC HAL driver mock.  It
-defines no test cases of its own, so it contributes none of the 482.
+defines no test cases of its own, so it contributes none of the 483.
 
 ### Adding a test file
 
@@ -235,8 +236,8 @@ Then, before you call it done:
   symlinking `mocks/hdmicec/hdmi_cec_driver.h` over `stubs/ccec/drivers/hdmi_cec_driver.h`.
   No test requires real CEC hardware, and none is skipped for the want of it.
 - **Disabled tests**: there are none.  No test name in `ccec/` or `osal/` carries GoogleTest's
-  disable prefix, all 482 cases are enabled and run, and
-  `./run_L1Tests --gtest_also_run_disabled_tests --gtest_list_tests` lists the same 482 as a
+  disable prefix, all 483 cases are enabled and run, and
+  `./run_L1Tests --gtest_also_run_disabled_tests --gtest_list_tests` lists the same 483 as a
   plain listing.  See [Known Issues](#known-issues-and-notes).
 
 ## Common Assertions
@@ -266,11 +267,14 @@ EXPECT_THROW({code}, ex)  // code throws exception ex
 - **test_Operands.cpp** (75 tests): All operand classes (PhysicalAddress, LogicalAddress, DeviceType, Version, PowerStatus, AbortReason, OSDString, OSDName, Language, VendorID, UICommand, SystemAudioStatus, AudioStatus, RequestAudioFormat, ShortAudioDescriptor, AllDeviceTypes, RcProfile, DeviceFeatures, LatencyInfo)
 - **test_Driver.cpp** (22 tests) / **test_Driver_Mock.cpp** (10 tests): Open/close and reopen, synchronous write including NACK and transmit-failure returns, address management, frame-detail printing, asynchronous write with both its success and failure returns, and direct mock verification
 - **test_DriverImpl_Async.cpp** (26 tests): Asynchronous transmit, the transmit-completion callback, invalid-state guards, error-injection paths
-- **test_Util.cpp** (12 tests): Log-level configuration parsing and the debug buffer dump. Each case body runs in a **forked child process**: production `cec_log_level` is a non-atomic file-static that `check_cec_log_status()` writes and `CCEC_LOG()`/`dump_buffer()` read, and the Bus reader and writer threads live for the whole program, so writing it on the test thread would race their reads. The parent only reads the level, and asserts it is unchanged on the way out. The child calls `__gcov_reset()`/`__gcov_dump()` so the production lines it drove are still counted, which is why `run_L1Tests_LDADD` names `-lgcov`. The file header carries the full rationale and records the blocked production change — make the level atomic, or expose a seam for setting and reading it — that would remove the need for a child process
+- **test_Util.cpp** (12 tests): Log-level configuration parsing and the debug buffer dump.  Production `check_cec_log_status()` hardcodes `fopen("/tmp/cec_log_enabled")`, so this suite cannot be pointed at a private temporary without a production change.  One guard therefore owns every access to that fixed path: it is classified with `lstat` and refused unless it is absent or a regular file this process owns, reads open `O_RDONLY|O_NOFOLLOW|O_CLOEXEC`, and a write goes to a fresh `O_EXCL|O_NOFOLLOW` temporary in the same directory that is `rename()`d over the path with the original mode, owner and group reapplied — so a planted link is replaced rather than written through.  Because the path is fixed, the guard also takes an advisory `flock` on `/tmp/cec_log_enabled.testlock` **before** it captures anything and releases it only after it has restored, which makes the capture-mutate-restore window exclusive against another copy of this suite on the same host; a lock it cannot obtain is a hard failure rather than a warning, because proceeding without it is precisely the race.  Restoration runs on ordinary control flow only — `TearDown()` plus one `atexit` backstop, and **no signal handlers**.  The case bodies run in this process: `cec_log_level` is a non-atomic file-static with internal linkage that `check_cec_log_status()` writes and `CCEC_LOG()`/`dump_buffer()` read, and that residual exposure is stated rather than engineered around, because the fix — make the level atomic, or expose a seam for setting and reading it — is a production change and is reported as a blocked gap.  The file header carries the full rationale, including why an earlier forked-child design was withdrawn: `fork()` in a process that already has the Bus reader and writer threads left the child holding their locks and then ran GoogleTest, stdio and libgcov inside it, which bought a formal data race and paid for it with a deadlock
 
-### OSAL Library Tests (26 tests)
+### OSAL Library Tests (27 tests)
 
-- **test_ConditionVariable.cpp** (4 tests): Notify/wait synchronization patterns, timed wait, native-handle accessor
+- **test_ConditionVariable.cpp** (5 tests): Notify/wait synchronization patterns, timed wait and
+  signalling before the timeout, the absolute-deadline computation when the requested wait pushes
+  the nanosecond field past one second (which must carry into `tv_sec` rather than be handed to
+  `pthread_cond_timedwait` out of range), and the native-handle accessor
 - **test_Mutex.cpp** (11 tests): Lock/unlock including the recursive case, native-handle retrieval and its usability checked with `pthread_mutex_trylock` through that handle, copy construction and copy assignment.  `Mutex` exposes no try-lock operation of its own — its API is `lock()`, `unlock()` and `getNativeHandle()` — so none is tested
 - **test_Thread.cpp** (11 tests): Named construction, dispatch through Runnable, detach, destruction
 
@@ -369,42 +373,47 @@ artifacts out of a commit is yours to manage.
 
 ### No Disabled Tests
 
-**This suite has no disabled tests.**  `./run_L1Tests` reports 482 tests run, 482 passed,
+**This suite has no disabled tests.**  `./run_L1Tests` reports 483 tests run, 483 passed,
 0 disabled.  Verify with:
 
 ```bash
 ./run_L1Tests --gtest_list_tests | grep DISABLED_    # expect no output
 ```
 
-Earlier revisions of this document listed three disabled `LibCCECTest` cases — a `Term`-throws
-case, a `Term`-succeeds case and a multiple-init/term-cycles case — and attributed their
-disablement to thread-safety concerns.  Both halves of that entry are corrected here rather than
-quietly dropped:
+Two things are worth knowing if you are hunting for disabled tests on the strength of older notes.
+Three `LibCCECTest` cases — a `Term`-throws case, a `Term`-succeeds case and a
+multiple-init/term-cycles case — are **not** in `ccec/test_LibCCEC.cpp`, disabled or otherwise; they
+left the file upstream in commit `0f00d4e`, before this engagement.  And the two asynchronous-write
+cases in `ccec/test_Driver.cpp` that did carry GoogleTest's disable prefix are enabled and passing as
+`DriverTest.WriteAsync` and `DriverTest.WriteAsyncWithFailure`.
 
-- **The list was stale, and it had been stale for a while.**  Those three cases were real: they
-  were added to `ccec/test_LibCCEC.cpp` on 2026-02-19 (commit `e48fa73`) and removed again on
-  2026-03-17 (commit `0f00d4e`).  This README's last content change predates that removal, so it
-  went on describing tests the file no longer contained.  From then until this project's tests
-  landed, the only cases in the suite actually carrying GoogleTest's disable prefix were two
-  asynchronous-write cases in `ccec/test_Driver.cpp` — and both are now enabled and passing, as
-  `DriverTest.WriteAsync` and `DriverTest.WriteAsyncWithFailure`.
-- **The stated reason no longer justifies disabling anything.**  The rationale given was that
-  LibCCEC's Bus reader/writer threads race when repeatedly started and stopped, so the suite
-  avoided init/term cycling altogether.  That cycling is now covered and green:
-  the four `LibCCECUninitializedTest.*ThrowsWhenNotInitialized` guard cases — for `term()`,
-  `addLogicalAddress()`, `getLogicalAddress()` and `getPhysicalAddress()` — plus
-  `InitWithNullNameClearsLogPrefix` all assert against a deliberately terminated library, and all
-  five are green.
+The reason once given for disabling — that LibCCEC's Bus reader/writer threads race when repeatedly
+started and stopped, so init/term cycling had to be avoided altogether — no longer justifies
+disabling anything.  That cycling is covered and green: the four
+`LibCCECUninitializedTest.*ThrowsWhenNotInitialized` guard cases — for `term()`,
+`addLogicalAddress()`, `getLogicalAddress()` and `getPhysicalAddress()` — plus
+`InitWithNullNameClearsLogPrefix` all assert against a deliberately terminated library.
 
-The underlying race is real; what changed is that it is now **structurally avoided rather than
-timed around**.  There is no pause anywhere in this suite's new tests.  Two things replace it, and
+The underlying race is real; it is **structurally avoided rather than timed around**.  There is no
+pause anywhere in this suite's new tests.  Two things replace it, and
 both are the pattern to reuse if you add another case that terminates the library:
 
-- **The uninitialised state is owned at suite level.**  `LibCCECUninitializedTest` performs ONE
-  `term()` in the first `SetUp()` and ONE `init()` in `TearDownTestSuite()`; every case in between
-  simply asserts, because "terminated" is already the state.  No case pairs an `init()` with a
-  following `term()`, which is the only ordering in which `Bus::Reader`'s RUNNING/STOPPING
-  transition can be lost, so the window is never opened rather than being waited out.
+- **The uninitialised state is owned by the fixture, per case, through two idempotent helpers.**
+  `LibCCECUninitializedTest` declares no `SetUpTestSuite()` and no `TearDownTestSuite()`.  Its
+  `SetUp()` calls `ensureTerminated()` and its `TearDown()` calls `ensureInitialized()`, so each
+  case is handed the uninitialised state and hands back the initialised `CEC_TEST` state the rest
+  of the binary runs against — including the case that empties the log prefix on purpose, which is
+  why `TearDown()` also restores the prefix.  Both helpers work from EITHER state: the state is
+  read with a read-only `getPhysicalAddress()` probe, chosen because it answers the question
+  without initialising anything, unlike using `init()` as the probe.
+- **What removes the need for a pause is the readiness wait, not the absence of cycling.**
+  `ensureTerminated()` never calls `term()` until `awaitBusReaderRunning()` has observed the Bus
+  reader publish RUNNING, and terminating before that observation is exactly the ordering in which
+  `Bus::Reader`'s RUNNING/STOPPING transition can be lost.  The window is therefore closed by
+  ordering rather than waited out by a sleep, which is why this fixture contains no `sleep`,
+  `usleep` or `sleep_for` at all.  `ensureTerminated()`'s already-terminated early return is a
+  guard that keeps the helper total over both states; in the default order no case reaches it,
+  because every `TearDown()` leaves the library initialised.
 - **The close() sentinel CANNOT be drained from a test, and the suite no longer claims otherwise.**
   `DriverImpl::close()` offers a NULL sentinel to the receive queue and `DriverImpl::read()` is what
   consumes it, but `Bus::stop()` only waits for the reader to leave its loop - it can leave with the
@@ -412,35 +421,38 @@ both are the pattern to reuse if you add another case that terminates the librar
   dereference below needs.  Three cases used to follow their `term()` with a `Driver::read()` on the
   closed driver, on the stated theory that the call would take the sentinel off the queue.  **It does
   not.**  `read()` opens with `if (status != OPENED) { throw InvalidStateException(); }`
-  (`ccec/src/DriverImpl.cpp:157-162`) and therefore throws *before* it reaches `rQueue.poll()`, so on
+  (`ccec/src/DriverImpl.cpp:158-162`) and therefore throws *before* it reaches `rQueue.poll()`, so on
   a closed driver the flush arm at `DriverImpl.cpp:178-186` is unreachable and the sentinel is
   untouched.  The two calls that existed only as that mitigation are gone; the one in
   `ccec/test_DriverImpl_Async.cpp` remains because it is a real assertion on `read()`'s
   invalid-state arm, and its comment now says only that.  The window itself is **BLOCKED, reported
   not fixed** - see the section below - and the suite bounds its exposure instead: only
   `DriverTest.WriteAsync`, `DriverTest.WriteAsyncWithFailure` and `LibCCECUninitializedTest` cycle
-  the shared library at all, and the last of those does it once for the whole fixture rather than
-  once per case.
+  the shared library at all, and the last of those only ever calls `term()` behind the readiness
+  wait described in the bullet above.
 
 ### Intermittent SIGSEGV in the Bus reader thread — a PRODUCTION defect, reported not worked around
 
-`./run_L1Tests` can exit 139 (SIGSEGV) intermittently — measured on this tree at 1 crash in
-60 consecutive full-suite runs, and 2 in 60 when only the LibCCEC and Driver fixtures were run.
-The fault is a null dereference in PRODUCTION source and the tests merely reach it, so the
-production defect below is reported rather than fixed.
+`./run_L1Tests` can exit 139 (SIGSEGV).  The fault is a null dereference in PRODUCTION source that
+the tests merely reach, so the defect is reported rather than fixed, and an exit 139 should be read
+as this window reopening rather than as a test regression.
 
-**This is NOT mitigated in the tests, and an earlier version of this document wrongly said it was.**
-The claimed mitigation was a `Driver::read()` call issued on the closed driver after each `term()`,
-described as draining the `close()` sentinel off the receive queue.  It cannot do that: `read()`
-throws its invalid-state exception before it ever reaches `rQueue.poll()` (see the bullet in
-[No Disabled Tests](#no-disabled-tests)), so the sentinel was never removed and the runs that were
-green were green for some other reason.  Those calls have been removed rather than left in place
-looking protective, and no measurement is claimed for them.  What the suite does instead is bound
-its exposure: only `DriverTest.WriteAsync`, `DriverTest.WriteAsyncWithFailure` and
-`LibCCECUninitializedTest` cycle the shared library at all, and the last of those cycles it once
-for the whole fixture instead of once per case.  Measured after the removal: **25 consecutive
-full-suite runs, 25 green, 0 exit-139**.  That is what was observed, not a guarantee — the window is
-a race and 25 runs cannot prove its absence.
+Measured on this tree: **30 consecutive full-suite runs in the default order, 30 green, 0
+exit-139** — and the crash is reliably reproducible as soon as the order changes:
+`--gtest_shuffle --gtest_random_seed=54321` ended in exit 139 in **5 of 5** runs, always in
+`LibCCECUninitializedTest.GetPhysicalAddressThrowsWhenNotInitialized`, and seed 12345 crashed in
+1 of 5 (see the seed tables in
+[Test Order Dependence](#test-order-dependence-diagnostic)).  Neither figure bounds the other: the
+default order keeps the window narrow, it does not close it.
+
+**IT IS NOT MITIGATED IN THE TESTS, AND MUST NOT BE "MITIGATED" WITH A `Driver::read()` ON A CLOSED
+DRIVER.**  That call looks like it drains the `close()` sentinel off the receive queue and cannot:
+`read()` throws its invalid-state exception before it ever reaches `rQueue.poll()` (see the bullet
+in [No Disabled Tests](#no-disabled-tests)), so the sentinel stays queued and a green run following
+such a call was green for some other reason.  What the suite does instead is bound its exposure:
+only `DriverTest.WriteAsync`, `DriverTest.WriteAsyncWithFailure` and `LibCCECUninitializedTest`
+cycle the shared library at all, and the last of those calls `term()` only behind the Bus-reader
+readiness wait.
 
 Core dump, symbolised (`gdb ./.libs/run_L1Tests core.<pid>`):
 
@@ -492,27 +504,83 @@ re-run; `run_coverage.sh` fails closed on it and reports no coverage, which is t
 behaviour.  Note that this arm was UNCOVERED before this project's tests reached it, which is why
 the latent dereference had never been observed.
 
-### Test Order Dependence (diagnostic)
+#### A SECOND, DISTINCT SIGSEGV IN THE SAME THREAD — dangling `Connection` listener
 
-The suite is green in its default order — 482 of 482, exit `0` — and, on this tree, under the
-randomised order below as well:
+An exit 139 does not always mean the arm above.  Under `--gtest_shuffle --gtest_random_seed=54321`
+the crash reproduced in **5 of 5 runs** on this tree, and `gdb` puts it somewhere else entirely:
 
-```bash
-./run_L1Tests --gtest_shuffle --gtest_random_seed=12345
+```
+Thread 2 "run_L1Tests" received signal SIGSEGV
+#0  Connection::DefaultFrameListener::notify  at Connection.cpp:335
+#1  Bus::Reader::run                          at Bus.cpp:165
+#2  CCEC_OSAL::Thread::CEntry                 at Thread.cpp:41
 ```
 
-Measured with that seed on this tree: **482 of 482 passed, exit `0`**, with no `[  FAILED  ]` case
-and no production SIGSEGV.  An earlier revision of this suite failed that same seed with
-`BusTest.ListenerFiltering` and `BusTest.UnregisteredConnectionReceivesAll` and then ended in the
-segmentation fault described above; the fixtures that own the shared library's lifecycle now wait
-for the bus reader to publish RUNNING before terminating it, and no case pairs an `init()` with a
-following `term()` outside that custody, so the window that shuffling used to open is not opened.
-A single green seed is NOT a proof of order independence — see the paragraph below.
+`Connection::~Connection(void)` is EMPTY (`ccec/src/Connection.cpp:49-51`): it neither calls
+`close()` nor removes the connection's listener from `Bus::listeners`.  A `Connection` that is
+opened and then destroyed without an explicit `close()` therefore leaves a dangling
+`FrameListener *` on the bus, and the next frame the reader dispatches calls `notify()` through
+freed storage at `Bus.cpp:165`.
+
+**Required production change (NOT made here — production source is out of scope):**
+`Connection::~Connection()` must detach, either by calling `close()` or by removing its bus
+listener directly.  The test side cannot close this: a test can only avoid provoking it, which is
+why `ConnectionTest.CloseDetachesTheConnectionAndDestroyingAClosedOneLeavesTheBusUsable` destroys a
+connection it has already closed and asserts detachment through `close()` rather than through the
+destructor.
+
+So when triaging an exit 139, read the backtrace before assuming which defect you have: frame `#0`
+in `DriverImpl::read` is the sentinel dereference, frame `#0` in
+`Connection::DefaultFrameListener::notify` is this one.
+
+### Test Order Dependence (diagnostic)
+
+The suite is green in its default order — 483 of 483, exit `0`.  **Under a randomised order it is
+not**, and a single green seed proves nothing either way, so run more than one:
+
+```bash
+./run_L1Tests --gtest_shuffle --gtest_random_seed=<seed>
+```
+
+Measured on this tree across twelve seeds, one run each, and the spread is the point:
+
+| Seeds | Exit | Ran / passed | Cases that failed |
+| --- | --- | --- | --- |
+| 3, 1000, 12345, 99999 | `0` | 483 / 483 | none — green, like the default order |
+| 1, 42, 100, 777 | `1` | 483 / 481 | `ConnectionTest.MatchSourceMismatchedAddress`, `ConnectionTest.SendAsyncMatchSource` |
+| 500 | `1` | 483 / 481 | `BusTest.ListenerFiltering`, `BusTest.UnregisteredConnectionReceivesAll` — a different pair from the one above, so the failing set is not a fixed list |
+| 2 | `1` | 483 / 480 | both `ConnectionTest` cases above, plus `BusTest.ListenerFiltering` |
+| 20260808 | `1` | 483 / 480 | both `ConnectionTest` cases above, plus `BusTest.UnregisteredConnectionReceivesAll` |
+| 54321 | `139` | no totals printed | five `ConnectionTest` cases fail, and then the production SIGSEGV of the section above aborts the run before GoogleTest prints a summary |
+
+**TWO DIFFERENT PROBLEMS ARE IN PLAY, and repeating a seed separates them.**  Five repeats of each
+of five seeds:
+
+| Seed | exit `0` | exit `1` | exit `139` |
+| --- | --- | --- | --- |
+| 1 | 0 | 5 | 0 |
+| 42 | 0 | 5 | 0 |
+| 500 | 0 | 5 | 0 |
+| 12345 | 4 | 0 | 1 |
+| 54321 | 0 | 0 | 5 |
+
+The order-dependent ASSERTION failures are deterministic for a given seed — 1, 42 and 500 failed
+identically five times out of five, with the same cases each time.  The SIGSEGV is a RACE layered
+on top and is NOT tied to a seed the way the assertion failures are: seed 54321 crashed five times
+out of five, while seed 12345 — green in the single-run sweep above and green in four of its five
+repeats — crashed once.  When the crash fires it pre-empts the summary, so a crashing run reports
+no totals at all, which is why the same seed can read as green in one table and as a crash in the
+other.
+
+So order dependence in this suite is **NOT resolved**, and no seed should be quoted as "the"
+reproducer: 12345 is green four runs in five, and a green run of any seed proves nothing.  For the
+assertion failures use seed 42 or 100; for the crash use seed 54321, which reproduced it five times
+out of five in `LibCCECUninitializedTest.GetPhysicalAddressThrowsWhenNotInitialized`.
 
 The failing set is specific to the seed *and* to the test inventory: re-derive it after adding
-tests rather than trusting a list quoted here, because shuffling reorders the whole program and a
-different seed exposes a different subset of the same underlying fragility.  The seed above is
-simply a known reproducer.  Corroborating evidence sits in the driver file:
+tests rather than trusting the table above, because shuffling reorders the whole program and a
+different seed exposes a different subset of the same underlying fragility.  Corroborating evidence
+sits in the driver file:
 `DriverTest.AAA_DriverSingletonAccess` is commented "runs first alphabetically", and
 `DriverTest.ZZZ_OpenWithFailure` and `DriverTest.ZZZ_CloseWithFailure` are commented "runs late
 to avoid breaking other tests" — deliberate alphabetical-ordering prefixes, which only make
@@ -532,8 +600,9 @@ runs are diagnostic here, not an acceptance gate.**  Two consequences for anyone
 
 `ccec/test_Driver.cpp` contains 14 `GTEST_SKIP()` guards — 13 spelled
 `"Mock is nullptr - test environment not initialized"` and one
-`"Driver not in valid state for this test"`.  Measurement shows **none of them ever fires**: both
-the default run and the shuffled run above report zero skipped tests.  They are dead defensive code
+`"Driver not in valid state for this test"`.  Measurement shows **none of them ever fires**: the
+default run and every shuffled run in the table above report 483 tests run and zero skipped, green
+seeds and failing seeds alike.  They are dead defensive code
 rather than silent skips, so the suite's pass count is its real pass count.  New tests deliberately
 do not copy that idiom — if a precondition genuinely cannot be met, the test is not written and
 the gap is reported instead.
@@ -547,9 +616,12 @@ LibCCEC is a singleton shared across all test suites. The test fixture SetUp() c
 - Thread-related tests may need timing adjustments on slow systems
 - Bus thread cleanup can take time.  Init/term cycling is nonetheless covered — see
   [No Disabled Tests](#no-disabled-tests) — and it is covered **without any wall-clock pause**:
-  the uninitialised state is owned at suite level so no `init()` is ever followed by a `term()`,
-  and the `close()` sentinel is drained through a real `Driver::read()` assertion.  There is no
-  `sleep`, `usleep` or `sleep_for` anywhere in the tests this project added
+  `LibCCECUninitializedTest` owns the uninitialised state per case, and its `term()` runs only
+  after `awaitBusReaderRunning()` has observed the reader publish RUNNING, so the dropped-stop
+  window is closed by ordering instead of waited out.  The `close()` sentinel is a separate matter
+  and is **not** drained by anything in this suite — it cannot be, because `read()` throws at its
+  state guard before reaching the queue.  There is no `sleep`, `usleep` or `sleep_for` anywhere in
+  the tests this project added
 
 ### Hardware Dependencies
 
@@ -557,7 +629,7 @@ LibCCEC is a singleton shared across all test suites. The test fixture SetUp() c
   GoogleMock HDMI-CEC HAL driver mock already exists at `../../mocks/hdmicec/`
   (`hdmi_cec_driver_mock.h` / `.cpp`), is registered in `run_L1Tests_SOURCES`, and is injected by
   symlinking `mocks/hdmicec/hdmi_cec_driver.h` over `stubs/ccec/drivers/hdmi_cec_driver.h` during
-  the build.  In the default order all 60 `ConnectionTest` and all 23 `DriverTest` cases pass
+  the build.  In the default order all 60 `ConnectionTest` and all 22 `DriverTest` cases pass
   against the mock with no hardware present
 - Failure and error paths are provoked by making the mock return non-success codes, and the
   asynchronous completion path by invoking the callback the driver registered during open —

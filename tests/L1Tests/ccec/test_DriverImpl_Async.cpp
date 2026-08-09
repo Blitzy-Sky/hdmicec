@@ -152,30 +152,23 @@ static_assert(HDMI_CEC_IO_SENT_BUT_NOT_ACKD == kAuthoritativeSentAndAckd,
 
 /*
  * ---------------------------------------------------------------------------------
- * THE DANGLING HdmiCecOpen DEFAULT ACTION IS FIXED AT ITS SOURCE, NOT WORKED AROUND HERE
+ * THE HdmiCecOpen DEFAULT ACTION IS OWNED WHERE IT IS INSTALLED, AND NOT WORKED AROUND HERE
  *
  * HdmiCecDriverMockTest::TearDown() (ccec/test_Driver_Mock.cpp) installs an ON_CALL default
  * action for HdmiCecOpen on the PROCESS-GLOBAL driver mock, which outlives every fixture.
- * That lambda used to capture the fixture's `this` and read `mock->currentHandle` through
- * it, so once the fixture was destroyed any later HdmiCecOpen call dereferenced released
- * storage - latent in the default order, and a segfault under --gtest_shuffle with seeds 1,
- * 777 and 12345, reached from DriverImpl::open in DriverTest.MultipleClose,
- * DriverTest.RemoveLogicalAddress and DriverTest.WriteAsync.
+ * Its lambda therefore captures NOTHING and looks the mock up freshly inside the action:
+ * anything captured from that fixture would be dereferenced by every later HdmiCecOpen call,
+ * which is latent in the default order - where the released storage still happens to be
+ * readable - and a segfault once shuffling moves a driver case behind that fixture.
  *
- * THIS FILE USED TO NEUTRALISE IT with a TestEventListener that re-stated a capture-free
- * default action after EVERY test.  That worked, and it was the wrong shape twice over.
- * gmock keeps default actions in a list and Mock::VerifyAndClearExpectations does NOT clear
- * them, so one rule was appended per test and never removed: 475 accumulated rules by the
- * end of the run, all identical, each of which gmock walks on every HdmiCecOpen call.  And
- * it left the actual defect in place, so anything that opened the driver without this
- * translation unit linked in was still exposed.
- *
- * The lambda in test_Driver_Mock.cpp now captures nothing and looks the mock up freshly
- * inside the action - identical behaviour, no reference to any object's lifetime - so there
- * is nothing left to neutralise and no listener here.  ccec/test_Driver_Mock.cpp is in
- * scope for this pass (every ccec test translation unit under hdmicec/tests/L1Tests) and the
- * change is confined to a
- * fixture helper: no test body was touched.
+ * DO NOT NEUTRALISE SUCH A DEFAULT FROM HERE with a TestEventListener that re-states a
+ * capture-free action after every test.  It works, and it is the wrong shape twice over.
+ * gmock keeps default actions in a LIST and Mock::VerifyAndClearExpectations does NOT clear
+ * them, so one rule is appended per test and never removed - hundreds of identical rules by
+ * the end of a run, each of which gmock walks on every HdmiCecOpen call.  And it leaves the
+ * defect itself in place, so anything that opens the driver without this translation unit
+ * linked in stays exposed.  A dangling default action is fixed at its installation site,
+ * which is an in-scope fixture helper, without touching any test body.
  * ---------------------------------------------------------------------------------
  */
 
@@ -625,9 +618,9 @@ TEST_F(DriverImplAsyncTest, ReceiveCallbackDiscardsFrameWhenIncomingQueueRejects
     // establishes that directly - CLOSING, sentinel offered, HdmiCecClose, CLOSED
     // (DriverImpl.cpp:130-154) - and the fixture's TearDown already restores the opened baseline.
     //
-    // An earlier revision reached the same precondition through LibCCEC::term() and then re-armed
-    // the library with init() inside this test body, which is the one pattern the middleware's own
-    // test notes identify as the trigger for the reader-thread hazard: term() runs Bus::stop(),
+    // DO NOT REACH THIS PRECONDITION THROUGH LibCCEC::term() AND A RE-ARMING init() IN A TEST
+    // BODY.  That is the one pattern the middleware's own test notes identify as the trigger for
+    // the reader-thread hazard: term() runs Bus::stop(),
     // whose Stoppable transition can be lost when a reader has not yet been scheduled, and init()
     // then puts a FRESH Bus reader behind whatever sentinels are still queued. Closing the driver
     // opens neither door. The Bus reader is left RUNNING throughout, so it consumes the sentinel
@@ -635,7 +628,8 @@ TEST_F(DriverImplAsyncTest, ReceiveCallbackDiscardsFrameWhenIncomingQueueRejects
     // blocking read() that the NULL wakes - and Bus::Reader::run() catches InvalidStateException and
     // stays in its loop (Bus.cpp:156-173), so it re-arms cleanly the moment open() restores the
     // driver. LibCCEC's own init/term lifecycle is covered where it belongs, by
-    // LibCCECUninitializedTest in test_LibCCEC.cpp, which cycles the library ONCE per suite.
+    // LibCCECUninitializedTest in test_LibCCEC.cpp, which cycles the library once per case and
+    // only ever calls term() behind a wait for the reader to publish RUNNING.
     //
     // open() re-registers the very same static DriverReceiveCallback and DriverTransmitCallback
     // (DriverImpl.cpp:108-128), so the callback the mock captured at open() stays valid across this
@@ -668,8 +662,8 @@ TEST_F(DriverImplAsyncTest, ReceiveCallbackDiscardsFrameWhenIncomingQueueRejects
     // A CLOSED read() throws at its first statement and never touches the queue at all: the guard is
     // `{AutoLock lock_(mutex); if (status != OPENED) throw InvalidStateException(); }` at
     // DriverImpl.cpp:158-162, and it runs BEFORE the poll loop. So this call asserts the guard and
-    // NOTHING MORE - it is not a drain, and an earlier revision's claim that it took the sentinel
-    // off the queue was simply wrong about the production code. read()'s flush arm is reachable only
+    // NOTHING MORE - it is NOT a drain, and it must not be described as one: a read() on a closed
+    // driver cannot take the sentinel off the queue. read()'s flush arm is reachable only
     // when the driver was OPENED on entry and is closed while the caller is already blocked in
     // poll(); it is a race window, not a state a test can arrange from the calling thread.
     //
@@ -685,10 +679,12 @@ TEST_F(DriverImplAsyncTest, ReceiveCallbackDiscardsFrameWhenIncomingQueueRejects
     // `while (rQueue.size() > 0) { inFrame = rQueue.poll(); frame = *inFrame; }` dereferences it,
     // because CCEC_OSAL::EventQueue guards its element count and its condition variable with
     // DIFFERENT mutexes, so poll() can return the default-constructed null for a queue size() has
-    // just reported as non-empty. Measured on this tree: a segmentation fault in the reader thread in
-    // roughly 1 full-suite run in 60, in a revision that re-initialised the shared library mid-run.
-    // The fix is one of two production edits: read() must null-check inFrame in its flush arm, or
-    // EventQueue must publish its count and its condition under one lock. Neither is made here.
+    // just reported as non-empty. The fault has been observed in the reader thread with frame #0 in
+    // DriverImpl::read; tests/L1Tests/README.md carries the symbolised backtrace and the current
+    // measured stability figures, and no frequency is claimed here because this case does not
+    // provoke the window. The fix is one of two production edits: read() must null-check inFrame in
+    // its flush arm, or EventQueue must publish its count and its condition under one lock. Neither
+    // is made here.
     {
         // Named for what actually happens to it: read() throws at the state guard above, so this
         // frame is never written to. Calling it a "drain" target would restate the very claim the

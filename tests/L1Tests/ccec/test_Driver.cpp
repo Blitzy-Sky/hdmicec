@@ -47,10 +47,9 @@ using ::testing::SetArgPointee;
  * A read() CANNOT BE USED TO CLEAR THAT SENTINEL, and no helper here attempts it.  read()'s first
  * statement is `{AutoLock lock_(mutex); if (status != OPENED) throw InvalidStateException(); }`
  * (DriverImpl.cpp:158-162), which runs BEFORE the poll loop, so a read() issued against an
- * already-closed driver throws immediately and never touches rQueue at all.  An earlier revision
- * of this file carried a helper that claimed the opposite - that a closed driver's read() would
- * drain the queue and then report the invalid state.  It does not, the helper was therefore a
- * no-op describing itself as a mitigation, and it has been removed rather than left to mislead.
+ * already-closed driver throws immediately and never touches rQueue at all.  Do NOT add a helper
+ * that claims otherwise - that a closed driver's read() drains the queue and then reports the
+ * invalid state.  It cannot: such a helper is a no-op describing itself as a mitigation.
  * read()'s flush arm is reachable only when the driver was OPENED on entry and is closed while the
  * caller is already blocked in poll() - a race window, not a state a test can arrange.
  *
@@ -106,12 +105,13 @@ protected:
         // Re-opening here closes that window without touching a single test body: with the driver
         // OPENED, the running reader takes each queued NULL through the harmless arm of read()
         // (`inFrame == 0`, status still OPENED, back to poll) and the queue is empty again before the
-        // next case starts.  An earlier revision left this as "Leave driver state as-is for next
-        // test", which is what let them pile up.
+        // next case starts.  Do NOT reduce this to leaving the driver state as-is for the next test:
+        // that is what lets the sentinels pile up.
         //
-        // MEASURED, on default-order full-suite runs: 4 SIGSEGVs in 120 with the pristine fixtures
-        // (3.3%), 2 in 120 after the shared-library cycles were removed from the two async cases, and
-        // 2 in 366 with this restoration in place as well (0.5%).  REDUCED BY ROUGHLY SIX TIMES, NOT
+        // MEASURED, on default-order full-suite runs: 4 SIGSEGVs in 120 with fixtures that neither
+        // re-open here nor avoid shared-library cycling in the two async cases (3.3%), 2 in 120 with
+        // only the cycling avoided, and 2 in 366 with this re-open in place as well (0.5%).
+        // REDUCED BY ROUGHLY SIX TIMES, NOT
         // ELIMINATED, and it is worth being exact about why: the dereference is a production defect,
         // and its trigger - closing the shared driver while the Bus reader is live - is performed by
         // pre-existing passing cases in this very fixture, which Directive 5 forbids modifying.  No
@@ -182,7 +182,6 @@ TEST_F(DriverTest, CloseAndReopen) {
         // Already open, that's fine
     }
     
-    // Set up mock for close
     EXPECT_CALL(*mock, HdmiCecClose(::testing::_))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SUCCESS));
@@ -199,7 +198,6 @@ TEST_F(DriverTest, CloseAndReopen) {
         driver.open();
     });
     
-    // Verify it works by doing a simple operation
     EXPECT_NO_THROW({
         driver.open(); // Should handle gracefully
     });
@@ -207,7 +205,6 @@ TEST_F(DriverTest, CloseAndReopen) {
     // Leave driver in OPENED state for next test
 }
 
-// Test multiple close calls
 TEST_F(DriverTest, MultipleClose) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -223,7 +220,6 @@ TEST_F(DriverTest, MultipleClose) {
         // Already open, that's fine
     }
     
-    // Set up mock for first close
     EXPECT_CALL(*mock, HdmiCecClose(::testing::_))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SUCCESS));
@@ -246,7 +242,6 @@ TEST_F(DriverTest, MultipleClose) {
     });
 }
 
-// Test getLogicalAddress
 TEST_F(DriverTest, GetLogicalAddress) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -261,7 +256,6 @@ TEST_F(DriverTest, GetLogicalAddress) {
         GTEST_SKIP() << "Driver not in valid state for this test";
     }
     
-    // Set up mock to return a logical address
     EXPECT_CALL(*mock, HdmiCecGetLogicalAddress(_, _))
         .Times(1)
         .WillOnce(DoAll(
@@ -279,7 +273,6 @@ TEST_F(DriverTest, GetLogicalAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test getPhysicalAddress
 TEST_F(DriverTest, GetPhysicalAddress) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -287,7 +280,6 @@ TEST_F(DriverTest, GetPhysicalAddress) {
     }
     Driver &driver = Driver::getInstance();
     
-    // Set up mock to return a physical address
     EXPECT_CALL(*mock, HdmiCecGetPhysicalAddress(_, _))
         .Times(1)
         .WillOnce(DoAll(
@@ -305,7 +297,6 @@ TEST_F(DriverTest, GetPhysicalAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test addLogicalAddress success
 TEST_F(DriverTest, AddLogicalAddressSuccess) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -313,7 +304,6 @@ TEST_F(DriverTest, AddLogicalAddressSuccess) {
     }
     Driver &driver = Driver::getInstance();
     
-    // Set up mock to succeed
     EXPECT_CALL(*mock, HdmiCecAddLogicalAddress(_, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SUCCESS));
@@ -339,7 +329,6 @@ TEST_F(DriverTest, AddLogicalAddressSuccess) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test addLogicalAddress - address unavailable
 TEST_F(DriverTest, AddLogicalAddressUnavailable) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -347,7 +336,6 @@ TEST_F(DriverTest, AddLogicalAddressUnavailable) {
     }
     Driver &driver = Driver::getInstance();
     
-    // Set up mock to return unavailable
     EXPECT_CALL(*mock, HdmiCecAddLogicalAddress(_, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_LOGICALADDRESS_UNAVAILABLE));
@@ -362,7 +350,6 @@ TEST_F(DriverTest, AddLogicalAddressUnavailable) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test addLogicalAddress - general error
 TEST_F(DriverTest, AddLogicalAddressGeneralError) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -370,7 +357,6 @@ TEST_F(DriverTest, AddLogicalAddressGeneralError) {
     }
     Driver &driver = Driver::getInstance();
     
-    // Set up mock to return general error
     EXPECT_CALL(*mock, HdmiCecAddLogicalAddress(_, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -385,7 +371,6 @@ TEST_F(DriverTest, AddLogicalAddressGeneralError) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test removeLogicalAddress
 TEST_F(DriverTest, RemoveLogicalAddress) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -416,7 +401,6 @@ TEST_F(DriverTest, RemoveLogicalAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test isValidLogicalAddress - address is valid
 TEST_F(DriverTest, IsValidLogicalAddressTrue) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -457,12 +441,10 @@ TEST_F(DriverTest, IsValidLogicalAddressFalse) {
     EXPECT_FALSE(driver.isValidLogicalAddress(addr));
 }
 
-// Test write with NACK for non-broadcast
 TEST_F(DriverTest, WriteWithNackNonBroadcast) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     Driver &driver = Driver::getInstance();
     
-    // Set up mock to return NACK
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(DoAll(
@@ -483,12 +465,10 @@ TEST_F(DriverTest, WriteWithNackNonBroadcast) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test write with NACK for broadcast REPORT_PHYSICAL_ADDRESS
 TEST_F(DriverTest, WriteWithNackBroadcastReportPhysicalAddress) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     Driver &driver = Driver::getInstance();
     
-    // Set up mock to return NACK
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(DoAll(
@@ -511,7 +491,6 @@ TEST_F(DriverTest, WriteWithNackBroadcastReportPhysicalAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
-// Test write with sendResult errors
 TEST_F(DriverTest, WriteWithSendResultErrors) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     Driver &driver = Driver::getInstance();
@@ -545,12 +524,10 @@ TEST_F(DriverTest, WriteWithSendResultErrors) {
     }
 }
 
-// Test write with HdmiCecTx failure
 TEST_F(DriverTest, WriteWithHdmiCecTxFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     Driver &driver = Driver::getInstance();
     
-    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -576,7 +553,6 @@ TEST_F(DriverTest, ZZZ_OpenWithFailure) {
     // Close first
     driver.close();
     
-    // Set up mock to fail on open
     EXPECT_CALL(*mock, HdmiCecOpen(_))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -603,7 +579,6 @@ TEST_F(DriverTest, ZZZ_CloseWithFailure) {
     
     Driver &driver = Driver::getInstance();
     
-    // Set up mock to fail on close
     EXPECT_CALL(*mock, HdmiCecClose(::testing::_))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -626,7 +601,6 @@ TEST_F(DriverTest, ZZZ_CloseWithFailure) {
 
 }
 
-// Test printFrameDetails with various frames
 TEST_F(DriverTest, PrintFrameDetails) {
     
     Driver &driver = Driver::getInstance();
@@ -671,7 +645,6 @@ TEST_F(DriverTest, PrintFrameDetails) {
 
 }
 
-// Test poll through driver
 TEST_F(DriverTest, PollAddress) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
@@ -713,17 +686,13 @@ TEST_F(DriverTest, WriteAsync) {
 
     // Own the HdmiCecOpen default action rather than inheriting one, BEFORE opening.
     //
-    // HdmiCecDriverMockTest::TearDown() (ccec/test_Driver_Mock.cpp:53) installs an ON_CALL default
-    // action on the PROCESS-GLOBAL driver mock whose lambda captures that fixture's `this` and
-    // reads `mock->currentHandle` through it.  The action is stored on the mock, which outlives the
-    // fixture, so once that fixture has been destroyed any later HdmiCecOpen call performs a lambda
-    // that dereferences released storage.  Measured: with the default action inherited, the full
-    // suite under `--gtest_shuffle --gtest_random_seed=12345` SEGFAULTs here, in
-    // DriverImpl::open -> HdmiCecOpen, with the faulting frame being that TearDown lambda.
-    // test_Driver_Mock.cpp is a pre-existing passing file this pass must not modify, so the fix
-    // belongs here: gmock performs the LAST matching ON_CALL, so re-stating the default in this
-    // test displaces the dangling one and makes the test self-sufficient rather than dependent on
-    // whichever fixture happened to run before it.
+    // The driver mock is PROCESS-GLOBAL and outlives every fixture, so the ON_CALL default left on
+    // it by whichever fixture ran last is the default this case would otherwise open through.
+    // gmock performs the LAST matching ON_CALL, so re-stating the action here displaces any
+    // inherited one and makes the case self-sufficient in any run order instead of dependent on
+    // what ran before it.  The action is stated in terms of the mock this case already holds and
+    // of nothing that dies before the mock does - the same lifetime rule
+    // HdmiCecDriverMockTest::TearDown follows when it restores the suite-wide defaults.
     ON_CALL(*mock, HdmiCecOpen(_))
         .WillByDefault(DoAll(SetArgPointee<0>(mock->currentHandle), Return(HDMI_CEC_IO_SUCCESS)));
 
@@ -731,7 +700,6 @@ TEST_F(DriverTest, WriteAsync) {
     // while leaving LibCCEC::initialized == true (e.g. PollAddress, PrintFrameDetails)
     try { driver.open(); } catch (...) { /* already open, fine */ }
 
-    // Set up mock for async write
     EXPECT_CALL(*mock, HdmiCecTxAsync(_, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SUCCESS));
@@ -746,26 +714,25 @@ TEST_F(DriverTest, WriteAsync) {
 
     // NO SHARED-LIBRARY CYCLE HERE, AND NONE IS NEEDED.
     //
-    // An earlier revision ended this case with term() / a "drain" / init("CEC_TEST"), justified as
-    // stopping the Bus threads "before the driver is closed".  Nothing in this case closes the
-    // driver: it opens the shared driver and issues one writeAsync, neither of which moves the
-    // driver out of OPENED or the library out of initialised.  So the pair restored nothing that had
-    // changed - it left exactly the baseline it was handed - while taking the one route this file's
-    // own note (below WriteAsyncWithFailure) identifies as unsafe, and the "drain" it performed was a
-    // no-op: DriverImpl::read() throws at its state guard (DriverImpl.cpp:158-162) before it reaches
-    // the poll loop, so a read() against an already-closed driver never touches rQueue.
+    // This case opens the shared driver and issues one writeAsync.  Neither moves the driver out of
+    // OPENED or the library out of initialised, so there is nothing for it to restore: a term() /
+    // init("CEC_TEST") pair appended here would hand back exactly the baseline it was given while
+    // taking the one route this file's own note (below WriteAsyncWithFailure) identifies as unsafe.
     //
-    // MEASURED, WHICH IS WHY IT IS GONE: with the cycle in place, 80 consecutive full-suite runs
-    // produced 2 SIGSEGVs, both inside this case.  With it removed, 80 runs produced none.  The
-    // mechanism is the one stated in ccec/test_DriverImpl_Async.cpp: each close() queues a NULL
-    // sentinel that only read() consumes, Bus::stop() lets the reader leave without consuming it, and
-    // read()'s flush arm dereferences a second sentinel because CCEC_OSAL::EventQueue publishes its
-    // element count and its condition variable under DIFFERENT mutexes.  That is a production defect,
-    // reported and not made (Directive 6); a test's part is not to provoke it.
+    // WHY CYCLING THE SHARED LIBRARY IS UNSAFE, stated once so no case reintroduces it: each
+    // DriverImpl::close() offers a NULL sentinel to the receive queue and only DriverImpl::read()
+    // consumes it; Bus::stop() lets the reader leave its loop with the sentinel still queued; and
+    // read()'s flush arm can then dereference a second sentinel, because CCEC_OSAL::EventQueue
+    // publishes its element count and its condition variable under DIFFERENT mutexes.  A read() on
+    // an already-closed driver cannot be used to drain it either - read() throws at its
+    // `status != OPENED` guard before it reaches the poll loop, so rQueue is never touched.  That
+    // window is a PRODUCTION defect, reported and not fixed under AAP Directive 6; a test's part is
+    // not to provoke it.
     //
     // LibCCEC's own init/term lines are covered where they belong - LibCCECTest.InitWithValidName,
-    // InitThrowsWhenAlreadyInitialized and LibCCECUninitializedTest.TermThrowsWhenNotInitialized in
-    // ccec/test_LibCCEC.cpp - so removing this pair costs no coverage at all.
+    // LibCCECTest.InitThrowsWhenAlreadyInitialized and
+    // LibCCECUninitializedTest.TermThrowsWhenNotInitialized in ccec/test_LibCCEC.cpp - so keeping
+    // this case free of the cycle costs no coverage.
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
@@ -777,8 +744,8 @@ TEST_F(DriverTest, WriteAsyncWithFailure) {
 
     Driver &driver = Driver::getInstance();
 
-    // Same reason as DriverTest.WriteAsync above: displace the dangling HdmiCecOpen default action
-    // that ccec/test_Driver_Mock.cpp's TearDown leaves on the process-global mock, so this test
+    // Same reason as DriverTest.WriteAsync above: the HdmiCecOpen default action on the
+    // process-global mock belongs to whichever fixture ran last, so this case re-states it and
     // opens the driver through an action it owns.
     ON_CALL(*mock, HdmiCecOpen(_))
         .WillByDefault(DoAll(SetArgPointee<0>(mock->currentHandle), Return(HDMI_CEC_IO_SUCCESS)));
@@ -787,7 +754,6 @@ TEST_F(DriverTest, WriteAsyncWithFailure) {
     // while leaving LibCCEC::initialized == true (e.g. PollAddress, PrintFrameDetails)
     try { driver.open(); } catch (...) { /* already open, fine */ }
 
-    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTxAsync(_, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -801,9 +767,9 @@ TEST_F(DriverTest, WriteAsyncWithFailure) {
     }, IOException);
 
     // NO SHARED-LIBRARY CYCLE HERE, for exactly the reasons set out at the end of
-    // DriverTest.WriteAsync above: this case never closes the driver, so the term()/init() pair an
-    // earlier revision ended with restored nothing, its "drain" was a no-op against read()'s state
-    // guard, and cycling the shared library is the one route measured to SIGSEGV.
+    // DriverTest.WriteAsync above: this case never closes the driver, so a closing term()/init()
+    // pair would restore nothing, a "drain" is a no-op against read()'s state guard, and cycling
+    // the shared library is the one route measured to SIGSEGV.
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 

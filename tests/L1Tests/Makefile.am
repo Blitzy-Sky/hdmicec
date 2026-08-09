@@ -19,20 +19,28 @@
 
 # Every entry in run_L1Tests_SOURCES below except test_main.cpp names a source in a SUBDIRECTORY
 # (ccec/, osal/, or the mock under $(top_srcdir)/mocks).  With subdir-objects off, automake flattens
-# each object into this directory and warns once per such source - seventeen warnings on this file,
-# all of them at the run_L1Tests_SOURCES line.  The subdirectory layout is the suite's convention and
-# is not up for change, so the option is enabled instead of living with the warnings.
+# each object into this directory and warns ONCE PER SUCH SOURCE, every one of them reported against
+# the run_L1Tests_SOURCES line.  The subdirectory layout mirrors the source tree and is the suite's
+# convention, so the option is enabled rather than either flattening the layout or living with one
+# warning per file.
 #
-# MEASURED, both ways, from a clean tree: seventeen automake warnings -> zero; `make all` and the
-# tests build otherwise warning-free (the two that remain come from gtest.h instantiated by the
-# pre-existing ccec/test_Operands.cpp and are not ours); the suite still runs 452 of 452 green; and
-# the coverage table is IDENTICAL file for file - 91.5% (1912/2090) lines, 85.7% (377/440) functions,
-# 57.3% (1094/1908) branches, gate PASS.  Registration order is also unaffected: objects are still
-# linked in the order of this list, only their paths change.
+# ENABLING IT REORDERS NOTHING, which is the property that matters in this file: automake emits
+# am_run_L1Tests_OBJECTS in the order of this list either way and only the object PATHS change, so
+# the static-initialisation order that the "ORDER IS SIGNIFICANT" note below depends on is untouched.
+# That is checkable rather than asserted - read am_run_L1Tests_OBJECTS in the generated Makefile and
+# it is the list below, in order, with subdirectory prefixes.
 #
-# The one visible consequence is that the mock's object, .gcno and .deps now land beside its source
-# in mocks/hdmicec/ instead of here.  That is the same class of in-tree build output the build already
-# leaves in ccec/src and osal/src, it is untracked, and `git clean -fdx` removes it with the rest.
+# The one visible consequence is that the mock's object, .gcno and .deps land beside its source in
+# mocks/hdmicec/ instead of here.  That is the same class of in-tree build output the build already
+# leaves in ccec/src and osal/src, and it is untracked.
+#
+# To clear that output, use BOUNDED commands from the component root.  Do NOT use `git clean -fdx`
+# at the repository root: this component is checked out beside others in a shared workspace, and a
+# repository-wide clean deletes untracked work belonging to all of them.
+#     make -C tests/L1Tests clean
+#     find ccec osal tests mocks \( -name '*.gcno' -o -name '*.gcda' \) -delete
+# The first command removes the objects wherever subdir-objects placed them; the second is needed
+# because automake's clean rules do not cover coverage artefacts.
 AUTOMAKE_OPTIONS = subdir-objects
 
 AM_CPPFLAGS = -I$(top_srcdir)/ccec/include \

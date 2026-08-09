@@ -66,8 +66,9 @@
  *   caller, and that is reported as a BLOCKED production finding rather than closed
  *   here.
  *
- *   WHY THE CASES ARE NOT SIMPLY DELETED. Deleting them would leave osal/src/Mutex.cpp
- *   at its measured 64.5% line coverage, below the >=80% bar that Directive 4 applies
+ *   WHY THE CASES ARE NOT SIMPLY DELETED. They are what carries osal/src/Mutex.cpp from the
+ *   64.5% line coverage it measured before they existed to a measured 100% (31/31); deleting them
+ *   would put it back below the >=80% bar that Directive 4 applies
  *   per target and that ../run_coverage.sh machine-checks - and it would do so while
  *   the production defect above still shipped, unexercised and undocumented. Directive
  *   6's escape clause covers gaps that cannot be closed WITHOUT a production change;
@@ -105,9 +106,9 @@
  *   failure mode on an unsupported platform is a named, actionable failure rather than a hang,
  *   a corruption, or a pass by luck.
  *
- *   An earlier revision used the trylock probe itself as that check. That was the wrong way
- *   round: trylock IS a pthread call on the duplicate, so the check could only report a
- *   problem by performing the very operation whose validity was in question.
+ *   DO NOT USE THE TRYLOCK PROBE AS THAT CHECK. It is the wrong way round: trylock IS a pthread
+ *   call on the duplicate, so such a check could only report a problem by performing the very
+ *   operation whose validity was in question.
  *
  *   THE ONE UNGATED CALL, stated rather than glossed over: ~Mutex() calls
  *   pthread_mutex_destroy on the duplicate at scope exit. It is the production destructor, it

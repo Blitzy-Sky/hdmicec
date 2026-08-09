@@ -48,17 +48,16 @@ using ::testing::Invoke;
 using ::testing::Return;
 
 /*
- * NO SENTINEL-DRAINING HELPER IS DECLARED OR CALLED HERE, and that is a finding rather than an
- * omission.  An earlier revision of this fixture called a cec_l1_testsupport::drainClosedDriverQueue()
- * defined in ccec/test_Driver.cpp, on the reasoning that a case which terminates the shared library
- * has to take the NULL sentinel DriverImpl::close() leaves on the receive queue off that queue
- * itself.  ccec/test_Driver.cpp now records why that call could never have done so:
- * DriverImpl::read()'s first statement is
+ * NO SENTINEL-DRAINING HELPER IS DECLARED OR CALLED HERE, and none can be written.  A case that
+ * terminates the shared library leaves the NULL sentinel DriverImpl::close() offers to the receive
+ * queue sitting on that queue, and it is tempting to answer that with a helper that issues a
+ * read() on the closed driver to take it off.  A read() cannot: DriverImpl::read()'s first
+ * statement is
  * `{AutoLock lock_(mutex); if (status != OPENED) throw InvalidStateException(); }`
  * (DriverImpl.cpp:158-162), which runs BEFORE the poll loop, so a read() issued against an
- * already-closed driver throws immediately and never touches rQueue at all.  The helper was a
- * no-op describing itself as a mitigation, so it is gone from both files rather than left to
- * mislead - removing the calls changes no behaviour, only the claim.
+ * already-closed driver throws immediately and never touches rQueue at all.  Any such helper is a
+ * no-op describing itself as a mitigation, and must not be reintroduced here or in
+ * ccec/test_Driver.cpp.
  *
  * BLOCKED - REQUIRED PRODUCTION CHANGE, REPORTED NOT MADE (Directive 6): DriverImpl::read() must
  * null-check inFrame in its flush arm, or CCEC_OSAL::EventQueue must publish its element count and
@@ -80,9 +79,10 @@ namespace {
  * before the reader was scheduled is therefore dropped, the reader re-arms itself against a
  * closed driver, and the suite hangs or crashes.
  *
- * An earlier revision worked around that by declaring the initialising case LAST, so nothing
- * ever termed after it.  That is a dependence on source order: moving the case, or adding one
- * after it, silently re-opened the window, and nothing in the code would have said so.
+ * DECLARING THE INITIALISING CASE LAST WOULD ALSO AVOID IT, AND MUST NOT BE RELIED ON.  Nothing
+ * would then term() after it - but that is a dependence on source order: moving the case, or
+ * adding one after it, silently re-opens the window, and nothing in the code says so when it
+ * breaks.
  *
  * The dependence is removed by waiting for the transition instead of hoping it happened.
  * awaitBusReaderRunning() injects one frame through the mock HAL and waits - bounded, on a
@@ -92,10 +92,13 @@ namespace {
  * in any order, which is what per-test isolation means here.
  *
  * IT RUNS ONLY WHEN THERE IS A READER TO WAIT FOR.  ensureTerminated() first asks a read-only
- * probe whether the library is initialised at all, so in the suite's default order exactly ONE
- * injection happens per run - at the first case in this fixture, where the global environment's
- * library is still up.  Every later case finds it already terminated and injects nothing.  That
- * matters because frame dispatch is not free of risk in this suite: Connection::~Connection()
+ * probe whether the library is initialised at all and skips the wait when it is not, so the
+ * injection is paid once per case that actually has to stop a reader and never on a library that
+ * is already down.  In this fixture's default order that is every case, because each TearDown()
+ * hands the initialised library back to the rest of the binary - measured by running
+ * `--gtest_filter=LibCCECUninitializedTest.*`, which shows one `Bus::Reader::stop` between
+ * consecutive `[ RUN ]` lines.  KEEP THE INJECTION COUNT AS LOW AS THE DESIGN ALLOWS, because
+ * frame dispatch is not free of risk in this suite: Connection::~Connection()
  * is EMPTY in production and never detaches its Bus listener, so any dispatch after a
  * Connection has been destroyed without an explicit close() walks a freed listener.  That is a
  * pre-existing production defect - it segfaults the suite under --gtest_shuffle in
@@ -228,8 +231,9 @@ protected:
         }
         // No case in THIS fixture terminates the library, so an init() performed here is never
         // followed by a term() that could race the Bus reader it just started. The cases that do
-        // need the uninitialised state live in LibCCECUninitializedTest below, which owns that
-        // state at suite level for exactly that reason.
+        // need the uninitialised state live in LibCCECUninitializedTest below, which brings the
+        // library down only behind a wait for the reader to publish RUNNING - the ordering that
+        // keeps the stop from being dropped.
     }
 
     void TearDown() override {
@@ -383,11 +387,12 @@ TEST_F(LibCCECTest, GetLogicalAddressForDifferentDeviceTypes) {
  * which case ran before or on where a case appears in this file.  Adding a case, reordering
  * two, or running one alone with --gtest_filter all behave identically.
  *
- * An earlier revision instead performed ONE term() for the whole fixture and NO init() until
- * TearDownTestSuite(), which required the one initialising case to be declared LAST so that no
- * SetUp() would term() straight after its init().  That is the fragility this replaces:
- * ensureTerminated() now waits for the Bus reader to be observably running before it stops it
- * (see awaitBusReaderRunning above), so a term() after an init() is safe wherever it occurs.
+ * DO NOT REPLACE THIS WITH A ONE-TERM-PER-FIXTURE SCHEME.  Terminating once in the first SetUp()
+ * and re-initialising only in TearDownTestSuite() looks cheaper, and it forces the one initialising
+ * case to be declared LAST so that no SetUp() term()s straight after its init() - the same
+ * declaration-order dependence this design exists to remove.  ensureTerminated() waits for the Bus
+ * reader to be observably running before it stops it (see awaitBusReaderRunning above), which makes
+ * a term() after an init() safe wherever it occurs and costs one frame injection per case.
  */
 class LibCCECUninitializedTest : public ::testing::Test {
 protected:
@@ -418,7 +423,9 @@ protected:
         /* ALREADY TERMINATED: there is no reader to wait for and nothing to stop.  Checked with
          * a read-only probe - getPhysicalAddress() throws InvalidStateException when the
          * library is uninitialised and otherwise only reads - so this path costs no state
-         * change at all.  In the suite's default order this is every case after the first. */
+         * change at all.  It is what makes this helper safe to call from either state; in the
+         * default order no case reaches it, because every TearDown() leaves the library
+         * initialised for the rest of the binary. */
         if (!isInitialized()) {
             return true;
         }

@@ -23,6 +23,7 @@
 #include <string>
 #include <chrono>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <pthread.h>
 
@@ -228,28 +229,65 @@ TEST_F(ThreadTest, DetachWithoutStartLeavesThreadUsable) {
 // deterministic: it returns as soon as the dispatch lands and fails rather than hangs
 // if it never does.
 TEST_F(ThreadTest, StartDispatchesRunnableOnAnotherThread) {
-    SignallingRunnable asyncRunnable;
+    // THE RUNNABLE IS HEAP-OWNED, AND OWNERSHIP IS ONLY GIVEN UP ON ONE PATH.
+    //
+    // Thread::start() hands &runnable to pthread_create with PTHREAD_CREATE_DETACHED, and
+    // Thread::stop()/getNativeHandle() are declared in osal/Thread.hpp but defined nowhere in
+    // the component, so there is NO join and NO handle: nothing in the public surface tells a
+    // caller that the worker has left Thread::CEntry.  A stack-allocated runnable is therefore
+    // only safe on the path where the worker is known to be finished with it, and it is not safe
+    // on the path where it is not.
+    //
+    // Where the boundary actually is, argued rather than assumed.  SignallingRunnable::run()
+    // takes mutex_, records the thread, sets dispatched_, notifies, and RELEASES mutex_ as its
+    // unique_lock unwinds; CEntry then does nothing but `return NULL`, so the object is not
+    // touched again (Thread.cpp:38-43).  waitForDispatch() can only observe dispatched_ == true
+    // while it itself holds mutex_, which it cannot do until the worker has released it.  So a
+    // TRUE return is a genuine happens-after edge: once it lands, no worker can reach this
+    // object again, and destroying it is safe.
+    //
+    // A FALSE return is the opposite - it says nothing about the worker except that it has not
+    // signalled yet, which includes "pthread_create has not scheduled it and it is about to call
+    // run() on this object".  Destroying the runnable there is a use-after-free with no
+    // diagnostic.  Ownership is consequently RELEASED (deliberately retained for the remainder
+    // of the process) on exactly that path and freed normally on every other, so the passing run
+    // leaks nothing and the failing run cannot corrupt memory while reporting its failure.
+    //
+    // Required production change, reported and NOT made here (Directive 6): a join or completion
+    // seam on CCEC_OSAL::Thread - either a defined stop()/getNativeHandle(), or a non-detached
+    // start() paired with a join - would let this case observe worker EXIT rather than run()'s
+    // tail, and the retention below could then go away.
+    std::unique_ptr<SignallingRunnable> asyncRunnable(new SignallingRunnable());
     const pthread_t callingThread = pthread_self();
+    bool dispatched = false;
 
     {
-        Thread thread(asyncRunnable, reinterpret_cast<const int8_t *>("l1-start"));
+        Thread thread(*asyncRunnable, reinterpret_cast<const int8_t *>("l1-start"));
 
         thread.start();
 
         // Bounded, and deliberately generous rather than tight: this runs inside a suite whose
         // Bus reader threads can be CPU-bound, and a tight bound would turn scheduling pressure
         // into a spurious failure (measured: one such failure in 25 full-suite runs at 5 s).
-        // Fatal on purpose - start() creates the worker DETACHED and swallows a pthread_create
-        // failure, so the only way this times out is that no worker exists, and continuing would
-        // assert on a dispatch that never happened.
-        ASSERT_TRUE(asyncRunnable.waitForDispatch(30000));
+        dispatched = asyncRunnable->waitForDispatch(30000);
+    }
+
+    if (!dispatched) {
+        // Retain the object for the process lifetime BEFORE failing: a worker that has not
+        // signalled may still be about to dereference it, and there is no seam to wait on.
+        (void)asyncRunnable.release();
+        FAIL() << "Thread::start() never dispatched the runnable within 30s. start() creates the "
+                  "worker detached and swallows a pthread_create failure, so the only way this "
+                  "happens is that no worker exists; the runnable has been intentionally retained "
+                  "rather than freed, because a worker that starts late would otherwise use it "
+                  "after free.";
     }
 
     // Dispatch really crossed a thread boundary; start() did not degrade to an
     // inline call on the caller.
-    EXPECT_EQ(0, pthread_equal(callingThread, asyncRunnable.dispatchThread()));
+    EXPECT_EQ(0, pthread_equal(callingThread, asyncRunnable->dispatchThread()));
 
     // The worker was created detached, so scope exit above is a complete teardown:
     // ~Thread has no join to perform and must not block or fail.
-    EXPECT_TRUE(asyncRunnable.waitForDispatch(0));
+    EXPECT_TRUE(asyncRunnable->waitForDispatch(0));
 }

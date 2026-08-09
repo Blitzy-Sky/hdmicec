@@ -26,12 +26,10 @@
 # genhtml invocation with HOME pointed at it, set per command rather than exported
 # so the suite under test and the build keep the real one; the directory is removed
 # at the end. Nothing in your home directory is read, copied, moved or removed, and
-# an unset HOME is not an error. An earlier revision of the runner did stash and
-# restore `~/.lcovrc`, and this note used to say so; it was replaced because the
-# restoring `mv -f` would destroy a copy that had reappeared during the run - which
-# a sibling runner in this workspace could recreate - and because its
-# "already stashed" early return made the per-level re-check a no-op. A private HOME
-# has neither failure mode and needs no trap to undo.
+# an unset HOME is not an error. Keep it that way rather than stashing and restoring
+# `~/.lcovrc`: a restoring `mv -f` destroys any copy that reappeared during the run -
+# which a sibling runner sharing this workspace can recreate at any moment - and a
+# stash needs a trap to undo, which a private HOME does not.
 #
 # PRECEDENCE, in the order lcov applies it: `--rc branch_coverage=1` on the command
 # line wins over everything; `--config-file <this file>` is read INSTEAD OF
@@ -154,7 +152,7 @@ function_coverage = 1
 # Specify if branch coverage data should be collected and processed. Enabled
 # here because lcov collects no branch data by default, and this suite reports
 # branch movement alongside line coverage. This is lcov 2.x's current spelling;
-# the legacy `lcov_branch_coverage` this file used to carry is deprecated and
+# keep it, because the legacy `lcov_branch_coverage` spelling is deprecated and
 # emits a warning on every invocation. It is only read when this file is passed
 # with --config-file, so a caller that needs branch data unconditionally should
 # also pass `--rc branch_coverage=1`.

@@ -159,10 +159,12 @@ TEST_F(MessageEncoderTest, EncodeActiveSsourceRoundTrip) {
  *
  * MessageEncoder::encode() is a template that calls msg.opCode() and msg.serialize(frame), so a
  * message class whose type is never handed to the encoder has both of those bodies sitting
- * uncovered no matter how thoroughly the operands inside it are tested.  Measured on this tree,
- * that is why ccec/include/ccec/Messages.hpp read 76.5% (228/298) - the lowest figure in the
- * middleware trace after the two even smaller headers - while every .cpp in ccec/src was at or
- * above the bar.
+ * uncovered no matter how thoroughly the operands inside it are tested.  That is what left
+ * ccec/include/ccec/Messages.hpp at a measured 76.5% (228/298) in the baseline this file's cases
+ * were written against - the lowest figure in the middleware trace after the two even smaller
+ * headers - while every .cpp in ccec/src was at or above the bar.  With the cases below in place
+ * it measures 92.5% (294/318).  Re-measure with ../run_coverage.sh rather than trusting either
+ * figure as current.
  *
  * The cases below encode the message types that were in that position.  Each asserts the exact
  * bytes rather than only the length, because the byte layout IS the message: an operand

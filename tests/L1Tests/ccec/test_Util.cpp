@@ -39,18 +39,52 @@
  * lstat and refused unless it is absent or a regular file this process owns; reads open
  * O_RDONLY|O_NOFOLLOW|O_CLOEXEC; writes go to a fresh O_EXCL|O_NOFOLLOW temporary in the
  * same directory, with the original mode, owner and group reapplied, and are rename()d over
- * the path so a planted link is replaced rather than written through; and restoration is
- * additionally armed through atexit and the fatal/termination signals using only
- * async-signal-safe primitives, so a crash cannot leave CEC debug logging switched on for
- * the whole machine.
+ * the path so a planted link is replaced rather than written through.
  *
- * The Bus reader and writer threads are the other shared state and are deliberately NOT
- * stopped: quiescing them means LibCCEC::term() then init(), and that path can lose the
- * reader's RUNNING/STOPPING transition and hang. Both threads park without CEC traffic,
- * which no case here generates, and every assertion over captured output matches a unique
- * marker or an ordered token sequence rather than the size of the capture, so output from
- * another writer cannot change a verdict. The residual data race on cec_log_level itself
- * needs a production change and is reported as a blocked gap.
+ * INTER-PROCESS CUSTODY. The path is fixed, so two copies of this suite on one host - or
+ * this suite and anything else that writes it - contend for the same file, and
+ * capture-then-restore is not atomic across processes: the second copy captures what the
+ * first has already replaced and hands that back as though it were the original. An
+ * advisory whole-file lock on a companion path, "/tmp/cec_log_enabled.testlock", is
+ * therefore taken by the guard BEFORE it captures anything and released only after it has
+ * restored, so the capture-mutate-restore window is exclusive. A lock this fixture cannot
+ * obtain is a hard failure, not a warning: proceeding without it is precisely the race.
+ *
+ * RESTORATION IS NORMAL-FLOW ONLY - NO SIGNAL HANDLER. An earlier revision also armed the
+ * restoration from handlers installed on SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGSEGV and
+ * SIGABRT. That was wrong, and not marginally: the handler reached a function-local static
+ * through instance(), mutated ordinary C++ object state, and could re-enter the very
+ * rename()/unlink() sequence it interrupted - two racing writers over one shared temporary
+ * path, from a context where almost nothing is defined. A crash mid-restore would corrupt
+ * the file it was trying to protect. Restoration is now TearDown() plus one atexit hook,
+ * both of which run on ordinary control flow; the residual exposure - a SIGKILL, or a
+ * fatal signal - leaves the file as it stood, which is a stale value in a debug-logging
+ * switch and is recoverable by hand, whereas an interrupted rename is not.
+ *
+ * cec_log_level is a plain int with internal linkage in Util.cpp: check_cec_log_status()
+ * writes it, and CCEC_LOG() and dump_buffer() read it, with no lock, no atomic and no
+ * accessor. The Bus reader and writer threads outlive every case in this binary, so a write
+ * issued from the test thread is formally concurrent with their reads.
+ *
+ * WHY THAT IS NOT ANSWERED WITH fork(). An earlier revision ran every case body in a forked
+ * child so the write happened where no Bus thread existed. fork() in a process that has
+ * other threads leaves the child holding whatever locks those threads happened to own, and
+ * the child then ran GoogleTest, stdio and libgcov - none of them async-signal-safe and all
+ * of them allocator users. The isolation bought a formal data race and paid for it with a
+ * deadlock that no amount of care inside the child could remove; a poll-and-kill deadline
+ * around it converted the hang into a timeout, which is a failure report, not a fix.
+ *
+ * So the bodies run in this process, and the remaining exposure is stated rather than
+ * engineered around: an int written by one thread while others read it. Both Bus threads
+ * park on a condition variable when there is no CEC traffic and no case here generates any,
+ * and every read is a single load whose two possible values are the old level and the new
+ * one. What is left unfixed is in production, not here: cec_log_level should be atomic, or
+ * Util.cpp should expose a seam for setting and reading it. That is a production change, so
+ * it is reported as a BLOCKED gap rather than made - see the traceability report.
+ *
+ * The output assertions are unaffected by any of this: each matches a unique marker or an
+ * ordered token sequence rather than the size of the capture, so output from another
+ * writer reaching the redirected descriptor cannot change a verdict.
  */
 
 #include <gtest/gtest.h>
@@ -60,10 +94,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "ccec/Util.hpp"
@@ -204,7 +242,11 @@ std::string captureStdout(Callable body) {
  * no-follow, atomic-replace and signal-safe properties described in the file header hold
  * for every code path rather than for the ones somebody remembered.
  *
- * Everything the signal path needs is a fixed-size static: the handler allocates nothing.
+ * The guard is also the holder of the inter-process lock over the path, so the exclusive
+ * window and the capture it protects cannot get out of step: activate() takes the lock
+ * before it reads a byte, and restoreAndDeactivate() releases it after it has written the
+ * original back.  Nothing here runs from a signal handler - see RESTORATION IS NORMAL-FLOW
+ * ONLY in this file's header for why that was removed.
  */
 class LogConfigGuard {
 public:
@@ -223,6 +265,18 @@ public:
             return true;
         }
         error_.clear();
+
+        /* EXCLUSIVE FIRST, CAPTURE SECOND.  The path is fixed by production code, so a
+         * second writer is possible; capturing before locking would capture whatever that
+         * writer had already put there and hand it back as the original.
+         *
+         * A `return false` anywhere below this point leaves the lock held and active_ false.
+         * That is deliberate rather than leaked: GoogleTest runs TearDown() even when a
+         * fatal assertion aborts SetUp(), and restoreAndDeactivate() releases the lock on
+         * the !active_ path for exactly this case; the atexit hook is the backstop. */
+        if (!acquireLock()) {
+            return false;
+        }
         savedLength_ = 0;
         savedExisted_ = false;
         savedMode_ = 0600;
@@ -289,26 +343,13 @@ public:
 
         buildTempPath();
         registerAtExitOnce();
-        installSignalHandlers();
         active_ = true;
         return true;
     }
 
-    /*
-     * Write one configuration value, atomically and without following a link.
-     *
-     * Only a fully complete write counts. A metadata step that did not take aborts before the
-     * rename, so a false here means the path still holds exactly what it held before and
-     * metadataError() says why.
-     */
+    /* Write one configuration value, atomically and without following a link. */
     bool write(const char *data, size_t length) {
-        metadataErrno_ = 0;
-        const int outcome = atomicWrite(data, length, savedMode_, savedUid_, savedGid_);
-        if (outcome != kWriteComplete) {
-            error_ = describeMetadataFailure("could not write " + std::string(kLogConfigPath));
-            return false;
-        }
-        return true;
+        return atomicWrite(data, length, savedMode_, savedUid_, savedGid_) == 0;
     }
 
     bool write(const std::string &contents) {
@@ -324,37 +365,16 @@ public:
     bool active() const { return active_; }
     const std::string &lastError() const { return error_; }
 
-    /*
-     * Put the path back exactly as it was found and disarm the restoration paths.
-     *
-     * "Exactly" includes the mode and the owner, so a restore that reinstated the CONTENT but
-     * could not reinstate the metadata returns false with an explanation. That is not pedantry:
-     * this fixture's contract is that it leaves the host as it found it, and a file whose mode
-     * this suite widened is a change to the machine whether or not its bytes are right. The
-     * content has been put back in that case - the return value reports the shortfall, it does
-     * not describe a file left holding a test value.
-     */
+    /* Put the path back exactly as it was found, then release the exclusive window. */
     bool restoreAndDeactivate() {
         if (!active_) {
+            releaseLock();     /* activate() may have failed after locking */
             return true;
         }
-        metadataErrno_ = 0;
-        const int outcome = restoreQuietly();
-        removeSignalHandlers();
+        const bool restored = (restoreQuietly() == 0);
         active_ = false;
-
-        if (outcome == kWriteComplete) {
-            return true;
-        }
-        if (outcome == kContentWrittenMetadataIncomplete) {
-            error_ = describeMetadataFailure(
-                std::string("restored the contents of ") + kLogConfigPath
-                + " but could not restore its mode and owner");
-        } else {
-            error_ = describeMetadataFailure(
-                std::string("could not restore ") + kLogConfigPath);
-        }
-        return false;
+        releaseLock();
+        return restored;
     }
 
 private:
@@ -366,60 +386,16 @@ private:
         , savedUid_(static_cast<uid_t>(-1))
         , savedGid_(static_cast<gid_t>(-1))
         , atExitRegistered_(false)
-        , handlersInstalled_(false)
-        , restoreInProgress_(false)
-        , metadataErrno_(0) {
+        , lockFd_(-1) {
         saved_[0] = '\0';
         tempPath_[0] = '\0';
+        lockPath_[0] = '\0';
     }
 
     LogConfigGuard(const LogConfigGuard &);
     LogConfigGuard &operator=(const LogConfigGuard &);
 
-    /*
-     * Turn a recorded metadata errno into a message, on the non-signal paths only.
-     *
-     * atomicWrite() stores the errno and formats nothing, because it may be running inside a
-     * signal handler where allocation is not permitted. The formatting happens here instead,
-     * where a std::string is safe, and names the mode and owner that were being restored so a
-     * reader can put the file right by hand if this fixture could not.
-     */
-    std::string describeMetadataFailure(const std::string &prefix) const {
-        std::string message = prefix;
-        if (metadataErrno_ != 0) {
-            message += ": ";
-            message += std::strerror(metadataErrno_);
-            message += " (wanted mode 0" + std::to_string(static_cast<unsigned long>(savedMode_))
-                + ", uid " + std::to_string(static_cast<long>(savedUid_))
-                + ", gid " + std::to_string(static_cast<long>(savedGid_)) + ")";
-        }
-        return message;
-    }
-
-    /*
-     * Outcome of atomicWrite(), and the reason it is three-valued rather than a bool.
-     *
-     * A metadata step failing is not the same event as a content step failing, and the two
-     * demand opposite handling depending on which caller is asking. When a TEST VALUE is being
-     * written, a metadata failure must abort the whole operation: nothing is renamed into place,
-     * the path keeps the bytes it had, and the caller reports a failure - the recovery material
-     * is then still exactly where it was. When the ORIGINAL is being RESTORED, aborting would be
-     * the worse outcome by far, because the path is holding a test value at that moment and
-     * refusing to rename would leave it there. So the content is put back and the metadata
-     * failure is reported separately, which is what kContentWrittenMetadataIncomplete says.
-     */
-    enum WriteOutcome {
-        kWriteFailed = -1,                       /* nothing replaced; the path is untouched */
-        kWriteComplete = 0,                      /* content and metadata both as requested */
-        kContentWrittenMetadataIncomplete = 1    /* content replaced; mode and/or owner are not */
-    };
-
-    /*
-     * Async-signal-safe: no allocation, and only open/write/fchmod/fchown/fstat/rename/unlink/
-     * close, every one of which POSIX lists as async-signal-safe. The metadata failure it
-     * records is stored in plain scalars for the same reason - the signal path must be able to
-     * set them without formatting anything.
-     */
+    /* Allocation-free: only open/write/fchmod/fchown/rename/unlink/close. */
     int atomicWrite(const char *data, size_t length, mode_t mode, uid_t uid, gid_t gid) {
         if (tempPath_[0] == '\0') {
             return -1;
@@ -442,105 +418,48 @@ private:
             }
             written += static_cast<size_t>(chunk);
         }
-        /*
-         * Hand back the metadata the file was found with, and CHECK that it was handed back.
-         * These two calls used to be discarded with a (void) cast on the reasoning that a
-         * non-root process cannot always give a file away. The reasoning is sound; discarding
-         * the result is not, because it makes the two indistinguishable outcomes - "this process
-         * is not permitted to restore the owner" and "the file has been left with the wrong mode
-         * or the wrong owner" - and the second is a machine this fixture modified and did not
-         * put back.
+        /* Hand back the metadata the file was found with. The two calls are NOT
+         * equivalent, so they are not treated equivalently:
          *
-         * fstat is what turns the check from "the call returned zero" into "the file is as it
-         * should be": a partial success, or a platform that reports success without applying the
-         * change, is caught by comparing the descriptor's own metadata against what was asked
-         * for. The descriptor is used rather than the path, so nothing that happens to the
-         * directory entry between the calls can affect the answer.
+         *   fchmod - this descriptor was just created by this process with O_EXCL, so
+         *            this process owns the file and fchmod to any mode must succeed. A
+         *            failure here means the restored file carries permissions the host
+         *            did not have before, which is exactly the silent host mutation the
+         *            restoration exists to prevent, so it fails the write.
+         *   fchown - genuinely best-effort. A non-root process cannot give a file away,
+         *            so EPERM is the normal, expected outcome whenever the config file
+         *            was owned by somebody else, and failing on it would abort every
+         *            unprivileged run for a condition the test cannot influence.
          */
-        /*
-         * WHEN THIS BRANCH CAN FIRE, said plainly so it is not mistaken for tested code. On a
-         * normal filesystem it cannot. activate() refuses the path unless it is owned by this
-         * process's effective uid or this process is root, so the fchown below is always either
-         * "give the file to the user who already owns it" or "root gives a file away" - both of
-         * which succeed - and fchmod on a file this process owns succeeds for the same reason.
-         * What is left is the case this code exists for: a filesystem or a security module that
-         * refuses the change anyway - a read-only remount, an immutable attribute, a restrictive
-         * label - where the alternative would be to leave the host's file with a mode or an owner
-         * this suite changed and never put back. No test provokes it, because provoking it would
-         * mean manufacturing a filesystem condition rather than exercising this unit, and the
-         * suite's own bar rules that out. It is stated here instead of implied.
-         */
-        int metadataFailure = 0;
         if (fchmod(fd, mode) != 0) {
-            metadataFailure = errno ? errno : EPERM;
+            close(fd);
+            unlink(tempPath_);
+            return -1;
         }
-        if (uid != static_cast<uid_t>(-1) && fchown(fd, uid, gid) != 0) {
-            if (metadataFailure == 0) {
-                metadataFailure = errno ? errno : EPERM;
-            }
+        if (uid != static_cast<uid_t>(-1)) {
+            (void)fchown(fd, uid, gid);
         }
-        if (metadataFailure == 0) {
-            struct stat applied;
-            if (fstat(fd, &applied) != 0) {
-                metadataFailure = errno ? errno : EIO;
-            } else if ((applied.st_mode & 07777) != (mode & 07777)) {
-                metadataFailure = EPERM;
-            } else if (uid != static_cast<uid_t>(-1)
-                       && (applied.st_uid != uid || applied.st_gid != gid)) {
-                metadataFailure = EPERM;
-            }
-        }
-
         if (close(fd) != 0) {
             unlink(tempPath_);
-            return kWriteFailed;
+            return -1;
         }
-
-        /*
-         * A metadata failure while writing a TEST VALUE aborts before the rename: the path keeps
-         * the bytes it had, the temporary is removed, and saved_ is untouched - so everything
-         * needed to recover is still in place, which is the point. During a RESTORE the rename
-         * goes ahead, because leaving a test value on the machine to protect a mode bit would be
-         * the wrong trade; the caller is told through the return value.
-         */
-        if (metadataFailure != 0 && !restoreInProgress_) {
-            unlink(tempPath_);
-            metadataErrno_ = metadataFailure;
-            return kWriteFailed;
-        }
-
         if (rename(tempPath_, kLogConfigPath) != 0) {
             unlink(tempPath_);
-            return kWriteFailed;
+            return -1;
         }
-
-        if (metadataFailure != 0) {
-            metadataErrno_ = metadataFailure;
-            return kContentWrittenMetadataIncomplete;
-        }
-        return kWriteComplete;
+        return 0;
     }
 
-    /*
-     * The restoration used by TearDown, atexit and the signal handlers alike.
-     *
-     * restoreInProgress_ is what tells atomicWrite() which of the two metadata policies applies.
-     * It is set and cleared around the call rather than passed as an argument so that the signal
-     * and atexit paths, which call this function with no context of their own, get the restore
-     * policy automatically.
-     */
+    /* The one restoration primitive, used by TearDown and by the atexit hook alike. */
     int restoreQuietly() {
         if (!savedExisted_) {
-            return (unlink(kLogConfigPath) == 0 || errno == ENOENT) ? kWriteComplete : kWriteFailed;
+            return (unlink(kLogConfigPath) == 0 || errno == ENOENT) ? 0 : -1;
         }
-        restoreInProgress_ = true;
-        const int outcome = atomicWrite(saved_, savedLength_, savedMode_, savedUid_, savedGid_);
-        restoreInProgress_ = false;
-        return outcome;
+        return atomicWrite(saved_, savedLength_, savedMode_, savedUid_, savedGid_);
     }
 
     void buildTempPath() {
-        /* Built once, into a static buffer, so the signal path needs no formatting. */
+        /* Built once, into a static buffer, so no restoration path has to format it. */
         const long pid = static_cast<long>(getpid());
         std::snprintf(tempPath_, sizeof(tempPath_), "%s.test.%ld.tmp", kLogConfigPath, pid);
     }
@@ -553,55 +472,87 @@ private:
         atExitRegistered_ = true;
     }
 
+    /* Last-chance restoration on ORDINARY process exit.  atexit handlers run on return
+     * from main() and on exit(), which is normal control flow - unlike a signal handler,
+     * this may safely touch the guard's state and the filesystem.  It exists for the case
+     * where a fatal GoogleTest assertion unwinds past TearDown. */
     static void atExitRestore() {
         LogConfigGuard &guard = instance();
         if (guard.active_) {
             (void)guard.restoreQuietly();
             guard.active_ = false;
         }
+        guard.releaseLock();
     }
 
-    static void signalRestore(int signalNumber) {
-        LogConfigGuard &guard = instance();
-        if (guard.active_) {
-            (void)guard.restoreQuietly();
-            guard.active_ = false;
+    /*
+     * Advisory whole-file lock over a COMPANION path, not over the configuration file
+     * itself.  Locking the file would mean holding a descriptor to it across the
+     * rename() that replaces it, at which point the lock is on the replaced inode and no
+     * longer excludes anybody.  A separate, never-renamed lock file keeps the lock and the
+     * thing it protects independent.
+     *
+     * flock() rather than lockf()/fcntl(): the lock is wanted for the lifetime of the
+     * descriptor with no byte ranges, it is released automatically if this process dies,
+     * and it is not silently dropped when some other close() of the same file happens.
+     * LOCK_NB with a bounded retry, because blocking for ever inside SetUp() would turn a
+     * contended host into a suite that hangs instead of a suite that reports.
+     */
+    bool acquireLock() {
+        if (lockFd_ >= 0) {
+            return true;
         }
-        /* Chain to whatever was installed before, so a crash still produces its usual
-         * diagnosis and this fixture never swallows a failure. */
-        guard.removeSignalHandlers();
-        raise(signalNumber);
-    }
+        std::snprintf(lockPath_, sizeof(lockPath_), "%s.testlock", kLogConfigPath);
 
-    void installSignalHandlers() {
-        if (handlersInstalled_) {
-            return;
+        const int fd = open(lockPath_, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            error_ = std::string("could not open the custody lock ") + lockPath_ + ": "
+                + std::strerror(errno)
+                + " (a symlink at that path is refused, which is what O_NOFOLLOW reports"
+                  " as ELOOP)";
+            return false;
         }
-        struct sigaction action;
-        std::memset(&action, 0, sizeof(action));
-        action.sa_handler = &LogConfigGuard::signalRestore;
-        sigemptyset(&action.sa_mask);
-        action.sa_flags = 0;
-        for (size_t i = 0; i < kSignalCount; ++i) {
-            if (sigaction(kSignals[i], &action, &previous_[i]) != 0) {
-                std::memset(&previous_[i], 0, sizeof(previous_[i]));
+
+        /* 5 s in 10 ms steps.  The critical section is a handful of small writes, so any
+         * genuine holder clears it in milliseconds; anything longer is a stuck process and
+         * is worth failing on rather than waiting out. */
+        const int kAttempts = 500;
+        for (int attempt = 0; attempt < kAttempts; ++attempt) {
+            if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+                lockFd_ = fd;
+                return true;
+            }
+            if (errno != EWOULDBLOCK) {
+                error_ = std::string("could not lock ") + lockPath_ + ": "
+                    + std::strerror(errno);
+                close(fd);
+                return false;
+            }
+            struct timespec pause;
+            pause.tv_sec = 0;
+            pause.tv_nsec = 10 * 1000 * 1000L;
+            while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {
+                /* finish the remaining interval nanosleep wrote back */
             }
         }
-        handlersInstalled_ = true;
+        error_ = std::string("another process has held ") + lockPath_ + " for over 5 s, so "
+            + kLogConfigPath + " is not this suite's to modify.  Two copies of run_L1Tests "
+            "on one host contend for that fixed path; run them one at a time.";
+        close(fd);
+        return false;
     }
 
-    void removeSignalHandlers() {
-        if (!handlersInstalled_) {
+    void releaseLock() {
+        if (lockFd_ < 0) {
             return;
         }
-        for (size_t i = 0; i < kSignalCount; ++i) {
-            (void)sigaction(kSignals[i], &previous_[i], NULL);
-        }
-        handlersInstalled_ = false;
+        /* The lock file is deliberately NOT unlinked: another waiter may already hold a
+         * descriptor to it, and removing it would let a third process create a new inode
+         * and lock that instead - two "exclusive" holders of different files. */
+        (void)flock(lockFd_, LOCK_UN);
+        close(lockFd_);
+        lockFd_ = -1;
     }
-
-    static const size_t kSignalCount = 6;
-    static const int kSignals[kSignalCount];
 
     bool active_;
     bool savedExisted_;
@@ -610,22 +561,11 @@ private:
     uid_t savedUid_;
     gid_t savedGid_;
     bool atExitRegistered_;
-    bool handlersInstalled_;
-    /* Selects atomicWrite()'s metadata policy: abort before the rename while writing a test
-     * value, complete the rename while restoring. Set only around restoreQuietly(). */
-    bool restoreInProgress_;
-    /* The errno of the metadata step that failed, recorded by atomicWrite() - which may be on a
-     * signal path and so cannot format - and turned into a message by describeMetadataFailure().
-     * volatile sig_atomic_t because a signal handler writes it. */
-    volatile sig_atomic_t metadataErrno_;
+    int lockFd_;
     std::string error_;
     char saved_[4096];
     char tempPath_[256];
-    struct sigaction previous_[kSignalCount];
-};
-
-const int LogConfigGuard::kSignals[LogConfigGuard::kSignalCount] = {
-    SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGSEGV, SIGABRT
+    char lockPath_[288];
 };
 
 LogConfigGuard &logConfig() {
@@ -654,19 +594,6 @@ int probeEffectiveLogLevel() {
     return kUnknownLogLevel;
 }
 
-// Table key that selects a given numeric level, so a snapshotted level can be put back
-// through the only route production offers: write the file, then re-read it. LOG_INFO is
-// Util.cpp's static initialiser, i.e. the level a process has before any file is read, so
-// it is the documented fallback when the probe found nothing.
-const char *keyForLogLevel(int level) {
-    for (const LogLevelCase &levelCase : kLogLevels) {
-        if (levelCase.value == level) {
-            return levelCase.key;
-        }
-    }
-    return "INFO";
-}
-
 // Whether a configuration file is present at the fixed path. lstat, so a symlink standing
 // there is not reported as the file.
 bool logConfigExists() {
@@ -679,70 +606,100 @@ bool logConfigExists() {
 class UtilTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        /* Capture the configuration file and arm every restoration path before the first
-         * write. A refusal here means the path holds something this fixture must not
-         * modify, which is a hard failure rather than a licence to proceed. */
+        /* Take the inter-process lock, capture the configuration file and arm the atexit
+         * restoration before the first write. A refusal here means either that another
+         * process holds the path or that it holds something this fixture must not modify;
+         * both are hard failures rather than a licence to proceed. */
         ASSERT_TRUE(logConfig().activate()) << logConfig().lastError();
 
-        /* Snapshot the EFFECTIVE level as well as the file. Restoring only the file would
-         * leave the process at whatever verbosity the last case selected, which the later
-         * LibCCEC and DriverImpl cases would silently inherit. */
-        savedLogLevel_ = probeEffectiveLogLevel();
+        /* Read the effective level BEFORE anything writes it, because it is what TearDown
+         * has to put back. cec_log_level has internal linkage and no accessor, so CCEC_LOG
+         * is the only observation available. */
+        entryLogLevel_ = probeEffectiveLogLevel();
+        ASSERT_NE(kUnknownLogLevel, entryLogLevel_)
+            << "no CCEC_LOG level produced output, so the level this case must restore could "
+            << "not be observed; proceeding would leave the process at whatever verbosity "
+            << "the case happens to set last.";
 
-        /* Regression guard for exactly that leak: every case in this fixture must start
-         * from the same effective level, so a case that failed to restore it fails here. */
+        /* Every case in this fixture must start from the same effective level. Each case
+         * restores it in TearDown, so a mismatch here means a restoration did not hold -
+         * either a case left the level moved, or another process rewrote the shared
+         * configuration file despite the lock. */
         if (firstObservedLogLevel_ == kUnknownLogLevel) {
-            firstObservedLogLevel_ = savedLogLevel_;
+            firstObservedLogLevel_ = entryLogLevel_;
         }
-        EXPECT_EQ(firstObservedLogLevel_, savedLogLevel_)
-            << "the effective CEC log level changed between UtilTest cases. Either an "
-            << "earlier case leaked verbosity into this one, or another process rewrote "
-            << kLogConfigPath << " while this suite was running - that path is fixed by "
-            << "the production reader, so two concurrent copies of this suite on one host "
-            << "contend for it.";
-
-        applyLogConfig("INFO\n");
+        EXPECT_EQ(firstObservedLogLevel_, entryLogLevel_)
+            << "the effective CEC log level changed between UtilTest cases, so either a case "
+            << "did not restore it or something outside this fixture rewrote "
+            << kLogConfigPath << " while the suite was running.";
     }
 
     void TearDown() override {
-        /* Normalise the process-static level to the compile-time default first: when the
-         * configuration file did not exist before this test, the production reader returns
-         * early without touching the level, so the file being gone is not by itself enough
-         * to put the level back. */
-        if (logConfig().active()) {
-            const bool resetFileWritten =
-                writeLogConfig(std::string(keyForLogLevel(savedLogLevel_)) + "\n");
-            /* lastError() is streamed so a metadata failure - a mode or owner that could not be
-             * applied - names itself here rather than surfacing only as a bare false. */
-            EXPECT_TRUE(resetFileWritten) << logConfig().lastError();
-            if (resetFileWritten) {
-                EXPECT_NO_THROW(check_cec_log_status());
-                /* Read it back: writing the file is not proof the reader adopted it. */
-                if (savedLogLevel_ != kUnknownLogLevel) {
-                    EXPECT_EQ(savedLogLevel_, probeEffectiveLogLevel());
-                }
-            }
-        }
+        /* THE ORDER MATTERS AND IS THE WHOLE POINT.  Applying a level means WRITING the
+         * configuration file, so the level has to go back first and the file's original
+         * bytes second - the reverse order would restore the file and then overwrite it. */
+        restoreEntryLogLevel();
 
-        /* Then hand the file back byte-for-byte (or remove it again) and disarm the
-         * atexit/signal restoration. */
-        /* A false here now covers two distinct outcomes and lastError() says which: the contents
-         * could not be put back at all, or the contents were restored but the file's mode and
-         * owner were not. Both leave the host altered, so both fail - and both name what to fix
-         * by hand. */
+        /* Hand the file back byte-for-byte (or remove it again), disarm the atexit hook and
+         * release the inter-process lock. */
         EXPECT_TRUE(logConfig().restoreAndDeactivate())
-            << "failed to restore " << kLogConfigPath << ": " << logConfig().lastError();
+            << "failed to restore " << kLogConfigPath;
 
-        /* Re-read the file that is now on disk so the process-static level cannot be left
-         * disagreeing with it: with the original file back the level becomes whatever that
-         * file says, and with no file the reader returns early and the level stays at the
-         * default just written above. Either way the pair is consistent when this test
-         * hands control on. */
-        EXPECT_NO_THROW(check_cec_log_status());
+        /* Prove the restoration rather than assume it: the level observed on the way out
+         * must be the level observed on the way in. */
+        EXPECT_EQ(entryLogLevel_, probeEffectiveLogLevel())
+            << "this case left the process-wide CEC log level at a different value than it "
+            << "found, which would leak verbosity into every later LibCCEC and DriverImpl "
+            << "case in this binary";
+    }
+
+    /*
+     * Runs one case body against the INFO baseline every case starts from.
+     *
+     * The name is kept because every case reads `RunWithBaseline([this]{ ... })` and the
+     * shape of the cases is unchanged; what it no longer does is fork.  See WHY THAT IS NOT
+     * ANSWERED WITH fork() in this file's header: the body executes in this process, and the
+     * process-wide level it moves is put back by TearDown() above.
+     */
+    void RunWithBaseline(const std::function<void()> &body) {
+        ASSERT_TRUE(logConfig().active())
+            << "the configuration-file guard is not armed, so nothing may write "
+            << kLogConfigPath;
+
+        applyLogConfig("INFO\n");
+        body();
+    }
+
+    /*
+     * Put cec_log_level back to the value the case found, through the only route production
+     * offers: write the matching key into the configuration file and let
+     * check_cec_log_status() read it.  There is no setter.
+     */
+    void restoreEntryLogLevel() {
+        if (entryLogLevel_ == kUnknownLogLevel) {
+            return;
+        }
+        if (probeEffectiveLogLevel() == entryLogLevel_) {
+            return;   /* the case did not move it; nothing to write */
+        }
+        for (size_t i = 0; i < sizeof(kLogLevels) / sizeof(kLogLevels[0]); ++i) {
+            if (kLogLevels[i].value != entryLogLevel_) {
+                continue;
+            }
+            const std::string contents = std::string(kLogLevels[i].key) + "\n";
+            EXPECT_TRUE(writeLogConfig(contents))
+                << "could not write " << kLogConfigPath << " to restore log level "
+                << entryLogLevel_;
+            EXPECT_NO_THROW(check_cec_log_status());
+            return;
+        }
+        ADD_FAILURE() << "the entry log level " << entryLogLevel_ << " has no key in the "
+                      << "production level table, so it cannot be restored through "
+                      << "check_cec_log_status(); the table and LOG_MAX have diverged.";
     }
 
     void applyLogConfig(const std::string &contents) {
-        EXPECT_TRUE(writeLogConfig(contents)) << logConfig().lastError();
+        EXPECT_TRUE(writeLogConfig(contents));
         EXPECT_NO_THROW(check_cec_log_status());
     }
 
@@ -765,7 +722,9 @@ protected:
     }
 
 private:
-    int savedLogLevel_ = kUnknownLogLevel;
+    /* The effective level this process had when the case started, which it must still have
+     * when the case ends. */
+    int entryLogLevel_ = kUnknownLogLevel;
 
     /* Shared by every case in the fixture: the effective level observed before the first
      * case ran, which every later case must also observe. */
@@ -777,183 +736,207 @@ int UtilTest::firstObservedLogLevel_ = kUnknownLogLevel;
 // Traceability: #gap-mw-util - section 6.2 rank 33, P2 -
 // check_cec_log_status().
 TEST_F(UtilTest, MissingConfigFileLeavesLogLevelUnchanged) {
-    applyLogConfig("DEBUG\n");
-    removeLogConfig();
-    EXPECT_FALSE(logConfigExists());
+    RunWithBaseline([this]() {
+        applyLogConfig("DEBUG\n");
+        removeLogConfig();
+        EXPECT_FALSE(logConfigExists());
 
-    std::string readerOutput;
-    EXPECT_NO_THROW(readerOutput = captureStdout([]() {
-        check_cec_log_status();
-    }));
-    EXPECT_NE(readerOutput.find("cec_log_enabled"), std::string::npos);
+        std::string readerOutput;
+        EXPECT_NO_THROW(readerOutput = captureStdout([]() {
+            check_cec_log_status();
+        }));
+        EXPECT_NE(readerOutput.find("cec_log_enabled"), std::string::npos);
 
-    unsigned char probe[] = { 0xA5, 0x5A, 0xA5 };
-    const std::string dumpOutput = captureDump(probe, 3);
-    EXPECT_NE(dumpOutput.find("A5 5A A5"), std::string::npos);
+        unsigned char probe[] = { 0xA5, 0x5A, 0xA5 };
+        const std::string dumpOutput = captureDump(probe, 3);
+        EXPECT_NE(dumpOutput.find("A5 5A A5"), std::string::npos);
+    });
 }
 
 TEST_F(UtilTest, EveryRecognisedLevelMapsToItsNumericSetting) {
-    unsigned char dumpProbe[] = { 0xD3, 0x7B };
+    RunWithBaseline([this]() {
+        unsigned char dumpProbe[] = { 0xD3, 0x7B };
 
-    for (const LogLevelCase &levelCase : kLogLevels) {
-        SCOPED_TRACE(levelCase.key);
-        applyLogConfig(std::string(levelCase.key) + "\n");
+        for (const LogLevelCase &levelCase : kLogLevels) {
+            SCOPED_TRACE(levelCase.key);
+            applyLogConfig(std::string(levelCase.key) + "\n");
 
-        const std::string thresholdMarker =
-            std::string("UTIL_THRESHOLD_") + levelCase.key;
-        const std::string thresholdOutput =
-            captureLog(levelCase.value, thresholdMarker);
-        EXPECT_NE(thresholdOutput.find(thresholdMarker), std::string::npos);
+            const std::string thresholdMarker =
+                std::string("UTIL_THRESHOLD_") + levelCase.key;
+            const std::string thresholdOutput =
+                captureLog(levelCase.value, thresholdMarker);
+            EXPECT_NE(thresholdOutput.find(thresholdMarker), std::string::npos);
 
-        if (levelCase.value + 1 < LOG_MAX) {
-            const std::string aboveMarker =
-                std::string("UTIL_ABOVE_") + levelCase.key;
-            const std::string aboveOutput =
-                captureLog(levelCase.value + 1, aboveMarker);
-            EXPECT_EQ(aboveOutput.find(aboveMarker), std::string::npos);
+            if (levelCase.value + 1 < LOG_MAX) {
+                const std::string aboveMarker =
+                    std::string("UTIL_ABOVE_") + levelCase.key;
+                const std::string aboveOutput =
+                    captureLog(levelCase.value + 1, aboveMarker);
+                EXPECT_EQ(aboveOutput.find(aboveMarker), std::string::npos);
+            }
+
+            const std::string dumpOutput = captureDump(dumpProbe, 2);
+            if (levelCase.value >= LOG_DEBUG) {
+                EXPECT_NE(dumpOutput.find("D3 7B"), std::string::npos);
+            } else {
+                EXPECT_EQ(dumpOutput.find("D3 7B"), std::string::npos);
+            }
         }
-
-        const std::string dumpOutput = captureDump(dumpProbe, 2);
-        if (levelCase.value >= LOG_DEBUG) {
-            EXPECT_NE(dumpOutput.find("D3 7B"), std::string::npos);
-        } else {
-            EXPECT_EQ(dumpOutput.find("D3 7B"), std::string::npos);
-        }
-    }
+    });
 }
 
 TEST_F(UtilTest, EmptyConfigFileLeavesLogLevelUnchanged) {
-    applyLogConfig("INFO\n");
-    applyLogConfig("");
+    RunWithBaseline([this]() {
+        applyLogConfig("INFO\n");
+        applyLogConfig("");
 
-    const std::string infoMarker = "UTIL_EMPTY_FILE_INFO";
-    const std::string infoOutput = captureLog(LOG_INFO, infoMarker);
-    EXPECT_NE(infoOutput.find(infoMarker), std::string::npos);
+        const std::string infoMarker = "UTIL_EMPTY_FILE_INFO";
+        const std::string infoOutput = captureLog(LOG_INFO, infoMarker);
+        EXPECT_NE(infoOutput.find(infoMarker), std::string::npos);
 
-    const std::string debugMarker = "UTIL_EMPTY_FILE_DEBUG";
-    const std::string debugOutput = captureLog(LOG_DEBUG, debugMarker);
-    EXPECT_EQ(debugOutput.find(debugMarker), std::string::npos);
+        const std::string debugMarker = "UTIL_EMPTY_FILE_DEBUG";
+        const std::string debugOutput = captureLog(LOG_DEBUG, debugMarker);
+        EXPECT_EQ(debugOutput.find(debugMarker), std::string::npos);
+    });
 }
 
 TEST_F(UtilTest, UnrecognisedLevelLeavesLogLevelUnchanged) {
-    applyLogConfig("TRACE\n");
-    applyLogConfig("NOT_A_LEVEL\n");
+    RunWithBaseline([this]() {
+        applyLogConfig("TRACE\n");
+        applyLogConfig("NOT_A_LEVEL\n");
 
-    const std::string marker = "UTIL_UNRECOGNISED_RETAINS_TRACE";
-    const std::string output = captureLog(LOG_TRACE, marker);
-    EXPECT_NE(output.find(marker), std::string::npos);
+        const std::string marker = "UTIL_UNRECOGNISED_RETAINS_TRACE";
+        const std::string output = captureLog(LOG_TRACE, marker);
+        EXPECT_NE(output.find(marker), std::string::npos);
+    });
 }
 
 TEST_F(UtilTest, ShortPrefixDoesNotMatchRecognisedLevel) {
-    applyLogConfig("INFO\n");
-    applyLogConfig("DEBU\n");
+    RunWithBaseline([this]() {
+        applyLogConfig("INFO\n");
+        applyLogConfig("DEBU\n");
 
-    const std::string infoMarker = "UTIL_SHORT_PREFIX_INFO";
-    const std::string infoOutput = captureLog(LOG_INFO, infoMarker);
-    EXPECT_NE(infoOutput.find(infoMarker), std::string::npos);
+        const std::string infoMarker = "UTIL_SHORT_PREFIX_INFO";
+        const std::string infoOutput = captureLog(LOG_INFO, infoMarker);
+        EXPECT_NE(infoOutput.find(infoMarker), std::string::npos);
 
-    const std::string debugMarker = "UTIL_SHORT_PREFIX_DEBUG";
-    const std::string debugOutput = captureLog(LOG_DEBUG, debugMarker);
-    EXPECT_EQ(debugOutput.find(debugMarker), std::string::npos);
+        const std::string debugMarker = "UTIL_SHORT_PREFIX_DEBUG";
+        const std::string debugOutput = captureLog(LOG_DEBUG, debugMarker);
+        EXPECT_EQ(debugOutput.find(debugMarker), std::string::npos);
+    });
 }
 
 TEST_F(UtilTest, RecognisedLevelWithTrailingContentIsAccepted) {
-    applyLogConfig("DEBUG extra trailing text\n");
+    RunWithBaseline([this]() {
+        applyLogConfig("DEBUG extra trailing text\n");
 
-    unsigned char probe[] = { 0xC3, 0x5E };
-    const std::string output = captureDump(probe, 2);
-    EXPECT_NE(output.find("C3 5E"), std::string::npos);
+        unsigned char probe[] = { 0xC3, 0x5E };
+        const std::string output = captureDump(probe, 2);
+        EXPECT_NE(output.find("C3 5E"), std::string::npos);
+    });
 }
 
 TEST_F(UtilTest, DumpBufferEmitsAtDebugAndTraceLevels) {
-    const char *enablingLevels[] = { "DEBUG", "TRACE" };
-    unsigned char probe[] = { 0x00, 0x0F, 0xA6, 0xFF };
+    RunWithBaseline([this]() {
+        const char *enablingLevels[] = { "DEBUG", "TRACE" };
+        unsigned char probe[] = { 0x00, 0x0F, 0xA6, 0xFF };
 
-    for (const char *level : enablingLevels) {
-        SCOPED_TRACE(level);
-        applyLogConfig(std::string(level) + "\n");
+        for (const char *level : enablingLevels) {
+            SCOPED_TRACE(level);
+            applyLogConfig(std::string(level) + "\n");
 
-        const std::string output = captureDump(probe, 4);
-        EXPECT_NE(output.find("00"), std::string::npos);
-        EXPECT_NE(output.find("0F"), std::string::npos);
-        EXPECT_NE(output.find("A6"), std::string::npos);
-        EXPECT_NE(output.find("FF"), std::string::npos);
-    }
+            const std::string output = captureDump(probe, 4);
+            EXPECT_NE(output.find("00"), std::string::npos);
+            EXPECT_NE(output.find("0F"), std::string::npos);
+            EXPECT_NE(output.find("A6"), std::string::npos);
+            EXPECT_NE(output.find("FF"), std::string::npos);
+        }
+    });
 }
 
 TEST_F(UtilTest, DumpBufferIsSilentBelowDebug) {
-    unsigned char probe[] = { 0xA5, 0x5A, 0xA5 };
+    RunWithBaseline([this]() {
+        unsigned char probe[] = { 0xA5, 0x5A, 0xA5 };
 
-    for (const LogLevelCase &levelCase : kLogLevels) {
-        if (levelCase.value >= LOG_DEBUG) {
-            continue;
+        for (const LogLevelCase &levelCase : kLogLevels) {
+            if (levelCase.value >= LOG_DEBUG) {
+                continue;
+            }
+
+            SCOPED_TRACE(levelCase.key);
+            applyLogConfig(std::string(levelCase.key) + "\n");
+            const std::string output = captureDump(probe, 3);
+            EXPECT_EQ(output.find("A5 5A A5"), std::string::npos);
         }
-
-        SCOPED_TRACE(levelCase.key);
-        applyLogConfig(std::string(levelCase.key) + "\n");
-        const std::string output = captureDump(probe, 3);
-        EXPECT_EQ(output.find("A5 5A A5"), std::string::npos);
-    }
+    });
 }
 
 TEST_F(UtilTest, DumpBufferWithZeroLengthEmitsNothing) {
-    applyLogConfig("DEBUG\n");
+    RunWithBaseline([this]() {
+        applyLogConfig("DEBUG\n");
 
-    unsigned char probe[] = { 0xA5, 0x5A, 0xA5 };
-    const std::string output = captureDump(probe, 0);
-    EXPECT_EQ(output.find("A5 5A A5"), std::string::npos);
+        unsigned char probe[] = { 0xA5, 0x5A, 0xA5 };
+        const std::string output = captureDump(probe, 0);
+        EXPECT_EQ(output.find("A5 5A A5"), std::string::npos);
+    });
 }
 
 TEST_F(UtilTest, DumpBufferEmitsMaximumLengthBuffer) {
-    applyLogConfig("DEBUG\n");
+    RunWithBaseline([this]() {
+        applyLogConfig("DEBUG\n");
 
-    unsigned char buffer[256];
-    for (unsigned int index = 0; index < sizeof(buffer); ++index) {
-        buffer[index] = static_cast<unsigned char>(index);
-    }
+        unsigned char buffer[256];
+        for (unsigned int index = 0; index < sizeof(buffer); ++index) {
+            buffer[index] = static_cast<unsigned char>(index);
+        }
 
-    /*
-     * Assert the whole dump as one ordered token sequence rather than asserting the size
-     * of the capture. It is the stronger statement about dump_buffer - every byte, in
-     * order, in the documented "%02X " form - and unlike a size comparison it stays
-     * deterministic if any other writer reaches the redirected descriptor.
-     */
-    std::string expectedSequence;
-    expectedSequence.reserve(sizeof(buffer) * 3);
-    for (unsigned int value = 0; value < sizeof(buffer); ++value) {
-        char expectedToken[4];
-        std::snprintf(expectedToken, sizeof(expectedToken), "%02X ",
-                      static_cast<unsigned int>(buffer[value]));
-        expectedSequence += expectedToken;
-    }
-    ASSERT_EQ(sizeof(buffer) * 3, expectedSequence.size());
+        /*
+         * Assert the whole dump as one ordered token sequence rather than asserting the size
+         * of the capture. It is the stronger statement about dump_buffer - every byte, in
+         * order, in the documented "%02X " form - and unlike a size comparison it stays
+         * deterministic if any other writer reaches the redirected descriptor.
+         */
+        std::string expectedSequence;
+        expectedSequence.reserve(sizeof(buffer) * 3);
+        for (unsigned int value = 0; value < sizeof(buffer); ++value) {
+            char expectedToken[4];
+            std::snprintf(expectedToken, sizeof(expectedToken), "%02X ",
+                          static_cast<unsigned int>(buffer[value]));
+            expectedSequence += expectedToken;
+        }
+        ASSERT_EQ(sizeof(buffer) * 3, expectedSequence.size());
 
-    const std::string output = captureDump(buffer, sizeof(buffer));
-    EXPECT_NE(output.find(expectedSequence), std::string::npos)
-        << "dump_buffer did not emit all " << sizeof(buffer)
-        << " bytes as an ordered uppercase token sequence";
+        const std::string output = captureDump(buffer, sizeof(buffer));
+        EXPECT_NE(output.find(expectedSequence), std::string::npos)
+            << "dump_buffer did not emit all " << sizeof(buffer)
+            << " bytes as an ordered uppercase token sequence";
+    });
 }
 
 TEST_F(UtilTest, LogEmitsAtOrBelowConfiguredLevel) {
-    applyLogConfig("INFO\n");
+    RunWithBaseline([this]() {
+        applyLogConfig("INFO\n");
 
-    const std::string lowerMarker = "UTIL_LOG_LOWER_LEVEL";
-    const std::string lowerOutput = captureLog(LOG_ERROR, lowerMarker);
-    EXPECT_NE(lowerOutput.find(lowerMarker), std::string::npos);
+        const std::string lowerMarker = "UTIL_LOG_LOWER_LEVEL";
+        const std::string lowerOutput = captureLog(LOG_ERROR, lowerMarker);
+        EXPECT_NE(lowerOutput.find(lowerMarker), std::string::npos);
 
-    const std::string thresholdMarker = "UTIL_LOG_THRESHOLD_LEVEL";
-    const std::string thresholdOutput = captureLog(LOG_INFO, thresholdMarker);
-    EXPECT_NE(thresholdOutput.find(thresholdMarker), std::string::npos);
+        const std::string thresholdMarker = "UTIL_LOG_THRESHOLD_LEVEL";
+        const std::string thresholdOutput = captureLog(LOG_INFO, thresholdMarker);
+        EXPECT_NE(thresholdOutput.find(thresholdMarker), std::string::npos);
+    });
 }
 
 TEST_F(UtilTest, LogSuppressesLevelsAboveConfiguredLevel) {
-    applyLogConfig("INFO\n");
+    RunWithBaseline([this]() {
+        applyLogConfig("INFO\n");
 
-    const std::string aboveMarker = "UTIL_LOG_ABOVE_LEVEL";
-    const std::string aboveOutput = captureLog(LOG_DEBUG, aboveMarker);
-    EXPECT_EQ(aboveOutput.find(aboveMarker), std::string::npos);
+        const std::string aboveMarker = "UTIL_LOG_ABOVE_LEVEL";
+        const std::string aboveOutput = captureLog(LOG_DEBUG, aboveMarker);
+        EXPECT_EQ(aboveOutput.find(aboveMarker), std::string::npos);
 
-    const std::string sentinelMarker = "UTIL_LOG_SENTINEL_LEVEL";
-    const std::string sentinelOutput = captureLog(LOG_MAX, sentinelMarker);
-    EXPECT_EQ(sentinelOutput.find(sentinelMarker), std::string::npos);
+        const std::string sentinelMarker = "UTIL_LOG_SENTINEL_LEVEL";
+        const std::string sentinelOutput = captureLog(LOG_MAX, sentinelMarker);
+        EXPECT_EQ(sentinelOutput.find(sentinelMarker), std::string::npos);
+    });
 }
