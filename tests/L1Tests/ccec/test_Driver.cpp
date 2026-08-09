@@ -182,6 +182,7 @@ TEST_F(DriverTest, CloseAndReopen) {
         // Already open, that's fine
     }
     
+    // Set up mock for close
     EXPECT_CALL(*mock, HdmiCecClose(::testing::_))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SUCCESS));
@@ -198,6 +199,7 @@ TEST_F(DriverTest, CloseAndReopen) {
         driver.open();
     });
     
+    // Verify it works by doing a simple operation
     EXPECT_NO_THROW({
         driver.open(); // Should handle gracefully
     });
@@ -205,6 +207,7 @@ TEST_F(DriverTest, CloseAndReopen) {
     // Leave driver in OPENED state for next test
 }
 
+// Test multiple close calls
 TEST_F(DriverTest, MultipleClose) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -220,6 +223,7 @@ TEST_F(DriverTest, MultipleClose) {
         // Already open, that's fine
     }
     
+    // Set up mock for first close
     EXPECT_CALL(*mock, HdmiCecClose(::testing::_))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SUCCESS));
@@ -242,6 +246,7 @@ TEST_F(DriverTest, MultipleClose) {
     });
 }
 
+// Test getLogicalAddress
 TEST_F(DriverTest, GetLogicalAddress) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -256,6 +261,7 @@ TEST_F(DriverTest, GetLogicalAddress) {
         GTEST_SKIP() << "Driver not in valid state for this test";
     }
     
+    // Set up mock to return a logical address
     EXPECT_CALL(*mock, HdmiCecGetLogicalAddress(_, _))
         .Times(1)
         .WillOnce(DoAll(
@@ -273,6 +279,7 @@ TEST_F(DriverTest, GetLogicalAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test getPhysicalAddress
 TEST_F(DriverTest, GetPhysicalAddress) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -280,6 +287,7 @@ TEST_F(DriverTest, GetPhysicalAddress) {
     }
     Driver &driver = Driver::getInstance();
     
+    // Set up mock to return a physical address
     EXPECT_CALL(*mock, HdmiCecGetPhysicalAddress(_, _))
         .Times(1)
         .WillOnce(DoAll(
@@ -297,6 +305,7 @@ TEST_F(DriverTest, GetPhysicalAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test addLogicalAddress success
 TEST_F(DriverTest, AddLogicalAddressSuccess) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -304,6 +313,7 @@ TEST_F(DriverTest, AddLogicalAddressSuccess) {
     }
     Driver &driver = Driver::getInstance();
     
+    // Set up mock to succeed
     EXPECT_CALL(*mock, HdmiCecAddLogicalAddress(_, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SUCCESS));
@@ -329,6 +339,7 @@ TEST_F(DriverTest, AddLogicalAddressSuccess) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test addLogicalAddress - address unavailable
 TEST_F(DriverTest, AddLogicalAddressUnavailable) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -336,6 +347,7 @@ TEST_F(DriverTest, AddLogicalAddressUnavailable) {
     }
     Driver &driver = Driver::getInstance();
     
+    // Set up mock to return unavailable
     EXPECT_CALL(*mock, HdmiCecAddLogicalAddress(_, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_LOGICALADDRESS_UNAVAILABLE));
@@ -350,6 +362,7 @@ TEST_F(DriverTest, AddLogicalAddressUnavailable) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test addLogicalAddress - general error
 TEST_F(DriverTest, AddLogicalAddressGeneralError) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -357,6 +370,7 @@ TEST_F(DriverTest, AddLogicalAddressGeneralError) {
     }
     Driver &driver = Driver::getInstance();
     
+    // Set up mock to return general error
     EXPECT_CALL(*mock, HdmiCecAddLogicalAddress(_, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -371,6 +385,7 @@ TEST_F(DriverTest, AddLogicalAddressGeneralError) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test removeLogicalAddress
 TEST_F(DriverTest, RemoveLogicalAddress) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -401,6 +416,7 @@ TEST_F(DriverTest, RemoveLogicalAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test isValidLogicalAddress - address is valid
 TEST_F(DriverTest, IsValidLogicalAddressTrue) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     if (mock == nullptr) {
@@ -441,10 +457,12 @@ TEST_F(DriverTest, IsValidLogicalAddressFalse) {
     EXPECT_FALSE(driver.isValidLogicalAddress(addr));
 }
 
+// Test write with NACK for non-broadcast
 TEST_F(DriverTest, WriteWithNackNonBroadcast) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     Driver &driver = Driver::getInstance();
     
+    // Set up mock to return NACK
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(DoAll(
@@ -465,10 +483,12 @@ TEST_F(DriverTest, WriteWithNackNonBroadcast) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test write with NACK for broadcast REPORT_PHYSICAL_ADDRESS
 TEST_F(DriverTest, WriteWithNackBroadcastReportPhysicalAddress) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     Driver &driver = Driver::getInstance();
     
+    // Set up mock to return NACK
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(DoAll(
@@ -491,6 +511,7 @@ TEST_F(DriverTest, WriteWithNackBroadcastReportPhysicalAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test write with sendResult errors
 TEST_F(DriverTest, WriteWithSendResultErrors) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     Driver &driver = Driver::getInstance();
@@ -524,10 +545,12 @@ TEST_F(DriverTest, WriteWithSendResultErrors) {
     }
 }
 
+// Test write with HdmiCecTx failure
 TEST_F(DriverTest, WriteWithHdmiCecTxFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     Driver &driver = Driver::getInstance();
     
+    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -553,6 +576,7 @@ TEST_F(DriverTest, ZZZ_OpenWithFailure) {
     // Close first
     driver.close();
     
+    // Set up mock to fail on open
     EXPECT_CALL(*mock, HdmiCecOpen(_))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -579,6 +603,7 @@ TEST_F(DriverTest, ZZZ_CloseWithFailure) {
     
     Driver &driver = Driver::getInstance();
     
+    // Set up mock to fail on close
     EXPECT_CALL(*mock, HdmiCecClose(::testing::_))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -601,6 +626,7 @@ TEST_F(DriverTest, ZZZ_CloseWithFailure) {
 
 }
 
+// Test printFrameDetails with various frames
 TEST_F(DriverTest, PrintFrameDetails) {
     
     Driver &driver = Driver::getInstance();
@@ -645,6 +671,7 @@ TEST_F(DriverTest, PrintFrameDetails) {
 
 }
 
+// Test poll through driver
 TEST_F(DriverTest, PollAddress) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     

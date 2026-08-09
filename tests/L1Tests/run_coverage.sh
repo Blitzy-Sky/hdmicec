@@ -211,11 +211,12 @@
 #   ENVIRONMENT (all optional; command-line flags win)
 #     COVERAGE_MIN            line-coverage bar, default 80
 #     COVERAGE_OUTPUT_DIR     artifact directory, default as under ARTIFACT HYGIENE
-#     COVERAGE_PER_FILE_GATE  1 to gate per file as well as on the aggregate, default 0
+#     COVERAGE_PER_FILE_GATE  1 to gate per file as well as on the aggregate, default 1
 #                             (0 gates the aggregate only; the per-file enumeration is
-#                             printed either way)
+#                             printed either way).  Directive 4 states the bar PER TARGET,
+#                             so the per-file half is ON unless it is switched off explicitly
 #     SUITE_TIMEOUT           wall-clock bound in seconds on the L1 suite under --run,
-#                             default 900; exceeding it is reported as a hang, not a failure
+#                             default 600; exceeding it is reported as a hang, not a failure
 #     GTEST_PREFIX            prefix providing libgtest/libgmock, default <WS>/install/usr
 #     GTEST_EXTRA_ARGS        extra arguments appended to the run_L1Tests command line
 #

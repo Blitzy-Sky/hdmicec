@@ -85,6 +85,7 @@ bool waitForFrames(const TestFrameListener &listener, int atLeast) {
     return listener.frameCount >= atLeast;
 }
 
+// Test basic constructor with auto-open
 TEST_F(ConnectionTest, ConstructorWithAutoOpen) {
     EXPECT_NO_THROW({
         Connection conn(LogicalAddress::UNREGISTERED, true);
@@ -92,28 +93,33 @@ TEST_F(ConnectionTest, ConstructorWithAutoOpen) {
     });
 }
 
+// Test constructor without auto-open
 TEST_F(ConnectionTest, ConstructorWithoutAutoOpen) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     // Even though not opened, explicitly verify no issues
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::UNREGISTERED);
 }
 
+// Test constructor with named connection
 TEST_F(ConnectionTest, ConstructorWithName) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false, "TestConnection");
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::PLAYBACK_DEVICE_1);
 }
 
+// Test constructor with specific logical address
 TEST_F(ConnectionTest, ConstructorWithLogicalAddress) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::PLAYBACK_DEVICE_1);
 }
 
+// Test open and close
 TEST_F(ConnectionTest, OpenAndClose) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     EXPECT_NO_THROW(conn.open());
     EXPECT_NO_THROW(conn.close());
 }
 
+// Test multiple open/close cycles
 TEST_F(ConnectionTest, MultipleOpenClose) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     
@@ -123,6 +129,7 @@ TEST_F(ConnectionTest, MultipleOpenClose) {
     }
 }
 
+// Test add and remove frame listener
 TEST_F(ConnectionTest, AddAndRemoveFrameListener) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     conn.open();
@@ -134,6 +141,7 @@ TEST_F(ConnectionTest, AddAndRemoveFrameListener) {
     conn.close();
 }
 
+// Test multiple frame listeners
 TEST_F(ConnectionTest, MultipleFrameListeners) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     conn.open();
@@ -151,6 +159,7 @@ TEST_F(ConnectionTest, MultipleFrameListeners) {
     conn.close();
 }
 
+// Test send with timeout
 TEST_F(ConnectionTest, SendWithTimeout) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -178,6 +187,7 @@ TEST_F(ConnectionTest, SendWithTimeout) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test send with zero timeout
 TEST_F(ConnectionTest, SendWithZeroTimeout) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -205,6 +215,7 @@ TEST_F(ConnectionTest, SendWithZeroTimeout) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test send with default timeout
 TEST_F(ConnectionTest, SendWithDefaultTimeout) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -232,6 +243,7 @@ TEST_F(ConnectionTest, SendWithDefaultTimeout) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test send with throw parameter succeeds when driver succeeds
 TEST_F(ConnectionTest, SendWithThrowParameter) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -289,6 +301,7 @@ TEST_F(ConnectionTest, SendToSpecificAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test sendTo with timeout
 TEST_F(ConnectionTest, SendToWithTimeout) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -315,6 +328,7 @@ TEST_F(ConnectionTest, SendToWithTimeout) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test sendTo with throw parameter succeeds when driver succeeds
 TEST_F(ConnectionTest, SendToWithThrowParameter) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     std::vector<unsigned char> capturedBuf;
@@ -473,6 +487,7 @@ TEST_F(ConnectionTest, PingAddress) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test getSource
 TEST_F(ConnectionTest, GetSource) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     LogicalAddress source = conn.getSource();
@@ -480,6 +495,7 @@ TEST_F(ConnectionTest, GetSource) {
     // Connection destructor will be called automatically
 }
 
+// Test setSource
 TEST_F(ConnectionTest, SetSource) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     conn.setSource(LogicalAddress::PLAYBACK_DEVICE_2);
@@ -607,6 +623,7 @@ TEST_F(ConnectionTest, SendToDifferentAddresses) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test connection with different logical addresses
 TEST_F(ConnectionTest, DifferentLogicalAddresses) {
     {
         Connection conn1(LogicalAddress::TV, false);
@@ -622,6 +639,7 @@ TEST_F(ConnectionTest, DifferentLogicalAddresses) {
     }
 }
 
+// Test close clears frame listeners
 TEST_F(ConnectionTest, CloseRemovesListeners) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     conn.open();
@@ -861,6 +879,7 @@ TEST_F(ConnectionTest, MixedSyncAsync) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test listener operations while connection is closed
 TEST_F(ConnectionTest, ListenerOperationsWithoutOpen) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     TestFrameListener listener;
@@ -870,6 +889,7 @@ TEST_F(ConnectionTest, ListenerOperationsWithoutOpen) {
     // Connection destructor will be called automatically
 }
 
+// Test remove non-existent listener
 TEST_F(ConnectionTest, RemoveNonExistentListener) {
     Connection conn(LogicalAddress::UNREGISTERED, false);
     conn.open();
@@ -881,9 +901,11 @@ TEST_F(ConnectionTest, RemoveNonExistentListener) {
     conn.close();
 }
 
+// Test send with Throw_e and driver failure to trigger exception path
 TEST_F(ConnectionTest, SendWithThrowAndDriverFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
+    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SENT_FAILED));
@@ -905,9 +927,11 @@ TEST_F(ConnectionTest, SendWithThrowAndDriverFailure) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test sendTo with Throw_e and driver failure to trigger exception path
 TEST_F(ConnectionTest, SendToWithThrowAndDriverFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
+    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SENT_FAILED));
@@ -929,9 +953,11 @@ TEST_F(ConnectionTest, SendToWithThrowAndDriverFailure) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test poll with Throw_e and driver failure to trigger exception path
 TEST_F(ConnectionTest, PollWithThrowAndDriverFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
+    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SENT_BUT_NOT_ACKD));
@@ -950,9 +976,11 @@ TEST_F(ConnectionTest, PollWithThrowAndDriverFailure) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test ping with Throw_e and driver failure to trigger exception path
 TEST_F(ConnectionTest, PingWithThrowAndDriverFailure) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
+    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_SENT_BUT_NOT_ACKD));
@@ -971,9 +999,11 @@ TEST_F(ConnectionTest, PingWithThrowAndDriverFailure) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test send with exception swallowing (no Throw_e parameter)
 TEST_F(ConnectionTest, SendWithoutThrowSwallowsException) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
+    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -995,9 +1025,11 @@ TEST_F(ConnectionTest, SendWithoutThrowSwallowsException) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test sendTo with exception swallowing (no Throw_e parameter)
 TEST_F(ConnectionTest, SendToWithoutThrowSwallowsException) {
     HdmiCecDriverMock* mock = HdmiCecDriverMock::getInstance();
     
+    // Set up mock to fail
     EXPECT_CALL(*mock, HdmiCecTx(_, _, _, _))
         .Times(1)
         .WillOnce(Return(HDMI_CEC_IO_GENERAL_ERROR));
@@ -1278,6 +1310,7 @@ TEST_F(ConnectionTest, SendToAsyncHeaderConstruction) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test connection close clears all listeners
 TEST_F(ConnectionTest, CloseRemovesAllListeners) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     conn.open();
@@ -1329,11 +1362,13 @@ TEST_F(ConnectionTest, LargeFrameMatchSource) {
     ::testing::Mock::VerifyAndClearExpectations(mock);
 }
 
+// Test getSource returns correct value
 TEST_F(ConnectionTest, GetSourceReturnsCorrectValue) {
     Connection conn(LogicalAddress::RECORDING_DEVICE_1, false);
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::RECORDING_DEVICE_1);
 }
 
+// Test setSource updates logical address
 TEST_F(ConnectionTest, SetSourceUpdatesAddress) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::PLAYBACK_DEVICE_1);
@@ -1342,6 +1377,7 @@ TEST_F(ConnectionTest, SetSourceUpdatesAddress) {
     EXPECT_EQ(conn.getSource().toInt(), LogicalAddress::PLAYBACK_DEVICE_2);
 }
 
+// Test connection with all different logical addresses
 TEST_F(ConnectionTest, AllLogicalAddresses) {
     int addresses[] = {
         LogicalAddress::TV,
@@ -1366,6 +1402,7 @@ TEST_F(ConnectionTest, AllLogicalAddresses) {
     }
 }
 
+// Test rapid open/close cycles
 TEST_F(ConnectionTest, RapidOpenCloseCycles) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     
@@ -1375,6 +1412,7 @@ TEST_F(ConnectionTest, RapidOpenCloseCycles) {
     }
 }
 
+// Test concurrent listener add/remove operations
 TEST_F(ConnectionTest, ConcurrentListenerOperations) {
     Connection conn(LogicalAddress::PLAYBACK_DEVICE_1, false);
     conn.open();

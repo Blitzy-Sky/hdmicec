@@ -79,10 +79,22 @@ run_L1Tests_SOURCES = \
 # initialisation, the order in which those initialisers run follows the link order of the
 # objects, which follows this list, and the order in which the suites then RUN is the order
 # they were registered.  This suite contains order-fragile tests that pass only in the
-# established order, so inserting a translation unit in the MIDDLE of this list reorders
-# every suite after it and can turn a green run red.
+# established order, so moving a translation unit that is ALREADY here, or inserting a new one
+# ahead of one, reorders every suite after it and can turn a green run red.
 #
-# APPEND new translation units to the end of the list; do not interleave them.
+# THE RULE, stated as the list above actually obeys it: append a new translation unit at the END
+# OF ITS OWN GROUP - after the last existing ccec/ entry for a ccec/ unit, after the last
+# existing osal/ entry for an osal/ unit - leaving the mock source last and leaving the relative
+# order of every pre-existing entry exactly as it was.  That is where the four units added by
+# this pass sit: test_DriverImpl_Async.cpp and test_Util.cpp close the ccec/ group, test_Mutex.cpp
+# and test_Thread.cpp close the osal/ group.
+#
+# WHY GROUP-END RATHER THAN LIST-END, since list-end would look simpler: the three order-fragile
+# units are ccec/test_Connection.cpp, ccec/test_Bus.cpp and ccec/test_Driver.cpp, and all three
+# already precede both insertion points, so the sequence they depend on is untouched either way -
+# but grouping keeps the list readable, and every new unit registers AFTER the fragile ones,
+# which is the property that actually matters.  Do NOT reorder or relocate an existing entry to
+# tidy the list; a pure append is the only safe edit here.
 
 run_L1Tests_LDADD = \
     $(top_builddir)/ccec/src/libRCEC.la \
