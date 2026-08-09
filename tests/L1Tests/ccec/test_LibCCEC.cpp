@@ -31,6 +31,14 @@
 #include "ccec/Operands.hpp"
 #include "ccec/Driver.hpp"
 #include "ccec/CECFrame.hpp"
+/*
+ * DriverImpl.hpp lives under ccec/src, which AM_CPPFLAGS does not cover, so it is reached by
+ * relative path rather than by adding an -I - the same route ccec/test_DriverImpl_Async.cpp
+ * already takes.  It is needed for exactly one thing here: the address of the driver's own HAL
+ * receive callback, DriverImpl::DriverReceiveCallback, which awaitBusReaderRunning() re-states
+ * on the process-global mock so its frame injection cannot be routed away by another fixture.
+ */
+#include "../../../ccec/src/DriverImpl.hpp"
 #include "hdmi_cec_driver_mock.h"
 
 // LibCCEC::init() is the only writer of the CEC log prefix, and the prefix is the only
@@ -142,6 +150,33 @@ bool awaitBusReaderRunning() {
     if (mock == nullptr) {
         return false;
     }
+
+    /*
+     * THE INBOUND ROUTE IS RE-STATED, NOT ASSUMED - this is what makes the wait below
+     * self-sufficient in any run order.
+     *
+     * The frame injected further down travels to the Bus reader only if the mock's stored
+     * receive registration still points at the driver's own callback.  It is a member of the
+     * PROCESS-GLOBAL mock, and the real HdmiCecSetRxCallback entry point overwrites it with
+     * whatever it is handed: ccec/test_Driver_Mock.cpp's ReceiveMessageCallback case registers a
+     * callback of its own, so once that case has run, an injection reaches ITS lambda - through a
+     * data pointer that died with its stack frame - and never reaches the CEC stack at all.
+     * DriverImpl::open() does not put the driver's registration back either, because it returns
+     * early while the driver is already OPENED.
+     *
+     * Re-stating the driver's own callback here costs two assignments and displaces any
+     * inherited registration, which is the same self-sufficiency rule DriverTest.WriteAsync
+     * follows when it re-states the HdmiCecOpen default action before opening rather than
+     * inheriting whichever one the previous fixture left (ccec/test_Driver.cpp).  The data
+     * pointer is 0 because that is precisely what DriverImpl::open() registers alongside the
+     * callback, so this restores the registration rather than inventing one.
+     *
+     * The sibling fixture now also restores what it borrowed, so in practice this is belt and
+     * braces - and it stays, because it is what keeps THIS fixture independent of whether any
+     * other fixture in the binary is well behaved.
+     */
+    mock->rxCallback = &DriverImpl::DriverReceiveCallback;
+    mock->rxCallbackData = 0;
 
     CountingFrameListener listener;
     Connection probe(LogicalAddress::PLAYBACK_DEVICE_1, false, "LibCcecReaderProbe");

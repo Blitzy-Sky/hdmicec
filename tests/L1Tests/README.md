@@ -177,8 +177,14 @@ make -C tests/L1Tests check
 # List all tests
 ./run_L1Tests --gtest_list_tests
 
-# Diagnostic only: expose inter-test order dependencies (see Known Issues)
-./run_L1Tests --gtest_shuffle --gtest_random_seed=12345
+# Diagnostic only: expose inter-test order dependencies (see Known Issues).
+# Seed 2 reproduces the two known legacy failures every run; seed 12345 is green about
+# seven runs in ten and crashes in the others, so one run of one seed proves nothing.
+./run_L1Tests --gtest_shuffle --gtest_random_seed=2
+
+# Deterministic, seed-free check that a new test does not depend on the mock's
+# leftover callback registration (see Test Order Dependence)
+./run_L1Tests --gtest_filter='HdmiCecDriverMockTest.*:YourFixture.*' --gtest_repeat=2
 
 # Coverage capture, report and the 80% line gate
 ./run_coverage.sh --run
@@ -381,9 +387,13 @@ artifacts out of a commit is yours to manage.
 ```
 
 Two things are worth knowing if you are hunting for disabled tests on the strength of older notes.
-Three `LibCCECTest` cases — a `Term`-throws case, a `Term`-succeeds case and a
-multiple-init/term-cycles case — are **not** in `ccec/test_LibCCEC.cpp`, disabled or otherwise; they
-left the file upstream in commit `0f00d4e`, before this engagement.  And the two asynchronous-write
+The three `LibCCECTest` cases those notes named — a `Term`-throws case, a `Term`-succeeds case and a
+multiple-init/term-cycles case — were **never** in `ccec/test_LibCCEC.cpp` under those names,
+disabled or otherwise; they left the file upstream in commit `0f00d4e`, before this engagement.  The
+*behaviour* is nevertheless covered now, enabled and passing, in a different fixture that this
+project added: `LibCCECUninitializedTest.TermThrowsWhenNotInitialized` and
+`LibCCECUninitializedTest.MultipleInitTermCycles`, with `term()` succeeding on an initialised library
+exercised by that fixture's `SetUp()` on every one of its six cases.  And the two asynchronous-write
 cases in `ccec/test_Driver.cpp` that did carry GoogleTest's disable prefix are enabled and passing as
 `DriverTest.WriteAsync` and `DriverTest.WriteAsyncWithFailure`.
 
@@ -392,7 +402,8 @@ started and stopped, so init/term cycling had to be avoided altogether — no lo
 disabling anything.  That cycling is covered and green: the four
 `LibCCECUninitializedTest.*ThrowsWhenNotInitialized` guard cases — for `term()`,
 `addLogicalAddress()`, `getLogicalAddress()` and `getPhysicalAddress()` — plus
-`InitWithNullNameClearsLogPrefix` all assert against a deliberately terminated library.
+`InitWithNullNameClearsLogPrefix` and `MultipleInitTermCycles`, six cases in all, assert against a
+deliberately terminated library.
 
 The underlying race is real; it is **structurally avoided rather than timed around**.  There is no
 pause anywhere in this suite's new tests.  Two things replace it, and
@@ -413,7 +424,11 @@ both are the pattern to reuse if you add another case that terminates the librar
   ordering rather than waited out by a sleep, which is why this fixture contains no `sleep`,
   `usleep` or `sleep_for` at all.  `ensureTerminated()`'s already-terminated early return is a
   guard that keeps the helper total over both states; in the default order no case reaches it,
-  because every `TearDown()` leaves the library initialised.
+  because every `TearDown()` leaves the library initialised.  The wait injects a frame, so it also
+  **re-states the driver's inbound registration on the process-global mock before injecting** — see
+  [Test Order Dependence](#test-order-dependence-diagnostic) for why a wait that trusted the
+  existing registration was order-fragile, and failed with *"could not bring LibCCEC to the
+  uninitialised state this case requires"* whenever `HdmiCecDriverMockTest` had run first.
 - **The close() sentinel CANNOT be drained from a test, and the suite no longer claims otherwise.**
   `DriverImpl::close()` offers a NULL sentinel to the receive queue and `DriverImpl::read()` is what
   consumes it, but `Bus::stop()` only waits for the reader to leave its loop - it can leave with the
@@ -437,13 +452,29 @@ both are the pattern to reuse if you add another case that terminates the librar
 the tests merely reach, so the defect is reported rather than fixed, and an exit 139 should be read
 as this window reopening rather than as a test regression.
 
-Measured on this tree: **30 consecutive full-suite runs in the default order, 30 green, 0
-exit-139** — and the crash is reliably reproducible as soon as the order changes:
-`--gtest_shuffle --gtest_random_seed=54321` ended in exit 139 in **5 of 5** runs, always in
-`LibCCECUninitializedTest.GetPhysicalAddressThrowsWhenNotInitialized`, and seed 12345 crashed in
-1 of 5 (see the seed tables in
-[Test Order Dependence](#test-order-dependence-diagnostic)).  Neither figure bounds the other: the
-default order keeps the window narrow, it does not close it.
+Re-measured on this tree after the order-independence fix described in
+[Test Order Dependence](#test-order-dependence-diagnostic): **14 consecutive full-suite runs in the
+default order, 14 green (483 / 483), 0 exit-139** — and the crash still fires as soon as the order
+changes, at **11 exit-139 in 81 shuffled full-suite runs (13.6%)**, spread across seeds 7, 15 and
+12345.
+
+**No seed is a reliable reproducer, and no seed is safe.**  Seed 12345 crashed 3 runs in 10, seed 15
+4 in 16 and seed 7 3 in 16, while seed 5 (6 runs), seed 2 (10 runs) and seed 54321 (10 runs) did not
+crash once — the remaining seeds in the tables below had one run each, which settles nothing about
+their rate either way.  Seed 54321 is the reason this paragraph is worded the way it is: an earlier
+revision of this file quoted it as crashing **5 runs out of 5**, and it is now green **10 runs out of
+10**.  A per-seed crash figure is a snapshot of a race, not a property of the seed, so re-measure it
+rather than quoting one; the per-seed numbers behind these totals are in
+[Test Order Dependence](#test-order-dependence-diagnostic).  The default order keeps the window
+narrow; it does not close it.
+
+Every crash observed in this pass fired in the same place, and the signature is worth knowing when
+triaging one.  The last case GoogleTest started was `DriverTest.ZZZ_OpenWithFailure` in **11 of the
+11** crashing runs, and all **five** crashes that were symbolised — four core files plus one live
+`gdb` capture — put frame `#0` in `DriverImpl::read` and frame `#1` in `Bus::Reader::run`, which is
+the arm described immediately below.  In each of them the main thread was inside `DriverImpl::open`
+(`ccec/src/DriverImpl.cpp:110`, reached from `ccec/test_Driver.cpp:561`) blocked on the driver mutex
+while the Bus reader dereferenced the sentinel — the race stated in one line.
 
 **IT IS NOT MITIGATED IN THE TESTS, AND MUST NOT BE "MITIGATED" WITH A `Driver::read()` ON A CLOSED
 DRIVER.**  That call looks like it drains the `close()` sentinel off the receive queue and cannot:
@@ -506,8 +537,10 @@ the latent dereference had never been observed.
 
 #### A SECOND, DISTINCT SIGSEGV IN THE SAME THREAD — dangling `Connection` listener
 
-An exit 139 does not always mean the arm above.  Under `--gtest_shuffle --gtest_random_seed=54321`
-the crash reproduced in **5 of 5 runs** on this tree, and `gdb` puts it somewhere else entirely:
+An exit 139 does not always mean the arm above.  A second, distinct null dereference lives in the
+same thread: an earlier pass reproduced it on this tree under
+`--gtest_shuffle --gtest_random_seed=54321` in **5 runs out of 5**, and `gdb` put it somewhere else
+entirely:
 
 ```
 Thread 2 "run_L1Tests" received signal SIGSEGV
@@ -529,6 +562,13 @@ why `ConnectionTest.CloseDetachesTheConnectionAndDestroyingAClosedOneLeavesTheBu
 connection it has already closed and asserts detachment through `close()` rather than through the
 destructor.
 
+**This arm was NOT reproduced in this pass.**  Seed 54321 — the seed that produced the backtrace
+above, 5 runs out of 5 — is now green 10 runs out of 10, and none of the 11 crashes measured across
+81 shuffled runs was this arm: all five that were symbolised were the `DriverImpl::read` arm of the
+section above.  That is a change in *exposure*, not a fix: `Connection::~Connection()` is still
+empty, the dangling-listener window is still open, and the analysis below still stands.  It is also
+why an exit 139 must be triaged from its backtrace rather than from its seed.
+
 So when triaging an exit 139, read the backtrace before assuming which defect you have: frame `#0`
 in `DriverImpl::read` is the sentinel dereference, frame `#0` in
 `Connection::DefaultFrameListener::notify` is this one.
@@ -542,52 +582,111 @@ not**, and a single green seed proves nothing either way, so run more than one:
 ./run_L1Tests --gtest_shuffle --gtest_random_seed=<seed>
 ```
 
-Measured on this tree across twelve seeds, one run each, and the spread is the point:
+Two independent problems are in play under a shuffle, and every figure below separates them:
+
+- **Order-dependent ASSERTION failures** (exit `1`).  Deterministic for a given seed: the same seed
+  fails the same cases every time.
+- **An intermittent SIGSEGV** (exit `139`).  A race in production source, described in
+  [Intermittent SIGSEGV in the Bus reader thread](#intermittent-sigsegv-in-the-bus-reader-thread--a-production-defect-reported-not-worked-around);
+  it is NOT tied to a seed, and when it fires it pre-empts the summary so the run prints no totals
+  at all.  That is why the same seed can read as green in one table and as a crash in another.
+
+#### What was fixed, and what remains
+
+Nine cases added by this project — the six in `LibCCECUninitializedTest`,
+`IntegrationFlowTest.InboundImageViewOnReachesTypedProcessorThroughTheWholeStack`,
+`IntegrationFlowTest.InboundBroadcastActiveSourceReachesTheProcessor` and
+`ConnectionTest.CloseDetachesTheConnectionAndDestroyingAClosedOneLeavesTheBusUsable` — were
+themselves order-fragile when they were written, and they are not any more.  **One cause explained
+all nine.**
+
+`HdmiCecDriverMockTest.ReceiveMessageCallback` (`ccec/test_Driver_Mock.cpp`) calls the real
+`HdmiCecSetRxCallback()` with a test lambda and a pointer to a local `bool`.  The mock's default
+action *stores* that pair on the process-global mock object, so it outlives the case that set it.
+`DriverImpl::open()` early-returns while the driver is already `OPENED`
+(`ccec/src/DriverImpl.cpp:110-113`) and therefore never re-registers its own receive callback, so
+after that one case every `injectReceivedMessage()` in the program invoked a dead lambda through a
+freed stack address and no injected frame reached `DriverImpl::DriverReceiveCallback` — and from
+there nothing reached `Bus`, `Connection` or any listener.  In the default order that case runs
+after its victims and nothing shows; under a shuffle it can run before them, and then any case that
+depends on an injected inbound frame fails.  The tell was
+`ccec/test_LibCCEC.cpp` reporting *"could not bring LibCCEC to the uninitialised state this case
+requires"*, because its readiness wait injects a frame to observe the Bus reader publish RUNNING.
+
+The remedy is in three parts, all of them test-side:
+
+- `HdmiCecDriverMockTest::SetUp()`/`TearDown()` now capture and restore the mock's `rxCallback`,
+  `rxCallbackData`, `txCallback`, `txCallbackData` and `currentHandle` — fixture state management
+  only; no `TEST_F` body was touched.
+- `awaitBusReaderRunning()` in `ccec/test_LibCCEC.cpp` re-states the driver's inbound registration
+  (`DriverImpl::DriverReceiveCallback`) before it injects, so it does not depend on who ran before.
+- `ccec/test_Connection.cpp` does the same through a file-local `restoreDriverInboundRoute()`,
+  called from `IntegrationFlowTest::SetUp()` and from the one `ConnectionTest` case that injects.
+  It is deliberately **not** called from `ConnectionTest::SetUp()`, which is shared with 60
+  pre-existing passing cases.
+
+**What remains is the pre-existing fragility, and it is now exactly two cases**:
+`ConnectionTest.MatchSourceMismatchedAddress` and `ConnectionTest.SendAsyncMatchSource`.  They pass
+in the default order, they are not this project's tests, and they are deliberately left as they are.
+Six further legacy cases that used to fail under a shuffle — `BusTest.ListenerFiltering`,
+`BusTest.UnregisteredConnectionReceivesAll`, `ConnectionTest.MultipleListenersNotification`,
+`ConnectionTest.DefaultFilterUnregistered`, `ConnectionTest.DefaultFilterSpecificAddress` and
+`ConnectionTest.DefaultFilterBroadcast` — stopped failing without being edited, because they were
+victims of the same hijacked callback registration.
+
+#### Assertion outcome, per seed
+
+Fifteen seeds, measured on this tree after the fix.  Every run that reached the summary reported 483
+tests run and zero skipped:
 
 | Seeds | Exit | Ran / passed | Cases that failed |
 | --- | --- | --- | --- |
-| 3, 1000, 12345, 99999 | `0` | 483 / 483 | none — green, like the default order |
-| 1, 42, 100, 777 | `1` | 483 / 481 | `ConnectionTest.MatchSourceMismatchedAddress`, `ConnectionTest.SendAsyncMatchSource` |
-| 500 | `1` | 483 / 481 | `BusTest.ListenerFiltering`, `BusTest.UnregisteredConnectionReceivesAll` — a different pair from the one above, so the failing set is not a fixed list |
-| 2 | `1` | 483 / 480 | both `ConnectionTest` cases above, plus `BusTest.ListenerFiltering` |
-| 20260808 | `1` | 483 / 480 | both `ConnectionTest` cases above, plus `BusTest.UnregisteredConnectionReceivesAll` |
-| 54321 | `139` | no totals printed | five `ConnectionTest` cases fail, and then the production SIGSEGV of the section above aborts the run before GoogleTest prints a summary |
+| 5, 7, 15, 500, 12345, 54321 | `0` | 483 / 483 | none — green, like the default order |
+| 1, 2, 11, 12, 14, 42, 100, 777, 999 | `1` | 483 / 481 | `ConnectionTest.MatchSourceMismatchedAddress`, `ConnectionTest.SendAsyncMatchSource` |
 
-**TWO DIFFERENT PROBLEMS ARE IN PLAY, and repeating a seed separates them.**  Five repeats of each
-of five seeds:
+The failing set is now a **fixed pair** wherever it appears, which is itself the evidence that the
+nine cases above were fixed at their cause rather than reordered around: before the fix the same
+sweep produced a different subset at almost every seed (a `BusTest` pair at seed 500, three cases at
+seed 2, five `ConnectionTest` cases at seed 54321, and six to fifteen unique failures at seeds 5, 7,
+11, 12, 14 and 15).  Seeds 7, 15 and 12345 appear in the green row because that is what they report
+**when they reach the summary** — they are also the three seeds that crash, which the next table
+separates out.
 
-| Seed | exit `0` | exit `1` | exit `139` |
-| --- | --- | --- | --- |
-| 1 | 0 | 5 | 0 |
-| 42 | 0 | 5 | 0 |
-| 500 | 0 | 5 | 0 |
-| 12345 | 4 | 0 | 1 |
-| 54321 | 0 | 0 | 5 |
+#### Crash rate, per seed, by repetition
 
-The order-dependent ASSERTION failures are deterministic for a given seed — 1, 42 and 500 failed
-identically five times out of five, with the same cases each time.  The SIGSEGV is a RACE layered
-on top and is NOT tied to a seed the way the assertion failures are: seed 54321 crashed five times
-out of five, while seed 12345 — green in the single-run sweep above and green in four of its five
-repeats — crashed once.  When the crash fires it pre-empts the summary, so a crashing run reports
-no totals at all, which is why the same seed can read as green in one table and as a crash in the
-other.
+| Seed | Runs | exit `0` | exit `1` | exit `139` |
+| --- | --- | --- | --- | --- |
+| 5 | 6 | 6 | 0 | 0 |
+| 7 | 16 | 13 | 0 | 3 |
+| 15 | 16 | 12 | 0 | 4 |
+| 12345 | 10 | 7 | 0 | 3 |
+| 54321 | 10 | 10 | 0 | 0 |
+| 2 | 10 | 0 | 10 | 0 |
 
-So order dependence in this suite is **NOT resolved**, and no seed should be quoted as "the"
-reproducer: 12345 is green four runs in five, and a green run of any seed proves nothing.  For the
-assertion failures use seed 42 or 100; for the crash use seed 54321, which reproduced it five times
-out of five in `LibCCECUninitializedTest.GetPhysicalAddressThrowsWhenNotInitialized`.
+Four further runs of seed 12345 under `gdb` crashed once more, for 4 in 14 at that seed.  Across
+every shuffled full-suite run in this pass — 81 of them, 77 plain and 4 under `gdb`, over the fifteen
+seeds above — the totals are **11 exit-139, 0 unexpected assertion failures beyond the fixed pair**.
+The default order over the same period was **14 runs, 14 green, 0 exit-139**.
+
+Read those two tables together and the split is unambiguous: seed 2 fails its two assertions ten
+times out of ten and never crashes, while seed 54321 crashes zero times out of ten and passes all
+483.  **Do not quote a single seed as "the" reproducer of either problem.**  For the assertion pair
+use seed 2, 42 or 100, which reproduce it every time; for the crash, budget for repetition rather
+than a seed — seed 15 is the highest observed rate at 4 in 16, and the seed an earlier revision of
+this file named for it (54321) no longer reproduces it at all.
 
 The failing set is specific to the seed *and* to the test inventory: re-derive it after adding
-tests rather than trusting the table above, because shuffling reorders the whole program and a
+tests rather than trusting the tables above, because shuffling reorders the whole program and a
 different seed exposes a different subset of the same underlying fragility.  Corroborating evidence
 sits in the driver file:
 `DriverTest.AAA_DriverSingletonAccess` is commented "runs first alphabetically", and
 `DriverTest.ZZZ_OpenWithFailure` and `DriverTest.ZZZ_CloseWithFailure` are commented "runs late
 to avoid breaking other tests" — deliberate alphabetical-ordering prefixes, which only make
-sense as a workaround for this fragility.
+sense as a workaround for this fragility.  `ZZZ_OpenWithFailure` is also the case that was running
+in all 11 crashing runs, so the prefix bounds the assertion problem and not the race.
 
-These cases pass in the default order and are deliberately left as they are.  **Randomised-order
-runs are diagnostic here, not an acceptance gate.**  Two consequences for anyone adding tests:
+Order dependence in this suite is therefore **reduced, not resolved**, and **randomised-order runs
+remain diagnostic here, not an acceptance gate**.  Three consequences for anyone adding tests:
 
 - Place new translation units in `run_L1Tests_SOURCES` *after* every pre-existing entry of their
   layer, so no established suite is reordered.  GoogleTest registers each `TEST_F` during static
@@ -595,14 +694,23 @@ runs are diagnostic here, not an acceptance gate.**  Two consequences for anyone
   ahead of an existing suite reorders that suite.
 - A new test must establish its own preconditions and leave shared state untouched, and must be
   verified both in isolation (`--gtest_filter=YourFixture.*`) and in the full suite.
+- **The HAL driver mock is process-global, and its registered callbacks are part of the state you
+  can break.**  GoogleTest isolates fixture members, not the mock singleton: `VerifyAndClear` and
+  re-stated `ON_CALL` defaults restore *expectations*, and restore nothing about which receive or
+  transmit callback the driver last registered.  A test that calls `HdmiCecSetRxCallback()` or
+  `HdmiCecSetTxCallback()` — directly or through production code — must capture and restore the
+  previous registration, and a test that injects an inbound frame must not assume the route is
+  still intact.  Verify a new test with
+  `--gtest_filter='HdmiCecDriverMockTest.*:YourFixture.*' --gtest_repeat=2`, which exposes this
+  class of defect deterministically and without a seed.
 
 ### Dead Skip Guards
 
 `ccec/test_Driver.cpp` contains 14 `GTEST_SKIP()` guards — 13 spelled
 `"Mock is nullptr - test environment not initialized"` and one
 `"Driver not in valid state for this test"`.  Measurement shows **none of them ever fires**: the
-default run and every shuffled run in the table above report 483 tests run and zero skipped, green
-seeds and failing seeds alike.  They are dead defensive code
+default run, and every shuffled run in the tables above that reached its summary, report 483 tests
+run and zero skipped — green seeds and failing seeds alike.  They are dead defensive code
 rather than silent skips, so the suite's pass count is its real pass count.  New tests deliberately
 do not copy that idiom — if a precondition genuinely cannot be met, the test is not written and
 the gap is reported instead.

@@ -31,6 +31,13 @@
 #include "ccec/MessageEncoder.hpp"
 #include "ccec/MessageProcessor.hpp"
 #include "ccec/Messages.hpp"
+/*
+ * DriverImpl.hpp lives under ccec/src, which AM_CPPFLAGS does not cover, so it is reached by
+ * relative path rather than by adding an -I - the same route ccec/test_DriverImpl_Async.cpp and
+ * ccec/test_LibCCEC.cpp already take.  One thing is needed from it: the address of the driver's
+ * own HAL receive callback, for restoreDriverInboundRoute() below.
+ */
+#include "../../../ccec/src/DriverImpl.hpp"
 #include "hdmi_cec_driver_mock.h"
 
 using ::testing::_;
@@ -38,6 +45,36 @@ using ::testing::Return;
 using ::testing::DoAll;
 using ::testing::Invoke;
 using ::testing::SetArgPointee;
+
+/*
+ * Re-state the driver's own HAL receive registration on the process-global mock, so that a frame
+ * injected afterwards actually travels HAL -> DriverImpl -> Bus -> Connection.
+ *
+ * WHY A TEST HAS TO DO THIS.  The mock stores whatever the real HdmiCecSetRxCallback entry point
+ * is handed, on an instance that outlives every fixture: ccec/test_Driver_Mock.cpp's
+ * ReceiveMessageCallback case registers a callback of its own, and after it has run an injection
+ * reaches that case's lambda - through a data pointer that died with its stack frame - instead of
+ * the CEC stack.  DriverImpl::open() does not put the driver's registration back, because it
+ * returns early while the driver is already OPENED.  Measured, deterministically:
+ * `--gtest_filter='HdmiCecDriverMockTest.ReceiveMessageCallback:IntegrationFlowTest.Inbound*:
+ * ConnectionTest.CloseDetaches*' --gtest_repeat=2` passed iteration 1 and failed all three
+ * inbound cases in iteration 2 before this call existed.
+ *
+ * The data pointer is 0 because that is exactly what DriverImpl::open() registers alongside the
+ * callback, so this restores the driver's registration rather than inventing a new one.  It is
+ * the same self-sufficiency rule DriverTest.WriteAsync applies to the HdmiCecOpen default action
+ * in ccec/test_Driver.cpp: own the precondition, do not inherit it.
+ *
+ * DELIBERATELY NOT CALLED FROM ConnectionTest::SetUp().  That fixture is shared with sixty
+ * pre-existing passing cases, and changing what they run inside would be modifying them; this
+ * pass's own cases call it for themselves instead.
+ */
+static void restoreDriverInboundRoute(HdmiCecDriverMock *mock) {
+    if (mock != nullptr) {
+        mock->rxCallback = &DriverImpl::DriverReceiveCallback;
+        mock->rxCallbackData = 0;
+    }
+}
 
 class ConnectionTest : public ::testing::Test {
 protected:
@@ -1479,6 +1516,11 @@ TEST_F(ConnectionTest, CloseDetachesTheConnectionAndDestroyingAClosedOneLeavesTh
         << "the process-global HdmiCecDriverMock is absent, so no frame can be injected and "
            "this case cannot observe the contract it exists to check";
 
+    // Own the inbound precondition rather than inheriting it: step (1) below is an injection that
+    // MUST arrive, and it arrives only if the mock is still routing frames to the driver.  See
+    // restoreDriverInboundRoute() at the top of this file for what can route them elsewhere.
+    restoreDriverInboundRoute(mock);
+
     TestFrameListener listener;
     Connection *conn = new Connection(LogicalAddress::PLAYBACK_DEVICE_1, true, "HeapConnection");
 
@@ -1701,6 +1743,13 @@ protected:
         mock = HdmiCecDriverMock::getInstance();
         ASSERT_NE(mock, nullptr) << "the global test environment must have created the driver mock";
         ::testing::Mock::VerifyAndClearExpectations(mock);
+
+        // Every inbound case in this fixture asserts on a frame injected at the HAL, so the route
+        // from the HAL to the CEC stack is a precondition of the fixture rather than of one case.
+        // Establishing it here makes all six cases behave identically whether they run alone, in
+        // this file's order, or anywhere a shuffle puts them.  Safe for the outbound cases too:
+        // it only restores the registration DriverImpl::open() itself installed.
+        restoreDriverInboundRoute(mock);
     }
 
     void TearDown() override
