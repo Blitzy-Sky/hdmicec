@@ -192,6 +192,24 @@
 #   byte for byte if that is what you want -- at which point keeping them out of a commit
 #   becomes yours to manage.
 #
+#   ARTIFACT CUSTODY IS THE SAME ON BOTH BRANCHES, and that is a correction rather than a
+#   restatement.  A directory this script MINTS was already owner-only; a directory a
+#   caller NAMED used to be accepted exactly as found, and the files inside it were created
+#   at the caller's umask.  Under `umask 000` and a pre-existing mode-0755 directory, every
+#   artifact was written 0666 and an unprivileged local account could read them, append to
+#   them, and forge the gate's own input (a fabricated 100.0% row in
+#   per_file_coverage.tsv) or squat on .run.lock to defeat the concurrency guard.  Three
+#   things now hold for both branches:
+#     * `umask 077` is set before anything is resolved, so every file this run or any of
+#       its children creates is 0600 and every directory 0700 -- see the block above
+#       `set -euo pipefail`'s successor at the top of the executable section;
+#     * a caller-named directory is brought to mode 0700 and then asserted private
+#       (restrict_artifact_dir_to_owner), the same two steps the minted branch ends with;
+#     * a caller-named path is COLLAPSED lexically and then checked for where it lands
+#       (canonicalise_path_lexically, assert_artifact_location_plausible), so a near-root
+#       value or one whose '..' components collapse into a system tree is refused instead
+#       of created -- the refusal both plugin runners already made and this one did not.
+#
 # ==============================================================================
 # USAGE
 # ==============================================================================
@@ -333,6 +351,32 @@
 #
 # ==============================================================================
 set -euo pipefail
+
+# ------------------------------------------------------------------------------------
+# FILE MODE FOR EVERYTHING THIS RUN CREATES.  Set here, before any path is resolved and
+# long before any byte is written, because it is inherited by every child too -- lcov,
+# genhtml, gcov and the test binary all create files in this run's name.
+#
+# WHY IT IS NOT ENOUGH TO CHMOD THE DIRECTORY.  The artifact DIRECTORY was already
+# created 0700 on the branch that mints it, but the FILES inside it were created at
+# whatever umask the caller happened to have.  Under a permissive umask -- `umask 000` is
+# the case that was demonstrated -- coverage.info, filtered_coverage.info,
+# per_file_coverage.tsv, uncovered_lines.txt, capture.log, filter.log and .run.lock were
+# all written 0666.  Inside a caller-supplied directory that was left world-traversable,
+# an unprivileged local account could then READ them, APPEND to them, and FORGE the very
+# file the gate reads: a fabricated 100.0% row in per_file_coverage.tsv, or a .run.lock
+# it can hold to break the concurrency guard.  For a script whose only product is
+# trustworthy coverage evidence, that is the failure that matters -- not confidentiality
+# (the artifacts hold source paths and counts, never secrets) but INTEGRITY.
+#
+# 077 rather than 022: group and other get nothing at all.  Nothing in this pipeline is
+# read by another account -- the suite, lcov, genhtml and the gate all run as this user
+# in this process tree -- so there is no consumer to break, and CI collects artifacts as
+# the same user that produced them.  The HTML report stays fully readable by its owner.
+# The one file that already chmod'd itself to 600 (provenance.txt) keeps doing so; this
+# makes every other artifact match it instead of being the exception.
+# ------------------------------------------------------------------------------------
+umask 077
 
 # ------------------------------------------------------------------------------------
 # Path resolution.  Everything is derived from this script's own location so that the
@@ -598,6 +642,115 @@ rule() { printf '%s\n' '--------------------------------------------------------
 EUID_VALUE="$(id -u)"
 readonly EUID_VALUE
 
+# ------------------------------------------------------------------------------------
+# LEXICAL CANONICALISATION -- collapse '.', '..' and doubled slashes, and NOTHING ELSE.
+#
+# WHY IT IS NEEDED.  Absolutising a caller-supplied path is not the same as canonicalising
+# it.  `--output-dir "$SANDBOX/ok/../../../../etc/name"` is already absolute, so it passed
+# straight into the ancestry walk -- which then validated `$SANDBOX/ok/..`,
+# `$SANDBOX/ok/../..` and so on as ordinary existing directories owned by root, created
+# every missing component in turn, and wrote the artifacts into /etc/name.  Every
+# individual check held; the PATH had simply left the tree the caller appeared to name.
+# Collapsing the components first means the checks below, the location guard above and the
+# messages a reader sees all describe the one directory that will actually be written to.
+#
+# WHY IT IS LEXICAL AND NOT `realpath`.  `realpath` (without --no-symlinks) RESOLVES
+# symbolic links, which would quietly defeat this script's strongest guarantee: that it
+# refuses to write THROUGH a link rather than following it (assert_safe_ancestry,
+# create_safe_dir).  A resolved path has no links left to refuse, so the refusal would
+# never fire again and a substituted component would be validated at its target instead.
+# Collapsing textually keeps every link visible to those checks -- and needs no external
+# tool, which also keeps the "no new dependency" clause intact.
+#
+# `local -` scopes the option change to this function, so `set -f` (no pathname expansion
+# while the path is split on '/') cannot leak into the caller: without it a component
+# containing '*' would be glob-expanded during the split.
+# ------------------------------------------------------------------------------------
+canonicalise_path_lexically() { # $1=absolute path -> canonical path on stdout
+    local input="$1" out='' component saved_ifs
+    local -
+    set -f
+
+    saved_ifs="$IFS"
+    IFS='/'
+    # Deliberate word splitting on '/' to walk the components in order.
+    # shellcheck disable=SC2086
+    set -- ${input#/}
+    IFS="$saved_ifs"
+
+    for component in "$@"; do
+        case "$component" in
+            ''|.)  : ;;                        # '' comes from a doubled slash; '.' is a no-op
+            ..)    out="${out%/*}" ;;          # one level up, textually -- never via the filesystem
+            *)     out="$out/$component" ;;
+        esac
+    done
+    printf '%s\n' "${out:-/}"
+}
+
+# ------------------------------------------------------------------------------------
+# WHERE AN ARTIFACT ROOT MAY NOT BE.  Both sibling plugin runners refuse a near-root
+# artifact root outright ("implausibly short"); this file had no equivalent check, so
+# `--output-dir /etc` was accepted and created /etc/.run.lock, and a '..'-collapsed value
+# landed under /etc as well.  Three sibling scripts written together must not disagree
+# about that, so the same refusal lives here now, with the system-location half made
+# explicit rather than left to a length test.
+#
+# The list is deliberately SHORT and holds only trees the operating system owns.  /tmp,
+# /var/tmp, /run/user/<uid>, /opt, /home and /root are all legitimate destinations and are
+# NOT refused -- and neither is a path inside the checkout, because the header documents
+# `--output-dir .` from the superproject root as the way to reproduce CI's layout byte for
+# byte.  A guard that broke a documented usage would be a worse defect than the one it
+# closes.
+# ------------------------------------------------------------------------------------
+readonly PROTECTED_SYSTEM_ROOTS=(
+    /bin /boot /dev /etc /lib /lib32 /lib64 /libx32 /proc /run /sbin /sys /usr /var
+)
+
+assert_artifact_location_plausible() { # $1=canonical absolute path  $2=how it was chosen
+    local path="$1" origin="$2" root
+
+    case "$path" in
+        /)  die "the artifact directory must not be '/' ($origin).  This script creates and
+       overwrites fixed artifact names underneath it and takes a lock file there; the
+       filesystem root is not a place to do that." ;;
+        /*) : ;;
+        *)  die "internal error: assert_artifact_location_plausible needs an absolute path;
+       got '$path' ($origin)." ;;
+    esac
+
+    # Same test, same wording, as the two plugin runners: four characters or fewer cannot be
+    # anything but a near-root directory.
+    [ "${#path}" -gt 4 ] || die "the artifact directory '$path' is implausibly short ($origin).
+       Fixed artifact names are created and overwritten underneath it, so a near-root path is
+       refused.  Give a path that is unmistakably yours, for example
+       \"\${TMPDIR:-/tmp}/hdmicec-l1-coverage\", or drop --output-dir entirely and let this
+       script mint an unpredictable mode-0700 root with mktemp -d."
+
+    # Checked BEFORE the protected-root loop, because /var/tmp and /run/user/<uid> are
+    # ordinary per-user scratch directories that happen to live under a protected root.
+    case "$path" in
+        /var/tmp|/var/tmp/*|/run/user/*) return 0 ;;
+    esac
+
+    for root in "${PROTECTED_SYSTEM_ROOTS[@]}"; do
+        case "$path" in
+            "$root"|"$root"/*)
+                die "refusing to write coverage artifacts to
+           $path
+       ($origin), because it is $root or lies underneath it -- a directory the operating
+       system owns.  This script creates a directory there if it is missing, takes
+       .run.lock inside it, and overwrites fixed artifact names on every run; none of that
+       belongs in a system tree, and a value that reaches one is nearly always a '..' that
+       collapsed out of the intended path or a mistyped root.
+       Use \"\${TMPDIR:-/tmp}/hdmicec-l1-coverage\", a directory inside your own tree, or
+       drop --output-dir / COVERAGE_OUTPUT_DIR and let this script mint an unpredictable
+       mode-0700 root with mktemp -d." ;;
+        esac
+    done
+    return 0
+}
+
 # "<uid> <octal mode> <type>" for an existing path, empty for one that does not exist.
 # lstat semantics (stat does not follow the final link), so a symlink reports as such
 # rather than as whatever it points at.
@@ -768,6 +921,45 @@ assert_private_dir() { # $1=path
     numeric_mode="$(( 8#$mode ))"
     [ "$(( numeric_mode & 0077 ))" -eq 0 ] || die "a directory this script created for its own
        use has mode $mode, which lets other accounts read or write it: $path"
+}
+
+# ------------------------------------------------------------------------------------
+# ONE PRIVACY POSTURE FOR BOTH BRANCHES OF THE ARTIFACT DIRECTORY.
+#
+# The minted branch already ended at `chmod 700` + assert_private_dir, so a directory this
+# script created was owner-only.  A CALLER-SUPPLIED directory got neither: it was accepted
+# as it was found, so a pre-existing mode-0755 directory stayed 0755 and every artifact
+# written into it was reachable by any local account that could traverse it -- which is how
+# an unprivileged user was able to read, append to and forge the gate's own input file.
+# The caller-named branch is the predictable one, so if anything it warrants the stricter
+# treatment, not the weaker.
+#
+# TIGHTENED RATHER THAN REFUSED, and only when the mode actually grants something away:
+# the directory has already been proved to be OWNED by this user (assert_owned_and_private),
+# so narrowing it is a change to the caller's own directory, it is announced when it
+# happens, and it costs the caller nothing this pipeline needs.  Refusing instead would
+# turn an ordinary `--output-dir ~/cov` into a hard failure over a bit this script can
+# simply fix.  A chmod that does not take IS fatal -- proceeding would write evidence
+# somewhere it can be replaced.
+# ------------------------------------------------------------------------------------
+restrict_artifact_dir_to_owner() { # $1=directory this run writes its artifacts into
+    local dir="$1" mode
+    mode="$(stat -c '%a' -- "$dir" 2>/dev/null)" \
+        || die "cannot stat the artifact directory to check its mode: $dir"
+    if [ "$(( 8#$mode & 0077 ))" -ne 0 ]; then
+        chmod 700 -- "$dir" \
+            || die "the artifact directory $dir is mode $mode -- readable or writable by other
+       accounts -- and could not be tightened to 0700.  Everything written there is the
+       evidence this run is judged on, and another account able to write it can replace a
+       trace between the capture and the gate.  Fix its permissions, or point
+       --output-dir / COVERAGE_OUTPUT_DIR at a directory you own."
+        warn "tightened the artifact directory from mode $mode to 0700: $dir"
+        warn "  Its contents are the trace, the table and the log the gate and the"
+        warn "  traceability report rest on, so no other account may read or replace them."
+    fi
+    # The same assertion the minted branch makes, so both branches end in the same state
+    # rather than in two states that merely look similar.
+    assert_private_dir "$dir"
 }
 
 # Re-run the ancestry check immediately before a destructive step, and check the specific
@@ -1072,11 +1264,22 @@ OPTIONS
   -t, --threshold N        Line-coverage bar, an integer percentage.  Default ${COVERAGE_MIN}.
                            Lower it only for a deliberate diagnostic run; 80 is the
                            required bar.
-  -o, --output-dir DIR     Write artifacts to DIR.  Default:
-                           \${TMPDIR:-/tmp}/hdmicec-l1-coverage/<workspace basename>,
+  -o, --output-dir DIR     Write artifacts to DIR.  Left unset -- the default -- the root
+                           is MINTED per run with
+                           mktemp -d "\${TMPDIR:-/tmp}/hdmicec-l1-coverage.XXXXXXXX",
                            which is outside the git tree because this suite's .gitignore
                            does not cover coverage.info, filtered_coverage.info or
-                           coverage/ and is out of scope for editing.
+                           coverage/ and is out of scope for editing, and unpredictable so
+                           it cannot be pre-created by another account.  The chosen path is
+                           printed as the "artifacts:" line.
+                           A DIR you name is held to the same custody as a minted one and
+                           to two checks a minted name cannot need: it is collapsed
+                           lexically first (so '..' cannot land the artifacts outside the
+                           tree it appears to name) and refused if it is near-root or
+                           inside a system tree -- /etc, /usr, /var and the rest; /tmp,
+                           /var/tmp, /run/user, /opt, /home, /root and anywhere in your own
+                           checkout are all accepted.  It is then brought to mode 0700, and
+                           every file written under it is 0600.
       --per-file-gate      In addition to the aggregate gate, fail when ANY non-exempt file
                            in the filtered trace is below the bar.  ON by default, because
                            Directive 4 states the bar per target; the flag exists so a
@@ -1917,6 +2120,13 @@ prepare_output_dir() {
             /*) ;;
             *)  die "TMPDIR must be an absolute path to be checked safely; got: $parent" ;;
         esac
+        # TMPDIR is caller-controlled too, so it gets the same treatment as --output-dir:
+        # collapsed first, then checked for where it actually lands.  Without this, a TMPDIR
+        # of /tmp/x/../../../etc would put the minted root under /etc by exactly the route
+        # the named branch refuses -- the guard has to cover both ways in or it covers
+        # neither.
+        parent="$(canonicalise_path_lexically "$parent")"
+        assert_artifact_location_plausible "$parent/hdmicec-l1-coverage" "TMPDIR"
         assert_safe_ancestry "$parent/hdmicec-l1-coverage" minted
         OUTPUT_DIR="$("$MKTEMP_BIN" -d "$parent/hdmicec-l1-coverage.XXXXXXXX")" \
             || die "could not create an artifact directory under $parent.
@@ -1930,6 +2140,19 @@ prepare_output_dir() {
             /*) ;;
             *)  OUTPUT_DIR="$(pwd -P)/$OUTPUT_DIR" ;;
         esac
+        # Then COLLAPSE it, and only then decide whether the place it names is acceptable.
+        # Both steps precede create_safe_dir deliberately: that function CREATES what is
+        # missing, so anything it is handed has already been created by the time a later
+        # check could object.  The collapsed form is printed when it differs from what the
+        # caller typed, because a path that quietly means somewhere else is the whole
+        # defect being closed here and a reader must be able to see it happen.
+        local named_output_dir="$OUTPUT_DIR"
+        OUTPUT_DIR="$(canonicalise_path_lexically "$OUTPUT_DIR")"
+        if [ "$OUTPUT_DIR" != "$named_output_dir" ]; then
+            log "the output directory you named collapses to: $OUTPUT_DIR"
+            log "  as given: $named_output_dir"
+        fi
+        assert_artifact_location_plausible "$OUTPUT_DIR" "--output-dir / COVERAGE_OUTPUT_DIR"
         # The WHOLE chain, not just the leaf: the leaf can be an ordinary directory while its
         # parent is the substituted one.  create_safe_dir validates what exists, creates what
         # does not at 0700 one component at a time, and re-validates each component afterwards.
@@ -1940,6 +2163,10 @@ prepare_output_dir() {
     OUTPUT_DIR="$(cd -- "$OUTPUT_DIR" && pwd -P)"
     assert_owned_and_private "$OUTPUT_DIR"
     assert_ancestors_safe "$OUTPUT_DIR"
+    # Applied to BOTH branches, after ownership has been established: the minted branch is
+    # already 0700 so this is a no-op there, and a caller-supplied directory is brought to
+    # the same posture instead of being trusted as found.  See the function's own comment.
+    restrict_artifact_dir_to_owner "$OUTPUT_DIR"
 
     RAW_TRACE="$OUTPUT_DIR/coverage.info"
     FILTERED_TRACE="$OUTPUT_DIR/filtered_coverage.info"
