@@ -1015,16 +1015,90 @@ cleanup_stage_dir() {
     return 0
 }
 
+# ------------------------------------------------------------------------------------
+# CANCELLATION.  A run that cannot be stopped is a run CI cannot cancel.
+#
+# Bash runs a trap only BETWEEN commands.  The suite used to be launched as a FOREGROUND child
+# -- `( cd …; timeout … ./run_L1Tests ) >"$run_log"` -- so while this shell sat inside that
+# command an external SIGTERM was recorded and then withheld from the handler until the child
+# finished on its own.  For the length of a whole suite the runner therefore ignored its own
+# cancellation, and nothing forwarded the signal to the suite: a cancelled job left the test
+# binary running and the private lcov HOME and staging directory behind it.
+#
+# So the suite is launched in the BACKGROUND and in its OWN PROCESS GROUP -- `set -m` makes a
+# background job a process-group leader -- and this shell waits on it.  `wait` is interruptible,
+# so a signal reaches the handler at once; the handler then signals the whole GROUP, which is
+# `timeout` and the test binary, both of which stay in that group because `timeout --foreground`
+# deliberately does not create one of its own.  A bounded grace period follows, then the group is
+# killed outright.
+SUITE_PGID=''                  # process group of the running suite; empty when none is running
+SUITE_SIGNAL=''                # name of the signal that cancelled this run, if any
+# How long a signalled process group is given to exit before it is killed outright.  Bounded
+# because the point of the exercise is that a cancellation completes.
+SUITE_STOP_GRACE_SECONDS="${SUITE_STOP_GRACE_SECONDS:-10}"
+readonly SUITE_STOP_GRACE_SECONDS
+
+# Wait up to $2 seconds for kill-target $1 (a pid, or -pgid) to disappear.  0 when it is gone.
+await_process_exit() { # $1 = kill target  $2 = seconds
+    local target="$1" seconds="$2" waited=0
+    while kill -0 -- "$target" 2>/dev/null; do
+        [ "$waited" -lt "$seconds" ] || return 1
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 0
+}
+
+# Forward $1 to the suite's process group, then make sure it is actually gone.  Idempotent, so
+# the signal handler and the EXIT handler can both call it.  The group is addressed by id -- never
+# by a command-line pattern, because `pkill -f run_L1Tests` would also match anything that merely
+# mentions the name, including the harness that started this script.
+stop_suite_group() { # $1 = signal name to forward
+    local signal="${1:-TERM}"
+    [ -n "$SUITE_PGID" ] || return 0
+    if ! kill -0 -- "-$SUITE_PGID" 2>/dev/null; then
+        SUITE_PGID=''
+        return 0
+    fi
+    warn "forwarding SIG$signal to the suite process group $SUITE_PGID"
+    kill -"$signal" -- "-$SUITE_PGID" 2>/dev/null || true
+    if ! await_process_exit "-$SUITE_PGID" "$SUITE_STOP_GRACE_SECONDS"; then
+        warn "the suite process group $SUITE_PGID ignored SIG$signal for"
+        warn "    ${SUITE_STOP_GRACE_SECONDS}s (SUITE_STOP_GRACE_SECONDS); killing it outright."
+        kill -KILL -- "-$SUITE_PGID" 2>/dev/null || true
+        await_process_exit "-$SUITE_PGID" 5 \
+            || warn "process group $SUITE_PGID survived SIGKILL; report this, it should not happen."
+    fi
+    SUITE_PGID=''
+    return 0
+}
+
 on_exit() {
     local rc=$?
+    # Children first: removing the staging directory or the private lcov HOME while the suite is
+    # still running is a cleanup that has to be done twice.  The signal that cancelled the run,
+    # when there was one, is the signal forwarded on -- a run cancelled with SIGHUP should not
+    # report that it sent SIGTERM.
+    stop_suite_group "${SUITE_SIGNAL:-TERM}"
     cleanup_stage_dir
     cleanup_lcov_home
     return "$rc"
 }
+
+# The signal handler `exit`s rather than re-raising, because a shell terminated by a signal with
+# its default disposition never runs its EXIT trap: re-raising would have skipped the staging
+# cleanup, the private lcov HOME and -- now -- the suite itself.  `exit 130/143/129` reports the
+# same status a signalled shell would while guaranteeing the handler runs.
+on_signal() { # $1 = signal name  $2 = exit status
+    SUITE_SIGNAL="$1"
+    warn "received SIG$1 -- cancelling this run"
+    stop_suite_group "$1"
+    exit "$2"
+}
 trap on_exit EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
 
 
 # ------------------------------------------------------------------------------------
@@ -1933,19 +2007,39 @@ $survivors
     # this suite drives real pthread mutexes, condition variables and threads, and a mock that
     # never signals is one edit away -- would otherwise hang here for ever: no output, no exit,
     # no gate, and in CI a job killed by the runner's own limit with no diagnosis attached.
-    # `timeout --foreground` so the child keeps the terminal and a Ctrl-C still reaches it, plus
-    # --kill-after where the local timeout preserves exit 124 with it (see the probe above), to
-    # escalate to SIGKILL if the suite ignores SIGTERM.  Exit 124 is timeout's own signal that
-    # the limit fired, and it is reported as its own outcome below rather than folded into "the
-    # suite failed", because the two need different fixes.
+    # `timeout --foreground` is kept, but NOT for the reason it usually is: the suite no longer
+    # runs in the terminal's foreground group at all (see the cancellation block next to
+    # `trap on_exit`).  It is kept because --foreground makes `timeout` refrain from putting its
+    # child in a process group of its OWN, which is what keeps `timeout` and the test binary
+    # inside the one group the signal handler signals.  A Ctrl-C reaches the suite through that
+    # handler now, not through the terminal.  --kill-after is added where the local timeout
+    # preserves exit 124 with it (see the probe above), to escalate to SIGKILL if the suite
+    # ignores SIGTERM.  Exit 124 is timeout's own signal that the limit fired, and it is reported
+    # as its own outcome below rather than folded into "the suite failed", because the two need
+    # different fixes.
+    #
+    # CANCELLABLE: the suite is launched in the BACKGROUND and in its OWN PROCESS GROUP, and this
+    # shell waits on it, so an external INT/TERM/HUP reaches the handler WHILE the suite runs
+    # rather than after it (see the block next to `trap on_exit`).  `timeout --foreground` is kept
+    # for exactly that reason: it deliberately does not put its child in a new process group, so
+    # `timeout` and the test binary both stay in the one group the handler signals.
     local rc=0
+    set -m
     (
         cd "$HDMICEC_ROOT/tests/L1Tests"
         LD_LIBRARY_PATH="$ld_path" \
-        "$TIMEOUT_BIN" --foreground "${TIMEOUT_KILL_AFTER[@]}" "$SUITE_TIMEOUT" \
+        exec "$TIMEOUT_BIN" --foreground "${TIMEOUT_KILL_AFTER[@]}" "$SUITE_TIMEOUT" \
             ./run_L1Tests --gtest_print_time=1 "--gtest_output=json:$results_json" \
                 ${GTEST_EXTRA_ARGS:+$GTEST_EXTRA_ARGS}
-    ) >"$run_log" 2>&1 || rc=$?
+    ) >"$run_log" 2>&1 &
+    SUITE_PGID=$!
+    set +m
+    # `|| rc=$?` rather than a set +e / set -e pair: toggling errexit inside a function that may
+    # itself have been invoked in a `||` or `if !` context re-arms it where the caller had
+    # deliberately suppressed it.  A trapped signal interrupts the wait either way, which is the
+    # whole point of waiting rather than running the suite in the foreground.
+    wait "$SUITE_PGID" || rc=$?
+    SUITE_PGID=''
 
     # The tail is the part a reader needs; the whole log is on disk either way.
     "$AWK_BIN" '/^\[==========\]|^\[  PASSED  \]|^\[  FAILED  \]|^\[  SKIPPED \]|tests? from .* ran/' "$run_log" \

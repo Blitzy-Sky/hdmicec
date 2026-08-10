@@ -668,6 +668,41 @@ every shuffled full-suite run in this pass — 81 of them, 77 plain and 4 under 
 seeds above — the totals are **11 exit-139, 0 unexpected assertion failures beyond the fixed pair**.
 The default order over the same period was **14 runs, 14 green, 0 exit-139**.
 
+#### Independent re-measurement, and two seeds that moved
+
+The tables above are kept exactly as they were measured, because their value is provenance.  A later
+QA-remediation pass re-ran the sweep on the same tree — 16 shuffled runs plus one default-order run,
+each bounded at 600 s — and the outcome both confirms the split and moves two seeds, which is the
+point of recording it separately rather than editing the numbers above:
+
+| Seed | Runs | exit `0` | exit `1` (fixed pair) | exit `139` |
+| --- | --- | --- | --- | --- |
+| default order | 1 | 1 | 0 | 0 |
+| 1, 2, 11, 12, 14, 42, 999 | 1 each | 0 | 7 | 0 |
+| 7, 15 | 1 each | 2 | 0 | 0 |
+| 100 | 3 | 0 | 3 | 0 |
+| 777 | 1 | 0 | 0 | **1** |
+| 12345 | 3 | 2 | 0 | **1** |
+
+Every exit-1 run reported 483 ran / 481 passed with the same fixed pair —
+`ConnectionTest.MatchSourceMismatchedAddress` and `ConnectionTest.SendAsyncMatchSource` — and the
+default order was green at 483 / 483, so nothing in the assertion picture has changed.
+
+- **Seed 777 crashed.**  It sits in the exit-1 row of the assertion table above and had never been
+  observed crashing.  Its crashing run had already printed both `ConnectionTest` failures before the
+  fault pre-empted the summary, so it read as "exit 139 with two named failures and no totals" —
+  which is exactly the interleaving the two tables above warn about, now observed rather than
+  predicted.
+- **Seed 100 did not crash in three runs**, although the QA checkpoint that prompted this
+  re-measurement did observe it crashing.  Two independent measurements of the same seed therefore
+  disagree, which is the strongest form of the point this section already makes.
+
+Totals for the re-measurement: **2 exit-139 in 16 shuffled runs (12.5%)**, against 11 in 81 (13.6%)
+above — the same rate within the noise of a race — and **0 exit-139 in the default order**.  Neither
+required production change has been made, so nothing here is a fix: the exposure moved seeds, and the
+two defects are still open exactly as described above and in
+[Intermittent SIGSEGV in the Bus reader thread](#intermittent-sigsegv-in-the-bus-reader-thread--a-production-defect-reported-not-worked-around).
+
 Read those two tables together and the split is unambiguous: seed 2 fails its two assertions ten
 times out of ten and never crashes, while seed 54321 crashes zero times out of ten and passes all
 483.  **Do not quote a single seed as "the" reproducer of either problem.**  For the assertion pair
