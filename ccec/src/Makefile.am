@@ -21,7 +21,7 @@ SUBDIRS =
 # The AIDL/Binder HDMI CEC back-end is compiled into libRCEC unconditionally, so
 # that both back-ends are present in every build for every SOC vendor and the
 # choice between them is made at runtime rather than at build time.  There is
-# deliberately no --enable switch and no AM_CONDITIONAL guarding it.
+# deliberately no --enable switch and no Automake conditional guarding it.
 #
 # @AIDL_CPPFLAGS@ carries the four include roots the generated stubs need, and
 # @AIDL_CXXFLAGS@ the C++17 dialect flag this compiler requires: the generated
