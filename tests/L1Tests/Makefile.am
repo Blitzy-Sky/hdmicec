@@ -98,6 +98,17 @@ run_L1Tests_SOURCES = \
 # back-end, the runtime selection and the compatibility rule would have no L1 coverage while the
 # suite still reported green.
 #
+# $(top_srcdir)/mocks/hdmicec/fake_hdmi_cec_aidl_service.cpp went in immediately BEFORE the legacy
+# mock rather than after it, so that hdmi_cec_driver_mock.cpp keeps the final position the rule
+# below reserves for it.  That position is load-bearing: the legacy mock is the HAL that every
+# driver-dependent suite in this list resolves against, and it is the one entry the rule pins by
+# name rather than by group, so it is also the one entry a later append must not displace.  What
+# makes this insertion point safe is that neither mock-class source registers a TEST_F of its own,
+# so placing the fake between the osal/ group and the legacy mock reorders no suite registration
+# at all - and that is also why the fake belongs at the tail beside the mock instead of inside
+# either test group.  The fake is a test-scope source only: it belongs to this runner and to the
+# L2 fake-service host, and to no production library.
+#
 # ORDER IS SIGNIFICANT IN THIS LIST.  GoogleTest registers each TEST_F during static
 # initialisation, the order in which those initialisers run follows the link order of the
 # objects, which follows this list, and the order in which the suites then RUN is the order
