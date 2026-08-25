@@ -144,11 +144,18 @@ jobs:
           cmake-version: '3.16.x'
           github-api-token: ''
 
+      # flex and bison are BUILD-SDK prerequisites, not extras. build_binder.sh configures the
+      # Binder SDK with -DBUILD_HOST_AIDL=ON, which builds the host AIDL compiler, and that
+      # target calls FLEX_TARGET/BISON_TARGET. Without these two packages CMake reports
+      # "Could NOT find FLEX (missing: FLEX_EXECUTABLE)" and then fails outright with
+      # "Unknown CMake command \"FLEX_TARGET\"", so the "Build the Binder SDK" step below
+      # cannot run at all - measured, not anticipated. They belong here rather than in that
+      # step because this is the one place this job installs packages.
       - name: Install packages
         run: >
           sudo apt update
           &&
-          sudo apt install -y autoconf automake libtool pkg-config libgtest-dev libgmock-dev libdbus-1-dev build-essential g++ cmake valgrind lcov clang ninja-build
+          sudo apt install -y autoconf automake libtool pkg-config libgtest-dev libgmock-dev libdbus-1-dev build-essential g++ cmake valgrind lcov clang ninja-build flex bison
 
       - name: Checkout hdmicec
         uses: actions/checkout@v3
