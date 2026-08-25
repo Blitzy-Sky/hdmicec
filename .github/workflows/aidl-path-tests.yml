@@ -1,0 +1,1407 @@
+name: aidl-path-tests
+
+# WHAT A GREEN TICK ON THIS JOB MEANS - AND WHAT IT DOES NOT.
+#
+# This job is the ONLY place the AIDL/Binder HAL back-end EXECUTES, so it is the sole
+# producer of the dual-path evidence the migration rests on.
+#
+# It runs the COMPLETE five-invocation matrix - A through E - on ONE instrumented build on
+# ONE machine, then a single coverage capture and the branch-arm gate:
+#
+#   A  run_L1Tests  no service reachable          -> LEGACY back-end   (the regression arm)
+#   B  run_L1Tests  in-process compatible fake    -> AIDL back-end     (adapter translation)
+#   C  run_L1Tests  in-process fake, hash "-1"    -> LEGACY back-end   (present-but-unusable
+#                                                                       falls back)
+#   D  run_L2Tests  fake host not launched        -> LEGACY back-end   (end-to-end round trip)
+#   E  run_L2Tests  fake host launched and ready  -> AIDL back-end     (end-to-end round trip
+#                                                                       over real binder IPC)
+#
+# B AND E ARE BOTH NEEDED AND NEITHER SUBSTITUTES FOR THE OTHER. An in-process fake is not
+# IPC: libbinder resolves a locally registered name to the local BBinder, so interface_cast
+# hands back that very object - no Bp* proxy, no transaction across the driver, no client
+# threadpool involvement. That is why the L2 tier hosts the fake OUT OF PROCESS. Conversely,
+# incompatible-service behaviour is reachable ONLY in-process, because local dispatch honours
+# a virtual override of getInterfaceHash()/getInterfaceVersion() whereas a remote Bn* service's
+# generated onTransact writes the compiled-in constants. Hence C has no L2 counterpart.
+#
+# .github/workflows/L1-tests.yml RUNS INVOCATION A ONLY. Its green tick is build-plus-legacy
+# evidence and IS NOT DUAL-PATH EVIDENCE. It cannot run B, C, D or E: a hosted GitHub runner
+# has no binder kernel driver and no servicemanager - measured on an equivalent host as kernel
+# 6.12.85+, "binder" absent from /proc/filesystems, no /dev/binder*, and
+# "# CONFIG_ANDROID_BINDER_IPC is not set". That is also why this job boots a guest kernel of
+# its own instead of borrowing the hosted one.
+#
+# INVOCATION A IS REPEATED HERE RATHER THAN IMPORTED FROM THE HOSTED JOB, BECAUSE GCOV
+# COUNTERS CANNOT ACCUMULATE ACROSS MACHINES. The back-end selection resolves ONCE PER
+# PROCESS - tests/L1Tests/test_main.cpp calls LibCCEC::getInstance().init("CEC_TEST") inside a
+# global ::testing::Environment::SetUp, which is the first thing that forces
+# Driver::getInstance() - so one binary run yields exactly one selection outcome and every
+# outcome needs its own process. gcov counters DO accumulate across repeated runs of the same
+# instrumented binary, so running all five invocations against one build on one machine before
+# a single capture is the only way both arms of the selection branch land in one trace. That
+# is precisely what the branch-arm gate needs. Do not "optimise" this by importing A's
+# counters from elsewhere or by capturing between invocations.
+#
+# THERE IS NO strategy/matrix BLOCK, and its absence is deliberate rather than an omission on
+# the way across from L1-tests.yml. That job matrixes over compiler and coverage; matrixing
+# anything here would put the five invocations on more than one runner and fragment the single
+# accumulated trace the branch-arm gate depends on. The only matrix in this job is the five
+# RUNTIME INVOCATIONS of one build, which run_coverage.sh drives inside the guest.
+#
+# THE ORCHESTRATION IS NOT HERE. tests/L1Tests/run_coverage.sh owns, per invocation: the
+# CEC_TEST_AIDL_MODE value, the select/exclude gtest filters, the zero-exit check, the
+# executed-versus-registered case-count check, the assertion on the selected-back-end log
+# line, and the deterministically named non-overwriting per-invocation artifacts. It also owns
+# the zero-once / accumulate-across-all-five / capture-once counter policy and the two trace
+# consumers (the branch-arm gate reads the UNFILTERED coverage.info because some of the arms
+# live in halcompat.h; the 80% line gate reads its own filtered derivative). THIS WORKFLOW
+# GREPS NO LOG, COUNTS NO TESTS, NAMES NO PER-INVOCATION ARTIFACT, FILTERS NOTHING AND
+# CAPTURES NOTHING. It provisions a guest that can actually run binder, hands the guest the
+# payload, and preserves what the guest produces.
+#
+# NOT MEASURED HERE AND NOT CLAIMED ANYWHERE. Performance parity and device-level L3
+# validation are deferred human steps against target hardware. This job asserts no timing
+# figure, no percentage, no aggregate coverage number and no pass claim for either. There is
+# deliberately no performance-gate step.
+#
+# ----------------------------------------------------------------------------------------
+# THE TWENTY-FIFTH IN-SUBMODULE PATH.
+#
+# The diff gate for this migration is "exactly the twenty-four in-submodule paths". This
+# folder contributes a TWENTY-FIFTH: .github/workflows/aidl-path-tests-rootfs.sh. It is
+# authorised by the provisioning requirement - the guest root image must be built by a
+# CHECKED-IN SCRIPT - which the file-by-file table never enumerated. It is not out of scope
+# and it is not scope creep; it is the script this workflow is required to invoke rather than
+# generate inline. The only paths this migration changes under .github/ are L1-tests.yml,
+# this file, and that script.
+#
+# ----------------------------------------------------------------------------------------
+# BITNESS AND WIRE PROTOCOL: WHAT WAS SPECIFIED, WHAT IS REACHABLE, AND WHY.
+#
+# The guest userspace is ALL-32-BIT. That is not a preference: aidl-path-tests-rootfs.sh
+# accepts only i386 or armhf, and both verify_sdk_tree and verify_payload_tree REFUSE any
+# staged artefact whose ELF class or machine does not match. So the Binder SDK, both AIDL stub
+# snapshots, servicemanager and GoogleTest are all built for i386 here.
+#
+# The binder WIRE PROTOCOL is a SEPARATE AXIS from the compile bitness, and this job runs
+# protocol 8, not protocol 7. The reasoning, read from linux_binder_idl at the pinned tag
+# 2.6.0 rather than assumed:
+#
+#   * BUILD.md:415-425 and CMakeLists.txt:733-739 both state the protocol is selected at build
+#     time by BINDER_IPC_32BIT and is independent of the process bitness - a 32-bit process can
+#     run protocol 8.
+#   * CMakeLists.txt:724-727 shows TARGET_LIB32_VERSION emits a message and NOTHING ELSE; it
+#     adds no -m32. CMakeLists.txt:201-202 and :218-224 show it defaults ON and drags
+#     BINDER_IPC_32BIT ON with it, so the DEFAULT build of this SDK is protocol 7 at whatever
+#     bitness the compiler happens to produce. CMakeLists.txt:225-228 rejects only
+#     BINDER_IPC_32BIT=ON together with a non-32-bit build, so OFF with TARGET_LIB32_VERSION=ON
+#     is the documented 32-bit protocol-8 configuration (CMakeLists.txt:216-217).
+#   * BUILD.md:409-413 documents a strict protocol-version EQUALITY check when libbinder opens
+#     the driver node. Kernel, SDK build and vendor must agree or EVERY open fails.
+#   * Protocol 7 additionally requires CONFIG_ANDROID_BINDER_IPC_32BIT in the kernel
+#     (BUILD.md:429-430, and upstream's own tests/qemu/kconfig/binder-ipc32.fragment). In
+#     MAINLINE that option exists only up to 4.17. CONFIG_ANDROID_BINDERFS, which the in-guest
+#     init this job boots REQUIRES, exists only from 5.0. THE TWO ARE MUTUALLY EXCLUSIVE IN A
+#     MAINLINE KERNEL, so a binderfs guest cannot be a protocol-7 guest.
+#
+# Enabling CONFIG_ANDROID_BINDER_IPC_32BIT on a 5.x kernel would be silently dropped by
+# olddefconfig and would leave a protocol-7 userspace against a protocol-8 driver - exactly the
+# mismatch that fails every open, reported as a crash rather than as a configuration fault. So
+# this job does the honest thing: the kernel is built WITHOUT that option, the SDK is built
+# with -DBINDER_IPC_32BIT=OFF, and both sides speak protocol 8. That is also upstream's own
+# routinely-exercised configuration - tests/qemu/build-kernels.sh applies binder.fragment and
+# NOT binder-ipc32.fragment for every entry in its default matrix.
+#
+# The image manifest that aidl-path-tests-rootfs.sh writes carries a fixed "BINDER_PROTOCOL=7"
+# line of its own. That line is the script's text and is not authoritative here. The
+# authoritative value is the one the guest READS from /dev/binder and prints in the BINDER
+# PLATFORM RECORD block on the console, alongside the kernel configuration it read from the
+# running kernel and the SDK build flags it read from the staging tree. Those three are only
+# meaningful together, which is why the guest prints them as one block and why the console log
+# is uploaded as evidence.
+#
+# ----------------------------------------------------------------------------------------
+# EXPECT A FIRST RUN TO FAIL ON THE BRANCH-ARM GATE, AND DO NOT LAUNDER IT.
+#
+# run_coverage.sh exits 0 only when the suite was run by that invocation, was green, and line
+# coverage met the bar. Exit 1 is a failure. EXIT 3 IS ADVISORY AND IS NOT A PASS - the script
+# says so in terms, and the image manifest's STATUS_FILE_FORMAT repeats it.
+#
+# Its BRANCH_MANIFEST ships with EVERY entry's line, block and branch coordinates EMPTY, so
+# apply_branch_gate reports that it could not do its job and records an advisory, which makes
+# apply_gate exit 3 EVEN WHEN ALL FIVE INVOCATIONS ARE GREEN AND COVERAGE IS ABOVE THE BAR.
+# That is a deliberate chicken-and-egg, not an oversight: the coordinates can only be derived
+# from an UNFILTERED trace produced by a full five-invocation run on a binder-capable host, and
+# this job is the first thing able to produce one.
+#
+# This workflow therefore FAILS on any status other than 0 - no "|| true", no
+# continue-on-error, no "set +e" wrapped round the verdict, no special case for 3 - and its
+# failure message names BRANCH_MANIFEST, the three empty fields and the uploaded coverage.info
+# as the artefact those fields must be read from. Populating them is a change to
+# run_coverage.sh, which is a dependency of this file and is not modified here. Once they are
+# populated, subsequent runs can reach 0.
+#
+# The invariant that statement rests on, stated once so it can be checked: NO COMMAND WHOSE
+# RESULT DETERMINES AN OUTCOME TOLERATES A FAILURE ANYWHERE IN THIS FILE. "continue-on-error"
+# appears on no step and "set +e" on no line. The handful of "|| true" occurrences sit on
+# diagnostic prints and on captures that are ALLOWED to come back empty - a grep of a config
+# file, say - and in every one of those cases the emptiness is then tested explicitly and
+# turned into a named failure a few lines later. The verdict itself, and every assertion
+# leading to it, is bare.
+
+on:
+  # A full TCG-emulated guest boot plus a five-invocation matrix and a coverage capture is
+  # measured in hours, not minutes, so this is deliberately NOT wired to push or
+  # pull_request. Per-commit regression evidence is L1-tests.yml's job (invocation A on a
+  # hosted runner); this one runs on demand and on a schedule.
+  workflow_dispatch:
+    inputs:
+      lcov_expected_sha256:
+        description: >-
+          Optional. Expected SHA256 of the lcov release tarball. When given, the job
+          cross-checks the digest it measures against this value and fails on a mismatch.
+          Leave empty to record the measured digest without cross-checking.
+        required: false
+        default: ''
+      kernel_expected_sha256:
+        description: >-
+          Optional. Expected SHA256 of the guest kernel tarball. The job always verifies the
+          tarball against kernel.org's own published sha256sums for the release directory;
+          this input is an additional independent cross-check.
+        required: false
+        default: ''
+  schedule:
+    - cron: '0 3 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  # rdk-halif-aidl is a SIBLING SUBMODULE OF THE SUPERPROJECT, not of hdmicec: hdmicec has no
+  # .gitmodules of its own and actions/checkout fetches no submodules, so nothing brings this
+  # tree in implicitly. The ref is a COMMIT SHA on purpose - it is the superproject gitlink,
+  # i.e. exactly the content this migration was developed against. A branch name would be
+  # ambiguous: .gitmodules says "blitzy", the workspace README says "develop", and a worktree
+  # reports "main". No token or secret is named anywhere in this file.
+  AIDL_REPOSITORY: Blitzy-Sky/rdk-halif-aidl
+  AIDL_REF: 3ff17d171a46805decc7408fa69f545c80226d4b
+  GOOGLETEST_REF: v1.15.0
+
+  # Two CMake installations coexist. The job-wide one stays on the project's pin because the
+  # rest of the chain depends on it; the newer one is reached ONLY by a step-scoped PATH
+  # prepend, because build_binder.sh and build_modules.sh call bare "cmake" and neither offers
+  # any override hook (no CMAKE_BIN, no CMAKE_COMMAND, no "command -v cmake", no CMAKE=), so
+  # an absolute path is not implementable for them. The floor belongs to the BINDER SDK
+  # specifically - the AIDL snapshot's own CMakeLists declares cmake_minimum_required 3.8.
+  CMAKE_PINNED_VERSION: '3.16.x'
+  CMAKE_SDK_FLOOR: '3.22.1'
+
+  # lcov 2.x is a HARD prerequisite of run_coverage.sh, which uses --fail-under-lines and
+  # --rc branch_coverage=1 and parses 2.x record spellings; the suite's .lcovrc_l1 is written
+  # in 2.x spellings too. Stable distribution archives ship 1.x. 2.0 specifically, because the
+  # runner's measured corrections were verified against lcov 2.0-1, and the RELEASE ASSET
+  # rather than the auto-generated source archive, because only the asset ships the .version
+  # file lcov's own version detection falls back on.
+  LCOV_VERSION: '2.0'
+
+  # The guest kernel. 5.15.148 is not a guess: it is an entry in upstream linux_binder_idl's
+  # own default QEMU matrix at tag 2.6.0 (tests/qemu/build-kernels.sh:45), it sits inside the
+  # documented supported range whose floor is 4.9 (BUILD.md:441), it is at or below 5.17 so
+  # CONFIG_ASHMEM still exists - it was removed in 5.18 - and it is at or above 5.0 so
+  # CONFIG_ANDROID_BINDERFS exists. The other clean 5.x entry in that matrix, 5.16.20, is
+  # explicitly flagged in BUILD.md:487 for SELinux context issues with binder, so it is not
+  # used here.
+  GUEST_KERNEL_VERSION: '5.15.148'
+
+  # Debian bookworm i386. bookworm rather than an older suite is a REQUIREMENT, not a
+  # preference: the staged i386 libraries are compiled on this runner against its own i386
+  # glibc, and a guest whose glibc were older than the runner's would fail to load them.
+  # bookworm's i386 glibc is newer than ubuntu-22.04's, which is the safe direction. i386 is
+  # a fully supported architecture in this suite.
+  GUEST_DEBIAN_SUITE: bookworm
+  GUEST_DEBIAN_MIRROR: 'http://deb.debian.org/debian'
+  GUEST_ARCH: i386
+
+  # Larger than the image builder's own default because the guest does a full autoreconf,
+  # configure and three-pass make of an instrumented tree, runs five invocations, and then
+  # writes an lcov HTML report into the same filesystem.
+  GUEST_IMAGE_SIZE_MIB: '8192'
+
+  # The guest's bounded wait for servicemanager to answer a real binder transaction. It is a
+  # poll on a transaction, never a sleep.
+  GUEST_READINESS_TIMEOUT_SECONDS: '300'
+
+  # A backstop only: the guest powers itself down when the run finishes. Hosted runners have
+  # no /dev/kvm, so the guest runs under TCG emulation and is slow; this allowance is sized
+  # for that and still leaves the job's own timeout room to run the teardown and the uploads.
+  QEMU_TIMEOUT_SECONDS: '16200'
+
+jobs:
+  aidl-path-tests:
+    name: Build both HAL back-ends and run the full A-E matrix on a binder-capable guest
+    runs-on: ubuntu-22.04
+
+    # A hosted runner's ceiling is 360 minutes. This is set just below it, and it is an honest
+    # allowance rather than a promise: under TCG emulation the in-guest build plus five
+    # invocations plus the lcov capture may genuinely not finish. When it does not, the QEMU
+    # step reports a timeout, the artifacts already written into the image are still extracted
+    # and uploaded by the always() steps below, and the job fails. It does not silently pass.
+    timeout-minutes: 350
+
+    # THE FOUR NAMES BELOW ARE THE ONES configure.ac DECLARES WITH AC_ARG_VAR, spelled
+    # identically here, on the ./configure line further down, and in tests/L1Tests/run_coverage.sh.
+    # configure derives from them the four AIDL/Binder include roots, the two library
+    # directories, the four -l edges and the C++17 flag, and substitutes those into
+    # ccec/src/Makefile.am, tests/L1Tests/Makefile.am and tests/L2Tests/Makefile.am. Renaming
+    # one here silently drops a back-end out of the library, so they are not paraphrased.
+    #
+    # HALIF_LIB_DIR and BINDER_SDK_INCLUDE_DIR are configure.ac's split-staging overrides and
+    # are genuinely needed, not decoration: build_modules.sh installs the stub libraries under
+    # out/target/lib/halif rather than under HALIF_PREFIX/lib/halif, and the Binder SDK's
+    # headers land under out/build while its runtime lands under out/target. Those two values
+    # are also exactly build_binder.sh's own defaults.
+    env:
+      HALIF_PREFIX: ${{ github.workspace }}/rdk-halif-aidl
+      HALIF_LIB_DIR: ${{ github.workspace }}/rdk-halif-aidl/out/target/lib/halif
+      BINDER_SDK_DIR: ${{ github.workspace }}/rdk-halif-aidl/out/target
+      BINDER_SDK_INCLUDE_DIR: ${{ github.workspace }}/rdk-halif-aidl/out/build
+      LD_LIBRARY_PATH: ${{ github.workspace }}/install/usr/lib:${{ github.workspace }}/rdk-halif-aidl/out/target/lib/halif:${{ github.workspace }}/rdk-halif-aidl/out/target/lib/binder
+
+      # GTEST_PREFIX is run_coverage.sh's own name for the prefix holding libgtest/libgmock and
+      # their headers, and this value is the same one L1-tests.yml installs GoogleTest into.
+      # It is used here only by the HOST-SIDE build verification; the guest gets its own.
+      GTEST_PREFIX: ${{ github.workspace }}/install/usr
+
+      # THE SECOND STAGING. Everything below with an _I386 suffix is a WORKFLOW-LOCAL name and
+      # is NOT a configure variable - only the four unsuffixed names above are. Two separate
+      # rdk-halif-aidl checkouts at the same pinned SHA are used rather than one checkout with
+      # redirected output directories, because build_modules.sh installs into
+      # <checkout>/out/target/lib/halif and the image builder treats the whole --sdk-dir tree
+      # as HALIF_PREFIX, so each staging needs a complete tree of its own.
+      #
+      #   the unsuffixed staging  x86_64, built exactly as L1-tests.yml builds it, and used
+      #                           ONLY to verify the host-side build contract: that libRCEC
+      #                           compiles with both back-ends, links the four edges, and
+      #                           resolves its whole loader closure.
+      #   the _I386 staging       i386 and protocol 8, and the one that goes into the guest
+      #                           image, because the image builder refuses 64-bit artefacts.
+      HALIF_PREFIX_I386: ${{ github.workspace }}/rdk-halif-aidl-i386
+      GTEST_PREFIX_I386: ${{ github.workspace }}/install-i386/usr
+
+      WORK_DIR: ${{ github.workspace }}/qemu-work
+      GUEST_IMAGE: ${{ github.workspace }}/qemu-work/cec-l2-rootfs.ext4
+      GUEST_CONSOLE_LOG: ${{ github.workspace }}/qemu-work/guest-console.log
+      GUEST_KERNEL_IMAGE: ${{ github.workspace }}/qemu-work/kernel/bzImage
+      GUEST_KERNEL_CONFIG: ${{ github.workspace }}/qemu-work/kernel/config
+      EXTRACTED_ARTIFACTS: ${{ github.workspace }}/coverage-artifacts
+
+    steps:
+      - name: Set up CMake
+        uses: jwlawson/actions-setup-cmake@v1.13
+        with:
+          cmake-version: '3.16.x'
+          github-api-token: ''
+
+      # flex and bison are BUILD-SDK prerequisites, not extras: build_binder.sh configures the
+      # Binder SDK with -DBUILD_HOST_AIDL=ON, which builds the host AIDL compiler, and that
+      # target calls FLEX_TARGET/BISON_TARGET. Without them CMake fails outright.
+      #
+      # gcc-multilib and g++-multilib are what make the i386 staging possible at all: the
+      # Binder SDK, the AIDL stub snapshots and GoogleTest are compiled here with -m32 for the
+      # guest. They need no glib - the guest's glib comes from its own Debian i386 archive -
+      # so the restricted i386 subset of Ubuntu's archive is not involved.
+      #
+      # debootstrap, e2fsprogs, util-linux and qemu-system-x86 provision and boot the guest.
+      # bc, bison, flex, libelf-dev, libssl-dev, cpio and rsync are the guest kernel's build
+      # prerequisites. The perl modules are lcov 2.x's.
+      #
+      # The distribution's own lcov package is deliberately NOT installed on the runner: this
+      # job needs 2.x, the archive ships 1.x, and a 1.x binary on PATH beside the one built
+      # below is a confusion this job does not need. run_coverage.sh never runs on the runner.
+      - name: Install packages
+        run: >
+          sudo apt-get update
+          &&
+          sudo apt-get install -y --no-install-recommends autoconf automake libtool pkg-config libdbus-1-dev libglib2.0-dev build-essential g++ gcc-multilib g++-multilib cmake ninja-build flex bison valgrind clang file binutils curl ca-certificates xz-utils debootstrap e2fsprogs util-linux qemu-system-x86 bc libelf-dev libssl-dev cpio rsync perl libcapture-tiny-perl libdatetime-perl libjson-xs-perl libperlio-gzip-perl libtimedate-perl
+
+      - name: Checkout hdmicec
+        uses: actions/checkout@v3
+        with:
+          path: hdmicec
+
+      # A SECOND, PRISTINE checkout of the same tree, and it is not redundant. The checkout
+      # above is configured and built on this x86_64 runner, which leaves 64-bit objects and
+      # libraries all through it - and the image builder's verify_payload_tree walks the
+      # payload and REFUSES any 64-bit ELF it finds. The guest gets clean source and does its
+      # own instrumented build inside the guest, which is the only place the counters that
+      # matter are produced. This checkout is never built here.
+      - name: Checkout hdmicec again as the guest payload
+        uses: actions/checkout@v3
+        with:
+          path: hdmicec-payload
+
+      - name: Checkout googletest
+        uses: actions/checkout@v3
+        with:
+          repository: google/googletest
+          path: googletest
+          ref: v1.15.0
+
+      - name: Checkout rdk-halif-aidl
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.AIDL_REPOSITORY }}
+          path: rdk-halif-aidl
+          ref: ${{ env.AIDL_REF }}
+
+      - name: Checkout rdk-halif-aidl again for the i386 staging
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.AIDL_REPOSITORY }}
+          path: rdk-halif-aidl-i386
+          ref: ${{ env.AIDL_REF }}
+
+      # THE SPARSE-CHECKOUT TRAP, ASSERTED RATHER THAN ASSUMED.
+      #
+      # rdk-halif-aidl is documented elsewhere as sparse to hdmicec/ only, while TWO of the
+      # four include roots this build needs - common/0.2.0.0/include and, decisively,
+      # common/current, the ONLY root that supplies halcompat.h - live under common/.
+      # actions/checkout is full by default and the sparse-checkout input is deliberately NOT
+      # used above, so this assertion exists to turn a future sparse pattern into a named
+      # failure here instead of a mysterious "halcompat.h: No such file" hundreds of lines
+      # later. Both checkouts are asserted, because a partial second tree would fail equally.
+      - name: Verify rdk-halif-aidl source include roots
+        run: |
+          set -euo pipefail
+          rc=0
+          for aidl in "$HALIF_PREFIX" "$HALIF_PREFIX_I386"; do
+            if [ ! -f "$aidl/common/current/halcompat.h" ]; then
+              echo "::error::halcompat.h is missing at $aidl/common/current/halcompat.h. This is the ONLY include root that supplies it - the two frozen snapshot roots do not - and both Driver.cpp's selection helper and DriverAidlImpl depend on getService<I>()/isCompatible<I>() from it. The usual cause is a sparse checkout limited to hdmicec/; this job must check the tree out in full."
+              rc=1
+            fi
+            if [ ! -d "$aidl/common/0.2.0.0/include" ]; then
+              echo "::error::the frozen common@0.2.0.0 include root is missing at $aidl/common/0.2.0.0/include. It supplies com/rdk/hal/PropertyValue.h, the ABI the hdmicec 0.1.0.0 snapshot was generated and pinned against."
+              rc=1
+            fi
+            if [ ! -d "$aidl/hdmicec/0.1.0.0/include" ]; then
+              echo "::error::the hdmicec@0.1.0.0 include root is missing at $aidl/hdmicec/0.1.0.0/include. It supplies the generated client proxies and the Bn* server bases."
+              rc=1
+            fi
+          done
+          [ "$rc" -eq 0 ] || exit 1
+          echo "rdk-halif-aidl source include roots present in both checkouts"
+
+      # Verified in the two build scripts: build_binder.sh calls bare "cmake" at :259, :266,
+      # :279 and :289, build_modules.sh at :651, :660, :663, :700 and :723, and a grep across
+      # both for CMAKE_BIN / CMAKE_COMMAND / "command -v cmake" / CMAKE= returns nothing. There
+      # is no override hook, so an absolute path is not implementable for those scripts and a
+      # step-scoped PATH prepend is the only mechanism. An apt cmake on ubuntu-22.04 is
+      # EXPECTED to satisfy the SDK floor, which is why this step measures it rather than
+      # trusting it, records both versions, and downloads a known-good build if neither
+      # candidate qualifies.
+      - name: Resolve the CMake installations
+        run: |
+          set -euo pipefail
+          at_least() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$2" ]; }
+          cmake_version_of() { "$1" --version | head -n 1 | awk '{ print $3 }'; }
+
+          job_wide="$(command -v cmake)"
+          job_wide_version="$(cmake_version_of "$job_wide")"
+          echo "job-wide cmake : $job_wide ($job_wide_version)"
+          case "$job_wide_version" in
+            3.16.*) : ;;
+            *)
+              echo "::error::the job-wide cmake is $job_wide_version, expected 3.16.x. The rest of this chain depends on the project pin, so the newer CMake must never become the job-wide one - it is reached only by a step-scoped PATH prepend."
+              exit 1
+              ;;
+          esac
+
+          newer_cmake=''
+          for candidate in /usr/bin/cmake /usr/local/bin/cmake; do
+            [ -x "$candidate" ] || continue
+            candidate_version="$(cmake_version_of "$candidate")"
+            echo "candidate      : $candidate ($candidate_version)"
+            if at_least "$candidate_version" "$CMAKE_SDK_FLOOR"; then
+              newer_cmake="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$newer_cmake" ]; then
+            echo "no installed cmake satisfies the Binder SDK floor of $CMAKE_SDK_FLOOR; fetching that exact version"
+            tools="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_SDK_FLOOR"
+            mkdir -p "$tools"
+            curl -fsSL "https://github.com/Kitware/CMake/releases/download/v$CMAKE_SDK_FLOOR/cmake-$CMAKE_SDK_FLOOR-linux-x86_64.tar.gz" \
+              | tar -xz --strip-components=1 -C "$tools"
+            newer_cmake="$tools/bin/cmake"
+          fi
+
+          echo "SDK cmake      : $newer_cmake ($(cmake_version_of "$newer_cmake"))"
+          echo "AIDL_CMAKE_BIN_DIR=$(dirname "$newer_cmake")" >> "$GITHUB_ENV"
+
+      # THE PREREQUISITE L1-tests.yml DOES NOT NEED AND THIS JOB DOES.
+      #
+      # L1-tests.yml gets away with the distribution's lcov because it only ever calls plain
+      # "lcov -c", "lcov -r" and "genhtml", all of which work on 1.x. This job runs
+      # run_coverage.sh, which CANNOT work on 1.x: it uses --fail-under-lines and
+      # --rc branch_coverage=1, and it parses record spellings that are 2.x behaviour.
+      #
+      # It is built here as well as in the guest for a reason worth stating: it proves the
+      # pinned tarball is sane and installable BEFORE the lengthy kernel and image builds, so a
+      # bad download surfaces in two minutes rather than in two hours. The guest's own copy is
+      # installed and asserted by aidl-path-tests-rootfs.sh from this same tarball.
+      #
+      # The digest is MEASURED from the artefact that was actually fetched and then recorded. A
+      # hard-coded constant here would be a fabricated measurement; the optional
+      # workflow_dispatch input is the way to pin it from outside, and it is cross-checked when
+      # supplied. The sidecar file is written in sha256sum's own "digest  filename" form, which
+      # is one of the two forms the image builder accepts, so the digest travels with the
+      # tarball rather than through a shell variable.
+      - name: Build and assert lcov 2.x
+        env:
+          LCOV_EXPECTED_SHA256: ${{ github.event.inputs.lcov_expected_sha256 }}
+        run: |
+          set -euo pipefail
+          lcov_dir="$GITHUB_WORKSPACE/lcov-src"
+          mkdir -p "$lcov_dir"
+          cd "$lcov_dir"
+
+          tarball="lcov-$LCOV_VERSION.tar.gz"
+          curl -fsSL --output "$tarball" \
+            "https://github.com/linux-test-project/lcov/releases/download/v$LCOV_VERSION/$tarball"
+
+          sha256sum "$tarball" > "$tarball.sha256"
+          measured="$(awk '{ print $1 }' "$tarball.sha256")"
+          echo "lcov tarball    : $tarball"
+          echo "measured sha256 : $measured"
+
+          if [ -n "${LCOV_EXPECTED_SHA256:-}" ]; then
+            if [ "$measured" != "$LCOV_EXPECTED_SHA256" ]; then
+              echo "::error::lcov tarball digest mismatch. measured $measured, expected $LCOV_EXPECTED_SHA256. Either the release asset changed or the fetch was tampered with; this job will not build an unverified coverage tool."
+              exit 1
+            fi
+            echo "cross-checked against the supplied expected digest: match"
+          else
+            echo "no expected digest was supplied, so the measured value above is recorded rather than checked"
+          fi
+
+          # A single top-level directory is what the image builder's --strip-components=1
+          # extraction requires, so it is asserted here where the remedy is obvious.
+          top_level_count="$(tar -tzf "$tarball" | awk -F/ '{ print $1 }' | sort -u | wc -l)"
+          if [ "$top_level_count" -ne 1 ]; then
+            echo "::error::$tarball has $top_level_count top-level entries; exactly one is required, because the image builder extracts it with --strip-components=1. Repack it before passing it on."
+            exit 1
+          fi
+
+          tar -xzf "$tarball"
+          sudo make -C "lcov-$LCOV_VERSION" install
+
+          version_line="$(lcov --version 2>&1 | head -n 1)"
+          echo "lcov on PATH    : $version_line"
+          major="$(printf '%s\n' "$version_line" | sed -n 's/.*[^0-9]\([0-9]\+\)\.[0-9].*/\1/p' | head -n 1)"
+          case "$major" in
+            ''|*[!0-9]*)
+              echo "::error::could not read a major version out of '$version_line'. run_coverage.sh requires lcov 2.x and this job will not guess."
+              exit 1
+              ;;
+          esac
+          if [ "$major" -lt 2 ]; then
+            echo "::error::lcov reports major version $major. run_coverage.sh requires 2.x for --fail-under-lines and --rc branch_coverage=1, and tests/L1Tests/.lcovrc_l1 is written in 2.x spellings."
+            exit 1
+          fi
+          echo "lcov 2.x assertion passed on the runner"
+          echo "LCOV_TARBALL=$lcov_dir/$tarball" >> "$GITHUB_ENV"
+
+      # Byte-for-byte the command L1-tests.yml uses, because this prefix feeds the SAME
+      # host-side build verification and divergence here would make the two jobs incomparable.
+      - name: Build googletest
+        run: |
+          cmake -G Ninja -S "$GITHUB_WORKSPACE/googletest" -B build/googletest \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/install/usr" \
+            -DBUILD_TYPE=Debug -DBUILD_GMOCK=ON -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build build/googletest -j8
+          cmake --install build/googletest
+
+      # THE GUEST'S GoogleTest, AND WHY --gtest-prefix IS NOT OPTIONAL.
+      #
+      # The image builder requires it twice over. Its input validation requires the LITERAL
+      # file <prefix>/lib/pkgconfig/gtest.pc to exist before the build starts, and its in-image
+      # assertions then run "pkg-config --atleast-version=1.10.0 gtest" inside the chroot with
+      # PKG_CONFIG_PATH pointing at that copied prefix - populated only when --gtest-prefix was
+      # given. configure.ac's PKG_CHECK_MODULES([GTEST], [gtest >= 1.10.0]) consults pkg-config
+      # ONLY and ignores -I/-L, so headers and libraries on their own cannot satisfy it.
+      #
+      # -DCMAKE_INSTALL_LIBDIR=lib is load-bearing rather than tidy: on a Debian-family host
+      # GNUInstallDirs can multiarch the library directory, which would put gtest.pc under
+      # lib/<triple>/pkgconfig and fail the literal-path check above.
+      - name: Build googletest for the guest (i386)
+        run: |
+          set -euo pipefail
+          cmake -G Ninja -S "$GITHUB_WORKSPACE/googletest" -B build/googletest-i386 \
+            -DCMAKE_INSTALL_PREFIX="$GTEST_PREFIX_I386" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DBUILD_TYPE=Debug -DBUILD_GMOCK=ON -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 \
+            -DCMAKE_EXE_LINKER_FLAGS=-m32 -DCMAKE_SHARED_LINKER_FLAGS=-m32
+          cmake --build build/googletest-i386 -j8
+          cmake --install build/googletest-i386
+
+          for required in \
+            "$GTEST_PREFIX_I386/lib/pkgconfig/gtest.pc" \
+            "$GTEST_PREFIX_I386/lib/pkgconfig/gmock.pc" \
+            "$GTEST_PREFIX_I386/lib/libgtest.a" \
+            "$GTEST_PREFIX_I386/lib/libgmock.a"; do
+            if [ ! -f "$required" ]; then
+              echo "::error::the i386 GoogleTest prefix is missing $required. The image builder validates <prefix>/lib/pkgconfig/gtest.pc by literal path and its in-image assertion queries gtest through pkg-config, so both the .pc files and the archives must land exactly here."
+              exit 1
+            fi
+            echo "  ok  $required"
+          done
+
+          # readelf rather than file, because file describes a static library as an "ar
+          # archive" and says nothing about the ELF class of the objects inside it. readelf
+          # walks the members and reports each header, so the first Class/Machine pair it
+          # prints is a real measurement of what was compiled.
+          elf_class="$(readelf -h "$GTEST_PREFIX_I386/lib/libgtest.a" 2>/dev/null | awk '/Class:/ { print $2; exit }')"
+          elf_machine="$(readelf -h "$GTEST_PREFIX_I386/lib/libgtest.a" 2>/dev/null | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p' | head -n 1)"
+          echo "libgtest.a: class=$elf_class machine=$elf_machine"
+          if [ "$elf_class" != "ELF32" ]; then
+            echo "::error::the guest's GoogleTest was built as $elf_class (machine '$elf_machine'), not ELF32. The guest userspace is all-32-bit; check that gcc-multilib/g++-multilib are installed and that the -m32 flags above reached the compile."
+            exit 1
+          fi
+
+      # BINDER_VERSION is deliberately NOT set and no version is hardcoded: build_binder.sh
+      # reads the pin out of rdk-halif-aidl/binder_sdk.version and falls back to an older
+      # default only when that file is unreadable. The version named in the script's own help
+      # text is stale, so setting BINDER_VERSION from it would actively downgrade the SDK.
+      # The step is idempotent - a present .sdk_ready short-circuits the build - so the
+      # assertion afterwards is on the marker the script itself writes.
+      - name: Build the Binder SDK
+        run: |
+          set -euo pipefail
+          cd "$HALIF_PREFIX"
+          PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_binder.sh
+          if [ ! -f "$BINDER_SDK_DIR/.sdk_ready" ]; then
+            echo "::error::the Binder SDK build did not leave its readiness marker at $BINDER_SDK_DIR/.sdk_ready, so the staged tree cannot be trusted even if the script exited zero."
+            exit 1
+          fi
+          echo "Binder SDK staged: $(grep -vE '^[[:space:]]*(#|$)' "$HALIF_PREFIX/binder_sdk.version" | head -n 1)"
+
+      # common is built and linked at 0.2.0.0 and NOT at the component's newer release, because
+      # 0.2.0.0 is the ABI the released hdmicec snapshot was generated and pinned against: that
+      # snapshot's CMakeLists links common-v0.2.0.0-cpp at :83 and includes
+      # ${HALIF_INCLUDE_DIR}/common/0.2.0.0/include at :71-73. Linking the newer library would
+      # put a different ABI underneath pre-generated code compiled against older headers.
+      # common goes first because build_modules.sh pre-checks each dependency's shared object.
+      - name: Build the AIDL client stub snapshots
+        run: |
+          set -euo pipefail
+          cd "$HALIF_PREFIX"
+          PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_modules.sh common --version 0.2.0.0
+          PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_modules.sh hdmicec --version 0.1.0.0
+          ls -l "$HALIF_LIB_DIR"
+
+      # Each of the four include roots and two library directories is asserted before anything
+      # consumes it, so a staging path that resolved to the wrong place is a named failure here
+      # rather than a library that silently carries only one back-end.
+      - name: Verify the staged AIDL and Binder roots
+        run: |
+          set -euo pipefail
+          rc=0
+          require() {
+            if [ "$1" = "-I" ] || [ "$1" = "-L" ]; then
+              [ -d "$2" ] && { printf '  %-2s %s\n' "$1" "$2"; return 0; }
+            else
+              [ -f "$2" ] && { printf '  %-2s %s\n' "$1" "$2"; return 0; }
+            fi
+            echo "::error::$1 target missing: $2 ($3)"
+            rc=1
+          }
+          require -I "$HALIF_PREFIX/hdmicec/0.1.0.0/include" "the generated hdmicec client stubs and Bn* server bases"
+          require -I "$HALIF_PREFIX/common/0.2.0.0/include"  "com/rdk/hal/PropertyValue.h, the frozen import the snapshot was generated against"
+          require -I "$HALIF_PREFIX/common/current"          "halcompat.h - the ONLY root that supplies it"
+          require -I "$BINDER_SDK_INCLUDE_DIR/include/binder_sdk" "the Binder SDK headers the generated stubs include"
+          require -L "$HALIF_LIB_DIR"                        "libhdmicec-v0.1.0.0-cpp and libcommon-v0.2.0.0-cpp"
+          require -L "$BINDER_SDK_DIR/lib/binder"            "libbinder, libutils and libbinder's own runtime closure"
+          require -l "$HALIF_LIB_DIR/libcommon-v0.2.0.0-cpp.so"  "the frozen common ABI, at 0.2.0.0 and not a newer release"
+          require -l "$HALIF_LIB_DIR/libhdmicec-v0.1.0.0-cpp.so" "the hdmicec client stub library"
+          [ "$rc" -eq 0 ] || exit 1
+
+      # THE i386 TOOLCHAIN FILE, AND WHY IT IS THE ONLY AVAILABLE LEVER.
+      #
+      # build_binder.sh configures with a fixed argument list and offers no way to pass -D, and
+      # it removes a stale CMakeCache.txt before configuring, so pre-seeding the cache does not
+      # survive either. CMake reads CMAKE_TOOLCHAIN_FILE FROM THE ENVIRONMENT from 3.21
+      # onwards, and the CMake these steps use through the step-scoped PATH prepend is at or
+      # above the 3.22.1 SDK floor, so a toolchain file is reachable where a -D is not.
+      #
+      # It sets exactly two things and nothing more:
+      #
+      #   the -m32 flags, through the documented *_INIT variables, so they also apply to the
+      #   compiler-identification and try_compile runs rather than only to the real targets.
+      #
+      #   BINDER_IPC_32BIT=OFF as a cache entry. The project's own default would take this ON,
+      #   because TARGET_LIB32_VERSION defaults ON and BINDER_IPC_32BIT follows it - which is
+      #   wire protocol 7 and would fail libbinder's strict equality check against the
+      #   binderfs-capable 5.x guest kernel this job boots. A toolchain file is evaluated
+      #   during project(), at CMakeLists.txt:42, well before the "if (NOT DEFINED
+      #   BINDER_IPC_32BIT)" default at :218, and a cache variable IS defined - so the override
+      #   lands. TARGET_LIB32_VERSION is left at its ON default, which the project rejects only
+      #   in combination with BINDER_IPC_32BIT=ON.
+      #
+      # CMAKE_SYSTEM_NAME is deliberately NOT set. Setting it would put CMake into
+      # cross-compiling mode and break the host AIDL compiler that -DBUILD_HOST_AIDL=ON builds;
+      # this is a native build that happens to emit 32-bit objects, and the resulting i386 host
+      # tools still run on this x86_64 runner through the i386 loader that gcc-multilib brings
+      # in.
+      - name: Write the i386 CMake toolchain file
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/tools"
+          toolchain="$GITHUB_WORKSPACE/tools/i386-protocol8-toolchain.cmake"
+          {
+            printf '%s\n' '# Generated by .github/workflows/aidl-path-tests.yml. Do not edit in place.'
+            printf '%s\n' '# 32-bit userspace, binder wire protocol 8.'
+            printf '%s\n' 'set(CMAKE_C_FLAGS_INIT "-m32")'
+            printf '%s\n' 'set(CMAKE_CXX_FLAGS_INIT "-m32")'
+            printf '%s\n' 'set(CMAKE_EXE_LINKER_FLAGS_INIT "-m32")'
+            printf '%s\n' 'set(CMAKE_SHARED_LINKER_FLAGS_INIT "-m32")'
+            printf '%s\n' 'set(CMAKE_MODULE_LINKER_FLAGS_INIT "-m32")'
+            printf '%s\n' 'set(BINDER_IPC_32BIT OFF CACHE BOOL "binder wire protocol 8: the guest kernel has no CONFIG_ANDROID_BINDER_IPC_32BIT" FORCE)'
+          } > "$toolchain"
+          cat "$toolchain"
+          echo "AIDL_I386_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+
+      # BINDER_BUILD_DIR is redirected under out/build on purpose. The image builder harvests
+      # the SDK's build flags by looking for a CMakeCache.txt under the staged tree's out/build
+      # and out/target, and the script's default build directory sits outside both - so with
+      # the default the guest's platform record would have to say the flags were not recorded.
+      # Putting the cache where it is looked for means the guest reports the ACTUAL
+      # BINDER_IPC_32BIT value it was built with, which is one of the three halves of the
+      # protocol-equality record and the one that cannot be read from the running kernel.
+      - name: Build the Binder SDK for the guest (i386, protocol 8)
+        env:
+          HALIF_PREFIX: ${{ github.workspace }}/rdk-halif-aidl-i386
+          HALIF_LIB_DIR: ${{ github.workspace }}/rdk-halif-aidl-i386/out/target/lib/halif
+          BINDER_SDK_DIR: ${{ github.workspace }}/rdk-halif-aidl-i386/out/target
+          BINDER_SDK_INCLUDE_DIR: ${{ github.workspace }}/rdk-halif-aidl-i386/out/build
+          BINDER_BUILD_DIR: ${{ github.workspace }}/rdk-halif-aidl-i386/out/build/binder-cmake
+        run: |
+          set -euo pipefail
+          cd "$HALIF_PREFIX_I386"
+          CMAKE_TOOLCHAIN_FILE="$AIDL_I386_TOOLCHAIN" PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_binder.sh
+          if [ ! -f "$HALIF_PREFIX_I386/out/target/.sdk_ready" ]; then
+            echo "::error::the i386 Binder SDK build did not leave its readiness marker at $HALIF_PREFIX_I386/out/target/.sdk_ready. If the failure above is a compile or link error, read it as evidence about the 32-bit build specifically: the guest userspace is all-32-bit because the image builder accepts only i386 or armhf and its verify_sdk_tree refuses a 64-bit staged library, so the remedy is to make the SDK build for the target architecture and never to relax that gate."
+            exit 1
+          fi
+          # THE ASSERTION THAT MATTERS MOST IN THIS JOB. If the toolchain file did not take,
+          # BINDER_IPC_32BIT stays at the project's ON default, the library speaks wire
+          # protocol 7, and every /dev/binder open in the guest fails libbinder's equality
+          # check - which would surface much later as three inexplicably broken invocations
+          # rather than as a build fault. The cache is the one place that value can be read
+          # back, so it is read back here.
+          cache="$BINDER_BUILD_DIR/CMakeCache.txt"
+          if [ ! -f "$cache" ]; then
+            echo "::error::no CMakeCache.txt at $cache, so the wire protocol the SDK was built with cannot be verified. BINDER_BUILD_DIR was redirected under out/build precisely so this file would exist and be harvestable."
+            exit 1
+          fi
+          echo "--- the i386 SDK cache, as it records itself ---"
+          grep -E '^(BINDER_IPC_32BIT|TARGET_LIB32_VERSION|CMAKE_C_FLAGS|CMAKE_CXX_FLAGS|CMAKE_BUILD_TYPE):' "$cache" || true
+          protocol_setting="$(awk -F= '/^BINDER_IPC_32BIT:/ { print toupper($2); exit }' "$cache")"
+          case "$protocol_setting" in
+            OFF|0|FALSE|NO|N)
+              echo "verified: BINDER_IPC_32BIT=$protocol_setting, so this SDK speaks wire protocol 8 and matches the binderfs-capable guest kernel"
+              ;;
+            '')
+              echo "::error::BINDER_IPC_32BIT is absent from $cache. It must be present as a CACHE entry - that is what the generated toolchain file sets - because the project's own default would take it ON and produce a protocol-7 library."
+              exit 1
+              ;;
+            *)
+              echo "::error::BINDER_IPC_32BIT is '$protocol_setting' in $cache, not OFF. That is wire protocol 7, and the guest kernel this job builds has no CONFIG_ANDROID_BINDER_IPC_32BIT because mainline dropped it after 4.17 while CONFIG_ANDROID_BINDERFS - which the in-guest init requires - starts at 5.0. A protocol-7 library against a protocol-8 driver fails EVERY open. Check that CMAKE_TOOLCHAIN_FILE reached this cmake and that the cmake in use is at least 3.21, which is when reading that variable from the environment became supported."
+              exit 1
+              ;;
+          esac
+          mkdir -p "$GITHUB_WORKSPACE/tools"
+          cp -- "$cache" "$GITHUB_WORKSPACE/tools/i386-binder-CMakeCache.txt"
+
+      - name: Build the AIDL client stub snapshots for the guest (i386)
+        env:
+          HALIF_PREFIX: ${{ github.workspace }}/rdk-halif-aidl-i386
+          HALIF_LIB_DIR: ${{ github.workspace }}/rdk-halif-aidl-i386/out/target/lib/halif
+          BINDER_SDK_DIR: ${{ github.workspace }}/rdk-halif-aidl-i386/out/target
+          BINDER_SDK_INCLUDE_DIR: ${{ github.workspace }}/rdk-halif-aidl-i386/out/build
+        run: |
+          set -euo pipefail
+          cd "$HALIF_PREFIX_I386"
+          CMAKE_TOOLCHAIN_FILE="$AIDL_I386_TOOLCHAIN" PATH="$AIDL_CMAKE_BIN_DIR:$PATH" \
+            ./build_modules.sh common --version 0.2.0.0
+          CMAKE_TOOLCHAIN_FILE="$AIDL_I386_TOOLCHAIN" PATH="$AIDL_CMAKE_BIN_DIR:$PATH" \
+            ./build_modules.sh hdmicec --version 0.1.0.0
+          ls -l "$HALIF_PREFIX_I386/out/target/lib/halif"
+
+      # The same gate the image builder applies, run here where the remedy is at hand rather
+      # than after a base root filesystem has been debootstrapped and an image formatted. Every
+      # library the guest loads and the servicemanager it runs must be i386; one 64-bit
+      # artefact among them is refused outright.
+      - name: Verify the guest's staged SDK is 32-bit
+        run: |
+          set -euo pipefail
+          rc=0
+          binder_lib="$HALIF_PREFIX_I386/out/target/lib/binder"
+          halif_lib="$HALIF_PREFIX_I386/out/target/lib/halif"
+
+          check_i386() {
+            local path="$1" description
+            if [ ! -f "$path" ]; then
+              echo "::error::missing from the i386 staging: $path"
+              rc=1
+              return
+            fi
+            description="$(file -b "$path")"
+            case "$description" in
+              *x86-64*|*x86_64*|*aarch64*)
+                echo "::error::$path is built for a 64-bit machine ($description). This job is all-32-bit; rebuild the Binder SDK and the AIDL stub snapshots for i386."
+                rc=1
+                return
+                ;;
+            esac
+            case "$description" in
+              *ELF\ 32-bit*) : ;;
+              *)
+                echo "::error::$path is not a 32-bit ELF object ($description)."
+                rc=1
+                return
+                ;;
+            esac
+            printf '  ok  %-34s %s\n' "$(basename "$path")" "$description"
+          }
+
+          for soname in libbinder.so libutils.so liblog.so libbase.so libcutils.so libcutils_sockets.so; do
+            check_i386 "$binder_lib/$soname"
+          done
+          for soname in libhdmicec-v0.1.0.0-cpp.so libcommon-v0.2.0.0-cpp.so; do
+            check_i386 "$halif_lib/$soname"
+          done
+          check_i386 "$HALIF_PREFIX_I386/out/target/bin/servicemanager"
+
+          if [ ! -f "$HALIF_PREFIX_I386/out/build/include/binder_sdk/binder/IServiceManager.h" ]; then
+            echo "::error::the i386 staging has no Binder headers at out/build/include/binder_sdk/binder/IServiceManager.h, which the image builder requires and which its in-image link test compiles against."
+            rc=1
+          fi
+          [ "$rc" -eq 0 ] || exit 1
+
+      # The cloned upstream Binder sources and the CMake object trees are build scratch, not
+      # part of a staged SDK: nothing at runtime reads them, the readiness markers stop
+      # build_binder.sh from wanting them again, and the i386 tree is copied wholesale into the
+      # guest image, where they would cost gigabytes for nothing. The i386 Binder cache file
+      # itself is kept, because the guest reports its contents.
+      - name: Reclaim build scratch space
+        run: |
+          set -euo pipefail
+          df -h "$GITHUB_WORKSPACE" | tail -n 1
+
+          # The Binder cache file is kept where the image builder harvests it, and the object
+          # tree around it is not. The copy under tools/ was taken while the cache was still
+          # beside its objects, so it is restored from there rather than re-derived.
+          i386_cache_dir="$HALIF_PREFIX_I386/out/build/binder-cmake"
+          rm -rf -- "$i386_cache_dir"
+          mkdir -p -- "$i386_cache_dir"
+          cp -- "$GITHUB_WORKSPACE/tools/i386-binder-CMakeCache.txt" "$i386_cache_dir/CMakeCache.txt"
+
+          rm -rf -- "$HALIF_PREFIX/build-tools" "$HALIF_PREFIX/build" \
+                    "$HALIF_PREFIX_I386/build-tools" "$HALIF_PREFIX_I386/build" \
+                    "$HALIF_PREFIX_I386/.git" \
+                    "$GITHUB_WORKSPACE/build/googletest" "$GITHUB_WORKSPACE/build/googletest-i386"
+          df -h "$GITHUB_WORKSPACE" | tail -n 1
+
+      # A BUILD PREREQUISITE, not a committed artefact: the suite compiles against the mock HAL
+      # header through this symlink, and the touched IARM headers stand in for a staged SOC
+      # sysroot. The tree is excluded from coverage by run_coverage.sh's own glob set.
+      - name: Generate stub headers
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/hdmicec"
+          mkdir -p stubs/rdk/iarmbus stubs/ccec/drivers/iarmbus
+          cd stubs
+          touch rdk/iarmbus/libIARM.h rdk/iarmbus/libIBus.h \
+                rdk/iarmbus/libIBusDaemon.h ccec/drivers/iarmbus/CecIARMBusMgr.h
+          ln -sf ../../../mocks/hdmicec/hdmi_cec_driver.h ccec/drivers/hdmi_cec_driver.h
+
+      # THE HOST-SIDE BUILD CONTRACT. This is not the build the matrix measures - the guest
+      # builds its own instrumented tree, because gcov counters cannot cross machines. What
+      # this proves is that libRCEC compiles with BOTH back-ends in it, links the four AIDL and
+      # Binder edges, and produces all three test binaries, on the same runner and with the
+      # same commands L1-tests.yml uses.
+      #
+      # -std=c++17 is NOT set here. configure detects it and substitutes it into
+      # ccec/src/Makefile.am, tests/L1Tests/Makefile.am and tests/L2Tests/Makefile.am, so the
+      # library and both suites carry it explicitly. It is a hard requirement rather than a
+      # tidy-up: rdk-halif-aidl/common/current/halcompat.h:73 opens a NESTED NAMESPACE
+      # DEFINITION, which does not compile at c++14 at all.
+      #
+      # There are THREE make passes because the top-level Makefile.am sets SUBDIRS to osal and
+      # ccec only, so a root "make all" builds no test binary. The third pass is the L2 tier and
+      # is not optional: it builds run_L2Tests AND fake_hdmi_cec_aidl_host, the two
+      # noinst_PROGRAMS of tests/L2Tests/Makefile.am, and without it invocations D and E have no
+      # binary at all.
+      #
+      # The PKG_CONFIG_PATH entry is needed because configure.ac's
+      # PKG_CHECK_MODULES([GTEST], [gtest >= 1.10.0]) consults pkg-config only and ignores
+      # -I/-L.
+      #
+      # The gcov flags L1-tests.yml carries are DELIBERATELY ABSENT here, and their absence is
+      # not an oversight. This build is never measured: the counters that matter are produced
+      # by the guest's own instrumented build, because gcov counters cannot accumulate across
+      # machines. Instrumenting this one as well would only produce a second, unrelated set
+      # that nothing reads.
+      - name: Build hdmicec
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/hdmicec"
+          autoreconf -if
+          PKG_CONFIG_PATH="$GTEST_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+          CPPFLAGS="-I$GITHUB_WORKSPACE/hdmicec/mocks -I$GITHUB_WORKSPACE/hdmicec/stubs -I$GITHUB_WORKSPACE/install/usr/include -I$HALIF_PREFIX/hdmicec/0.1.0.0/include -I$HALIF_PREFIX/common/0.2.0.0/include -I$HALIF_PREFIX/common/current -I$BINDER_SDK_INCLUDE_DIR/include/binder_sdk" \
+          LDFLAGS="-L$GITHUB_WORKSPACE/install/usr/lib -L$HALIF_LIB_DIR -L$BINDER_SDK_DIR/lib/binder" \
+          ./configure --enable-l1tests \
+            HALIF_PREFIX="$HALIF_PREFIX" \
+            HALIF_LIB_DIR="$HALIF_LIB_DIR" \
+            BINDER_SDK_DIR="$BINDER_SDK_DIR" \
+            BINDER_SDK_INCLUDE_DIR="$BINDER_SDK_INCLUDE_DIR"
+          make -j"$(nproc)" all
+          make -C tests/L1Tests all
+          make -C tests/L2Tests all
+
+          for binary in tests/L1Tests/run_L1Tests tests/L2Tests/run_L2Tests tests/L2Tests/fake_hdmi_cec_aidl_host; do
+            if [ ! -x "$binary" ]; then
+              echo "::error::$binary was not built. run_L1Tests carries invocations A, B and C; run_L2Tests carries D and E; fake_hdmi_cec_aidl_host is the out-of-process service E needs, and without it E cannot exercise real binder IPC."
+              exit 1
+            fi
+            printf '  ok  %s\n' "$binary"
+          done
+
+          # THE DIALECT, CHECKED WHERE IT IS ACTUALLY ASSERTABLE. Both test Makefile.am files
+          # carry a LITERAL -std=c++17 in AM_CXXFLAGS, so its absence from the generated
+          # Makefile would mean the substitution or the regeneration went wrong, and that IS a
+          # failure. ccec/src/Makefile.am deliberately carries no literal -std at all: the
+          # library takes the dialect from configure's @AIDL_CXXFLAGS@, which configure leaves
+          # EMPTY when the compiler's own default already compiles the probe. So the library's
+          # line is REPORTED from configure's own notice rather than asserted against a flag
+          # that is legitimately absent on a host whose default is already C++17.
+          for generated in tests/L1Tests/Makefile tests/L2Tests/Makefile; do
+            if ! grep -q -- '-std=c++17' "$generated"; then
+              echo "::error::$generated does not carry -std=c++17. Both test Makefile.am files set it literally, so this means the Makefile was not regenerated from them. The generated AIDL headers declare a std::optional parameter and halcompat.h opens a nested namespace definition, neither of which compiles at c++14."
+              exit 1
+            fi
+            printf '  ok  %-24s carries -std=c++17\n' "$generated"
+          done
+          echo "library dialect, as configure resolved it:"
+          grep -E 'C\+\+17|AIDL_CXXFLAGS' config.log | tail -n 3 || true
+
+      # SCOPE: the AUTOTOOLS-built library only. The hand-written RDK makefile at
+      # ccec/src/Makefile is in configure.ac's AC_CONFIG_FILES, so the autoreconf and configure
+      # above have overwritten it with Autotools output - there is no hand-built libRCEC.so on
+      # this runner to inspect, and claiming to have validated the RDK1 build path from here
+      # would be false. What this does prove is the part that matters for the guest: the four
+      # direct edges are present and libbinder's whole runtime closure actually loads.
+      #
+      # Two measured facts keep this check honest. libcommon-v0.2.0.0-cpp is NOT among
+      # libRCEC's own DT_NEEDED entries - --as-needed drops it, and it reaches the process
+      # through the hdmicec stub library - and libcutils_sockets is not reachable from libRCEC
+      # at all, so it is checked as a staged, self-resolving library rather than as an entry in
+      # this closure.
+      - name: Verify the AIDL and Binder loader closure
+        run: |
+          set -euo pipefail
+          lib="$GITHUB_WORKSPACE/hdmicec/ccec/src/.libs/libRCEC.so"
+          [ -f "$lib" ] || { echo "::error::$lib was not built."; exit 1; }
+
+          echo "--- direct edges (DT_NEEDED) ---"
+          readelf -d "$lib" | grep NEEDED
+          echo "--- loader resolution ---"
+          ldd "$lib"
+
+          if ldd "$lib" | grep -q 'not found'; then
+            echo "::error::libRCEC.so has unresolved dependencies. liblog, libbase, libcutils and libcutils_sockets are libbinder's own dependencies rather than edges the middleware names, so they must be STAGED AND LOADABLE even though nothing in ccec references them."
+            ldd "$lib" | grep 'not found'
+            exit 1
+          fi
+
+          closure="$(ldd "$lib" | awk '$2 == "=>" { print $1, $3 }')"
+          rc=0
+          expect_in() {
+            local soname="$1" directory="$2" resolved
+            resolved="$(printf '%s\n' "$closure" | awk -v s="$soname" '$1 == s { print $2 }' | head -n 1)"
+            if [ -z "$resolved" ]; then
+              echo "::error::$soname does not appear in libRCEC.so's loader closure at all."
+              rc=1
+              return
+            fi
+            case "$resolved" in
+              "$directory"/*) printf '  ok  %-34s %s\n' "$soname" "$resolved" ;;
+              *)
+                echo "::error::$soname resolved to $resolved, outside the staged tree $directory. A system copy shadowing the staged SDK makes the whole measurement meaningless."
+                rc=1
+                ;;
+            esac
+          }
+          expect_in libhdmicec-v0.1.0.0-cpp.so "$HALIF_LIB_DIR"
+          for soname in libbinder.so libutils.so libcutils.so libbase.so liblog.so; do
+            expect_in "$soname" "$BINDER_SDK_DIR/lib/binder"
+          done
+
+          sockets="$BINDER_SDK_DIR/lib/binder/libcutils_sockets.so"
+          if [ ! -f "$sockets" ]; then
+            echo "::error::libcutils_sockets.so is not staged at $sockets. It sits below libcutils in libbinder's closure and must be present on the loader path even though it is not reachable from libRCEC."
+            rc=1
+          elif ldd "$sockets" | grep -q 'not found'; then
+            echo "::error::libcutils_sockets.so is staged but does not itself resolve:"
+            ldd "$sockets" | grep 'not found'
+            rc=1
+          else
+            printf '  ok  %-34s %s\n' "libcutils_sockets.so" "$sockets"
+          fi
+          [ "$rc" -eq 0 ] || exit 1
+
+      # THE GUEST KERNEL. Docker cannot substitute for a VM here: a container shares the host
+      # kernel, and the binder driver IS the thing that has to vary, so the runner boots a
+      # kernel of its own.
+      #
+      # The version is pinned in this workflow's env block, with its justification. The tarball
+      # is verified against kernel.org's OWN published sha256sums for the release directory -
+      # an upstream digest, not a constant invented here - and the measured value is printed
+      # either way. The optional workflow_dispatch input adds a second, independent check.
+      #
+      # ARCH=i386 because the guest userspace is all-32-bit and a 32-bit userspace needs a
+      # kernel that can run it. i386_defconfig is the base and the options below are layered
+      # on: the binder set the SDK requires, ashmem, the two IKCONFIG options so the guest can
+      # READ its own configuration back out of /proc/config.gz rather than being told what it
+      # is, devtmpfs so /dev is populated before init runs, and ext4 plus virtio-blk because
+      # the payload arrives as a copied disk image rather than an initramfs.
+      #
+      # CONFIG_ANDROID_BINDER_IPC_32BIT IS DELIBERATELY NOT ENABLED, and the step reports its
+      # state rather than passing over it. The option is a protocol-7 switch that mainline
+      # carries only up to 4.17, while CONFIG_ANDROID_BINDERFS - which the in-guest init
+      # requires - starts at 5.0, so no mainline kernel offers both. Asking for it here would
+      # be dropped by olddefconfig and would leave a protocol-7 userspace against a protocol-8
+      # driver, which fails every open. The SDK above is built protocol 8 to match. This
+      # scoping is a property of THIS job, not a statement about supported platforms: a real
+      # all-32-bit product kernel with the option present does want it set, and a 32-bit
+      # middleware against a 64-bit vendor wants it unset.
+      - name: Build the guest kernel
+        env:
+          KERNEL_EXPECTED_SHA256: ${{ github.event.inputs.kernel_expected_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK_DIR/kernel"
+          src_root="$GITHUB_WORKSPACE/kernel-src"
+          mkdir -p "$src_root"
+          cd "$src_root"
+
+          series="v${GUEST_KERNEL_VERSION%%.*}.x"
+          tarball="linux-$GUEST_KERNEL_VERSION.tar.xz"
+          base="https://cdn.kernel.org/pub/linux/kernel/$series"
+
+          curl -fsSL --output "$tarball" "$base/$tarball"
+          curl -fsSL --output sha256sums.asc "$base/sha256sums.asc"
+
+          measured="$(sha256sum "$tarball" | awk '{ print $1 }')"
+          published="$(awk -v f="$tarball" '$2 == f { print $1 }' sha256sums.asc | head -n 1)"
+          echo "kernel tarball   : $tarball"
+          echo "measured sha256  : $measured"
+          echo "published sha256 : ${published:-<not listed>}"
+
+          if [ -z "$published" ]; then
+            echo "::error::$tarball is not listed in kernel.org's sha256sums.asc for $series, so the download cannot be verified against upstream. This job does not proceed on an unverified kernel."
+            exit 1
+          fi
+          if [ "$measured" != "$published" ]; then
+            echo "::error::kernel tarball digest mismatch against kernel.org's published value. measured $measured, published $published."
+            exit 1
+          fi
+          echo "verified against kernel.org's published digest"
+          if [ -n "${KERNEL_EXPECTED_SHA256:-}" ]; then
+            if [ "$measured" != "$KERNEL_EXPECTED_SHA256" ]; then
+              echo "::error::kernel tarball digest mismatch against the supplied expected value. measured $measured, expected $KERNEL_EXPECTED_SHA256."
+              exit 1
+            fi
+            echo "cross-checked against the supplied expected digest: match"
+          fi
+
+          tar -xJf "$tarball"
+          cd "linux-$GUEST_KERNEL_VERSION"
+
+          make ARCH=i386 i386_defconfig
+          scripts/config --file .config \
+            --enable  ANDROID \
+            --enable  ANDROID_BINDER_IPC \
+            --enable  ANDROID_BINDERFS \
+            --set-str ANDROID_BINDER_DEVICES "binder,hwbinder,vndbinder" \
+            --enable  STAGING \
+            --enable  ASHMEM \
+            --enable  IKCONFIG \
+            --enable  IKCONFIG_PROC \
+            --enable  DEVTMPFS \
+            --enable  DEVTMPFS_MOUNT \
+            --enable  TTY \
+            --enable  SERIAL_8250 \
+            --enable  SERIAL_8250_CONSOLE \
+            --enable  EXT4_FS \
+            --enable  VIRTIO \
+            --enable  VIRTIO_PCI \
+            --enable  VIRTIO_BLK
+          make ARCH=i386 olddefconfig
+
+          # THE KERNEL HALF OF THE PROTOCOL RECORD, read back out of the resolved .config
+          # rather than restated from the request above. The guest prints the other two halves
+          # - the SDK build flags and the protocol version the driver actually reports - in one
+          # block on the console, and the three are only meaningful together.
+          echo "================ GUEST KERNEL CONFIGURATION (build time) ================"
+          echo "version: $GUEST_KERNEL_VERSION   arch: i386"
+          rc=0
+          for option in CONFIG_ANDROID CONFIG_ANDROID_BINDER_IPC CONFIG_ANDROID_BINDERFS \
+                        CONFIG_ANDROID_BINDER_DEVICES CONFIG_ASHMEM CONFIG_IKCONFIG_PROC \
+                        CONFIG_DEVTMPFS_MOUNT CONFIG_EXT4_FS CONFIG_VIRTIO_BLK \
+                        CONFIG_SERIAL_8250_CONSOLE; do
+            line="$(grep -E "^($option=|# $option is not set)" .config || true)"
+            if [ -z "$line" ]; then
+              echo "::error::$option is absent from the resolved configuration - neither set nor explicitly unset. Every option in this list is required for the guest to boot, mount binderfs and be measurable."
+              rc=1
+            else
+              echo "  $line"
+              case "$line" in
+                "# $option is not set")
+                  echo "::error::$option was requested but did not survive olddefconfig. A dependency it needs is missing from i386_defconfig."
+                  rc=1
+                  ;;
+              esac
+            fi
+          done
+          reported="$(grep -E '^(CONFIG_ANDROID_BINDER_IPC_32BIT=|# CONFIG_ANDROID_BINDER_IPC_32BIT is not set)' .config || true)"
+          if [ -n "$reported" ]; then
+            echo "  $reported"
+          else
+            echo "  CONFIG_ANDROID_BINDER_IPC_32BIT: absent from this Kconfig entirely"
+          fi
+          echo "    ^ expected. Mainline carries this protocol-7 switch only up to 4.17, and"
+          echo "      CONFIG_ANDROID_BINDERFS - which the in-guest init requires - starts at 5.0."
+          echo "      This guest therefore speaks binder protocol 8, and the staged SDK was built"
+          echo "      with BINDER_IPC_32BIT=OFF to match. The 32-bit userspace is unaffected:"
+          echo "      compile bitness and wire protocol are separate axes."
+          echo "================ END GUEST KERNEL CONFIGURATION ================"
+          [ "$rc" -eq 0 ] || exit 1
+
+          make ARCH=i386 -j"$(nproc)" bzImage
+          cp -- arch/x86/boot/bzImage "$GUEST_KERNEL_IMAGE"
+          cp -- .config "$GUEST_KERNEL_CONFIG"
+
+          # The source tree is scratch; the runner needs the space for the image.
+          cd "$GITHUB_WORKSPACE"
+          rm -rf -- "$src_root"
+          ls -l "$GUEST_KERNEL_IMAGE"
+          df -h "$GITHUB_WORKSPACE" | tail -n 1
+
+      # THE BASE ROOT FILESYSTEM, BUILT AND MEASURED HERE.
+      #
+      # The image builder hard-codes no digest, deliberately, because a digest is a
+      # MEASUREMENT. So the base is produced on this runner and its digest is taken from the
+      # artefact that was actually produced, then written to the sidecar file the builder reads.
+      # sha256sum's own output form is one of the two the builder accepts, so the digest travels
+      # beside the tarball instead of through a shell variable.
+      #
+      # This is host-side acquisition at IMAGE-BUILD time and is legitimate. What must not
+      # happen - and does not - is the GUEST reaching the network at test time.
+      #
+      # The suite is pinned; it is not a snapshot archive, and this comment does not claim
+      # otherwise. The same suite and mirror are handed to the builder as the in-image archive
+      # so the package set inside the image matches the base it was unpacked from.
+      - name: Build the base root filesystem
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK_DIR"
+          cd "$WORK_DIR"
+          sudo debootstrap --arch="$GUEST_ARCH" --variant=minbase \
+            "$GUEST_DEBIAN_SUITE" "$WORK_DIR/base-rootfs" "$GUEST_DEBIAN_MIRROR"
+
+          sudo tar --create --numeric-owner --file base-i386.tar -C "$WORK_DIR/base-rootfs" .
+          sudo chown "$(id -u):$(id -g)" base-i386.tar
+          sudo rm -rf -- "$WORK_DIR/base-rootfs"
+
+          sha256sum base-i386.tar > base-i386.tar.sha256
+          echo "base root filesystem : $WORK_DIR/base-i386.tar"
+          echo "measured digest      : $(awk '{ print $1 }' base-i386.tar.sha256)"
+          echo "suite / mirror       : $GUEST_DEBIAN_SUITE  $GUEST_DEBIAN_MIRROR"
+          df -h "$GITHUB_WORKSPACE" | tail -n 1
+
+      # THE ROOT IMAGE IS BUILT BY THE CHECKED-IN SCRIPT BESIDE THIS FILE. It is not fetched
+      # and it is not generated inline. The script also installs the in-guest init, which is the
+      # guest's PID 1 and the only thing that invokes run_coverage.sh.
+      #
+      # PAYLOAD TRANSPORT: the copied disk image, which is the transport the script implements
+      # and the one this job commits to. There is no shared directory, no second disk and no
+      # guest network. Artifacts come back the same way - out of the image after power-down.
+      #
+      # Every optional flag below is optional only on the command line and mandatory in effect.
+      # --gtest-prefix is required by the builder's own input validation and by its in-image
+      # pkg-config assertion. --lcov-tarball is what makes the image's "lcov reports 2.x"
+      # assertion pass; without it the build fails by design. Neither digest is passed as a
+      # flag because both sidecar files were written next to their tarballs above.
+      - name: Build the guest root image
+        run: |
+          set -euo pipefail
+          script="$GITHUB_WORKSPACE/hdmicec/.github/workflows/aidl-path-tests-rootfs.sh"
+          [ -f "$script" ] || { echo "::error::the checked-in root-image builder is missing at $script."; exit 1; }
+
+          sudo bash "$script" \
+            --output "$GUEST_IMAGE" \
+            --payload "$GITHUB_WORKSPACE/hdmicec-payload" \
+            --sdk-dir "$HALIF_PREFIX_I386" \
+            --base-tarball "$WORK_DIR/base-i386.tar" \
+            --lcov-tarball "$LCOV_TARBALL" \
+            --gtest-prefix "$GTEST_PREFIX_I386" \
+            --kernel-config "$GUEST_KERNEL_CONFIG" \
+            --arch "$GUEST_ARCH" \
+            --size "$GUEST_IMAGE_SIZE_MIB" \
+            --apt-mirror "deb $GUEST_DEBIAN_MIRROR $GUEST_DEBIAN_SUITE main" \
+            --readiness-timeout "$GUEST_READINESS_TIMEOUT_SECONDS"
+
+          manifest="$GUEST_IMAGE.manifest"
+          [ -f "$manifest" ] || { echo "::error::the image builder did not write its manifest at $manifest, so the image cannot be trusted."; exit 1; }
+          echo "================ IMAGE MANIFEST ================"
+          cat -- "$manifest"
+          echo "================ END IMAGE MANIFEST ================"
+
+          # The guest's entry point, its artifact directory and its status file are READ OUT OF
+          # THE MANIFEST rather than restated here, so that the two files cannot drift apart.
+          manifest_value() {
+            awk -v key="$1" -F= '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$manifest"
+          }
+          guest_init="$(manifest_value GUEST_INIT)"
+          artifact_dir="$(manifest_value ARTIFACT_DIR)"
+          status_file="$(manifest_value STATUS_FILE)"
+          for pair in "GUEST_INIT=$guest_init" "ARTIFACT_DIR=$artifact_dir" "STATUS_FILE=$status_file"; do
+            case "$pair" in
+              *=) echo "::error::the manifest does not name ${pair%=}, which this job needs in order to boot the guest and find its results."; exit 1 ;;
+            esac
+          done
+          {
+            echo "GUEST_INIT_PATH=$guest_init"
+            echo "GUEST_ARTIFACT_DIR=$artifact_dir"
+            echo "GUEST_STATUS_FILE=$status_file"
+          } >> "$GITHUB_ENV"
+          df -h "$GITHUB_WORKSPACE" | tail -n 1
+
+      # BOOT THE GUEST AND RUN THE WHOLE MATRIX.
+      #
+      # Everything that happens inside belongs to the guest: its init mounts binderfs, creates
+      # and verifies the binder, hwbinder and vndbinder nodes, prints the BINDER PLATFORM
+      # RECORD, starts servicemanager and WAITS FOR IT TO ANSWER A REAL BINDER TRANSACTION -
+      # a bounded poll on a transaction, never a sleep, because a sleep that is occasionally
+      # too short yields a run where every AIDL invocation quietly falls back to legacy and
+      # reports green, which is the exact failure this job exists to catch - and then runs
+      # run_coverage.sh --build --run --output-dir <the artifact directory>, writes that
+      # command's EXACT exit status to the status file, and powers itself down from a trap that
+      # runs on every path.
+      #
+      # THAT --output-dir IS WHY THE UPLOADS BELOW CAN NAME A PATH AT ALL. Given no output
+      # directory, run_coverage.sh MINTS one with mktemp and only prints it, so a fixed upload
+      # path would find nothing and - with if-no-files-found set to error, as every upload here
+      # is - the job would fail having measured everything correctly. The init passes the fixed
+      # artifact directory the manifest names, and this workflow reads that same name out of the
+      # manifest rather than hard-coding it, which is what keeps the two ends together.
+      # Only the DIRECTORY is overridable; the file names inside it are fixed, which is why the
+      # coverage upload takes the whole directory instead of enumerating names.
+      #
+      # The workflow does not set CEC_TEST_AIDL_MODE, CEC_FAKE_AIDL_HOST_PATH or
+      # CEC_FAKE_HOST_READY_FD, and must not: the first two belong to run_coverage.sh and the
+      # init, and the third names an inherited descriptor whose parent is the L2 harness. It
+      # does not launch the fake service host either - that is the harness's job, and doing it
+      # from outside would put a second process on the "HdmiCec" name.
+      #
+      # No KVM is available on a hosted runner, so this is TCG emulation and it is slow. The
+      # timeout is a backstop for a guest that fails to power itself down; the console is
+      # captured to a file AND streamed, because that log is the only place the platform record
+      # and the branch-arm gate's own output exist.
+      - name: Boot the guest and run the invocation matrix
+        run: |
+          set -uo pipefail
+          mkdir -p "$WORK_DIR"
+          echo "kernel  : $GUEST_KERNEL_IMAGE"
+          echo "image   : $GUEST_IMAGE"
+          echo "init    : $GUEST_INIT_PATH"
+          echo "timeout : ${QEMU_TIMEOUT_SECONDS}s (backstop only; the guest powers itself down)"
+
+          timeout --kill-after=120 "$QEMU_TIMEOUT_SECONDS" \
+            qemu-system-i386 \
+              -machine pc,accel=tcg \
+              -cpu max -smp 2 -m 2048 \
+              -kernel "$GUEST_KERNEL_IMAGE" \
+              -drive file="$GUEST_IMAGE",format=raw,if=virtio,cache=writeback \
+              -append "root=/dev/vda rw init=$GUEST_INIT_PATH console=ttyS0,115200 panic=-1" \
+              -display none -monitor none -serial stdio -no-reboot \
+              < /dev/null 2>&1 | tee "$GUEST_CONSOLE_LOG"
+          qemu_status="${PIPESTATUS[0]}"
+          set -e
+
+          echo "qemu exit status: $qemu_status"
+          if [ "$qemu_status" -eq 124 ] || [ "$qemu_status" -eq 137 ]; then
+            echo "::error::the guest did not power itself down within ${QEMU_TIMEOUT_SECONDS}s and was killed. Under TCG emulation the in-guest build, the five invocations and the coverage capture are slow; read the console log for how far it got. Whatever the guest managed to write is still extracted and uploaded by the steps below."
+            exit 1
+          fi
+          if [ "$qemu_status" -ne 0 ]; then
+            echo "::error::qemu exited $qemu_status. The guest's own verdict, if it produced one, is read from $GUEST_STATUS_FILE by the step below; this failure is about the boot itself."
+            exit 1
+          fi
+
+      # Read the results back out of the image. The guest's init forces the power-off from its
+      # trap, so the filesystem can carry a journal that has not been replayed - which is
+      # exactly why the image is ext4 WITH journalling rather than without. A read-only mount is
+      # attempted first; when the kernel needs to recover the journal before it will show the
+      # files, the fallback mounts writably so the evidence is complete rather than plausible.
+      - name: Extract the coverage artifacts from the image
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f "$GUEST_IMAGE" ]; then
+            echo "::error::there is no guest image at $GUEST_IMAGE, so no results can be extracted. An earlier step failed before the image was built."
+            exit 1
+          fi
+          mkdir -p "$EXTRACTED_ARTIFACTS" "$WORK_DIR/mnt"
+          loop="$(sudo losetup --find --show -- "$GUEST_IMAGE")"
+          echo "IMAGE_LOOP_DEVICE=$loop" >> "$GITHUB_ENV"
+          echo "IMAGE_MOUNT_POINT=$WORK_DIR/mnt" >> "$GITHUB_ENV"
+
+          if sudo mount -o ro -- "$loop" "$WORK_DIR/mnt"; then
+            echo "mounted read-only"
+          else
+            echo "a read-only mount was refused, which means the journal needs replaying after the guest's forced power-off; mounting writably to recover it"
+            sudo mount -- "$loop" "$WORK_DIR/mnt"
+          fi
+
+          source_dir="$WORK_DIR/mnt${GUEST_ARTIFACT_DIR}"
+          if [ ! -d "$source_dir" ]; then
+            echo "::error::the guest wrote no artifact directory at ${GUEST_ARTIFACT_DIR}. It never reached run_coverage.sh - read the console log for the reason, which is most often binderfs or servicemanager."
+            exit 1
+          fi
+          sudo cp -a -- "$source_dir/." "$EXTRACTED_ARTIFACTS/"
+          sudo chown -R -- "$(id -u):$(id -g)" "$EXTRACTED_ARTIFACTS"
+          chmod -R u+rwX -- "$EXTRACTED_ARTIFACTS"
+
+          echo "--- extracted ---"
+          ls -l "$EXTRACTED_ARTIFACTS"
+          status_basename="$(basename -- "$GUEST_STATUS_FILE")"
+          if [ ! -f "$EXTRACTED_ARTIFACTS/$status_basename" ]; then
+            echo "::error::the guest produced artifacts but no status file at ${GUEST_STATUS_FILE}. Without it there is no verdict, and an incomplete run must not be read as a passing one."
+            exit 1
+          fi
+          echo "COVERAGE_STATUS_FILE=$EXTRACTED_ARTIFACTS/$status_basename" >> "$GITHUB_ENV"
+
+      # THE VERDICT, AND IT IS NOT LAUNDERED.
+      #
+      # The number in the status file is run_coverage.sh's own exit status, written by the guest
+      # without alteration. Only 0 means the suite was run by that invocation, was green, and
+      # line coverage met the bar. There is no "|| true" here, no continue-on-error on this
+      # step, no "set +e" around the comparison and no special case that lets 3 through.
+      - name: Evaluate the coverage run verdict
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -z "${COVERAGE_STATUS_FILE:-}" ] || [ ! -f "${COVERAGE_STATUS_FILE:-}" ]; then
+            echo "::error::no status file was extracted, so this run has no verdict. An earlier step failed before the guest wrote one; a missing verdict is a failure, never a pass."
+            exit 1
+          fi
+          status="$(head -n 1 -- "$COVERAGE_STATUS_FILE" | tr -d '[:space:]')"
+          echo "run_coverage.sh exit status: ${status:-<empty>}"
+
+          case "$status" in
+            0)
+              echo "ACCEPTANCE: the five-invocation matrix ran, it was green, and line coverage met the bar."
+              echo "The per-invocation results, the unfiltered trace, the line gate's derivative and the"
+              echo "branch-arm gate's own output are in the uploaded artifacts and in the console log."
+              ;;
+            3)
+              echo "::error::run_coverage.sh exited 3, which is ADVISORY AND IS NOT A PASS. The most likely cause on a first run of this job is the BRANCH-ARM GATE: every entry in run_coverage.sh's BRANCH_MANIFEST ships with its line, block and branch fields EMPTY, so the gate reports that it could not check the arms and records an advisory - which produces exit 3 even when all five invocations are green and coverage is above the bar. This is a deliberate chicken-and-egg: those coordinates can only be derived from an UNFILTERED trace produced by a full five-invocation run on a binder-capable host, and this job is the first thing able to produce one. Read coverage.info out of the uploaded artifacts, take the (file, line, block, branch) coordinates for each required arm against the source line quoted in its manifest entry, and fill in those three fields. The console log names any other advisory reason - a DEFERRED invocation, for instance - in the COVERAGE ADVISORY block."
+              exit 1
+              ;;
+            1)
+              echo "::error::run_coverage.sh exited 1: a prerequisite was missing, a step failed, an invocation was not green, or the coverage gate failed. The console log carries the per-invocation output and the gate's own diagnosis; the uploaded artifacts carry the per-invocation results, the per-file table and the uncovered-line list."
+              exit 1
+              ;;
+            *)
+              echo "::error::run_coverage.sh exited '${status:-<empty>}', which is neither an acceptance nor a documented advisory. Treat it as a failure and read the console log."
+              exit 1
+              ;;
+          esac
+
+      # THE CONSOLE LOG IS EVIDENCE, NOT A CONVENIENCE. It is the only place the BINDER PLATFORM
+      # RECORD exists - the kernel binder configuration the guest read from itself, the SDK
+      # build flags read from the staging tree, and the protocol version read from /dev/binder,
+      # printed as one block because they are meaningful only together. It is also where
+      # run_coverage.sh's per-invocation output and THE BRANCH-ARM GATE'S OWN RESULT appear,
+      # because the gate writes to stdout and its manifest lives inside the script rather than
+      # in a separate checked-in file. So this upload is the gate's result, alongside the trace.
+      - name: Upload the guest console log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-console-aidl-path-tests
+          path: qemu-work/guest-console.log
+          if-no-files-found: error
+
+      # Uploaded WHOLESALE rather than by enumerating names. The artifact FILE NAMES inside are
+      # fixed by run_coverage.sh and only the directory is overridable, so naming individual
+      # files here would invent paths and risk uploading nothing. This one directory carries
+      # coverage.info (the UNFILTERED trace the branch-arm gate reads, and the trace the
+      # manifest coordinates must be derived from), filtered_coverage.info,
+      # line_gate_coverage.info (the line gate's input), the HTML report, per_file_coverage.tsv,
+      # uncovered_lines.txt, and the per-invocation rdkTestResults_invocation_<L>.json and
+      # run_invocation_<L>.log for every one of A through E.
+      - name: Upload the coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-aidl-path-tests
+          path: coverage-artifacts/
+          if-no-files-found: error
+
+      # How the guest was provisioned, so a later reader can reproduce or dispute it: the image
+      # manifest, the kernel configuration that was actually built, and the two records that
+      # fix the wire protocol on the userspace side.
+      - name: Upload the provisioning records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provisioning-aidl-path-tests
+          path: |
+            qemu-work/cec-l2-rootfs.ext4.manifest
+            qemu-work/kernel/config
+            tools/i386-protocol8-toolchain.cmake
+            tools/i386-binder-CMakeCache.txt
+          if-no-files-found: error
+
+      # HOST-SIDE teardown, and it runs on every path so that a failing matrix still leaves the
+      # runner clean and the artifacts above still retrievable. The GUEST's own teardown -
+      # stopping servicemanager, unmounting binderfs and powering down - is in the init's trap
+      # and has already run inside the guest by the time anything here executes. What is left
+      # out here is the loop device and the mount this job created, released in reverse order.
+      #
+      # Only the loop device this job recorded is touched, and only the mount point it created.
+      # Nothing is matched by name across the host.
+      #
+      # The tolerated failures below are cleanup only and decide nothing: the verdict was
+      # already issued by the step above, from the exit status the guest wrote, and no step that
+      # determines a result tolerates a failure anywhere in this file.
+      - name: Tear down the host-side image mount
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -n "${IMAGE_MOUNT_POINT:-}" ] && mountpoint -q -- "$IMAGE_MOUNT_POINT" 2>/dev/null; then
+            sudo umount -- "$IMAGE_MOUNT_POINT" || sudo umount -l -- "$IMAGE_MOUNT_POINT" || true
+            echo "unmounted $IMAGE_MOUNT_POINT"
+          fi
+          if [ -n "${IMAGE_LOOP_DEVICE:-}" ] && [ -e "${IMAGE_LOOP_DEVICE:-}" ]; then
+            sudo losetup -d -- "$IMAGE_LOOP_DEVICE" || true
+            echo "detached $IMAGE_LOOP_DEVICE"
+          fi
+          exit 0
