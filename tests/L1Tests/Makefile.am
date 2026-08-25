@@ -84,12 +84,20 @@ run_L1Tests_SOURCES = \
     ccec/test_Driver.cpp \
     ccec/test_DriverImpl_Async.cpp \
     ccec/test_Util.cpp \
+    ccec/test_DriverAidl.cpp \
     osal/test_ConditionVariable.cpp \
     osal/test_Mutex.cpp \
     osal/test_Thread.cpp \
     $(top_srcdir)/mocks/hdmicec/fake_hdmi_cec_aidl_service.cpp \
     $(top_srcdir)/mocks/hdmicec/hdmi_cec_driver_mock.cpp
 
+# ccec/test_DriverAidl.cpp closes the ccec/ group, which is the group-end append the rule below
+# prescribes: it follows the last pre-existing ccec/ entry, no existing entry moved, and it
+# therefore registers AFTER all three order-fragile units.  Without this line the translation unit
+# would never be compiled at all - GoogleTest would register none of its cases and the AIDL
+# back-end, the runtime selection and the compatibility rule would have no L1 coverage while the
+# suite still reported green.
+#
 # ORDER IS SIGNIFICANT IN THIS LIST.  GoogleTest registers each TEST_F during static
 # initialisation, the order in which those initialisers run follows the link order of the
 # objects, which follows this list, and the order in which the suites then RUN is the order
