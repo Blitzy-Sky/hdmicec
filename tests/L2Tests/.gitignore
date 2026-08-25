@@ -1,0 +1,20 @@
+# Build artifacts
+*.o
+*.lo
+*.la
+.libs/
+.deps/
+Makefile
+Makefile.in
+
+# Test executables
+run_L2Tests
+fake_hdmi_cec_aidl_host
+
+# Test results
+*.log
+*.trs
+*.xml
+
+# Generated files
+.dirstamp

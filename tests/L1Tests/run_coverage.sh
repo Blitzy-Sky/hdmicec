@@ -53,8 +53,27 @@
 #     3. ADDITIVE AND NON-DESTRUCTIVE.  This script writes nothing into ccec/**,
 #        osal/**, mocks/**, tests/L1Tests/test_main.cpp, tests/L1Tests/.gitignore, the
 #        workflows, or /etc/lcovrc.  It never commits, never regenerates a committed
-#        build file behind your back, and never runs `git checkout` as part of the
-#        coverage pipeline.  Its two side effects are stated rather than buried:
+#        build file behind your back, and IT NEVER RUNS `git checkout` AT ALL -- not in
+#        the coverage pipeline, not in `--restore`, and not as advice it prints for
+#        someone to paste.  That is a STRONGER promise than this clause used to make, and
+#        the reason it had to be strengthened is measured rather than theoretical.
+#        `configure` OVERWRITES the six git-tracked Makefiles listed at
+#        REGENERATED_MAKEFILES, and one of them -- ccec/src/Makefile -- is not toolchain
+#        output at all: it is a hand-written RDK build file that carries real source
+#        content, and it is in AC_CONFIG_FILES anyway, so `configure` clobbers it by
+#        design.  `git checkout --` restores whatever the INDEX holds, which makes it
+#        correct only under an assumption about the index and makes it silently DESTROY
+#        an uncommitted edit to any of the six.  A measurement tool does not get to lose
+#        someone's work as a side effect of measuring.
+#        So `--build` SNAPSHOTS the working-tree bytes of all six immediately before it
+#        runs autoreconf, and restores from that snapshot at the end of the SAME
+#        invocation -- exactly what was there, committed or not, index or no index.  The
+#        snapshot lives in a run-scoped mktemp -d directory registered with the same
+#        EXIT/INT/TERM trap as everything else here, so a cancelled build restores too.
+#        A standalone `--restore` that finds the six dirty and has no snapshot from its
+#        own invocation REFUSES and exits non-zero, because the only thing it could
+#        otherwise reach for is the `git checkout` this clause has just forbidden.
+#        Its two side effects are stated rather than buried:
 #          (a) $HOME is NOT one of them, and that is the point.  lcov reads
 #              $HOME/.lcovrc silently, and a branch-disabled copy there would defeat
 #              everything above -- CI plants exactly such a copy in the plugin jobs, so
@@ -80,10 +99,30 @@
 #        capture is a loud failure rather than a plausible-looking zero.  gcov counters
 #        ACCUMULATE across runs, so a stale *.gcda keeps a line marked hit long after the
 #        test that hit it stopped running -- which would let a gate pass on an earlier
-#        run's evidence.  `--run` therefore zeroes the counters before the suite and
-#        refuses to capture unless the suite produced fresh ones; without `--run` the
-#        script reports how many counter files it found and when they were last written,
-#        so a stale measurement is visible rather than silent.
+#        run's evidence.
+#        SO THE ORDER IS: ZERO ONCE, RUN THE MATRIX, CAPTURE ONCE.  That is a change from
+#        the per-run zeroing this clause used to describe, and the reason is the reason
+#        the matrix exists at all.  The HAL back-end selection resolves ONCE PER PROCESS,
+#        inside LibCCEC::init, so one binary run can only ever exercise one arm of the
+#        selection branch; covering both needs several processes, and ACCUMULATION ACROSS
+#        THEM is the only way anything ever sees both arms.  Zeroing before each
+#        invocation would leave the capture describing only the last one -- a report that
+#        looks complete and covers half the design.  Never zeroing would let an earlier
+#        run's evidence in, which is what this clause has always forbidden.  Zeroing once
+#        before the first invocation and capturing once after the last one has PASSED has
+#        neither failure mode, and the anti-stale guarantee is untouched: the figures are
+#        still an account of THIS run and of nothing before it.
+#        The verification is unchanged and still does not trust the tool: after zeroing,
+#        the *.gcda files are RE-COUNTED rather than `lcov --zerocounters`'s exit status
+#        being believed, and a survivor is fatal.  Nothing is captured unless the
+#        invocations produced fresh counters.
+#        ONE BUILD, ONE MACHINE, and this is a constraint rather than a convenience: gcov
+#        counters cannot accumulate across machines, and a counter file from a different
+#        build does not describe the same objects.  Every invocation therefore runs
+#        against the tree this invocation of the script measured, which is also why the
+#        hosted CI job cannot contribute its run to a capture made anywhere else.
+#        Without `--run` the script reports how many counter files it found and when they
+#        were last written, so a stale measurement is visible rather than silent.
 #        A ZERO EXIT STATUS IS NOT TAKEN AS PROOF THAT ANY TEST RAN.  GoogleTest exits 0
 #        when a filter selects nothing, so `GTEST_EXTRA_ARGS=--gtest_filter=NoSuchTest.*`
 #        would otherwise be reported as "the L1 suite passed" and then measured at 0.0% -- a run
@@ -214,7 +253,8 @@
 # USAGE
 # ==============================================================================
 #   ./run_coverage.sh                       measure existing profile data, report, gate
-#   ./run_coverage.sh --run                 zero counters, run the suite, then the above
+#   ./run_coverage.sh --run                 zero counters once, run the whole invocation
+#                                           matrix, capture once, then the above
 #   ./run_coverage.sh --build --run         build first, then the above
 #   ./run_coverage.sh --threshold 90        raise the bar for a diagnostic run
 #   ./run_coverage.sh --per-file-gate       also fail if any single file is below the bar
@@ -223,7 +263,9 @@
 #                                           per-file breaches without failing on them
 #   ./run_coverage.sh --output-dir DIR      write artifacts to DIR
 #   ./run_coverage.sh --no-html             skip the genhtml report
-#   ./run_coverage.sh --restore             restore the six tracked Makefiles, then exit
+#   ./run_coverage.sh --restore             restore the six tracked Makefiles from this
+#                                           invocation's snapshot, then exit (refuses when
+#                                           they are dirty and no snapshot exists)
 #   ./run_coverage.sh --help                full option and environment reference
 #
 #   ENVIRONMENT (all optional; command-line flags win)
@@ -239,13 +281,26 @@
 #     GTEST_EXTRA_ARGS        extra arguments appended to the run_L1Tests command line
 #
 #   ARTIFACTS (fixed names, written under the output directory)
-#     coverage.info              raw capture over the whole submodule
-#     filtered_coverage.info     production-source-only trace, after the seven globs
+#     coverage.info              raw capture over the whole submodule -- and the BRANCH GATE'S
+#                                INPUT, deliberately unfiltered (see ONE TRACE, TWO CONSUMERS)
+#     filtered_coverage.info     production-source-only trace, after the seven globs; the
+#                                CI-interchangeable form, and the input to the step below
+#     line_gate_coverage.info    filtered_coverage.info with the dependency headers removed --
+#                                the LINE GATE'S INPUT, and what the per-file table, the
+#                                uncovered-line list, the summary and the HTML report describe
 #     coverage/index.html        genhtml report, with a Branches column
 #     per_file_coverage.tsv      machine-readable per-file LINE/FUNCTION/BRANCH figures
 #     uncovered_lines.txt        per-file uncovered line numbers for below-bar targets
-#     rdkL1TestResults.json      GoogleTest results, when --run is used (as in CI)
-#     capture.log filter.log genhtml.log run_L1Tests.log build.log
+#     rdkTestResults_invocation_<L>.json   GoogleTest results, ONE PER INVOCATION under --run
+#     run_invocation_<L>.log               that invocation's captured output, one per invocation
+#     capture.log filter.log genhtml.log build.log
+#
+#   PER-INVOCATION NAMES CARRY A LETTER, NEVER A TIMESTAMP.  The suite is now run once per
+#   selection outcome (see THE INVOCATION MATRIX below), and a single results file would mean
+#   the last run's evidence standing in for all of them -- an empty or failed invocation erased
+#   by whichever green one came after it.  The letter keeps them distinct while keeping clause 5
+#   intact: the file set is a fixed, predictable function of the matrix, so the same tree
+#   produces the same names and a reader does not have to list the directory to find them.
 #
 #   The DIRECTORY is the override point; the FILE NAMES are fixed, and that is deliberate
 #   rather than an omission.  coverage.info, filtered_coverage.info and coverage/ are the
@@ -281,28 +336,121 @@
 #   PKG_CONFIG_PATH="$GTEST_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH" \
 #   CPPFLAGS="-I$PWD/mocks -I$PWD/stubs -I$GTEST_PREFIX/include" \
 #   LDFLAGS="-L$GTEST_PREFIX/lib -fprofile-arcs -ftest-coverage" \
-#   CXXFLAGS="-fprofile-arcs -ftest-coverage" ./configure --enable-l1tests
-#   make -j$(nproc) all && make -C tests/L1Tests all
+#   CXXFLAGS="-fprofile-arcs -ftest-coverage" ./configure --enable-l1tests \
+#       [HALIF_PREFIX=DIR] [HALIF_LIB_DIR=DIR] \
+#       [BINDER_SDK_DIR=DIR] [BINDER_SDK_INCLUDE_DIR=DIR]
+#   make -j$(nproc) all && make -C tests/L1Tests all && make -C tests/L2Tests all
+#
+#   THE STUB RECIPE IS SPELLED TWICE IN THIS FILE -- here, and executed in do_build -- and
+#   the two are kept identical on purpose: a documented recipe that has drifted from the
+#   one that runs is worse than no documentation, because it is trusted.  It gained no new
+#   entry for the AIDL back-end, and that is not an omission: stubs/ mutes the IARM bus
+#   headers this middleware includes but does not ship, and substitutes the HAL driver mock
+#   for the real legacy driver header.  The AIDL headers are REAL and are found through the
+#   prefixes below, so there is nothing to stub.
+#
+#   THE FOUR AIDL/BINDER PREFIXES ARE OPTIONAL ON THE COMMAND LINE AND MANDATORY IN EFFECT.
+#   libRCEC links the generated AIDL client stubs and the Binder client library
+#   unconditionally, for every SOC vendor, so the build needs their headers and libraries --
+#   but this script names no path for them.  configure.ac declares all four with AC_ARG_VAR
+#   and DERIVES from them the four include roots (the hdmicec and common snapshot roots, the
+#   common/current root that is the only source of halcompat.h, and the Binder header root),
+#   the -L directories, the four -l edges and the C++17 flag.  Omit them and configure looks
+#   for the sibling rdk-halif-aidl checkout; get them wrong and configure fails naming the
+#   roots it tried.  Either way there is ONE place that decides, which is what keeps the
+#   Autotools build and the hand-written ccec/src/Makefile from being configured differently.
+#
+#   `make -C tests/L2Tests all` is the third make and builds two programs: the L2 runner and
+#   the out-of-process fake service host.  Without it invocations D and E have no binary.
 #
 #   The PKG_CONFIG_PATH line is the one addition to the workflow's own command, and it is
 #   not optional off a CI runner: configure.ac uses PKG_CHECK_MODULES for GoogleTest, which
 #   consults pkg-config ONLY and ignores -I/-L.  CI additionally apt-installs libgtest-dev,
 #   so a system gtest.pc satisfies the check there; a host whose GoogleTest is a
-#   source-built copy in a private prefix -- the usual arrangement when the distribution's
-#   GoogleTest is too new for this project's C++ standard -- needs the prefix on
-#   pkg-config's path or configure aborts with "Google Test not found".
+#   source-built copy in a private prefix needs the prefix on pkg-config's path or configure
+#   aborts with "Google Test not found".
 #
 #   MANDATORY BUILD HYGIENE.  autoreconf and configure REWRITE six GIT-TRACKED Makefile
-#   files in this submodule.  They are local toolchain output and must never be
-#   committed.  Restore them with:
+#   files in this submodule (REGENERATED_MAKEFILES below).  Five of them are pure local
+#   toolchain output.  THE SIXTH IS NOT: ccec/src/Makefile is a hand-written RDK build
+#   file with its own object list and link command -- real source content -- and it is
+#   listed in configure.ac's AC_CONFIG_FILES all the same, so configure clobbers it by
+#   design.  Measured, not assumed: after a `--build` on this host the regenerated copy
+#   no longer contains the DriverAidlImpl.o entry the hand-written one carries.
 #
-#       git -C <hdmicec> checkout -- Makefile ccec/Makefile ccec/src/Makefile \
-#                                    osal/Makefile osal/src/Makefile tests/Makefile
+#   SO `--build` SNAPSHOTS ALL SIX AND RESTORES THEM ITSELF.  The snapshot is taken from
+#   the WORKING TREE immediately before autoreconf runs, held in a run-scoped mktemp -d
+#   directory, and restored at the end of the same invocation from the trap that already
+#   cleans up the private lcov HOME -- so a cancelled or failed build restores too.
+#   Nothing is left for anyone to paste.
 #
-#   `--build` prints that command and the list of files it dirtied but DELIBERATELY DOES
-#   NOT RUN IT: silently reverting tracked files in someone's working tree is not a thing
-#   a measurement tool gets to do.  `--restore` runs it, and only it, on request.  No
-#   `git checkout` is ever executed as part of the coverage pipeline.
+#   DO NOT REVERT THESE SIX WITH `git checkout`, AND THIS SCRIPT NO LONGER SUGGESTS IT.
+#   A blanket checkout over those paths restores whatever the INDEX holds: it is right
+#   only under an assumption about the index, and it silently DESTROYS an uncommitted
+#   edit to any of the six -- an edit to ccec/src/Makefile most of all, that being the
+#   one a person actually works on.  Restoring the bytes that were there is
+#   unconditionally correct; restoring the bytes git happens to hold is not.  `--restore`
+#   therefore restores from a snapshot or refuses: with the six dirty and no snapshot
+#   from its own invocation it exits non-zero and says why, rather than reaching for git.
+#   No `git checkout` is executed anywhere in this script, in any mode.
+#
+# ==============================================================================
+# ONE TRACE, TWO CONSUMERS
+# ==============================================================================
+#   The capture is taken ONCE and read in two forms, because the two gates ask different
+#   questions and neither form answers both.  This is stated up here rather than left to
+#   the function that does it, because "two gates read two files" looks like a defect
+#   until the reason is in front of the reader.
+#
+#   THE BRANCH GATE READS THE UNFILTERED CAPTURE.  Since libRCEC gained the AIDL
+#   back-end, some of the branches that have to be accounted for live in header-only code
+#   outside this submodule -- above all in halcompat.h's isCompatible<>(), whose empty-hash,
+#   "-1", "notfrozen", era and major arms are exactly what the selection rests on.  Filter
+#   first and those records are gone, and a branch gate that cannot see its own subject
+#   passes silently and for ever.
+#
+#   THE LINE GATE READS A DERIVATIVE with the dependency headers removed, and only them.
+#   Its 80% threshold is an aggregate, and an aggregate means nothing without a stable
+#   denominator.  MEASURED: the capture holds 140 source-file records; the seven globs
+#   reduce that to 42; and of those, 31 are this submodule's own and ELEVEN are dependency
+#   headers -- six from the binder SDK, four generated AIDL stubs, and halcompat.h.  Left
+#   in, they move the denominator away from the one the baseline was measured over and,
+#   because per-file gating is on, start failing runs over how well this suite covers a
+#   third-party header it neither owns nor tests.
+#
+#   halcompat.h IS RETAINED in the derivative: it is a consumed HALIF header called from
+#   the selection path, not toolchain code.  ccec/src/Driver.cpp and
+#   ccec/src/DriverAidlImpl.cpp are never filtered from either form, and their presence is
+#   ASSERTED after filtering rather than inferred from the globs not naming them.
+#
+#   The seven globs themselves are UNTOUCHED and nothing was added to them -- clause 6
+#   holds.  The dependency exclusions are a separate list applied in a separate step
+#   producing a separate artifact, so filtered_coverage.info still means what its comment
+#   has always said it means.
+#
+# ==============================================================================
+# THE LEGACY-PATH BASELINE -- REFERENCE ONLY, AND LABELLED AS SUCH
+# ==============================================================================
+#   These are the figures this suite measured BEFORE the AIDL back-end existed, on the
+#   legacy path alone.  They are recorded here so a later run has something to compare
+#   against, and they are labelled because a number without its provenance is the thing
+#   clause 4 exists to prevent:
+#
+#     483 tests from 18 suites, all passing, 6545 ms
+#     aggregate over 30 source files: 94.5% line (1999/2115), 93.2% function (425/456),
+#                                     58.4% branch (1122/1920)
+#     ccec/src/DriverImpl.cpp  97.5% line / 94.4% function / 66.2% branch
+#     ccec/src/LibCCEC.cpp     100%  line / 100%  function / 65.9% branch
+#
+#   THEY ARE NOT A POST-CHANGE EXPECTATION AND MUST NOT BE READ AS ONE.  The suite is
+#   larger now, ccec/src/DriverAidlImpl.cpp is in the denominator, and -- decisively -- the
+#   figures a run produces depend on HOW MANY INVOCATIONS THE HOST COULD RUN.  On a host
+#   with no binder driver, three of the five are deferred and the AIDL back-end's source is
+#   unmeasured by construction, so the aggregate is necessarily lower and says nothing about
+#   the test set.  NO POST-CHANGE AGGREGATE IS WRITTEN DOWN HERE, on purpose: the only
+#   honest source for one is a full five-invocation run on a binder-capable host, and this
+#   script prints what it measured on whatever host it ran on rather than carrying a number
+#   somebody would then compare the wrong thing against.
 #
 # ==============================================================================
 # GATE
@@ -506,6 +654,44 @@ fi
 GTEST_PREFIX="${GTEST_PREFIX:-$WS/install/usr}"
 GTEST_EXTRA_ARGS="${GTEST_EXTRA_ARGS:-}"
 
+# ------------------------------------------------------------------------------------
+# THE AIDL/BINDER STAGING PREFIXES -- four names, and NOT ONE HARD-CODED PATH.
+#
+# libRCEC now links the generated AIDL client stubs and the Binder client library
+# unconditionally, for every SOC vendor, so the build this script drives needs to find their
+# headers and libraries.  It does NOT get to decide where those are.
+#
+# WHY THE NAMES ARE THESE FOUR AND NOT NAMES OF THIS SCRIPT'S CHOOSING.  configure.ac declares
+# exactly these four as AC_ARG_VAR precious variables and derives everything else from them --
+# the four include roots, the -L directories, the four -l edges and the C++17 dialect flag are
+# all AC_SUBSTed outputs computed inside configure, not inputs anybody supplies twice.  Two
+# staging prefixes are the whole of the orchestrator contract and the other two are overrides
+# for split staging layouts, and the hand-written ccec/src/Makefile reads the same four names
+# from the environment for exactly the same reason.  So this script passes the four through and
+# lets configure derive the rest: a path spelled here as well would be a second place for the
+# two build systems to disagree, which is the failure the single-prefix contract exists to
+# prevent.
+#
+#   HALIF_PREFIX            root of the staged rdk-halif-aidl tree.  Left unset, configure
+#                           falls back to the sibling checkout beside this submodule, which is
+#                           the normal in-workspace arrangement -- so this stays EMPTY by
+#                           default rather than duplicating that fallback here and risking a
+#                           different answer.
+#   HALIF_LIB_DIR           stub library directory, when it is not HALIF_PREFIX/lib/halif
+#   BINDER_SDK_DIR          root of the staged Binder SDK, holding lib/binder and
+#                           include/binder_sdk
+#   BINDER_SDK_INCLUDE_DIR  Binder header prefix, when it is not under BINDER_SDK_DIR
+#
+# Every one of them is read from the environment and passed on untouched.  An unset variable is
+# passed as unset rather than as an empty string, because `configure BINDER_SDK_DIR=` is a
+# different instruction from omitting it: the first says "there is no Binder SDK", which fails
+# the configure-time check, and the second lets configure look where it knows to look.
+# ------------------------------------------------------------------------------------
+HALIF_PREFIX="${HALIF_PREFIX:-}"
+HALIF_LIB_DIR="${HALIF_LIB_DIR:-}"
+BINDER_SDK_DIR="${BINDER_SDK_DIR:-}"
+BINDER_SDK_INCLUDE_DIR="${BINDER_SDK_INCLUDE_DIR:-}"
+
 DO_BUILD=0
 DO_RUN=0
 DO_HTML=1
@@ -550,6 +736,64 @@ readonly LCOV_EXCLUDES=(
     '*/test_*.cpp'
 )
 
+# ------------------------------------------------------------------------------------
+# THE DEPENDENCY-HEADER EXCLUSIONS -- a SECOND, SEPARATE list, and separate on purpose.
+#
+# WHY THEY ARE NOT ADDED TO THE SEVEN ABOVE.  Clause 6 says the seven exclusion globs are
+# reproduced verbatim from the workflow and that NOTHING is added to them, and that is not
+# ceremony: those seven are what make a local run's filtered trace interchangeable with CI's
+# artifact bundle, and a list that has quietly grown by two is a list that no longer means what
+# its comment says.  So this is a second list, applied in a second step, producing a third
+# artifact -- and the seven-glob step keeps its name, its content and its meaning untouched.
+#
+# WHY A SECOND LIST IS NEEDED AT ALL.  Since libRCEC gained the AIDL back-end, the compiled
+# objects reference header-only code from outside this submodule: halcompat.h's templates, the
+# generated Bp*/Bn* inline definitions, and binder SDK headers.  gcov attributes records to
+# those paths, and NONE of the seven globs describes them.  MEASURED on this host: the capture
+# holds 140 source-file records, the seven globs reduce that to 42, and of those 42 exactly 31
+# are inside this submodule while ELEVEN are dependency headers -- six binder SDK headers, four
+# generated AIDL stub headers, and halcompat.h.  Left in, they change the file set the per-file
+# gate judges and the denominator the aggregate is computed over, so a figure produced now would
+# not be comparable with the recorded baseline and the per-file gate would start voting on
+# whether a binder SDK header is well tested by this suite.
+#
+# WHAT IS FILTERED AND WHAT IS DELIBERATELY KEPT:
+#
+#   '*/binder_sdk/*'      the binder SDK header root.  configure.ac fixes that directory name
+#                         -- the header root is <prefix>/include/binder_sdk -- so the glob
+#                         describes the layout rather than one host's path.  This is third-party
+#                         toolchain code that this suite neither owns nor tests.
+#   '*/com/rdk/hal/*'     the GENERATED AIDL stub headers.  The C++ AIDL backend package-paths
+#                         every generated header under com/rdk/hal/, so this one glob catches
+#                         them from any prefix and at any snapshot version -- which a
+#                         version-spelled glob would not.  They are committed pre-generated
+#                         code, not source anyone in this repository writes.
+#
+#   halcompat.h IS RETAINED, and that is the important half of this policy.  It lives at
+#   <halif prefix>/common/current/halcompat.h -- OUTSIDE com/rdk/hal/, which is precisely why
+#   the glob above separates the two cleanly rather than by luck -- and it is a CONSUMED HALIF
+#   HEADER rather than third-party toolchain code: getService<I>() and isCompatible<I>() are
+#   called from the selection path, their branches are branches this migration is answerable
+#   for, and SC6 asks for them by name.  Filtering it would delete the evidence.
+#
+# Anything the caller told us about the staging layout is added below, at resolve time, so a
+# Yocto-style layout whose binder headers do not sit under a binder_sdk directory is still
+# described.  A prefix that was never set contributes nothing.
+# ------------------------------------------------------------------------------------
+readonly DEPENDENCY_EXCLUDES=(
+    '*/binder_sdk/*'
+    '*/com/rdk/hal/*'
+)
+
+# Source files that must NEVER disappear from either trace, whatever any glob says.  They are
+# the two production files this migration is answerable for, and a filter that removed one would
+# leave a green gate over unmeasured code -- so their presence is ASSERTED after filtering rather
+# than assumed from the globs not naming them.  Paths are relative to the submodule root.
+readonly PROTECTED_TRACE_FILES=(
+    'ccec/src/Driver.cpp'
+    'ccec/src/DriverAidlImpl.cpp'
+)
+
 GENHTML_TITLE='hdmicec coverage'
 # NOT readonly: write_provenance() appends the superproject's short SHA so that every page of
 # the HTML report carries the revision it was produced from. A trace or a report that does not
@@ -587,7 +831,17 @@ if [ -f "$SCRIPT_DIR/.lcovrc_l1" ]; then
     LCOV_CONFIG_ARGS=(--config-file "$SCRIPT_DIR/.lcovrc_l1")
 fi
 
+# ------------------------------------------------------------------------------------
 # The six git-tracked Makefiles that autoreconf/configure rewrite (see BUILD RECIPE).
+#
+# FIVE OF THESE ARE TOOLCHAIN OUTPUT AND THE SIXTH IS NOT, which is the whole reason the
+# snapshot machinery below exists.  ccec/src/Makefile is a hand-written RDK build file --
+# its own CFLAGS, its own nine-entry object list, its own link command -- and it is in
+# configure.ac's AC_CONFIG_FILES anyway, so configure overwrites it with generated content
+# every time.  Restoring it is therefore not "throwing away generated noise": it is putting
+# a source file back, and the only mechanism that does that correctly under every condition
+# is one that remembers the bytes.
+# ------------------------------------------------------------------------------------
 readonly REGENERATED_MAKEFILES=(
     Makefile
     ccec/Makefile
@@ -596,6 +850,66 @@ readonly REGENERATED_MAKEFILES=(
     osal/src/Makefile
     tests/Makefile
 )
+
+# ------------------------------------------------------------------------------------
+# THE MAKEFILE SNAPSHOT -- what replaced `git checkout`, and why it is not the same thing
+# wearing a different name.
+#
+# WHAT WAS WRONG WITH THE OLD MECHANISM.  `do_restore` used to run
+# `git -C <hdmicec> checkout -- <the six>`, `announce_regenerated_makefiles` printed that
+# exact command for the caller to paste, and the BUILD RECIPE block in the header
+# documented it a third time.  All three restore WHATEVER THE INDEX HOLDS, which is a
+# different claim from "what was there before configure ran", and the difference is not
+# academic: an uncommitted edit to any of the six is destroyed outright, with no prompt and
+# no copy.  ccec/src/Makefile is precisely the file someone edits -- it is hand-written
+# source, not output -- so the one path where the old mechanism was most dangerous is also
+# the one it was most likely to be used on.
+#
+# WHAT THIS DOES INSTEAD.  `--build` copies the working-tree bytes of all six into a
+# run-scoped mktemp -d directory immediately before autoreconf, and the EXIT/INT/TERM trap
+# restores from that copy at the end of the same invocation.  It is unconditionally correct:
+# it does not consult the index, does not care whether the file is committed, modified,
+# staged or pristine, and cannot revert anything that was not itself about to be clobbered.
+# A cancelled build restores too, because the restore hangs off the trap rather than off the
+# build's success path.
+#
+# WHAT IT DELIBERATELY DOES NOT DO.  It does not fall back to git when there is no snapshot.
+# A fallback would reintroduce exactly the destruction this replaced, at the one moment a
+# caller is least able to notice -- and "we could not do the safe thing so we did the unsafe
+# thing" is not a recovery.  A standalone `--restore` that finds the six dirty with no
+# snapshot of its own says so and exits non-zero.
+#
+#   MAKEFILE_SNAPSHOT_DIR    the run-scoped copy, empty when none has been taken
+#   MAKEFILE_SNAPSHOT_TAKEN  newline-separated list of the paths actually captured, so the
+#                            restore puts back exactly what was saved and a file that did
+#                            not exist beforehand is not conjured into existence
+# ------------------------------------------------------------------------------------
+MAKEFILE_SNAPSHOT_DIR=''
+MAKEFILE_SNAPSHOT_TAKEN=''
+
+# ------------------------------------------------------------------------------------
+# THE BUILD LOCK -- tree-scoped, not artifact-scoped, and that distinction is the point.
+#
+# acquire_output_lock() below already serialises two runs that share an --output-dir.  It
+# cannot serialise these: two runs with two different minted artifact roots build in the
+# SAME working tree, so one can snapshot while the other is half way through configure and
+# then "restore" the other run's generated content as though it were the original.  The
+# shared resource is the tree, so the lock has to be keyed to the tree.
+#
+# The name is derived from the absolute path of the submodule root, because that is what
+# makes it tree-scoped: two clones of this superproject under /tmp/blitzy get two different
+# locks and do not block each other, which is the behaviour parallel clones need.
+#
+# A DERIVED NAME IN A SHARED DIRECTORY IS PREDICTABLE, and that trade-off is accepted here
+# rather than glossed: the ancestry checks (assert_safe_ancestry) still refuse a symlinked
+# or foreign-owned component, the lock file itself is refused if it is a symlink or not a
+# regular file, it is opened with `>>` so nothing is truncated, and if a local account
+# squats the name then flock fails and THIS RUN REFUSES TO PROCEED.  Every failure mode
+# lands on "do not build", which is the safe direction for a lock whose job is to stop two
+# builds interleaving.
+# ------------------------------------------------------------------------------------
+BUILD_LOCK_FD=''
+BUILD_LOCK_PATH=''
 
 # ------------------------------------------------------------------------------------
 # Output helpers.  A single prefix makes this script's lines distinguishable from lcov's
@@ -1015,6 +1329,234 @@ cleanup_stage_dir() {
     return 0
 }
 
+cleanup_makefile_snapshot() {
+    [ -n "$MAKEFILE_SNAPSHOT_DIR" ] || return 0
+    local snapshot="$MAKEFILE_SNAPSHOT_DIR"
+    MAKEFILE_SNAPSHOT_DIR=''
+    MAKEFILE_SNAPSHOT_TAKEN=''
+    # Only ever a directory this script created with mktemp -d, never a caller-supplied path,
+    # and the two-component pattern keeps a recursive remove away from '/' and '/anything'.
+    case "$snapshot" in
+        /*/*) [ -d "$snapshot" ] && rm -rf -- "$snapshot" ;;
+        *)    warn "refusing to remove an implausible snapshot path: $snapshot" ;;
+    esac
+    return 0
+}
+
+# ------------------------------------------------------------------------------------
+# Take the snapshot.  Called from do_build IMMEDIATELY BEFORE autoreconf -- not earlier,
+# because a snapshot taken before the stub-header step would still be correct but would
+# widen the window in which a concurrent build could interleave, and not later, because
+# autoreconf is the first command that can rewrite any of the six.
+#
+# A file that does not exist is recorded as absent rather than faked: MAKEFILE_SNAPSHOT_TAKEN
+# lists only what was actually copied, so the restore cannot conjure a file into a tree that
+# never had one.  A file that exists and cannot be read is FATAL, because carrying on would
+# mean building with no way back for that path.
+# ------------------------------------------------------------------------------------
+snapshot_regenerated_makefiles() {
+    [ -n "$MKTEMP_BIN" ] || die "internal error: snapshot_regenerated_makefiles needs mktemp"
+    [ -z "$MAKEFILE_SNAPSHOT_DIR" ] || die "internal error: a Makefile snapshot already exists at
+       $MAKEFILE_SNAPSHOT_DIR
+       Taking a second one would overwrite the record of what the tree looked like before
+       this invocation touched it."
+
+    local parent="${TMPDIR:-/tmp}"
+    case "$parent" in
+        /*) ;;
+        *)  die "TMPDIR must be an absolute path to be checked safely; got: $parent" ;;
+    esac
+    parent="$(canonicalise_path_lexically "$parent")"
+    assert_safe_ancestry "$parent/hdmicec-makefile-snapshot" minted
+
+    MAKEFILE_SNAPSHOT_DIR="$("$MKTEMP_BIN" -d "$parent/hdmicec-makefile-snapshot.XXXXXXXX")" \
+        || die "could not create a snapshot directory for the six tracked Makefiles under
+       $parent
+       Refusing to run autoreconf and configure, because they overwrite those six files and
+       this run would then have no way to put them back.  'git checkout' is NOT the fallback:
+       it restores what the index holds and would destroy any uncommitted edit."
+    chmod 700 -- "$MAKEFILE_SNAPSHOT_DIR" \
+        || die "could not restrict the Makefile snapshot directory to mode 0700: $MAKEFILE_SNAPSHOT_DIR"
+    assert_private_dir "$MAKEFILE_SNAPSHOT_DIR"
+
+    local f captured=0 absent=0
+    for f in "${REGENERATED_MAKEFILES[@]}"; do
+        if [ ! -e "$HDMICEC_ROOT/$f" ]; then
+            absent=$((absent + 1))
+            continue
+        fi
+        [ -f "$HDMICEC_ROOT/$f" ] || die "$HDMICEC_ROOT/$f exists but is not a regular file, so it
+       cannot be snapshotted and this build would have no way to restore it.  Investigate that
+       path before building."
+        mkdir -p -- "$MAKEFILE_SNAPSHOT_DIR/$(dirname -- "$f")" \
+            || die "could not create the snapshot subdirectory for $f under $MAKEFILE_SNAPSHOT_DIR"
+        # -p preserves the mode, which matters: ccec/src/Makefile is mode 0755 in this tree
+        # and a restore that silently dropped the executable bit would be a change of its own.
+        cp -p -- "$HDMICEC_ROOT/$f" "$MAKEFILE_SNAPSHOT_DIR/$f" \
+            || die "could not snapshot $HDMICEC_ROOT/$f.
+       Refusing to run autoreconf and configure without a way back for every one of the six."
+        MAKEFILE_SNAPSHOT_TAKEN="${MAKEFILE_SNAPSHOT_TAKEN}${f}
+"
+        captured=$((captured + 1))
+    done
+
+    log "snapshotted $captured of ${#REGENERATED_MAKEFILES[@]} tracked Makefile(s) before autoreconf"
+    if [ "$absent" -ne 0 ]; then
+        log "  ($absent did not exist yet and are recorded as absent, not fabricated)"
+    fi
+    log "  snapshot: $MAKEFILE_SNAPSHOT_DIR (removed when this run exits)"
+}
+
+# ------------------------------------------------------------------------------------
+# Put the six back from the snapshot.  Idempotent, so the trap and an explicit --restore
+# can both call it, and safe to call when no snapshot was ever taken.
+#
+# The pre-check/post-check discipline of the old git-based do_restore is KEPT VERBATIM in
+# spirit, because it was the good part: report what was dirty going in (`was:`), do the work,
+# then re-read git and report anything still dirty (`still:`) as a hard failure.  What
+# changed is only the verb in the middle -- a copy from the snapshot instead of a checkout
+# from the index.
+#
+# `git` is used here for REPORTING ONLY.  When it is absent or this is not a working tree the
+# restore still happens and the reporting degrades to a note; the restore does not depend on
+# git in any way, which is the whole point.
+# ------------------------------------------------------------------------------------
+restore_regenerated_makefiles_from_snapshot() {
+    [ -n "$MAKEFILE_SNAPSHOT_DIR" ] || return 0
+    [ -d "$MAKEFILE_SNAPSHOT_DIR" ] || return 0
+    [ -n "$MAKEFILE_SNAPSHOT_TAKEN" ] || return 0
+
+    local git_usable=0
+    if command -v git >/dev/null 2>&1 \
+       && git -C "$HDMICEC_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        git_usable=1
+    fi
+
+    local before=''
+    if [ "$git_usable" -eq 1 ]; then
+        before="$(git -C "$HDMICEC_ROOT" status --porcelain -- "${REGENERATED_MAKEFILES[@]}" 2>/dev/null || true)"
+    fi
+
+    rule
+    log "restoring the tracked Makefiles from this run's snapshot"
+    if [ -n "$before" ]; then
+        printf '%s\n' "$before" | sed 's/^/[run_coverage]   was: /'
+    elif [ "$git_usable" -eq 1 ]; then
+        log "  none of the six is currently modified; restoring from the snapshot anyway, because"
+        log "  the snapshot is the authority on their pre-build content and a byte-identical copy"
+        log "  is a no-op rather than a risk."
+    fi
+
+    local f restored=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        [ -f "$MAKEFILE_SNAPSHOT_DIR/$f" ] || die "the snapshot is missing $f although it was
+       recorded as captured ($MAKEFILE_SNAPSHOT_DIR).  Refusing to restore a partial set: some
+       of the six would be pre-build content and the rest generated content, which is worse
+       than either."
+        [ ! -L "$HDMICEC_ROOT/$f" ] || die "refusing to restore through a symlink: $HDMICEC_ROOT/$f"
+        cp -p -- "$MAKEFILE_SNAPSHOT_DIR/$f" "$HDMICEC_ROOT/$f" \
+            || die "could not restore $HDMICEC_ROOT/$f from the snapshot at
+       $MAKEFILE_SNAPSHOT_DIR/$f
+       The snapshot is still there: copy it back by hand.  Do NOT reach for
+       'git checkout' over these paths -- it restores what the index holds and would
+       destroy any uncommitted edit, which is the defect this mechanism replaced."
+        restored=$((restored + 1))
+    done <<< "$MAKEFILE_SNAPSHOT_TAKEN"
+
+    log "restored $restored tracked Makefile(s) from the snapshot"
+
+    if [ "$git_usable" -eq 1 ]; then
+        local after
+        after="$(git -C "$HDMICEC_ROOT" status --porcelain -- "${REGENERATED_MAKEFILES[@]}" 2>/dev/null || true)"
+        if [ -n "$after" ]; then
+            printf '%s\n' "$after" | sed 's/^/[run_coverage]   still: /' >&2
+            # NOT fatal, and the difference from the old git-based check is deliberate.  The old
+            # one compared against the index and so "still dirty" could only mean the checkout
+            # had failed.  Here the snapshot is the reference, and a path that was ALREADY
+            # modified relative to the index before this run started is still modified after a
+            # faithful restore -- correctly so.  That is a report, not a failure.
+            warn "the paths above still differ from the index.  That is expected when they were"
+            warn "  already modified before this run started: the snapshot restores the bytes"
+            warn "  this run found, which is not the same as the bytes git holds.  Compare them"
+            warn "  yourself if you need to -- this script will not resolve it for you by"
+            warn "  reverting anything."
+        else
+            log "the six now match the index"
+        fi
+    else
+        log "git is not usable here, so the restore was not cross-checked against the index."
+        log "  The copy itself does not depend on git and has already been verified above."
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------------------------------
+# Serialise builds in this working tree.  See THE BUILD LOCK above for why this cannot be
+# the artifact-directory lock and why a derived name is the accepted trade-off.
+# ------------------------------------------------------------------------------------
+acquire_build_lock() {
+    local parent="${TMPDIR:-/tmp}" key
+    case "$parent" in
+        /*) ;;
+        *)  die "TMPDIR must be an absolute path to be checked safely; got: $parent" ;;
+    esac
+    parent="$(canonicalise_path_lexically "$parent")"
+
+    # '/' is not legal in a filename, so the tree's own path becomes the key with the
+    # separators flattened.  A path long enough to exceed the filename limit keeps its TAIL,
+    # which is the part that distinguishes sibling clones, with the full length prefixed so
+    # two different paths that share a tail cannot collide silently.
+    key="${HDMICEC_ROOT//\//_}"
+    if [ "${#key}" -gt 180 ]; then
+        key="${#key}${key: -180}"
+    fi
+    BUILD_LOCK_PATH="$parent/hdmicec-l1-build$key.lock"
+
+    # THE ANCESTRY CHECK IS ON THE PARENT DIRECTORY, NOT ON THE LOCK PATH, and getting this
+    # wrong is a defect a concurrency test found rather than a subtlety worth guessing at.
+    # assert_safe_ancestry validates every EXISTING component of the path it is given, which
+    # means it requires each one to be a directory.  The lock's leaf is a regular FILE and --
+    # unlike the artifact root, which is minted fresh -- it PERSISTS between runs, so on the
+    # second run the walk reached an existing regular file where it expected a directory and
+    # refused.  Measured symptom: the first --build succeeded because the leaf did not exist
+    # yet, and every subsequent one died with "is a regular empty file, not a directory".
+    #
+    # So the parent chain gets the ancestry walk and the leaf gets the two checks that are
+    # actually meaningful for a file -- the same division acquire_output_lock already uses,
+    # where OUTPUT_DIR's ancestry is validated separately and the lock itself only has to not
+    # be a symlink.
+    assert_safe_ancestry "$parent" minted
+    [ ! -L "$BUILD_LOCK_PATH" ] || die "refusing to lock through a symlink: $BUILD_LOCK_PATH
+       Something pre-created that name.  Remove it, or point TMPDIR somewhere you own."
+    if [ -e "$BUILD_LOCK_PATH" ] && [ ! -f "$BUILD_LOCK_PATH" ]; then
+        die "the build lock path exists and is not a regular file: $BUILD_LOCK_PATH"
+    fi
+    # '>>' so an existing lock file is never truncated: another run may be holding it.
+    exec {BUILD_LOCK_FD}>>"$BUILD_LOCK_PATH" || die "could not open the build lock: $BUILD_LOCK_PATH"
+
+    if command -v flock >/dev/null 2>&1; then
+        flock -n "$BUILD_LOCK_FD" || die "another run of this script is building in
+       $HDMICEC_ROOT
+       Two builds in one tree would interleave their Makefile snapshots and restores, and
+       the loser would 'restore' the winner's generated content as though it were the
+       original.  Wait for the other run to finish.
+       (The lock is $BUILD_LOCK_PATH, held on an open descriptor and released when that
+       run's shell exits, so a crashed run does not leave it stuck.)"
+        log "holding the exclusive build lock for $HDMICEC_ROOT"
+    else
+        # Stated, not silently tolerated: without flock the snapshot/restore pairing across
+        # two concurrent runs cannot be guaranteed, and the caller is the only one who can
+        # know whether a second run is possible on this host.
+        warn "flock is not available, so two concurrent builds in $HDMICEC_ROOT cannot be"
+        warn "  prevented.  If anything else may be building this tree, do not run --build"
+        warn "  now: the two runs' Makefile snapshots would interleave."
+        note_advisory "flock was unavailable, so this run could not prove it was the only build in
+       $HDMICEC_ROOT.  The Makefile snapshot and restore are correct for THIS run, but a
+       concurrent build could have interleaved with them."
+    fi
+}
+
 # ------------------------------------------------------------------------------------
 # CANCELLATION.  A run that cannot be stopped is a run CI cannot cancel.
 #
@@ -1080,6 +1622,16 @@ on_exit() {
     # when there was one, is the signal forwarded on -- a run cancelled with SIGHUP should not
     # report that it sent SIGTERM.
     stop_suite_group "${SUITE_SIGNAL:-TERM}"
+    # THE MAKEFILE RESTORE HANGS OFF THE TRAP, NOT OFF THE BUILD'S SUCCESS PATH, and that is
+    # the reason it is here rather than at the end of do_build.  A build that fails half way
+    # through configure has already had some of the six overwritten; a run cancelled with
+    # Ctrl-C has too.  Both used to leave the caller holding generated content over their own
+    # source and a printed `git checkout` command as the only way out.  Restoring from the trap
+    # covers every exit path there is -- success, failure, gate failure and cancellation --
+    # with one mechanism and no special cases.  It runs BEFORE the snapshot is removed, and
+    # both are no-ops when no snapshot was ever taken (any invocation without --build).
+    restore_regenerated_makefiles_from_snapshot || true
+    cleanup_makefile_snapshot
     cleanup_stage_dir
     cleanup_lcov_home
     return "$rc"
@@ -1317,6 +1869,21 @@ selftest() {
 }
 
 usage() {
+    # The matrix is rendered into a variable BEFORE the heredoc rather than inside a command
+    # substitution within it.  Two reasons, and the second is the load-bearing one: a heredoc
+    # holding a loop is unreadable, and the reference audit reads this script's text with grep,
+    # so a loop variable inside a heredoc looks exactly like a call to a command that does not
+    # exist.  It caught this one when it was written the other way -- which is the audit doing
+    # its job, and the fix is to write it so there is nothing to except.
+    local matrix_summary='' record
+    local label tier mode back_end select_filter exclude_filter synopsis
+    for record in "${INVOCATION_MATRIX[@]}"; do
+        IFS='|' read -r label tier mode back_end select_filter exclude_filter synopsis <<< "$record"
+        matrix_summary="${matrix_summary}$(printf '  %s  %-3s CEC_TEST_AIDL_MODE=%-13s expects %-6s  %s' \
+            "$label" "$tier" "$mode" "$back_end" "$synopsis")
+"
+    done
+
     cat <<USAGE
 Usage: run_coverage.sh [OPTIONS]
 
@@ -1325,16 +1892,27 @@ Reproduces the "Generate coverage" step of .github/workflows/L1-tests.yml, adds 
 branch data that step discards, and adds the numeric threshold it has never had.
 
 OPTIONS
-  -b, --build              Build the middleware and its L1 suite with coverage
-                           instrumentation first.  OFF by default so an existing
-                           measurement is never silently discarded.  Rewrites six
-                           git-tracked Makefiles; the restore command is printed but
-                           deliberately not executed (see --restore).
-  -r, --run                Zero this build tree's gcov counters, then run run_L1Tests.
-                           OFF by default.  Zeroing first is what makes the reported
-                           figures an account of THIS run: gcov counters accumulate, so a
-                           stale .gcda would otherwise let the gate pass on evidence the
-                           current tests did not produce.
+  -b, --build              Build the middleware, its L1 suite and the L2 tier with
+                           coverage instrumentation first.  OFF by default so an existing
+                           measurement is never silently discarded.  autoreconf and
+                           configure rewrite six git-tracked Makefiles: this snapshots
+                           their working-tree content beforehand and RESTORES THEM ITSELF
+                           on every exit path, including a failure or a Ctrl-C.  No
+                           'git checkout' is run or suggested (see --restore).
+  -r, --run                Zero this build tree's gcov counters ONCE, then run every
+                           invocation of the matrix -- one process per selection outcome,
+                           each with its own results and log artifact -- and capture ONCE
+                           after all of them have passed.  OFF by default.
+                           Zeroing once is what makes the figures an account of THIS run:
+                           gcov counters accumulate, so a stale .gcda would let the gate
+                           pass on evidence the current tests did not produce.  Zeroing
+                           once rather than per invocation is what makes them an account
+                           of the WHOLE run: the back-end selection resolves once per
+                           process, so accumulation across the invocations is the only way
+                           both arms of that branch are ever covered.
+                           An invocation that cannot run on this host -- no binder driver,
+                           for the AIDL-selected ones -- is reported as DEFERRED and the
+                           verdict becomes advisory.  It is never counted as passed.
   -t, --threshold N        Line-coverage bar, an integer percentage.  Default ${COVERAGE_MIN}.
                            Lower it only for a deliberate diagnostic run; 80 is the
                            required bar.
@@ -1364,9 +1942,17 @@ OPTIONS
                            run uses.  Below-bar files are enumerated either way.
       --no-html            Skip the genhtml report (the trace and the tables are still
                            produced).
-      --restore            Restore the six git-tracked Makefiles that autoreconf and
-                           configure rewrite, then exit.  This is the ONLY code path in
-                           this script that runs git, and it only ever runs on request.
+      --restore            Report on the six git-tracked Makefiles that autoreconf and
+                           configure rewrite, restore them from THIS invocation's snapshot
+                           if it has one, and exit.  Since --build restores from its own
+                           snapshot before it exits, the expected outcome here is "nothing
+                           to restore".  With the six dirty and no snapshot it REFUSES and
+                           exits non-zero: the only remaining mechanism would be
+                           'git checkout' over those paths, which restores what the index
+                           holds rather than what was there and would destroy an
+                           uncommitted edit to ccec/src/Makefile -- hand-written source,
+                           not generated output.  This script runs no git command that
+                           writes, in any mode.
   -h, --help               Print this help and exit.
       --selftest           Audit every internal function and variable reference in this
                            script, re-parse it, and verify the measurement tooling -- then
@@ -1388,11 +1974,66 @@ ENVIRONMENT (command-line flags win)
   GTEST_PREFIX=DIR             prefix providing libgtest/libgmock and their headers,
                                used by --build and put on LD_LIBRARY_PATH by --run.
                                Default: ${GTEST_PREFIX}
-  GTEST_EXTRA_ARGS="..."       extra arguments appended to the run_L1Tests command line.
+  GTEST_EXTRA_ARGS="..."       extra arguments appended to each invocation's command line.
                                --gtest_shuffle is a DIAGNOSTIC: this suite has
                                pre-existing order-fragile tests that pass in the default
                                order, so a shuffled run is expected to fail and must
                                never be treated as a gate.
+                               A --gtest_filter here OVERRIDES the invocation's own filter
+                               (GoogleTest lets the last one win) and therefore FAILS the
+                               invocation on its case count, with both numbers named. That
+                               is deliberate: a re-filtered invocation is a different
+                               invocation and this script will not report one as the other.
+
+  AIDL/BINDER STAGING PREFIXES -- passed straight through to configure by --build, which
+  names no path of its own.  configure.ac declares all four with AC_ARG_VAR and derives the
+  include roots, the library directories, the four -l edges and the C++17 flag from them, so
+  these are the only inputs and there is one place that decides.  Unset is passed as unset,
+  never as empty, because 'BINDER_SDK_DIR=' asserts there is no SDK while omitting it lets
+  configure look where it knows to look.
+  HALIF_PREFIX=DIR             root of the staged rdk-halif-aidl tree, supplying the
+                               generated AIDL stub headers, common/current/halcompat.h and
+                               the stub libraries.  Unset: configure falls back to the
+                               sibling rdk-halif-aidl checkout beside this submodule.
+                               Currently: ${HALIF_PREFIX:-<unset>}
+  HALIF_LIB_DIR=DIR            stub library directory, for a split staging layout in which
+                               it is not HALIF_PREFIX/lib/halif.
+                               Currently: ${HALIF_LIB_DIR:-<unset>}
+  BINDER_SDK_DIR=DIR           root of the staged Binder SDK, holding lib/binder and
+                               include/binder_sdk.
+                               Currently: ${BINDER_SDK_DIR:-<unset>}
+  BINDER_SDK_INCLUDE_DIR=DIR   Binder header prefix, for a layout whose headers are not
+                               under BINDER_SDK_DIR.
+                               Currently: ${BINDER_SDK_INCLUDE_DIR:-<unset>}
+
+  TEST HARNESS VARIABLES -- set by this script per invocation, listed so their contract is
+  discoverable from --help rather than only from the sources.  Do not set them yourself: a
+  value in the environment would be overridden per invocation anyway.
+  CEC_TEST_AIDL_MODE           absent | compatible | incompatible | remote.  What the
+                               harness makes the service lookup find, and the only thing
+                               that distinguishes one invocation from the next.  Read by
+                               tests/L1Tests/test_main.cpp and tests/L2Tests/test_main.cpp
+                               and by NO production source.  Each harness hard-fails on a
+                               value it does not implement rather than downgrading to
+                               'absent', so a typo cannot silently become a legacy run.
+  CEC_FAKE_AIDL_HOST_PATH      where the L2 harness finds the out-of-process fake service
+                               host.  Set for both L2 invocations; only 'remote' reads it.
+  CEC_FAKE_HOST_READY_FD       NOT SET BY THIS SCRIPT, and it must not be.  It names an
+                               INHERITED descriptor -- the write end of a pipe whose read
+                               end the waiting parent holds -- and the parent is the L2
+                               harness, which creates the pipe, forks, sets this in the
+                               child's environment and blocks on the read end under a
+                               bounded timeout.  A value exported from here would name a
+                               descriptor this script never opened; the host treats an
+                               unusable descriptor as a hard failure precisely so a botched
+                               handoff is reported rather than answered on stdout.
+  BINDER_DRIVER_NODE           the driver node whose presence decides whether the
+                               AIDL-selected invocations can run at all.  Default
+                               /dev/binder.  Absent or unusable, those invocations are
+                               reported DEFERRED and never attempted -- registering a
+                               service name opens the driver, and on the pinned binder stack
+                               that aborts the process when the node is missing.
+                               Currently: ${BINDER_DRIVER_NODE}
 
 EXIT STATUS
   0  ACCEPTANCE: the suite was run by this invocation, it was green, and line coverage is
@@ -1408,6 +2049,13 @@ RESOLVED PATHS FOR THIS INVOCATION
   submodule root  ${HDMICEC_ROOT}      (the lcov capture directory)
   workspace root  ${WS}
   artifacts       ${OUTPUT_DIR:-<created with mktemp -d under ${TMPDIR:-/tmp}; printed as "artifacts:" when the run starts>}
+  L1 runner       ${HDMICEC_ROOT}/${TEST_BINARY_REL}
+  L2 runner       ${HDMICEC_ROOT}/${L2_TEST_BINARY_REL}
+  fake host       ${HDMICEC_ROOT}/${FAKE_HOST_BINARY_REL}   (launched by the L2 harness, never by this script)
+  binder node     ${BINDER_DRIVER_NODE}$( binder_transport_present && printf '   (present and usable: every invocation can run)' || printf '   (ABSENT or unusable: the AIDL-selected invocations will be DEFERRED)' )
+
+THE INVOCATION MATRIX
+${matrix_summary}
 USAGE
 }
 
@@ -1563,9 +2211,29 @@ log_tool_versions() {
     log "gcov:    $( { "$GCOV_BIN"    --version 2>&1 | head -n1; } || true )"
 }
 
-# The libtool wrapper, never .libs/run_L1Tests: the wrapper is what sets up the
-# uninstalled shared-library search path for libRCEC and libRCECOSHal.
+# ------------------------------------------------------------------------------------
+# THE TWO TEST TIERS AND THE FAKE SERVICE HOST.
+#
+# Each is the libtool WRAPPER, never .libs/<name>: the wrapper is what sets up the
+# uninstalled shared-library search path for libRCEC and libRCECOSHal, and for the L2 tier
+# also for the AIDL stub and Binder libraries libRCEC now links.
+#
+# TEST_BINARY_REL keeps its name and its meaning -- the L1 runner -- because
+# require_instrumented_tree and do_build both treat it as THE binary whose absence means
+# "this tree was never built", and that judgement is still the L1 runner's to make: the L1
+# suite is the one that always exists, and a tree with an L1 runner but no L2 runner is a
+# partial build rather than an unbuilt one.  The L2 pair is named separately and checked
+# separately, in the invocations that use it.
+#
+# FAKE_HOST_BINARY_REL is NOT a test and is never run by this script.  It is the
+# out-of-process fake service the L2 harness launches for invocation E; tests/L2Tests's own
+# Makefile.am keeps it out of TESTS for the same reason (listing a process that runs until
+# signalled would hang `make check` rather than fail it).  All this script does with it is
+# build it and tell the harness where it is -- see CEC_FAKE_AIDL_HOST_PATH below.
+# ------------------------------------------------------------------------------------
 readonly TEST_BINARY_REL='tests/L1Tests/run_L1Tests'
+readonly L2_TEST_BINARY_REL='tests/L2Tests/run_L2Tests'
+readonly FAKE_HOST_BINARY_REL='tests/L2Tests/fake_hdmi_cec_aidl_host'
 
 # Counters are always consumed through a command substitution, and `find` returns
 # non-zero the moment it meets one unreadable directory even with stderr silenced.  Under
@@ -1590,6 +2258,21 @@ require_instrumented_tree() {
        Build it with:  $SCRIPT_PATH --build
        or follow the BUILD RECIPE in this script's header.  Remember --enable-l1tests:
        without it configure builds no test suite at all."
+
+    # THE L2 TIER IS REPORTED HERE, NOT REQUIRED HERE, and the difference is deliberate.  An
+    # invocation that needs a binary it does not have fails in run_one_invocation, naming that
+    # binary and that invocation -- which is a better diagnostic than a blanket prerequisite
+    # failure, and it leaves the L1-only invocations runnable on a tree where the L2 tier was
+    # not configured.  Saying so up front is still worth doing: a caller who expected five
+    # invocations and is about to get three should learn it before the counters are zeroed.
+    if [ ! -x "$HDMICEC_ROOT/$L2_TEST_BINARY_REL" ] || [ ! -x "$HDMICEC_ROOT/$FAKE_HOST_BINARY_REL" ]; then
+        warn "the L2 integration tier is not built:"
+        [ -x "$HDMICEC_ROOT/$L2_TEST_BINARY_REL" ]   || warn "    missing: $L2_TEST_BINARY_REL"
+        [ -x "$HDMICEC_ROOT/$FAKE_HOST_BINARY_REL" ] || warn "    missing: $FAKE_HOST_BINARY_REL"
+        warn "  Invocations D and E need both and will fail naming them.  '$SCRIPT_PATH --build'"
+        warn "  builds them; they come from tests/L2Tests, which configure.ac configures through"
+        warn "  AC_CONFIG_FILES and tests/Makefile.am recurses into under --enable-l1tests."
+    fi
 
     [ "$gcno" -gt 0 ] || die "no *.gcno files under $HDMICEC_ROOT, so the tree is not
        coverage-instrumented and gcov has nothing to report on.  Rebuild with:
@@ -1617,6 +2300,16 @@ require_instrumented_tree() {
         # runs.  That cannot be prevented without running the suite, so it is made VISIBLE
         # instead of silent -- the age of the newest counter is usually enough to tell a
         # fresh measurement from a stale one at a glance.
+        #
+        # ACCUMULATION IS NOW BOTH THE MECHANISM AND THE HAZARD, which is why this warning
+        # says less than it looks as though it should.  Under `--run` the counters are
+        # zeroed once and then accumulated DELIBERATELY across the matrix, because the
+        # back-end selection resolves once per process and that is the only way both arms
+        # of the selection branch are ever covered.  Without `--run` the same accumulation
+        # is uncontrolled: these counters may hold one complete matrix, a partial one, or
+        # several runs of different builds, and nothing here can tell which.  So the
+        # figures are still produced and still real, and the verdict is still advisory --
+        # what cannot be established is WHICH executions they describe.
         local newest
         newest="$( { "$FIND_BIN" "$HDMICEC_ROOT" -name '*.gcda' -type f \
                          -printf '%TY-%Tm-%Td %TH:%TM\n' 2>/dev/null || true; } \
@@ -1662,6 +2355,48 @@ do_build() {
     # behind it rather than replaced.
     local build_pkg_config_path="$GTEST_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
+    # ------------------------------------------------------------------------------------
+    # THE AIDL/BINDER STAGING PREFIXES, HANDED TO configure AS PRECIOUS VARIABLES.
+    #
+    # configure.ac declares all four with AC_ARG_VAR, so `./configure NAME=value` is the
+    # documented way to supply them, and it DERIVES everything else from them itself: the four
+    # include roots, the -L directories, the four -l edges and the C++17 dialect flag are
+    # AC_SUBSTed outputs computed inside configure.  So this passes the prefixes and nothing
+    # else -- no -I, no -L, no -l is spelled here.
+    #
+    # WHY NOT PUT THE INCLUDE ROOTS IN CPPFLAGS ABOVE, which would look more direct.  Because
+    # then two places would decide where halcompat.h lives, and configure.ac exists precisely
+    # so that ONE place does: the same two prefixes feed the Autotools build and the
+    # hand-written ccec/src/Makefile, and the whole point of the single-prefix contract is that
+    # the two build systems cannot end up configured differently.  A root spelled here as well
+    # would be a second source of truth and a silent way for them to diverge.
+    #
+    # AN UNSET PREFIX IS PASSED AS UNSET, NOT AS AN EMPTY STRING, and the difference is real:
+    # `configure BINDER_SDK_DIR=` asserts there is no Binder SDK and fails configure's
+    # availability check, while omitting it lets configure look where it knows to look -- for
+    # HALIF_PREFIX, the sibling rdk-halif-aidl checkout beside this submodule, which is the
+    # ordinary in-workspace arrangement.  Hence the append-only array rather than four
+    # unconditional assignments.
+    # ------------------------------------------------------------------------------------
+    local -a configure_prefix_args=()
+    [ -z "$HALIF_PREFIX" ]            || configure_prefix_args+=("HALIF_PREFIX=$HALIF_PREFIX")
+    [ -z "$HALIF_LIB_DIR" ]           || configure_prefix_args+=("HALIF_LIB_DIR=$HALIF_LIB_DIR")
+    [ -z "$BINDER_SDK_DIR" ]          || configure_prefix_args+=("BINDER_SDK_DIR=$BINDER_SDK_DIR")
+    [ -z "$BINDER_SDK_INCLUDE_DIR" ]  || configure_prefix_args+=("BINDER_SDK_INCLUDE_DIR=$BINDER_SDK_INCLUDE_DIR")
+
+    if [ "${#configure_prefix_args[@]}" -eq 0 ]; then
+        log "  no AIDL/Binder staging prefix was supplied; configure will look for the sibling"
+        log "  rdk-halif-aidl checkout and for the Binder SDK where it knows to look.  If it"
+        log "  cannot find them it fails at configure time with the roots it tried, which is the"
+        log "  intended outcome: the alternative is a libRCEC carrying only one back-end."
+    else
+        log "  AIDL/Binder staging prefixes passed to configure:"
+        local prefix_arg
+        for prefix_arg in "${configure_prefix_args[@]}"; do
+            log "    $prefix_arg"
+        done
+    fi
+
     # stubs/ mutes the IARM bus headers this middleware includes but does not ship, and
     # the symlink is what substitutes the HAL driver mock for the real driver header.
     # Both are build prerequisites, not committed artifacts, and both are stripped from
@@ -1675,6 +2410,22 @@ do_build() {
     # committed non-autotools Makefiles and buried the real cause under a cascade of
     # unrelated link errors.  The explicit `&&` chain short-circuits regardless of errexit
     # state, and the `###STEP:` markers make the failure attributable to one step.
+    # THE SNAPSHOT AND THE LOCK GO HERE: ahead of the build chain and OUTSIDE the subshell.
+    #
+    # OUTSIDE, because a variable assigned inside a subshell is lost the moment it exits, and
+    # MAKEFILE_SNAPSHOT_DIR has to survive into the exit trap that does the restoring.  That
+    # rules out the literally-adjacent placement -- a snapshot step wedged between the
+    # `ln -sf` and the `autoreconf` lines inside the chain -- and it is the only reason it is
+    # not spelled that way.
+    #
+    # AHEAD OF THE CHAIN rather than immediately adjacent to autoreconf costs nothing, and
+    # that is a statement about the two steps in between rather than a hope: the stub-header
+    # step creates stubs/ and one symlink under it and touches none of the six.  autoreconf is
+    # still the first command in this function that can rewrite any of them, so the snapshot
+    # is still of pre-build content -- which is the property that matters, not the line number.
+    acquire_build_lock
+    snapshot_regenerated_makefiles
+
     (
         cd "$HDMICEC_ROOT" || exit 1
         echo '###STEP:generate stub headers and inject the HAL driver mock' &&
@@ -1691,11 +2442,13 @@ do_build() {
         CPPFLAGS="-I$HDMICEC_ROOT/mocks -I$HDMICEC_ROOT/stubs -I$GTEST_PREFIX/include" \
         LDFLAGS="-L$GTEST_PREFIX/lib -fprofile-arcs -ftest-coverage" \
         CXXFLAGS="-fprofile-arcs -ftest-coverage" \
-        ./configure --enable-l1tests &&
+        ./configure --enable-l1tests "${configure_prefix_args[@]}" &&
         echo '###STEP:make all' &&
         make -j"$nproc_count" all &&
         echo '###STEP:make -C tests/L1Tests all' &&
-        make -C tests/L1Tests all
+        make -C tests/L1Tests all &&
+        echo '###STEP:make -C tests/L2Tests all' &&
+        make -C tests/L2Tests all
     ) >>"$build_log" 2>&1 || {
         local failed_step
         failed_step="$( { grep '^###STEP:' "$build_log" | tail -n1 | sed 's/^###STEP://'; } || true )"
@@ -1708,7 +2461,15 @@ $( { tail -n 25 -- "$build_log" | sed 's/^/         /'; } 2>/dev/null || true )
        If configure failed on GTEST, point GTEST_PREFIX at a prefix whose lib/pkgconfig
        holds gtest.pc. It is currently $GTEST_PREFIX, so pkg-config was searched with
            PKG_CONFIG_PATH=$build_pkg_config_path
-       Note that PKG_CHECK_MODULES ignores -I and -L: only pkg-config's path decides."
+       Note that PKG_CHECK_MODULES ignores -I and -L: only pkg-config's path decides.
+       If configure failed on the AIDL/Binder headers or libraries, it prints the roots it
+       tried; supply the staging prefixes rather than adding -I or -L flags of your own,
+       because configure derives every root from them and a flag added here would leave the
+       hand-written ccec/src/Makefile configured differently. This run passed:
+           ${configure_prefix_args[*]:-<none: configure looked for the sibling rdk-halif-aidl checkout>}
+       If 'make -C tests/L2Tests all' failed, note that it builds TWO programs -- the L2
+       runner and the out-of-process fake service host -- and that invocations D and E have
+       no binary without both."
     }
 
     [ -x "$HDMICEC_ROOT/$TEST_BINARY_REL" ] || die "the build reported success but produced no
@@ -1718,21 +2479,25 @@ $( { tail -n 25 -- "$build_log" | sed 's/^/         /'; } 2>/dev/null || true )
 }
 
 # ------------------------------------------------------------------------------------
-# The build rewrites six git-tracked Makefiles.  They are reported, never reverted:
-# a measurement tool silently running `git checkout` over a working tree would be able to
-# discard work it knows nothing about, so the decision stays with the caller.  --restore
-# exists for when the answer is yes.
+# The build rewrote six git-tracked Makefiles.  THIS RUN PUTS THEM BACK ITSELF, from the
+# snapshot it took before autoreconf, and this function's job is now to say so rather than
+# to hand the caller a command.
+#
+# WHAT THIS FUNCTION USED TO DO, AND WHY IT NO LONGER DOES IT.  It built a
+# `git -C <hdmicec> checkout -- <the six>` string and printed it as one of two offered
+# routes.  Both routes were destructive and the printed one was the more dangerous of the
+# two, because a paste is unreviewed: it restores whatever the index holds and destroys any
+# uncommitted edit to ccec/src/Makefile, which is hand-written source rather than generated
+# output.  Fixing only the action and leaving the advice in place would have left the footgun
+# loaded and merely moved the trigger, so the advice went with it.  Nothing here prints a
+# command for anyone to run.
 # ------------------------------------------------------------------------------------
 announce_regenerated_makefiles() {
-    local restore_cmd="git -C '$HDMICEC_ROOT' checkout --"
-    local f
-    for f in "${REGENERATED_MAKEFILES[@]}"; do
-        restore_cmd="$restore_cmd '$f'"
-    done
-
     rule
     warn "MANDATORY BUILD HYGIENE: autoreconf and configure rewrite six GIT-TRACKED files."
-    warn "They are local toolchain output and must NEVER be committed."
+    warn "Five are local toolchain output.  ccec/src/Makefile is NOT: it is a hand-written"
+    warn "  RDK build file that configure clobbers anyway, so restoring it puts source back."
+    warn "None of the six may be committed in its generated form."
     if command -v git >/dev/null 2>&1 && git -C "$HDMICEC_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
         local dirty
         dirty="$(git -C "$HDMICEC_ROOT" status --porcelain -- "${REGENERATED_MAKEFILES[@]}" 2>/dev/null || true)"
@@ -1743,44 +2508,336 @@ announce_regenerated_makefiles() {
             warn "none of the six is currently modified."
         fi
     fi
-    warn "Restore them with EITHER:"
-    warn "    $SCRIPT_PATH --restore"
-    warn "or:"
-    warn "    $restore_cmd"
-    warn "This script will not run that for you as part of a coverage run, on purpose."
-}
-
-do_restore() {
-    command -v git >/dev/null 2>&1 || die "git not found on PATH, so --restore cannot run."
-    git -C "$HDMICEC_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
-        || die "$HDMICEC_ROOT is not a git working tree, so there is nothing to restore."
-
-    rule
-    log "restoring the six configure-generated Makefiles in $HDMICEC_ROOT"
-    local before
-    before="$(git -C "$HDMICEC_ROOT" status --porcelain -- "${REGENERATED_MAKEFILES[@]}" 2>/dev/null || true)"
-    if [ -z "$before" ]; then
-        log "none of the six is modified; nothing to do."
-        return 0
+    if [ -n "$MAKEFILE_SNAPSHOT_DIR" ]; then
+        warn "THIS RUN WILL RESTORE THEM before it exits, from the snapshot it took of their"
+        warn "  working-tree content immediately before autoreconf:"
+        warn "    $MAKEFILE_SNAPSHOT_DIR"
+        warn "  That happens on EVERY exit path -- success, build failure, gate failure and"
+        warn "  Ctrl-C -- because the restore hangs off this script's exit trap.  You do not"
+        warn "  need to run anything, and there is nothing to paste."
+        warn "DO NOT revert these paths with 'git checkout'.  It restores what the INDEX holds,"
+        warn "  not what was there, so it would silently destroy an uncommitted edit to any of"
+        warn "  the six.  This script no longer offers that route in any form."
+    else
+        # Reachable only if do_build is ever called without its snapshot step, which would be
+        # a defect in this script rather than a caller error -- so it says exactly that.
+        warn "NO SNAPSHOT WAS TAKEN FOR THIS RUN, which should not be possible: do_build takes"
+        warn "  one before autoreconf.  The six cannot be restored automatically, and this"
+        warn "  script will not reach for 'git checkout' to cover for its own defect.  Compare"
+        warn "  them against your own copy and report this."
     fi
-    printf '%s\n' "$before" | sed 's/^/[run_coverage]   was: /'
-    # Scoped to exactly these six paths.  Nothing else in the working tree is touched, and
-    # no branch, index or history operation is performed.
-    git -C "$HDMICEC_ROOT" checkout -- "${REGENERATED_MAKEFILES[@]}" \
-        || die "git checkout failed for the six generated Makefiles."
-    local after
-    after="$(git -C "$HDMICEC_ROOT" status --porcelain -- "${REGENERATED_MAKEFILES[@]}" 2>/dev/null || true)"
-    [ -z "$after" ] || { printf '%s\n' "$after" | sed 's/^/[run_coverage]   still: /' >&2
-                         die "some of the six remain modified after checkout."; }
-    log "restored: ${REGENERATED_MAKEFILES[*]}"
 }
 
 # ------------------------------------------------------------------------------------
-# Optional suite execution.  The order -- zero, run, verify -- is the whole point:
-# zeroing first removes accumulated counters so the capture describes exactly one suite
-# execution, and verifying afterwards proves the suite actually wrote counters rather than
-# exiting early.  Without the zeroing step a gate could be satisfied by an earlier run's
-# evidence; without the verification an empty capture could be reported as a real figure.
+# `--restore` as a standalone action.
+#
+# WHAT IT IS FOR NOW.  Since `--build` restores from its own snapshot on every exit path,
+# the normal case is that there is nothing left to do -- and confirming that is worth doing,
+# because "the tree is clean" is the thing a caller actually wants to know after a build.
+#
+# WHAT IT REFUSES TO DO, AND WHY THE REFUSAL IS THE FEATURE.  With the six dirty and no
+# snapshot from THIS invocation, the only mechanism left is the `git checkout` this script
+# has removed everywhere else.  Reaching for it here would mean the one code path a caller
+# invokes precisely when something has gone wrong is also the one that can destroy their
+# work: an uncommitted edit to ccec/src/Makefile -- hand-written source, not output -- would
+# be gone with no prompt and no copy.  So it reports what is dirty, says plainly why it will
+# not act, and exits non-zero.  A non-zero status is the honest answer: the caller asked for
+# a restore and did not get one.
+# ------------------------------------------------------------------------------------
+do_restore() {
+    rule
+    log "checking the tracked Makefiles in $HDMICEC_ROOT"
+
+    # A snapshot from this same invocation is the only thing that can be restored from, and
+    # the only way to have one is to have run --build here -- which parse_args forbids
+    # combining with --restore.  So this arm exists for the internal caller (the exit trap)
+    # rather than for the flag, and it is kept for exactly one reason: if the two are ever
+    # allowed to combine, this function must restore rather than refuse.
+    if [ -n "$MAKEFILE_SNAPSHOT_DIR" ]; then
+        restore_regenerated_makefiles_from_snapshot
+        return 0
+    fi
+
+    if ! command -v git >/dev/null 2>&1 \
+       || ! git -C "$HDMICEC_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        die "no snapshot exists for this invocation, and git is not usable here either, so
+       there is no way to tell whether the six tracked Makefiles even need restoring.
+       Nothing was changed.
+           the six: ${REGENERATED_MAKEFILES[*]}
+       Run '$SCRIPT_PATH --build ...' and it will snapshot them before autoreconf and
+       restore them itself when it exits."
+    fi
+
+    local before
+    before="$(git -C "$HDMICEC_ROOT" status --porcelain -- "${REGENERATED_MAKEFILES[@]}" 2>/dev/null || true)"
+    if [ -z "$before" ]; then
+        log "none of the six differs from the index; nothing to restore."
+        log "  (--build restores them from its own snapshot before it exits, so this is the"
+        log "  expected state after a build rather than a sign that nothing ran.)"
+        return 0
+    fi
+
+    printf '%s\n' "$before" | sed 's/^/[run_coverage]   dirty: /' >&2
+    die "the paths above differ from the index, and THIS INVOCATION HAS NO SNAPSHOT to
+       restore them from.  Nothing was changed, deliberately.
+       WHY THIS IS A REFUSAL AND NOT A FALLBACK.  The only other mechanism available is
+       'git -C $HDMICEC_ROOT checkout -- <the six>', and this script does not run it in
+       any mode.  That command restores whatever the INDEX holds rather than what was
+       there, so on ccec/src/Makefile -- a hand-written RDK build file with its own object
+       list and link command, which configure clobbers because it is in AC_CONFIG_FILES --
+       it would silently destroy an uncommitted edit.  Losing someone's source is not an
+       acceptable way to tidy up generated content.
+       WHAT TO DO INSTEAD.  A snapshot only exists inside the invocation that took it, so
+       let the build take one and put them back for you:
+           $SCRIPT_PATH --build --run
+       That snapshots all six before autoreconf and restores them from its exit trap on
+       every path, including a failure or a Ctrl-C.  If you already know these six hold
+       nothing you want, revert them however you normally revert a file -- that decision
+       is yours to take deliberately, and it is not one a measurement tool should take for
+       you."
+}
+
+# ====================================================================================
+# THE INVOCATION MATRIX
+# ====================================================================================
+#
+# WHY THERE IS A MATRIX AT ALL, rather than one run.  The middleware now compiles BOTH HAL
+# back-ends into libRCEC and chooses between them ONCE PER PROCESS, inside LibCCEC::init,
+# which is the first thing either harness does that forces Driver::getInstance().  By the
+# time any TEST_F body runs the choice is made and cannot be changed, so ONE BINARY RUN
+# YIELDS EXACTLY ONE SELECTION OUTCOME and every outcome that has to be covered needs its
+# own process.  A single run cannot exercise both arms of the selection branch no matter
+# what it is filtered to.
+#
+# THE FIVE INVOCATIONS, and what each is the only way to establish:
+#
+#   A  run_L1Tests  CEC_TEST_AIDL_MODE=absent        expects the LEGACY back-end
+#      No service is registered and no host is launched.  This is the regression arm: the
+#      whole pre-existing suite plus every case in the new contract suite that does not
+#      require the AIDL back-end.  It is also the arm that demonstrates the
+#      fallback-not-abort requirement on the one platform that naturally exhibits it -- a
+#      host with no binder driver at all, where an unguarded service lookup would abort the
+#      process rather than return an error.
+#
+#   B  run_L1Tests  CEC_TEST_AIDL_MODE=compatible    expects the AIDL back-end
+#      The harness registers a compatible fake IN THIS PROCESS before init.  This is the arm
+#      that proves the ADAPTER translates correctly -- array marshalling, status mapping,
+#      the frame-length guard, the state guards.
+#
+#   C  run_L1Tests  CEC_TEST_AIDL_MODE=incompatible  expects the LEGACY back-end
+#      The harness registers a fake that reports an interface hash of "-1".  This is the arm
+#      that proves "present but not usable falls back", and it CANNOT be replaced by a unit
+#      test: that is a FACTORY-level behaviour, and the selection helper that acts on the
+#      answer (resolveBackEnd in ccec/src/Driver.cpp) sits in an anonymous namespace, so it
+#      has internal linkage and no test can call it.  A unit test of the predicate proves the
+#      predicate; only a process that STARTS with an incompatible service registered proves
+#      the factory acts on it.  It is also only feasible IN-PROCESS: a remote Bn* service
+#      cannot report bad metadata at all, because its generated onTransact answers those
+#      transactions from compiled-in constants.
+#
+#   D  run_L2Tests  CEC_TEST_AIDL_MODE=absent        expects the LEGACY back-end
+#      The end-to-end round trip -- HAL event to Bus reader to Connection to FrameListener --
+#      driven through the legacy in-process mock.
+#
+#   E  run_L2Tests  CEC_TEST_AIDL_MODE=remote        expects the AIDL back-end
+#      The L2 harness launches the out-of-process fake service host, waits for its readiness
+#      token, and only then initializes.  The middleware holds a real Bp* proxy, transactions
+#      cross the binder driver, and the listener callback arrives on a binder threadpool
+#      thread.
+#
+# B AND E ARE BOTH REQUIRED AND NEITHER SUBSTITUTES FOR THE OTHER, which is worth stating
+# because five invocations look like more than are needed.  An in-process registration IS NOT
+# IPC: libbinder resolves a name registered in the calling process to the local BBinder, so
+# interface_cast hands back that very object -- no proxy is created, no transaction crosses
+# the driver, and the client threadpool is never involved.  B therefore proves translation
+# and cannot prove transport; E proves transport and, because a remote service cannot report
+# bad metadata, cannot reach the compatibility-rejection arms B and C reach.
+#
+# ------------------------------------------------------------------------------------
+# THE FILTERS ARE MEASURED, NOT ESTIMATED -- and the counts are not written down at all.
+#
+# --gtest_filter selects by SUITE name, and several source files declare more than one suite,
+# so a filter derived from file names would be wrong in a way nothing would catch.  The two
+# suite groups below were read out of the built binary with --gtest_list_tests, and the case
+# counts in the comments are what that listing reported on the host this was written on.
+#
+# THOSE COUNTS ARE DOCUMENTATION.  The gate does not use them: run_one_invocation asks the
+# binary itself how many cases its own filter selects, every time.  That is deliberate, and it
+# is what the two test files ask for in as many words -- adding a case must not require
+# editing an expected number here, because a stale number is a gate that fails on a correct
+# build and, worse, one that a caller then learns to override.
+# ------------------------------------------------------------------------------------
+
+# BACK-END-NEUTRAL: ten suites, 308 cases as measured, containing no reference to either HAL
+# back-end -- no mock, no EXPECT_CALL, no Driver::getInstance.  They run under EVERY
+# invocation, unchanged and unmodified, and that is the backward-compatibility evidence: the
+# same cases, the same assertions, passing with either back-end resolved.
+readonly NEUTRAL_SUITES='CECFrameTest.*:MessageDecoderTest.*:MessageDecoderTrackingTest.*:MessageEncoderTest.*:OpCodeTest.*:OperandsTest.*:UtilTest.*:ConditionVariableTest.*:MutexTest.*:ThreadTest.*'
+
+# LEGACY-BOUND: eight suites, 175 cases as measured, whose EXPECT_CALLs name HdmiCec*
+# functions a binder back-end never calls.  Under AIDL selection they would fail on unmet
+# expectations rather than on behaviour, which is a false negative and not evidence of
+# anything, so they run on invocation A only.  Their behavioural content is re-asserted
+# back-end-agnostically by the contract suite, which is what keeps nothing dropped.
+# Two of them also hold the ill-typed static_cast<DriverImpl &> route through the legacy
+# receive callback, so restricting them to A makes that route structurally unreachable under
+# AIDL selection rather than merely unused.
+readonly LEGACY_BOUND_SUITES='BusTest.*:ConnectionTest.*:IntegrationFlowTest.*:DriverTest.*:DriverImplAsyncTest.*:HdmiCecDriverMockTest.*:LibCCECTest.*:LibCCECUninitializedTest.*'
+
+# The contract suite's own fixtures, partitioned by which back-end each one requires.  Read
+# from the FIXTURE MANIFEST in tests/L1Tests/ccec/test_DriverAidl.cpp, which is the authority
+# for its own case set, and cross-checked against the built binary.
+#   back-end independent  Compatibility 11, Preflight 5, LocalInstance 9   -- run under A, B and C
+#   legacy back-end only  Selection 4, LegacyArm 4                         -- run under A only
+#   AIDL back-end only    Session 19, Transmit 12                          -- run under B only
+readonly CONTRACT_ANY_BACKEND_SUITES='DriverAidlCompatibilityTest.*:DriverAidlPreflightTest.*:DriverAidlLocalInstanceTest.*'
+readonly CONTRACT_LEGACY_ONLY_SUITES='DriverAidlSelectionTest.*:DriverAidlLegacyArmTest.*'
+readonly CONTRACT_AIDL_ONLY_SUITES='DriverAidlSessionTest.*:DriverAidlTransmitTest.*'
+
+# The L2 tier's own filter.  All three of its fixtures share the DualPath prefix precisely so
+# that one glob selects the tier, and the registered total is IDENTICAL for D and E by
+# design: the two arm-specific fixtures SKIP rather than FAIL when the resolved back-end is
+# not theirs, so every case is registered and reported under both and only the pass/skip
+# split differs.  That is what lets one expected count serve both invocations.
+readonly L2_SUITES='DualPath*'
+
+# ------------------------------------------------------------------------------------
+# THE MATRIX, one record per invocation, '|'-separated:
+#
+#   1 letter            the invocation's name, and the suffix on every artifact it writes
+#   2 tier              L1 or L2 -- which runner, which directory, which fixture pattern
+#   3 mode              the CEC_TEST_AIDL_MODE value handed to the harness
+#   4 back-end          the back-end name that MUST appear in the selected-path log line
+#   5 select filter     --gtest_filter for the run; empty means "no filter"
+#   6 exclude filter    the COMPLEMENT, spelled out as suite globs rather than derived
+#   7 synopsis          one line, printed when the invocation starts
+#
+# WHY FIELD 6 EXISTS RATHER THAN BEING COMPUTED.  The check it feeds is
+# `selected + excluded == registered`, measured all three times from the binary, and that is
+# the generalisation of the guard this script has always had: it used to compare the executed
+# count against the UNFILTERED inventory and raise an advisory on any gap, which was exactly
+# right when nothing was filtered and would now fire on every filtered invocation by design.
+# Deriving the complement arithmetically (registered - selected) would prove nothing at all,
+# because both sides would come from the same subtraction.  Spelling it out as suite globs and
+# MEASURING it makes the reconciliation real, and it buys something the old check could not:
+# a suite added to the binary and classified into neither group breaks the arithmetic and
+# fails the invocation, instead of silently going unrun on four invocations out of five.
+#
+# INVOCATION A CARRIES A NEGATIVE FILTER, AND IT IS NOT OPTIONAL.  The two AIDL-only fixtures
+# assert in SetUp that the AIDL back-end is the resolved one, and they FAIL rather than SKIP
+# when it is not -- deliberately, because a skipped arm is indistinguishable from a passing
+# one in an aggregate count, which is the swallowed-failure shape the whole suite is built to
+# avoid.  So A excludes them by name.  Everything else in the binary runs.
+# ------------------------------------------------------------------------------------
+readonly INVOCATION_MATRIX=(
+    "A|L1|absent|legacy|-${CONTRACT_AIDL_ONLY_SUITES}|${CONTRACT_AIDL_ONLY_SUITES}|no service registered: the regression arm, and the fallback-not-abort demonstration"
+    "B|L1|compatible|AIDL|DriverAidl*:${NEUTRAL_SUITES}-${CONTRACT_LEGACY_ONLY_SUITES}|${LEGACY_BOUND_SUITES}:${CONTRACT_LEGACY_ONLY_SUITES}|in-process compatible fake: the adapter-translation arm"
+    "C|L1|incompatible|legacy|${CONTRACT_ANY_BACKEND_SUITES}:${NEUTRAL_SUITES}|${LEGACY_BOUND_SUITES}:${CONTRACT_LEGACY_ONLY_SUITES}:${CONTRACT_AIDL_ONLY_SUITES}|in-process fake reporting hash \"-1\": present but not usable falls back"
+    "D|L2|absent|legacy|${L2_SUITES}||legacy round trip through the in-process mock, end to end"
+    "E|L2|remote|AIDL|${L2_SUITES}||out-of-process fake over real binder IPC, end to end"
+)
+
+# ------------------------------------------------------------------------------------
+# WHICH INVOCATIONS THIS HOST CAN ACTUALLY RUN.
+#
+# Compiling and linking the AIDL back-end needs only headers and libraries and is fully
+# verifiable anywhere.  EXECUTING an AIDL-selected case needs three more things: a kernel with
+# binder support, a binder protocol version matching the one libbinder was built for, and a
+# running service manager.  Where the driver node is absent, invocations B, C and E cannot run
+# AT ALL -- and not merely because the lookup would fail.  Registering a name requires
+# defaultServiceManager(), which opens the driver, and on the pinned binder stack that call
+# ABORTS the process when the node is missing.  So an in-process fake is as unreachable as a
+# remote one, and an attempt would take the whole runner down with it.
+#
+# The consequence for this script is a hard rule: an invocation that cannot run is REPORTED AS
+# DEFERRED AND SKIPPED.  It is never attempted, never counted as passed, and never allowed to
+# stand in for evidence it did not produce.  The final report says which invocations ran and
+# which did not, and a run that skipped any of them cannot produce an acceptance verdict.
+#
+# The probe is the driver node itself, checked exactly as the middleware's own bounded
+# preflight checks it first: does the node exist and can it be opened.  This script does NOT
+# reimplement the rest of that predicate -- the protocol-version equality check and the bounded
+# wait for binder handle 0 are production code in the middleware and are not duplicated here.
+# What this probe answers is narrower and is all it claims: "is there any point attempting an
+# AIDL-selected invocation on this host".
+# ------------------------------------------------------------------------------------
+readonly BINDER_DRIVER_NODE="${BINDER_DRIVER_NODE:-/dev/binder}"
+
+binder_transport_present() {
+    [ -e "$BINDER_DRIVER_NODE" ] || return 1
+    # Readable-and-writable rather than merely present: the node can exist with permissions
+    # that make it useless, and a run that got past this check only to abort inside libbinder
+    # would report a crash where it should have reported a deferral.
+    [ -r "$BINDER_DRIVER_NODE" ] && [ -w "$BINDER_DRIVER_NODE" ]
+}
+
+# ------------------------------------------------------------------------------------
+# THE RUNTIME LIBRARY PATH FOR THE BINDER CLOSURE.
+#
+# libRCEC now links four libraries directly -- the two generated AIDL stub libraries, libbinder
+# and libutils -- and libbinder itself pulls in liblog, libbase, libcutils and libcutils_sockets
+# beneath it.  Those four are NOT direct edges of anything in the middleware and are deliberately
+# not named as such, but the loader still has to find every one of them or the runner does not
+# start.  So this covers the DIRECTORIES rather than enumerating the libraries: whatever the
+# staging layout puts in them is what the closure needs.
+#
+# WHY THIS IS NOT A NO-OP EVEN WHERE ldconfig ALREADY RESOLVES THEM.  On a host whose loader
+# cache has been taught about the staged libraries this adds nothing, and that is fine -- a
+# duplicated directory on the search path costs a stat.  On a host where they are staged and NOT
+# registered, which is the ordinary case for a build tree, it is the difference between a suite
+# that runs and one that dies with "cannot open shared object file" before its first test.
+# Handling only the first case would make this script work on the machine it was written on.
+#
+# Each directory is added only if it exists, so an unset prefix contributes nothing rather than
+# an empty path element -- an empty element in LD_LIBRARY_PATH means the CURRENT DIRECTORY,
+# which is a genuine hazard and not merely untidy.
+# ------------------------------------------------------------------------------------
+binder_runtime_library_path() { # $1 = the path built so far -> the extended path on stdout
+    local path="${1:-}" candidate
+    local -a candidates=()
+
+    [ -z "$HALIF_LIB_DIR" ]  || candidates+=("$HALIF_LIB_DIR")
+    [ -z "$HALIF_PREFIX" ]   || candidates+=("$HALIF_PREFIX/lib/halif")
+    [ -z "$BINDER_SDK_DIR" ] || candidates+=("$BINDER_SDK_DIR/lib/binder" "$BINDER_SDK_DIR/lib")
+
+    for candidate in "${candidates[@]:-}"; do
+        [ -n "$candidate" ] || continue
+        [ -d "$candidate" ] || continue
+        # Already present?  Do not add it twice; a search path that grows on every call is how
+        # a long-running loop ends up with an environment too large to exec.
+        case ":$path:" in
+            *":$candidate:"*) continue ;;
+        esac
+        path="$candidate${path:+:$path}"
+    done
+    printf '%s\n' "$path"
+}
+
+# Does this invocation need the binder transport in order to run at all?
+#
+# B and C need it even though their fake is in-process, for the reason given above: the
+# registration itself opens the driver.  E needs it for the transport.  A and D need it not at
+# all and must not be made to look as though they do -- A on a driverless host is exactly the
+# fallback-not-abort evidence, so it is the one place the absence is a FEATURE of the run.
+invocation_needs_binder() { # $1 = invocation letter
+    case "$1" in
+        B|C|E) return 0 ;;
+        *)     return 1 ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------------
+# Optional suite execution.  The order -- zero once, run the matrix, capture once -- is the
+# whole point, and the first of those three words changed for a measured reason recorded at
+# clause 4 in the header: gcov counters ACCUMULATE, and because the back-end selection
+# resolves once per process, accumulation ACROSS the invocations is the only way both arms of
+# the selection branch are ever covered by anything.  Zeroing per invocation would leave the
+# capture describing only the last one; never zeroing would let an earlier run's evidence into
+# the figures.  Zeroing once, before the first invocation, and capturing once, after the last
+# one has passed, is the only arrangement that has neither failure mode.
+#
+# Verifying after each invocation is unchanged and is still what proves a suite ran rather
+# than exited early.
 # ------------------------------------------------------------------------------------
 # A zero exit status from run_L1Tests means "nothing failed", which is NOT the same as
 # "something ran".  GoogleTest exits 0 for an empty selection, so a mistyped or overly narrow
@@ -1792,35 +2849,89 @@ do_restore() {
 #   * it names one of this suite's own fixtures -> what ran was THIS suite, not, say, only
 #     a GoogleTest self-test or a case from an unrelated binary that happened to be on PATH.
 # The fixture list is deliberately a stable subset rather than every fixture in the suite: it
-# names the four oldest, largest fixtures, so adding or renaming a test file does not require
+# names the oldest, largest fixtures, so adding or renaming a test file does not require
 # editing this list, while a run that exercised none of them is not this suite.
-readonly EXPECTED_SUITE_PATTERN='"(classname|name)"[[:space:]]*:[[:space:]]*"(CECFrameTest|ConnectionTest|BusTest|DriverTest|LibCCECTest|OpCodeTest|MessageDecoderTest|MessageEncoderTest|OperandsTest)'
-
-# Number of test cases the binary has REGISTERED, read from the binary itself.
 #
-# --gtest_list_tests enumerates without executing, so this is cheap, and it is invoked with no
-# extra arguments at all - deliberately, because --gtest_list_tests honours --gtest_filter and a
-# filtered listing would agree with a filtered run and prove nothing.  A test line is indented by
+# ONE PATTERN PER TIER, because the two runners have DISJOINT fixture sets.  A single pattern
+# covering both would accept an L1 run that produced only L2 fixture names and vice versa,
+# which is precisely the "whatever ran was not this suite" condition it exists to catch.  Each
+# invocation names which pattern applies, from its tier.
+#
+# THE L1 PATTERN GAINED THE CONTRACT SUITE'S BACK-END-INDEPENDENT FIXTURES, and that is not a
+# weakening even though it widens what counts as "this suite".  The reason it is safe is that
+# the pattern is no longer the guard against a PARTIAL run: the per-invocation count
+# reconciliation below is, and it is far stronger -- it compares the executed count against
+# what the invocation's own filter selects and requires selected + excluded to equal the whole
+# registered inventory.  A run narrowed to one fixture now fails on the count with a specific
+# number, where before it could only be caught by not matching a name.  Widening the name test
+# while a real count test stands behind it costs nothing; widening it INSTEAD of one would have
+# cost everything.
+readonly EXPECTED_SUITE_PATTERN='"(classname|name)"[[:space:]]*:[[:space:]]*"(CECFrameTest|ConnectionTest|BusTest|DriverTest|LibCCECTest|OpCodeTest|MessageDecoderTest|MessageEncoderTest|OperandsTest|DriverAidlCompatibilityTest|DriverAidlPreflightTest|DriverAidlLocalInstanceTest)'
+
+# The L2 tier's three fixtures.  All of them, not a subset: there are only three and they are
+# the whole tier, so naming them all is the stable choice here rather than the fragile one.
+readonly L2_EXPECTED_SUITE_PATTERN='"(classname|name)"[[:space:]]*:[[:space:]]*"(DualPathSelectionTest|DualPathLegacyFlowTest|DualPathAidlFlowTest)'
+
+# Number of test cases a runner has REGISTERED, read from the binary itself.
+#
+# --gtest_list_tests enumerates without executing, so this is cheap.  A test line is indented by
 # exactly two spaces; a fixture line is not indented, and GoogleTest's trailing "# GetParam() ="
 # annotations are stripped before counting.
 #
+# THE FILTER PARAMETER IS THE WHOLE GENERALISATION, and it needs stating because the old version
+# of this function REFUSED to take one.  Its comment said so: a filtered listing would agree with
+# a filtered run and prove nothing.  That was correct when there was one unfiltered run to check,
+# and it is still correct as far as it goes -- which is why the caller asks THREE questions rather
+# than one, and never just the filtered one:
+#
+#   registered_test_count <...>            the whole inventory, no filter        -> registered
+#   registered_test_count <...> "$select"  what this invocation intends to run   -> selected
+#   registered_test_count <...> "$exclude" what it intends NOT to run            -> excluded
+#
+# `executed == selected` alone would indeed prove nothing, for exactly the reason the old comment
+# gave.  `selected + excluded == registered`, with all three read independently from the binary, is
+# what makes it an assertion: it is only satisfiable if the invocation's own account of what it
+# runs and what it skips adds up to everything that exists.
+#
 # Prints the count, or nothing when the listing could not be obtained - in which case the caller
 # treats the inventory as unknown rather than as satisfied.
-registered_test_count() {
-    local listing
-    listing="$(cd "$HDMICEC_ROOT/tests/L1Tests" \
-        && LD_LIBRARY_PATH="$1" "$TIMEOUT_BIN" --foreground 120 \
-            ./run_L1Tests --gtest_list_tests 2>/dev/null)" || return 0
+registered_test_count() { # $1=directory  $2=binary name  $3=LD_LIBRARY_PATH  $4=filter (optional)
+    local dir="$1" binary="$2" ld_path="$3" filter="${4:-}" listing
+    local -a filter_args=()
+    [ -z "$filter" ] || filter_args=("--gtest_filter=$filter")
+    listing="$(cd "$dir" \
+        && LD_LIBRARY_PATH="$ld_path" "$TIMEOUT_BIN" --foreground 120 \
+            "./$binary" --gtest_list_tests "${filter_args[@]}" 2>/dev/null)" || return 0
     [ -n "$listing" ] || return 0
     printf '%s\n' "$listing" \
         | sed -n 's/^  \([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' \
         | grep -c . || true
 }
 
-verify_results() { # $1 = path to the results JSON this run was told to write, $2 = LD_LIBRARY_PATH
-    local results="$1" ld_path="${2:-}" count
+# ------------------------------------------------------------------------------------
+# Verify one invocation's results file.
+#
+# EVERY GUARD THE SINGLE-RUN VERSION HAD IS STILL HERE, unchanged in intent and in most cases
+# unchanged in text: the file must exist (it was deleted immediately beforehand), "tests" must
+# be positive, executed = declared - disabled must be positive, failures and errors must both
+# be zero even when the exit status was zero, and the results must name one of this tier's own
+# fixtures.  None of them was weakened to accommodate a filtered run; the parameters below are
+# what let them apply per invocation instead of once.
+#
+# WHAT CHANGED IS THE INVENTORY COMPARISON, and only its mechanism.  It used to compare the
+# executed count against the UNFILTERED registered inventory and raise an advisory on any gap,
+# which is exactly right when the run is unfiltered and fires on every filtered invocation by
+# design.  It is now a per-invocation HARD CHECK against the count the invocation's own filter
+# selects, backed by the selected + excluded == registered reconciliation described at
+# registered_test_count.  That is stricter than the old advisory in two ways worth naming: a
+# mismatch FAILS rather than merely noting, and a suite classified into neither the select nor
+# the exclude group breaks the reconciliation instead of quietly going unrun.
+# ------------------------------------------------------------------------------------
+verify_results() { # $1=results JSON  $2=LD_LIBRARY_PATH  $3=label  $4=fixture pattern  $5=expected executed  $6=registered  $7=excluded
+    local results="$1" ld_path="${2:-}" label="$3" fixture_pattern="$4"
+    local expected="$5" registered="$6" excluded="$7" count
 
-    [ -f "$results" ] || die "run_L1Tests exited 0 but wrote no results file at
+    [ -f "$results" ] || die "invocation $label exited 0 but wrote no results file at
        $results
        The file was deleted immediately before the run, so its absence means the binary
        produced no results at all.  A coverage figure cannot be attributed to a run that
@@ -1847,70 +2958,177 @@ verify_results() { # $1 = path to the results JSON this run was told to write, $
     : "${disabled:=0}" "${failures:=0}" "${errors:=0}"
     count="$declared"
     if [ -z "$count" ] || [ "$count" -le 0 ]; then
-        die "run_L1Tests exited 0 but $results reports no tests (\"tests\": ${count:-absent}).
+        die "invocation $label exited 0 but $results reports no tests (\"tests\": ${count:-absent}).
        An empty run cannot substantiate a coverage figure: every line would be reported
        unhit and the gate would fail for the wrong reason, or -- worse, with a partial
        filter -- a subset's figure would be reported as the suite's.
-       If a --gtest_filter was passed through GTEST_EXTRA_ARGS, it selected nothing."
+       This invocation's own --gtest_filter selected $expected case(s), so a zero here means
+       either that filter matched nothing in this binary or something overrode it."
     fi
 
     local executed=$((declared - disabled))
     if [ "$executed" -le 0 ]; then
-        die "run_L1Tests exited 0 and $results declares $declared case(s), but $disabled of them are
+        die "invocation $label exited 0 and $results declares $declared case(s), but $disabled of them are
        DISABLED_ and so none actually executed.  A coverage figure cannot be attributed to a run in
        which nothing ran."
     fi
     # The results file is this run's evidence and a zero exit status is a different claim, so a
     # suite that recorded a failure or an error while still exiting 0 is treated as a failing suite.
     if [ "$failures" -ne 0 ] || [ "$errors" -ne 0 ]; then
-        die "run_L1Tests exited 0 but $results records $failures failure(s) and $errors error(s).
+        die "invocation $label exited 0 but $results records $failures failure(s) and $errors error(s).
        The results file is the evidence and it contradicts the exit status, so no coverage is
        reported for this run."
     fi
 
-    grep -Eq "$EXPECTED_SUITE_PATTERN" "$results" || die "run_L1Tests exited 0 and $results
-       reports $count test case(s), but not one of them belongs to a known middleware L1
-       fixture.  Whatever ran was not this suite, while the capture would credit this
-       submodule's objects.  Check that ./run_L1Tests in tests/L1Tests is the binary built
+    grep -Eq "$fixture_pattern" "$results" || die "invocation $label exited 0 and $results
+       reports $count test case(s), but not one of them belongs to a known fixture of this
+       tier.  Whatever ran was not this suite, while the capture would credit this
+       submodule's objects.  Check that the runner in that directory is the binary built
        from this tree and that GTEST_EXTRA_ARGS is not restricting the run to unrelated
        cases."
 
-    # THE EXECUTED INVENTORY IS COMPARED AGAINST THE REGISTERED ONE.
+    # ------------------------------------------------------------------------------------
+    # CHECK 2 OF THE THREE PER-INVOCATION CHECKS: the executed count is the count this
+    # invocation's own filter selects.
     #
-    # Everything above establishes that SOMETHING from this suite ran; none of it establishes
-    # that ALL of it ran.  `GTEST_EXTRA_ARGS=--gtest_filter=-SomeFailingSuite.*` leaves a
-    # positive count, keeps recognisable fixture names in the JSON, and exits 0 - so the suite
-    # reads as green while the cases that would have failed were never executed, and the
-    # coverage captured afterwards is credited to a run that skipped them.  Asking the binary
-    # what it has registered is the only way to see that gap, and it is asked without any
-    # filter of its own so that the two numbers are genuinely independent.
-    local registered
-    registered="$(registered_test_count "$ld_path")"
-    if [ -z "$registered" ] || [ "$registered" -le 0 ]; then
-        note_advisory "the complete registered test inventory could not be read from the binary
-       (--gtest_list_tests produced nothing), so it was NOT established that the run executed the
-       whole suite rather than a subset."
-    elif [ "$count" -ne "$registered" ]; then
-        # Both sides include DISABLED_ cases, so this compares the SELECTION against the
-        # INVENTORY: a difference means cases were filtered out of the run entirely, which is a
-        # different thing from a case being disabled in the source.
-        warn "the run selected $count of $registered registered test case(s)"
-        note_advisory "the run's selection covered $count test case(s) but the binary registers
-       $registered, so $((registered - count)) case(s) were never even selected and the coverage
-       below is credited to a PARTIAL execution.  A suite that exits 0 because the failing cases
-       were filtered out is not a green suite.  (Both counts include DISABLED_ cases, so a
-       disabled test does not by itself produce this gap.)"
-    else
-        log "the run selected the whole registered inventory of $registered test case(s)"
+    # Everything above establishes that SOMETHING from this tier ran; none of it establishes
+    # that ALL OF WHAT THIS INVOCATION WAS SUPPOSED TO RUN ran.
+    # `GTEST_EXTRA_ARGS=--gtest_filter=-SomeFailingSuite.*` leaves a positive count, keeps
+    # recognisable fixture names in the JSON, and exits 0 -- so the suite reads as green while
+    # the cases that would have failed were never executed, and the coverage captured
+    # afterwards is credited to a run that skipped them.
+    #
+    # The expected number is READ FROM THE BINARY with this invocation's declared filter, never
+    # written down here, so adding a test case requires no edit to this script.  A caller who
+    # overrides the filter through GTEST_EXTRA_ARGS therefore fails HERE, loudly, with both
+    # numbers named -- which is the intended outcome: GTEST_EXTRA_ARGS may add diagnostic flags,
+    # but re-filtering an invocation makes it a different invocation and this script will not
+    # report one as the other.
+    # ------------------------------------------------------------------------------------
+    if [ -z "$registered" ] || [ "$registered" -le 0 ] || [ -z "$expected" ] || [ "$expected" -le 0 ]; then
+        die "invocation $label ran, but its expected case count could not be read from the binary
+       (--gtest_list_tests produced nothing usable: registered='${registered:-}',
+       selected='${expected:-}').  Without it there is no way to tell a complete invocation
+       from a partial one, and a coverage figure credited to an unverifiable execution is
+       exactly what this script exists not to produce."
+    fi
+
+    # Both sides include DISABLED_ cases -- the listing enumerates them and the JSON's "tests"
+    # counts them -- so this compares SELECTION against SELECTION and a disabled case cannot by
+    # itself open a gap.
+    if [ "$count" -ne "$expected" ]; then
+        # The override is named ONLY when it is actually set.  An unconditional "filter :" line
+        # printed an empty field on every other cause of a mismatch, which reads as though the
+        # filter were the culprit when it is not -- and the overwhelmingly likeliest cause of
+        # this failure is a GTEST_EXTRA_ARGS filter layered on top of the matrix's own, so when
+        # it IS set that fact belongs in the message rather than in the reader's head.
+        local override_note=''
+        if [ -n "${GTEST_EXTRA_ARGS:-}" ]; then
+            override_note="
+           GTEST_EXTRA_ARGS      : set to [$GTEST_EXTRA_ARGS], which narrows the matrix's filter"
+        fi
+        die "invocation $label executed a different set from the one it declared.
+           declared by the filter : $expected case(s)
+           actually selected      : $count case(s)$override_note
+       A run that exits 0 because the cases that would have failed were filtered out is not a
+       green run, and coverage captured from it would be credited to an execution that did not
+       happen.  Both numbers above came from this same binary moments apart, so the difference
+       is real."
+    fi
+
+    # ------------------------------------------------------------------------------------
+    # THE RECONCILIATION.  selected + excluded == registered, all three measured.
+    #
+    # This is what the old unfiltered comparison became rather than what replaced it.  Its
+    # purpose was to notice cases that were never selected; under a matrix that is by design,
+    # so the question changed from "were any cases skipped" to "are the skipped cases exactly
+    # the ones this invocation SAID it skips".  A suite added to the binary and classified into
+    # neither group fails here -- which the old check could not have caught either, since a new
+    # unclassified suite would simply have widened the gap it already tolerated as an advisory.
+    # ------------------------------------------------------------------------------------
+    local accounted=$((expected + excluded))
+    if [ "$accounted" -ne "$registered" ]; then
+        die "invocation $label does not account for the whole registered inventory.
+           selected by its filter : $expected
+           excluded by its filter : $excluded
+           sum                    : $accounted
+           registered in binary   : $registered
+       $(( registered - accounted )) case(s) are in neither group, so they run under no
+       invocation and nothing would ever report them.  This almost always means a new test
+       suite was added without being classified in INVOCATION_MATRIX: put it in the select
+       filter of the invocations that can run it and in the exclude filter of the rest.
+       Do NOT widen a select filter with a wildcard to make this arithmetic close -- that
+       would run the new suite under an invocation whose back-end it may not support, which
+       is the failure this classification exists to prevent."
     fi
 
     if [ "$disabled" -gt 0 ]; then
-        log "run_L1Tests EXECUTED $executed test case(s) per $results (of $declared declared;
-       $disabled DISABLED_ and therefore not run), including known middleware fixtures"
+        log "invocation $label EXECUTED $executed case(s) per $results (of $declared declared;
+       $disabled DISABLED_ and therefore not run) -- matching the $expected its filter selects,
+       with $excluded excluded and $registered registered"
     else
-        log "run_L1Tests EXECUTED all $executed declared test case(s) per $results, including known
-       middleware fixtures"
+        log "invocation $label EXECUTED all $executed declared case(s) -- matching the $expected its"
+        log "  filter selects, with $excluded excluded and $registered registered in the binary"
     fi
+}
+
+# ------------------------------------------------------------------------------------
+# CHECK 3 OF THE THREE: the selected-path line, in THIS invocation's own log.
+#
+# WHY THIS CHECK IS NOT OPTIONAL AND CANNOT BE INFERRED.  An invocation that was supposed to
+# resolve the AIDL back-end and quietly resolved the legacy one instead is GREEN in every
+# other respect: the back-end-neutral cases pass either way, the arm-specific fixtures skip
+# rather than fail by design, the count reconciles, the exit status is zero.  Nothing in the
+# results file records WHICH back-end ran.  So a mis-wired invocation E -- a host launched too
+# late, a readiness token never written, a service name already taken -- would report a clean
+# AIDL result having tested the legacy path from start to finish.  This grep is the only thing
+# standing between that and an acceptance verdict.
+#
+# THE STRING IS NOT INVENTED HERE.  It is emitted once per process at LOG_INFO by the selection
+# helper in ccec/src/Driver.cpp, from a single format constant with the back-end name as its one
+# substitution, and both test files transcribe it verbatim for the same reason this does.  It
+# reaches the log through CCEC_LOG, which prefixes a timestamp and the CEC log prefix, so the
+# match is on the TRAILING SUBSTRING rather than on a whole line.
+#
+# EXACTLY ONE HIT IS REQUIRED, not at least one.  The two "service is not usable" lines that
+# precede it on a legacy fallback are deliberately worded so that they do not match, which is
+# what makes "one hit" meaningful: more than one would mean the selection resolved twice, and
+# the whole design rests on it resolving once per process.
+# ------------------------------------------------------------------------------------
+readonly SELECTED_BACK_END_LOG_PREFIX='Driver::getInstance : HDMI CEC HAL back-end selected : '
+
+assert_selected_back_end() { # $1=log file  $2=expected back-end name  $3=invocation label
+    local log_file="$1" expected_back_end="$2" label="$3" hits other
+
+    [ -f "$log_file" ] || die "invocation $label left no log at $log_file, so the back-end it
+       selected cannot be established."
+
+    hits="$(grep -c -F -- "${SELECTED_BACK_END_LOG_PREFIX}${expected_back_end}" "$log_file" || true)"
+    if [ "${hits:-0}" -eq 1 ]; then
+        log "invocation $label resolved the $expected_back_end back-end (selected-path line found, once)"
+        return 0
+    fi
+
+    # Name what WAS selected when something was, because "expected AIDL" is a much less useful
+    # diagnostic than "expected AIDL, got legacy".
+    other="$(grep -o -- "${SELECTED_BACK_END_LOG_PREFIX}[A-Za-z]*" "$log_file" 2>/dev/null | sort -u | sed 's/^/         /' || true)"
+    if [ "${hits:-0}" -eq 0 ]; then
+        die "invocation $label did not resolve the $expected_back_end back-end.
+       The selected-path line naming it is absent from
+           $log_file
+       Selected-path line(s) actually present:
+${other:-         (none at all)}
+       This invocation is therefore NOT evidence about the back-end it was configured for, and
+       it is treated as a failure rather than as a pass, because every other signal it produces
+       -- exit status, case count, fixture names -- is identical whichever back-end resolved.
+       For invocation E the usual causes are a fake service host that never became ready, one
+       launched after LibCCEC::init rather than before it, or a stale registration already
+       holding the production service name.  For B and C, a harness that could not register its
+       in-process fake."
+    fi
+    die "invocation $label emitted the $expected_back_end selected-path line $hits times, and it
+       must appear EXACTLY ONCE: the selection resolves once per process and is held for the
+       process lifetime, so a second line means it resolved twice.  Log: $log_file"
 }
 
 do_run() {
@@ -1966,24 +3184,99 @@ $survivors
        fresh --build into a tree you own is the fix."
     fi
 
-    local run_log="$OUTPUT_DIR/run_L1Tests.log"
-    local results_json="$OUTPUT_DIR/rdkL1TestResults.json"
+    log "counters zeroed ONCE for the whole matrix; the invocations accumulate into them"
+    run_invocation_matrix
+
+    local fresh
+    fresh="$(gcda_count)"
+    [ "$fresh" -gt 0 ] || die "every invocation passed but no *.gcda counters exist under
+       $HDMICEC_ROOT.  Either the binaries are not the instrumented ones or the counters went
+       somewhere unexpected.  Refusing to report a coverage figure that was not measured."
+    log "the matrix produced $fresh .gcda counter file(s), accumulated across every invocation"
+}
+
+# ------------------------------------------------------------------------------------
+# Run ONE invocation of the matrix and hold it to all three checks.
+#
+# ARTIFACTS ARE PER-INVOCATION AND A LATER ONE CANNOT OVERWRITE AN EARLIER ONE.  This used to
+# be a single hard-coded run_L1Tests.log and a single rdkL1TestResults.json, which under a
+# matrix would mean the last invocation's evidence standing in for all five: an empty or failed
+# run would be erased by whichever green one came after it, and the artifact bundle would say
+# nothing about how the result was reached.  The invocation LETTER goes in the name -- and a
+# letter, not a timestamp, because clause 5 of the governing contract requires fixed artifact
+# names with no timestamp in any of them, so that the same tree produces the same file set and
+# a reader knows what to look for without listing the directory.
+#
+# ORDERING IS LOAD-BEARING AND IT IS THE HARNESS THAT OWNS IT.  On B and C the in-process fake
+# must be registered, and on E the host must be launched and signalled ready, BEFORE
+# LibCCEC::init -- because init is what forces the selection, and a service that appears after
+# it leaves the already-resolved choice on legacy and produces a green run that proves nothing.
+# Both harnesses do that themselves, in their global environment SetUp, before the init call.
+# What this script contributes is the mode and the host's path, handed over as environment
+# before the process starts, and then the assertion that the intended back-end actually
+# resolved -- which is the only check that can catch a mis-ordering after the fact.
+# ------------------------------------------------------------------------------------
+run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=exclude $7=synopsis
+    local label="$1" tier="$2" mode="$3" back_end="$4"
+    local select_filter="$5" exclude_filter="$6" synopsis="$7"
+    local binary_rel binary_name binary_dir fixture_pattern
+
+    case "$tier" in
+        L1) binary_rel="$TEST_BINARY_REL";    fixture_pattern="$EXPECTED_SUITE_PATTERN" ;;
+        L2) binary_rel="$L2_TEST_BINARY_REL"; fixture_pattern="$L2_EXPECTED_SUITE_PATTERN" ;;
+        *)  die "internal error: invocation $label names an unknown tier '$tier'" ;;
+    esac
+    binary_name="$(basename -- "$binary_rel")"
+    binary_dir="$HDMICEC_ROOT/$(dirname -- "$binary_rel")"
+
+    [ -x "$HDMICEC_ROOT/$binary_rel" ] || die "invocation $label needs $binary_rel and it is
+       not an executable in this tree:
+           $HDMICEC_ROOT/$binary_rel
+       Build it with:  $SCRIPT_PATH --build
+       The L2 tier is configured by tests/L2Tests/Makefile in configure.ac's AC_CONFIG_FILES
+       and recursed into from tests/Makefile.am's SUBDIRS, both under --enable-l1tests."
+
+    local run_log="$OUTPUT_DIR/run_invocation_${label}.log"
+    local results_json="$OUTPUT_DIR/rdkTestResults_invocation_${label}.json"
     local ld_path="${LD_LIBRARY_PATH:-}"
 
     # Deleted BEFORE the binary starts, so a results file that exists afterwards can only
-    # have been written by this run.  Without this, a binary that produced nothing would be
-    # judged against whatever an earlier invocation left at the same path.
+    # have been written by this invocation.  Without this, a binary that produced nothing would
+    # be judged against whatever an earlier invocation left at the same path -- and with
+    # per-invocation names, against its own earlier attempt.
     rm -f -- "$results_json"
     if [ -d "$GTEST_PREFIX/lib" ]; then
         ld_path="$GTEST_PREFIX/lib${ld_path:+:$ld_path}"
     fi
+    ld_path="$(binder_runtime_library_path "$ld_path")"
 
-    log "running the L1 suite: $HDMICEC_ROOT/$TEST_BINARY_REL"
-    log "  LD_LIBRARY_PATH=$ld_path"
-    log "  results JSON:    $results_json"
-    log "  time limit:      ${SUITE_TIMEOUT}s (SUITE_TIMEOUT)"
+    # THE EXPECTED COUNTS ARE READ FROM THE BINARY, NOW, with this invocation's own filters.
+    # Three separate listings, so the reconciliation in verify_results compares independently
+    # obtained numbers rather than two views of one subtraction.
+    local registered selected excluded
+    registered="$(registered_test_count "$binary_dir" "$binary_name" "$ld_path" '')"
+    selected="$(registered_test_count "$binary_dir" "$binary_name" "$ld_path" "$select_filter")"
+    if [ -n "$exclude_filter" ]; then
+        excluded="$(registered_test_count "$binary_dir" "$binary_name" "$ld_path" "$exclude_filter")"
+    else
+        # No exclude filter means the invocation claims to run everything, and the
+        # reconciliation then reduces to selected == registered, which is exactly right.
+        excluded=0
+    fi
+    : "${registered:=0}" "${selected:=0}" "${excluded:=0}"
+
+    rule
+    log "INVOCATION $label -- $synopsis"
+    log "  runner            : $binary_rel"
+    log "  CEC_TEST_AIDL_MODE: $mode"
+    log "  expected back-end : $back_end"
+    log "  filter            : ${select_filter:-<none: the whole registered inventory>}"
+    log "  expected cases    : $selected selected, $excluded excluded, $registered registered"
+    log "  results JSON      : $results_json"
+    log "  log               : $run_log"
+    log "  time limit        : ${SUITE_TIMEOUT}s (SUITE_TIMEOUT)"
     if [ -n "$GTEST_EXTRA_ARGS" ]; then
-        log "  extra gtest args: $GTEST_EXTRA_ARGS"
+        log "  extra gtest args  : $GTEST_EXTRA_ARGS"
         # ANY caller-supplied gtest argument makes this run diagnostic, not acceptance.
         #
         # A filter is the obvious case - `--gtest_filter=-KnownFailingSuite.*` leaves a
@@ -1992,9 +3285,16 @@ $survivors
         # --gtest_repeat changes what the counters accumulate, and --gtest_also_run_disabled_tests
         # changes which cases the figures came from.  Rather than enumerate a permitted subset
         # and be wrong about the next one, every custom argument is recorded, so the verdict is
-        # ADVISORY and the exit status is $EXIT_ADVISORY.  verify_results additionally compares
-        # the executed inventory against the registered one, so a filter is reported as the
-        # specific number of cases it removed.
+        # ADVISORY and the exit status is $EXIT_ADVISORY.
+        #
+        # A FILTER PASSED THIS WAY NOW FAILS THE INVOCATION rather than being reported as a
+        # partial one, and that is a deliberate tightening.  GTEST_EXTRA_ARGS is appended after
+        # this invocation's own --gtest_filter, and GoogleTest lets the last one win, so an
+        # override silently turns invocation B into some other selection entirely.  The expected
+        # count in verify_results comes from the invocation's DECLARED filter, so the two
+        # disagree and it dies with both numbers named.  Diagnostic flags remain useful here;
+        # re-filtering does not, because a re-filtered invocation is a different invocation and
+        # this script will not report one as the other.
         note_advisory "GTEST_EXTRA_ARGS was set to '$GTEST_EXTRA_ARGS', so the suite was NOT run
        the way an acceptance run runs it.  Custom arguments can change which cases execute, in
        what order and how often, so this run's figures are diagnostic."
@@ -2023,13 +3323,48 @@ $survivors
     # rather than after it (see the block next to `trap on_exit`).  `timeout --foreground` is kept
     # for exactly that reason: it deliberately does not put its child in a new process group, so
     # `timeout` and the test binary both stay in the one group the handler signals.
+    # THE HARNESS ENVIRONMENT, and the one variable this script deliberately does NOT set.
+    #
+    # CEC_TEST_AIDL_MODE is what distinguishes one invocation from the next.  It is read by
+    # tests/L1Tests/test_main.cpp and tests/L2Tests/test_main.cpp and by nothing else -- no
+    # production source reads it, and none may.  Each harness hard-fails on a value it does not
+    # implement rather than quietly downgrading to `absent`, which is why passing `remote` to
+    # the L1 runner or `compatible` to the L2 runner is a loud error rather than a silent
+    # legacy run.  The matrix never does either.
+    #
+    # CEC_FAKE_AIDL_HOST_PATH tells the L2 harness where the out-of-process fake service host
+    # is.  It is set for BOTH L2 invocations even though only E launches anything: D reads it
+    # not at all, so setting it costs nothing and keeps one code path.
+    #
+    # CEC_FAKE_HOST_READY_FD IS NOT SET HERE, AND MUST NOT BE.  It names the number of an
+    # INHERITED DESCRIPTOR -- the write end of a pipe whose read end the waiting parent holds --
+    # and the parent is the L2 harness, not this script.  The harness creates the pipe, forks,
+    # sets that variable in the CHILD's environment, and blocks on the read end under a bounded
+    # timeout.  A value exported from here would name a descriptor this script never opened, and
+    # the host treats an unusable descriptor as a hard failure precisely so that a botched
+    # handoff is reported rather than silently answered on standard output.  Setting it would
+    # therefore break the very handoff it looks like it is helping with.
+    #
+    # THE READINESS WAIT AND THE REAPING ARE THE HARNESS'S TOO, and both are bounded there: it
+    # matches the fixed token verbatim, fails the run rather than proceeding when the token does
+    # not arrive, and terminates and reaps the host in its teardown.  This script's contribution
+    # to that contract is SUITE_TIMEOUT as an outer bound and the selected-path assertion as the
+    # after-the-fact check -- a host that never became ready leaves the harness failing, and a
+    # host that became ready too late leaves a legacy selection, which the assertion catches.
+    #
+    # NOTHING HERE STARTS A BINDER THREADPOOL.  The client-side pool is DriverAidlImpl::open()'s
+    # to start, during init; the host starts its own service-side pool.  A third one from the
+    # harness or from here would duplicate an ownership the production back-end already holds.
     local rc=0
     set -m
     (
-        cd "$HDMICEC_ROOT/tests/L1Tests"
+        cd "$binary_dir"
+        CEC_TEST_AIDL_MODE="$mode" \
+        CEC_FAKE_AIDL_HOST_PATH="$HDMICEC_ROOT/$FAKE_HOST_BINARY_REL" \
         LD_LIBRARY_PATH="$ld_path" \
         exec "$TIMEOUT_BIN" --foreground "${TIMEOUT_KILL_AFTER[@]}" "$SUITE_TIMEOUT" \
-            ./run_L1Tests --gtest_print_time=1 "--gtest_output=json:$results_json" \
+            "./$binary_name" --gtest_print_time=1 "--gtest_output=json:$results_json" \
+                ${select_filter:+"--gtest_filter=$select_filter"} \
                 ${GTEST_EXTRA_ARGS:+$GTEST_EXTRA_ARGS}
     ) >"$run_log" 2>&1 &
     SUITE_PGID=$!
@@ -2038,6 +3373,12 @@ $survivors
     # itself have been invoked in a `||` or `if !` context re-arms it where the caller had
     # deliberately suppressed it.  A trapped signal interrupts the wait either way, which is the
     # whole point of waiting rather than running the suite in the foreground.
+    #
+    # THE PROCESS GROUP IS ALSO WHAT REAPS THE FAKE SERVICE HOST, and no new machinery was added
+    # for it.  The harness forks the host from inside this group, so a cancelled or timed-out
+    # invocation has its host signalled along with the runner by stop_suite_group, which
+    # addresses the group BY ID.  That matters: a pattern-based kill would match anything merely
+    # mentioning the binary's name, up to and including the harness that started this script.
     wait "$SUITE_PGID" || rc=$?
     SUITE_PGID=''
 
@@ -2045,33 +3386,117 @@ $survivors
     "$AWK_BIN" '/^\[==========\]|^\[  PASSED  \]|^\[  FAILED  \]|^\[  SKIPPED \]|tests? from .* ran/' "$run_log" \
         | sed 's/^/[run_coverage]   /' || true
 
+    # ------------------------------------------------------------------------------------
+    # CHECK 1 OF THE THREE: the exit status.
+    # ------------------------------------------------------------------------------------
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
         printf '%s\n' "--- last 30 lines ---" >&2
         tail -n 30 -- "$run_log" | sed 's/^/[run_coverage]   /' >&2 || true
-        die "the L1 suite did not finish within ${SUITE_TIMEOUT}s and was terminated (exit $rc).
+        die "invocation $label did not finish within ${SUITE_TIMEOUT}s and was terminated (exit $rc).
        This is a HANG, not a test failure: the last test named in the log above is where it
        stopped.  Coverage is not captured, because a suite that was killed part-way through
        produced partial counters.  Investigate that test, or raise the bound deliberately with
-       SUITE_TIMEOUT=<seconds> if the suite has legitimately grown.  Full log: $run_log"
+       SUITE_TIMEOUT=<seconds> if the suite has legitimately grown.  Full log: $run_log
+       On invocation E specifically, a hang can also mean the fake service host is waiting on a
+       service manager that is not running: reaching one blocks in one-second retries until
+       binder handle 0 resolves, and this bound is what turns that into a reported failure."
     fi
     if [ "$rc" -ne 0 ]; then
-        warn "the suite exited $rc. Full log: $run_log"
+        warn "invocation $label exited $rc. Full log: $run_log"
         printf '%s\n' "--- last 30 lines ---" >&2
         tail -n 30 -- "$run_log" | sed 's/^/[run_coverage]   /' >&2 || true
-        die "the L1 suite failed, so coverage was not measured.
+        die "invocation $label FAILED, so coverage was not measured and no later invocation was run.
        A red suite makes every coverage figure meaningless: fix the tests first.
        Coverage is deliberately NOT captured for a failing run, so that no report can
-       ever be produced from one."
+       ever be produced from one, and the artifacts of this and every earlier invocation
+       are left in place under $OUTPUT_DIR for diagnosis."
     fi
-    log "the L1 suite passed (exit 0)"
-    verify_results "$results_json" "$ld_path"
+    log "invocation $label exited 0"
 
-    local fresh
-    fresh="$(gcda_count)"
-    [ "$fresh" -gt 0 ] || die "the suite exited 0 but wrote no *.gcda counters under
-       $HDMICEC_ROOT.  Either the binary is not the instrumented one or the counters went
-       somewhere unexpected.  Refusing to report a coverage figure that was not measured."
-    log "the suite produced $fresh fresh .gcda counter file(s)"
+    # ------------------------------------------------------------------------------------
+    # CHECKS 2 AND 3.  Both are FATAL, and both run before the next invocation starts.
+    # ------------------------------------------------------------------------------------
+    verify_results "$results_json" "$ld_path" "$label" "$fixture_pattern" \
+                   "$selected" "$registered" "$excluded"
+    assert_selected_back_end "$run_log" "$back_end" "$label"
+
+    log "invocation $label PASSED all three checks (exit status, case count, selected back-end)"
+}
+
+# ------------------------------------------------------------------------------------
+# Run the whole matrix, in order, stopping at the first invocation that fails.
+#
+# WHY IT STOPS RATHER THAN COLLECTING FAILURES.  The counters accumulate into one set, and a
+# capture taken after a failed invocation would describe a mixture of complete and incomplete
+# executions with no way to tell which lines came from which.  There is no useful report to be
+# had from a partial matrix, so the run ends where the evidence stops being attributable -- and
+# every artifact written so far survives, because they are per-invocation and nothing overwrites
+# them.
+#
+# AN INVOCATION THAT CANNOT RUN IS DEFERRED, NOT SKIPPED QUIETLY AND NEVER PASSED.  On a host
+# with no binder driver, B, C and E cannot execute at all -- an attempt would abort inside
+# libbinder rather than fail a test.  Those are recorded as deferred, listed in the summary, and
+# turned into an advisory reason, so the run cannot produce an acceptance verdict while claiming
+# five invocations' worth of evidence from two.
+# ------------------------------------------------------------------------------------
+INVOCATIONS_RUN=''
+INVOCATIONS_DEFERRED=''
+
+run_invocation_matrix() {
+    local binder_available=0
+    if binder_transport_present; then
+        binder_available=1
+    fi
+
+    rule
+    log "the invocation matrix: ${#INVOCATION_MATRIX[@]} invocation(s), one process each,"
+    log "  all against this one build so the gcov counters accumulate into a single capture"
+    if [ "$binder_available" -eq 1 ]; then
+        log "  binder transport: $BINDER_DRIVER_NODE is present and usable, so every invocation runs"
+    else
+        log "  binder transport: $BINDER_DRIVER_NODE is absent or unusable on this host"
+        log "  => the AIDL-selected invocations are DEFERRED, not attempted and not passed."
+        log "     Executing one needs a kernel with binder support, a matching binder protocol"
+        log "     version and a running service manager.  Compiling and linking the back-end"
+        log "     needs none of those and has already been verified by the build."
+    fi
+
+    local record label tier mode back_end select_filter exclude_filter synopsis
+    for record in "${INVOCATION_MATRIX[@]}"; do
+        IFS='|' read -r label tier mode back_end select_filter exclude_filter synopsis <<< "$record"
+
+        if [ "$binder_available" -eq 0 ] && invocation_needs_binder "$label"; then
+            rule
+            warn "INVOCATION $label DEFERRED -- $synopsis"
+            warn "  It needs the binder transport and $BINDER_DRIVER_NODE is not usable here."
+            warn "  Not attempted: on the pinned binder stack, registering a service name calls"
+            warn "  defaultServiceManager(), which opens the driver and ABORTS the process when"
+            warn "  the node is missing -- so an attempt would take the runner down with it and"
+            warn "  destroy the counters the invocations that CAN run have accumulated."
+            INVOCATIONS_DEFERRED="${INVOCATIONS_DEFERRED}${INVOCATIONS_DEFERRED:+, }$label"
+            continue
+        fi
+
+        run_one_invocation "$label" "$tier" "$mode" "$back_end" \
+                           "$select_filter" "$exclude_filter" "$synopsis"
+        INVOCATIONS_RUN="${INVOCATIONS_RUN}${INVOCATIONS_RUN:+, }$label"
+    done
+
+    rule
+    log "invocations run      : ${INVOCATIONS_RUN:-none}"
+    log "invocations deferred : ${INVOCATIONS_DEFERRED:-none}"
+    [ -n "$INVOCATIONS_RUN" ] || die "no invocation ran at all, so there is nothing to measure.
+       Every one of them was deferred for want of a binder transport, which cannot be right:
+       invocations A and D need none.  Check that both runners exist and are executable."
+
+    if [ -n "$INVOCATIONS_DEFERRED" ]; then
+        note_advisory "invocation(s) $INVOCATIONS_DEFERRED were DEFERRED, not run: this host has no
+       usable binder transport at $BINDER_DRIVER_NODE.  The figures below therefore describe
+       only invocation(s) $INVOCATIONS_RUN, so no arm of the selection branch that needs the
+       AIDL back-end was exercised and the branch gate cannot be satisfied from this run.
+       Re-run the whole matrix on a binder-capable host for an acceptance verdict; nothing here
+       may be reported as though those invocations had passed."
+    fi
 }
 
 
@@ -2083,6 +3508,7 @@ $survivors
 # ------------------------------------------------------------------------------------
 RAW_TRACE=''
 FILTERED_TRACE=''
+LINE_GATE_TRACE=''
 HTML_DIR=''
 PER_FILE_TSV=''
 UNCOVERED_TXT=''
@@ -2264,13 +3690,18 @@ prepare_output_dir() {
 
     RAW_TRACE="$OUTPUT_DIR/coverage.info"
     FILTERED_TRACE="$OUTPUT_DIR/filtered_coverage.info"
+    # The line gate's own input: filtered_coverage.info with the dependency headers removed.
+    # A THIRD name rather than an overwrite, so all three stages of the trace survive side by
+    # side and a reader can see exactly what each step took out.
+    LINE_GATE_TRACE="$OUTPUT_DIR/line_gate_coverage.info"
     HTML_DIR="$OUTPUT_DIR/coverage"
     PER_FILE_TSV="$OUTPUT_DIR/per_file_coverage.tsv"
     UNCOVERED_TXT="$OUTPUT_DIR/uncovered_lines.txt"
-    readonly RAW_TRACE FILTERED_TRACE HTML_DIR PER_FILE_TSV UNCOVERED_TXT
+    readonly RAW_TRACE FILTERED_TRACE LINE_GATE_TRACE HTML_DIR PER_FILE_TSV UNCOVERED_TXT
 
     assert_safe_artifact_path "$RAW_TRACE" file
     assert_safe_artifact_path "$FILTERED_TRACE" file
+    assert_safe_artifact_path "$LINE_GATE_TRACE" file
     assert_safe_artifact_path "$HTML_DIR" dir
     assert_safe_artifact_path "$PER_FILE_TSV" file
     assert_safe_artifact_path "$UNCOVERED_TXT" file
@@ -2411,6 +3842,134 @@ $(tail -n 20 -- "$OUTPUT_DIR/filter.log" 2>/dev/null | sed 's/^/         /')"
 }
 
 # ------------------------------------------------------------------------------------
+# Step 2b -- ONE TRACE, TWO CONSUMERS.  Produce the line gate's input by removing the
+# dependency headers, and leave the branch gate reading the UNFILTERED capture.
+#
+# THE SPLIT, AND WHY IT IS NOT AN INCONSISTENCY.  Two gates now read two different traces, and
+# that is deliberate because they are asking two different questions:
+#
+#   THE BRANCH GATE READS THE UNFILTERED CAPTURE ($RAW_TRACE).  Some of the branches SC6 asks
+#   for by name live inside halcompat.h's isCompatible<>() -- the empty-hash arm, the "-1" arm,
+#   the "notfrozen" arm, the era and major comparisons -- and some of the arcs it needs are in
+#   header-only code.  Filtering first would delete exactly the evidence the gate exists to
+#   check, and a gate that cannot see its own subject is worse than no gate: it would pass
+#   silently and for ever.
+#
+#   THE LINE GATE READS THIS DERIVATIVE.  Its threshold is 80% over an aggregate, and an
+#   aggregate is only meaningful against a stable denominator.  Admitting six binder SDK
+#   headers and four generated stub headers would change the file set, change the denominator,
+#   make the figure incomparable with the recorded baseline, and -- because per-file gating is
+#   on -- start failing the run over how well this suite covers a third-party header it neither
+#   owns nor tests.  So the dependency headers come out, and only they.
+#
+# WHY NOT SIMPLY GATE BOTH ON THE SAME TRACE.  Both single-trace answers are worse.  Gating
+# lines on the unfiltered capture imports the denominator problem above.  Gating branches on
+# the filtered copy deletes halcompat.h's arcs.  Two consumers of one capture, each reading the
+# form that answers its own question, is the only arrangement in which both gates mean
+# something -- and the capture is still taken ONCE, so the two are views of the same evidence
+# rather than two measurements that could disagree.
+# ------------------------------------------------------------------------------------
+filter_dependency_headers() {
+    rule
+    log "producing the line gate's trace: removing dependency headers from the filtered trace"
+
+    # The fixed globs, plus whatever the caller's staging prefixes tell us about this host.  A
+    # Yocto-style layout can put the binder headers somewhere that no fixed glob describes, and
+    # the prefixes are the only thing that knows where.  Derived here rather than at definition
+    # time because they depend on values parse_args may still have been changing.
+    local -a excludes=("${DEPENDENCY_EXCLUDES[@]}")
+    local root
+    for root in "$BINDER_SDK_INCLUDE_DIR" "$BINDER_SDK_DIR"; do
+        [ -n "$root" ] || continue
+        excludes+=("$root/*")
+    done
+
+    local g
+    for g in "${excludes[@]}"; do
+        log "    exclude: $g"
+    done
+    log "    RETAINED: halcompat.h -- a consumed HALIF header, and the branches SC6 names live in it"
+
+    assert_output_dir_still_safe "$LINE_GATE_TRACE"
+    rm -f -- "$LINE_GATE_TRACE"
+    lcov_run -r "$FILTERED_TRACE" \
+        "${excludes[@]}" \
+        -o "$LINE_GATE_TRACE" \
+        "${LCOV_CONFIG_ARGS[@]}" \
+        "${LCOV_RC_ARGS[@]}" \
+        --ignore-errors "$LCOV_FILTER_IGNORE" \
+        >"$OUTPUT_DIR/filter_dependencies.log" 2>&1 \
+        || die "removing the dependency headers failed. Full log: $OUTPUT_DIR/filter_dependencies.log
+       Tail:
+$(tail -n 20 -- "$OUTPUT_DIR/filter_dependencies.log" 2>/dev/null | sed 's/^/         /')"
+
+    [ -s "$LINE_GATE_TRACE" ] || die "removing the dependency headers produced an empty trace
+       ($LINE_GATE_TRACE).  One of the globs above must be matching this submodule's own source;
+       compare them against the file list in $FILTERED_TRACE before changing anything else."
+
+    # ------------------------------------------------------------------------------------
+    # THE TWO FILES THAT MUST SURVIVE, ASSERTED RATHER THAN ASSUMED.
+    #
+    # A glob that accidentally described this migration's own source would leave a gate passing
+    # over code nobody measured -- the exact failure mode a filter can produce while looking
+    # like it is working.  The globs above do not name them, but "the globs do not name them" is
+    # a claim about the globs and this is a check on the result.
+    # ------------------------------------------------------------------------------------
+    local protected_file
+    for protected_file in "${PROTECTED_TRACE_FILES[@]}"; do
+        grep -q "^SF:.*/${protected_file}\$" "$LINE_GATE_TRACE" || die "$protected_file is
+       ABSENT from the line gate's trace, and it must never be.  It is production source this
+       migration is answerable for, so a gate computed without it would pass over unmeasured
+       code.  Either one of the exclusion globs above matches it -- check them against
+           grep '^SF:' $FILTERED_TRACE
+       -- or it was never compiled into the objects the capture walked."
+    done
+
+    # THE FILE SET IS ENUMERATED, NOT SUMMARISED.  What came out and what stayed are both
+    # printed, because a policy about which dependency headers belong in a denominator is only
+    # auditable if a reader can see the decision applied to real paths.
+    local before after removed
+    before="$(grep -c '^SF:' "$FILTERED_TRACE" || true)"
+    after="$(grep -c '^SF:' "$LINE_GATE_TRACE" || true)"
+    removed=$((before - after))
+    log "line gate trace: $LINE_GATE_TRACE ($after file record(s); $removed dependency header(s) removed)"
+
+    if [ "$removed" -gt 0 ]; then
+        log "  removed:"
+        # comm needs sorted input; LC_ALL=C so the ordering is the same on every host.
+        LC_ALL=C comm -23 \
+            <(grep '^SF:' "$FILTERED_TRACE"   | sed 's/^SF://' | LC_ALL=C sort) \
+            <(grep '^SF:' "$LINE_GATE_TRACE" | sed 's/^SF://' | LC_ALL=C sort) \
+            | sed 's/^/[run_coverage]     /'
+    fi
+
+    # Any surviving record from outside the submodule is a NEWLY APPEARING dependency header
+    # that this policy has not classified.  It is reported rather than filtered, because
+    # silently widening a filter is how a denominator drifts: the reader decides whether it is
+    # consumed HALIF source that belongs in the gate, like halcompat.h, or toolchain code that
+    # does not.
+    local unclassified
+    unclassified="$(grep '^SF:' "$LINE_GATE_TRACE" | sed 's/^SF://' \
+                    | grep -v "^$HDMICEC_ROOT/" | grep -v '/halcompat\.h$' || true)"
+    if [ -n "$unclassified" ]; then
+        warn "the line gate's trace still holds file record(s) from outside this submodule that"
+        warn "  this policy has not classified:"
+        printf '%s\n' "$unclassified" | sed 's/^/[run_coverage]     /' >&2
+        warn "  They are IN the aggregate denominator and IN the per-file gate as things stand."
+        warn "  Decide deliberately: a consumed HALIF header belongs there, as halcompat.h does;"
+        warn "  third-party toolchain code does not and belongs in DEPENDENCY_EXCLUDES.  Nothing"
+        warn "  is filtered automatically here, because a filter that widens itself is how a"
+        warn "  coverage denominator drifts without anyone deciding that it should."
+        note_advisory "the line gate's trace holds unclassified dependency header record(s) from
+       outside this submodule, so its aggregate denominator is not the one the recorded baseline
+       was measured over.  They are listed in this run's output; classify them in
+       DEPENDENCY_EXCLUDES or accept them deliberately."
+    fi
+
+    log "  retained inside this submodule: $(grep '^SF:' "$LINE_GATE_TRACE" | sed 's/^SF://' | grep -c "^$HDMICEC_ROOT/" || true) file record(s)"
+}
+
+# ------------------------------------------------------------------------------------
 # Step 3 -- HTML REPORT.  Built into a private staging directory and published by rename,
 # so a smaller trace can never leave pages from a larger earlier one behind, and an
 # interrupted run cannot leave a half-written report at the published path.
@@ -2433,7 +3992,7 @@ generate_html() {
     genhtml_run \
         -o "$STAGE_DIR/coverage" \
         -t "$GENHTML_TITLE" \
-        "$FILTERED_TRACE" \
+        "$LINE_GATE_TRACE" \
         "${LCOV_CONFIG_ARGS[@]}" \
         "${LCOV_RC_ARGS[@]}" \
         --ignore-errors "$GENHTML_IGNORE" \
@@ -2472,12 +4031,12 @@ $(tail -n 20 -- "$OUTPUT_DIR/genhtml.log" 2>/dev/null | sed 's/^/         /')"
 summarise_coverage() {
     rule
     log "aggregate coverage (production source only), as reported by lcov itself:"
-    lcov_run --summary "$FILTERED_TRACE" \
+    lcov_run --summary "$LINE_GATE_TRACE" \
         "${LCOV_CONFIG_ARGS[@]}" \
         "${LCOV_RC_ARGS[@]}" \
         --ignore-errors "$LCOV_SUMMARY_IGNORE" 2>&1 \
         | sed 's/^/[run_coverage]   /' \
-        || die "lcov --summary failed for $FILTERED_TRACE"
+        || die "lcov --summary failed for $LINE_GATE_TRACE"
 }
 
 
@@ -2629,7 +4188,7 @@ write_per_file_tsv() {
 
     {
         printf '# Per-file coverage for the HDMI-CEC middleware L1 suite, derived from\n'
-        printf '# %s\n' "$FILTERED_TRACE"
+        printf '# %s\n' "$LINE_GATE_TRACE"
         printf '# PROVENANCE  superproject %s\n' "$(git_sha_of "$WS")"
         printf '# PROVENANCE  hdmicec      %s\n' "$(git_sha_of "$HDMICEC_ROOT")"
         printf '# PROVENANCE  runner       %s  sha256 %s\n' "$SCRIPT_PATH" "$(sha256_of "$SCRIPT_PATH")"
@@ -2675,7 +4234,7 @@ write_per_file_tsv() {
                        next }
             /^end_of_record/ { flush_record(); next }
             END { flush_record() }
-        ' "$FILTERED_TRACE" \
+        ' "$LINE_GATE_TRACE" \
         | LC_ALL=C sort -t "$(printf '\t')" -k1,1 \
         | "$AWK_BIN" -F'\t' -v min="$COVERAGE_MIN" '
             function pct(hit, found) { return found > 0 ? 100 * hit / found : 0 }
@@ -2711,7 +4270,7 @@ write_per_file_tsv() {
                        (pct(TLH, TLF) >= min + 0 ? "PASS" : "BELOW")
             }
         '
-    } >"$tmp_tsv" || { rm -f -- "$tmp_tsv"; die "per-file parsing of $FILTERED_TRACE failed"; }
+    } >"$tmp_tsv" || { rm -f -- "$tmp_tsv"; die "per-file parsing of $LINE_GATE_TRACE failed"; }
 
     if grep -q '^##NODATA$' "$tmp_tsv"; then
         rm -f -- "$tmp_tsv"
@@ -2736,7 +4295,7 @@ write_uncovered_lines() {
     rm -f -- "$tmp"
     {
         printf '# Uncovered (never-executed) source lines per file, from\n'
-        printf '# %s\n' "$FILTERED_TRACE"
+        printf '# %s\n' "$LINE_GATE_TRACE"
         printf '# Paths are relative to %s. A line is listed when its DA: record shows a hit\n' "$HDMICEC_ROOT"
         printf '# count of zero. Files with full line coverage are omitted.\n'
         printf '# Line coverage bar in force for this run: %s%%\n' "$COVERAGE_MIN"
@@ -2772,10 +4331,10 @@ write_uncovered_lines() {
                       next }
             /^end_of_record/ { flush_record(); next }
             END { flush_record() }
-        ' "$FILTERED_TRACE" \
+        ' "$LINE_GATE_TRACE" \
         | LC_ALL=C sort -t "$(printf '\t')" -k1,1 \
         | "$AWK_BIN" -F'\t' '{ printf "%s\t%s\t%s\t%s\n    uncovered lines: %s\n", $1, $2, $3, $4, $5 }'
-    } >"$tmp" || { rm -f -- "$tmp"; die "uncovered-line enumeration failed for $FILTERED_TRACE"; }
+    } >"$tmp" || { rm -f -- "$tmp"; die "uncovered-line enumeration failed for $LINE_GATE_TRACE"; }
     mv -f -- "$tmp" "$UNCOVERED_TXT" || die "could not write $UNCOVERED_TXT"
 }
 
@@ -2871,12 +4430,339 @@ per_file_report() {
 # `--no-per-file-gate` turns it off, for the reason given under GATE in the header.
 # Branch coverage is never gated.
 # ------------------------------------------------------------------------------------
+# ====================================================================================
+# THE BRANCH-COVERAGE MANIFEST AND ITS GATE
+# ====================================================================================
+#
+# WHAT PROBLEM THIS SOLVES.  The requirement is full branch coverage of the SELECTION and the
+# ARRAY-ADAPTATION code specifically, and a whole-file percentage cannot establish that:
+# ccec/src/DriverAidlImpl.cpp contains many branches that are neither, so a high file figure can
+# sit happily on top of an uncovered selection arm.  The gate therefore has to name individual
+# arms -- which means mapping a semantic arm onto something a trace actually contains.
+#
+# WHY A MAPPING IS UNAVOIDABLE.  LCOV records a branch as
+#     BRDA:<line>,<block>,<branch>,<taken>
+# and those are COORDINATES, not names.  Nothing in the trace says "this is the
+# service-not-found arm".  So the mapping from semantic arm to coordinate has to be produced
+# from a real trace and written down, and it is written down HERE, with the source line quoted
+# beside each entry so that a later reader can re-derive it rather than take it on trust.
+#
+# WHY IT LIVES IN THIS SCRIPT RATHER THAN IN A FILE OF ITS OWN.  A sibling manifest file would
+# be a twenty-fifth path in a change whose diff check requires exactly twenty-four in-submodule
+# paths and nothing more, so it would fail that check.  The manifest is data plus gate logic,
+# both of which a shell script can hold perfectly well, so it holds them.
+#
+# IDENTIFICATION IS BY BLOCK AND BRANCH INDEX, NEVER BY LINE ALONE.  A short-circuited
+# condition contributes several arcs on ONE line -- `if (a && b)` is at least two -- so a
+# line-only key would match an arm the entry did not mean and would pass or fail on the wrong
+# arc.  Every entry therefore carries all three of line, block and branch.
+#
+# THE GATE FAILS ON TWO CONDITIONS, AND THE SECOND IS THE ONE THAT EARNS ITS KEEP:
+#   (a) a mapped record whose `taken` count is ZERO -- the arm exists and nothing drove it;
+#   (b) a mapped record that is ABSENT FROM THE TRACE ALTOGETHER -- which is what catches a
+#       refactor that silently deleted an arm.  Without (b), deleting the branch would make the
+#       gate greener rather than redder, and a gate that rewards deletion is worse than none.
+#
+# `-` IS RECORDED AS UNEXERCISABLE, NOT AS A FAILURE.  gcov emits `-` for an arc it considers
+# impossible to drive.  That is information about the compiler's control-flow graph, not about
+# the test set, and treating it as a failure would produce a gate nobody can ever satisfy.
+#
+# THIS MANIFEST IS REVIEWED WHENEVER A MAPPED FILE CHANGES.  Coordinates are a function of the
+# source: inserting a line above a mapped arm moves it, and adding a condition to a mapped `if`
+# renumbers its branches.  A stale coordinate shows up as condition (b) -- absent from the
+# trace -- which is the loud failure rather than the quiet one, but it is still a review that
+# belongs with the source change and not with a puzzled reading of this gate's output.
+#
+# ------------------------------------------------------------------------------------
+# THE COORDINATES ARE NOT POPULATED IN THIS COMMIT, AND THAT IS STATED RATHER THAN FAKED.
+#
+# A coordinate is only real if it came out of a real unfiltered trace produced by a full
+# five-invocation run.  Three of those five invocations cannot execute on a host without a
+# binder driver, so the arms belonging to them have no trace to be read out of here, and the
+# arms that DO have one would be a half-populated manifest presenting itself as a whole one.
+# Writing plausible-looking numbers would be the exact failure this whole script is built
+# against: a figure that looks measured and is not.
+#
+# So the manifest below ships the ARM LIST -- which is knowledge, and is the part that took the
+# analysis -- with its coordinate fields empty, and the gate reports honestly that it could not
+# check them.  An unpopulated gate NEVER reports success and never contributes a pass: it
+# records an advisory reason, which is what stops the run producing an acceptance verdict.
+# Populating it is a one-time step on the binder-capable job: run the full matrix, read
+# coverage.info, and fill in the line, block and branch fields against the quoted source lines.
+# ------------------------------------------------------------------------------------
+#
+# RECORD FORMAT, '|'-separated:
+#   1 id         short stable name for the arm, used in the gate's output
+#   2 file       path suffix as it appears after SF: in the trace
+#   3 line       gcov line number     -- EMPTY until populated on a binder-capable host
+#   4 block      gcov block index     -- EMPTY until populated
+#   5 branch     gcov branch index    -- EMPTY until populated
+#   6 reacher    the invocation or unit test that drives this arm.  An arm with no named
+#                reacher is a DEFECT IN THE TEST SET, not a target to lower -- so every entry
+#                below has one, and a future entry without one is the finding rather than the
+#                gate's problem.
+#   7 status     required | unreachable
+#   8 source     the source line, quoted, so the coordinate can be re-derived
+# ====================================================================================
+readonly BRANCH_MANIFEST=(
+    # ---- GROUP 1: the selection helper's three arms and their log lines.
+    # Reached by invocations A, B and C -- one arm each, which is the whole reason the matrix
+    # has three L1 invocations rather than one.
+    "selection.aidl-selected|ccec/src/Driver.cpp||||invocation B|required|if (aidlBackEnd.isServiceAvailable()) {"
+    "selection.legacy-fallback|ccec/src/Driver.cpp||||invocations A and C|required|if (aidlBackEnd.isServiceAvailable()) {"
+    "selection.preflight-ok-no-service|ccec/src/Driver.cpp||||invocation C|required|if (DriverAidlImpl::isBinderPreflightOk()) {"
+    "selection.preflight-unavailable|ccec/src/Driver.cpp||||invocation A|required|if (DriverAidlImpl::isBinderPreflightOk()) {"
+
+    # ---- GROUP 2: halcompat's compatibility predicate, arm by arm.
+    # The template form is what the selection calls; the reject arms are only reachable
+    # IN-PROCESS, because a remote Bn* service answers metadata transactions from compiled-in
+    # constants and so cannot report a bad hash or a bad version at all.
+    "compat.reject-null|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|if (service == nullptr) {"
+    "compat.reject-empty-hash|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|if (hash.empty() || hash == \"-1\") {"
+    "compat.reject-minus-one-hash|rdk-halif-aidl/common/current/halcompat.h||||invocation C at factory level; unit test otherwise|required|if (hash.empty() || hash == \"-1\") {"
+    "compat.reject-notfrozen|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|if (hash == \"notfrozen\") {"
+    "compat.accept-exact|rdk-halif-aidl/common/current/halcompat.h||||invocation B; unit test|required|return detail::isCompatible(I::VERSION, service->getInterfaceVersion());"
+    "compat.accept-newer-same-major|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|&& serverVersion >= clientVersion);"
+    "compat.reject-cross-major|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|&& major(serverVersion) == major(clientVersion)"
+    "compat.reject-cross-era|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|: (era(serverVersion) == era(clientVersion)"
+
+    # ---- GROUP 2a: TWO ARMS THAT ARE UNREACHABLE BY CONSTRUCTION.  Recorded with their
+    # proofs so that nobody spends time hunting them, and NOT gated -- an unreachable arm
+    # cannot be covered and a gate that demanded it could never be satisfied.
+    #
+    # PROOF FOR BOTH.  IHdmiCec::VERSION is 1000.  Under the encoding
+    # era*100000 + major*1000 + minor*10 + bugfix that decodes to era 0, major 1.
+    #
+    # (1) OLDER-SAME-MAJOR IS AN EMPTY SET for this client.  A server value with era 0 and
+    #     major 1 satisfies v < 100000 and (v/1000) % 100 == 1, which for era 0 means
+    #     v/1000 == 1, i.e. v in [1000, 1999] -- and EVERY member of that range is >= 1000.
+    #     So "same era, same major, server older than client" has no members at all.
+    #     A server reporting 999 does NOT belong here: major(999) == 0, so it is rejected by
+    #     the CROSS-MAJOR condition, and labelling such a case "older same-major" would
+    #     mis-attribute which condition decided it.
+    # (2) THE ERA >= 1 TERNARY ARM is unreachable for this client, because
+    #     (era(server) >= 1 && era(client) >= 1) has era(client) == 0 as a conjunct and is
+    #     therefore false for every possible server value.
+    #
+    # WORTH KNOWING WHILE READING halcompat.h's OWN PROOFS: its
+    # static_assert(!isCompatible(3000, 2000), "era0 older rejected") is MISLABELLED.
+    # major(3000) == 3 and major(2000) == 2, so that case is decided by the major inequality
+    # and merely re-covers cross-major.  A genuine older-same-major call needs equal era AND
+    # equal major with a lower server -- detail::isCompatible(3020, 3000), for instance.
+    "compat.older-same-major|rdk-halif-aidl/common/current/halcompat.h||||UNREACHABLE: era-0/major-1 servers occupy [1000,1999], all >= VERSION 1000|unreachable|&& serverVersion >= clientVersion);"
+    "compat.era1-ordering|rdk-halif-aidl/common/current/halcompat.h||||UNREACHABLE: era(client) == 0 falsifies the conjunction for every server|unreachable|return (era(serverVersion) >= 1 && era(clientVersion) >= 1)"
+
+    # ---- GROUP 3: the bounded binder preflight.
+    # The POSITIVE arm needs a driver, so invocation B owns it; every negative arm is driven by
+    # a unit test calling the predicate with a driver path of the test's choosing, which is what
+    # makes them testable without rendering the runner's own driver unusable.
+    "preflight.positive|ccec/src/DriverAidlImpl.cpp||||invocation B|required|the preflight's all-checks-passed arm"
+    "preflight.node-absent|ccec/src/DriverAidlImpl.cpp||||unit test, DriverAidlPreflightTest|required|the driver-node existence check"
+    "preflight.node-unopenable|ccec/src/DriverAidlImpl.cpp||||unit test, DriverAidlPreflightTest|required|the driver-node open check"
+    "preflight.protocol-mismatch|ccec/src/DriverAidlImpl.cpp||||unit test, DriverAidlPreflightTest|required|the protocol-version equality check"
+    "preflight.handle-zero-timeout|ccec/src/DriverAidlImpl.cpp||||unit test, DriverAidlPreflightTest|required|the bounded wait for binder handle 0"
+
+    # ---- GROUP 4: the one-element address arrays, add and remove, all three outcomes each.
+    "addlogical.ok-true|ccec/src/DriverAidlImpl.cpp||||invocation B|required|addLogicalAddresses(one, &ok) succeeding"
+    "addlogical.ok-false|ccec/src/DriverAidlImpl.cpp||||invocation B|required|ok == false -> AddressNotAvailableException"
+    "addlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp||||invocation B|required|a non-ok binder Status -> IOException"
+    "removelogical.ok-true|ccec/src/DriverAidlImpl.cpp||||invocation B|required|removeLogicalAddresses(one, &ok) succeeding"
+    "removelogical.ok-false|ccec/src/DriverAidlImpl.cpp||||invocation B|required|ok == false -> logged at LOG_EXP and ignored"
+    "removelogical.status-not-ok|ccec/src/DriverAidlImpl.cpp||||invocation B|required|a non-ok binder Status -> logged and ignored"
+
+    # ---- GROUP 5: getLogicalAddresses, every cardinality plus the failure.
+    "getlogical.empty|ccec/src/DriverAidlImpl.cpp||||invocation B|required|an empty vector -> return 0"
+    "getlogical.exactly-one|ccec/src/DriverAidlImpl.cpp||||invocation B|required|exactly one entry -> return vec[0]"
+    "getlogical.more-than-one|ccec/src/DriverAidlImpl.cpp||||invocation B|required|vec.size() > 1 -> log the count, return vec[0]"
+    "getlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp||||invocation B|required|a non-ok binder Status -> return 0"
+
+    # ---- GROUP 6: the frame-length guard, both sides.  The over-length side is difference 1
+    # of the authorized observable differences, so both arms are evidence rather than trivia.
+    "framelen.within-contract|ccec/src/DriverAidlImpl.cpp||||invocation B|required|a frame at or below the 16-byte sendMessage contract"
+    "framelen.over-contract|ccec/src/DriverAidlImpl.cpp||||invocation B|required|an over-length frame -> IOException, never truncated"
+)
+
+# Set by apply_branch_gate and folded into apply_gate's own failure count, so the script keeps
+# ONE final verdict and one exit status rather than two gates racing to exit first.
+BRANCH_GATE_FAILURES=0
+
+# ------------------------------------------------------------------------------------
+# Print the BRDA records for one file suffix out of a trace, as "line block branch taken".
+#
+# Reads the trace once per file rather than once per manifest entry: several entries share a
+# file, and re-walking a trace for each of thirty-odd arms would turn a gate into a cost.
+# ------------------------------------------------------------------------------------
+branch_records_for_file() { # $1=trace  $2=SF path suffix
+    "$AWK_BIN" -v want="$2" '
+        /^SF:/ {
+            path = substr($0, 4)
+            # SUFFIX match anchored on the END of the path, with the manifest supplying enough
+            # leading directory components to be unambiguous.  Both halves matter and both were
+            # checked against a real trace: end-anchoring is what stops "ccec/src/Driver.cpp"
+            # matching "ccec/src/DriverAidlImpl.cpp" or "ccec/src/DriverImpl.cpp", and the
+            # directory components are what stop it matching "tests/L1Tests/ccec/test_Driver.cpp".
+            # A bare basename would satisfy neither.
+            infile = (index(path, want) > 0 && index(path, want) + length(want) - 1 == length(path))
+            next
+        }
+        /^end_of_record/ { infile = 0; next }
+        infile && /^BRDA:/ {
+            rec = substr($0, 6)
+            n = split(rec, f, ",")
+            if (n >= 4) print f[1], f[2], f[3], f[4]
+        }
+    ' "$1"
+}
+
+# ------------------------------------------------------------------------------------
+# THE BRANCH GATE.  Reads the UNFILTERED trace, per ONE TRACE, TWO CONSUMERS in the header:
+# some of the arms above live in halcompat.h, which the line gate's derivative keeps but which
+# any narrower filtering would remove.
+#
+# IT RUNS AFTER THE SUITE RESULTS AND AFTER THE LINE GATE'S INPUT IS PREPARED, and it records
+# its failures rather than exiting on them, so that apply_gate remains the single place a
+# verdict is issued.  Coverage is subordinate to functional passes: by the time this runs, every
+# invocation has already been run and held to its three checks, and a red matrix never reaches
+# here at all.
+# ------------------------------------------------------------------------------------
+apply_branch_gate() {
+    rule
+    log "branch-arm gate: checking the manifest's named arms against the UNFILTERED trace"
+    log "  trace: $RAW_TRACE"
+
+    [ -s "$RAW_TRACE" ] || die "the branch gate has no trace to read at $RAW_TRACE."
+
+    local record id file line block branch reacher status source
+    local required=0 unreachable=0 unpopulated=0 covered=0 zero_taken=0 absent=0 unexercisable=0
+    local -a zero_list=() absent_list=()
+
+    # One pass per distinct file, cached in a variable keyed by nothing more elaborate than the
+    # file we last read -- the manifest is grouped by file, so this is a single read per group.
+    local cached_file='' cached_records=''
+
+    for record in "${BRANCH_MANIFEST[@]}"; do
+        IFS='|' read -r id file line block branch reacher status source <<< "$record"
+
+        if [ "$status" = 'unreachable' ]; then
+            unreachable=$((unreachable + 1))
+            log "  UNREACHABLE  $id"
+            log "               $reacher"
+            continue
+        fi
+        required=$((required + 1))
+
+        if [ -z "$line" ] || [ -z "$block" ] || [ -z "$branch" ]; then
+            unpopulated=$((unpopulated + 1))
+            continue
+        fi
+
+        if [ "$file" != "$cached_file" ]; then
+            cached_records="$(branch_records_for_file "$RAW_TRACE" "$file")"
+            cached_file="$file"
+        fi
+
+        local taken
+        taken="$(printf '%s\n' "$cached_records" \
+                 | "$AWK_BIN" -v l="$line" -v b="$block" -v br="$branch" \
+                       '$1 == l && $2 == b && $3 == br { print $4; found = 1; exit }
+                        END { if (!found) print "ABSENT" }')"
+
+        case "$taken" in
+            ABSENT)
+                absent=$((absent + 1))
+                # The quoted source line is carried into the report, not just held in the
+                # manifest: a reader told an arm has moved needs the line to look for, and
+                # making them go and read the manifest to find it is a step this can save.
+                absent_list+=("$id  ($file:$line block $block branch $branch)")
+                absent_list+=("    manifest source: $source")
+                ;;
+            -)
+                # gcov's own judgement that the arc cannot be driven.  Recorded, not failed.
+                unexercisable=$((unexercisable + 1))
+                log "  UNEXERCISABLE  $id -- gcov reports '-' for this arc"
+                ;;
+            0)
+                zero_taken=$((zero_taken + 1))
+                zero_list+=("$id  ($file:$line block $block branch $branch)")
+                zero_list+=("    should be reached by: $reacher")
+                zero_list+=("    manifest source:     $source")
+                ;;
+            *)
+                covered=$((covered + 1))
+                ;;
+        esac
+    done
+
+    log "  manifest: $required required arm(s), $unreachable recorded unreachable by construction"
+
+    # ------------------------------------------------------------------------------------
+    # THE UNPOPULATED CASE.  It is neither a pass nor a failure of the TEST SET: it is this
+    # gate reporting that it could not do its job, which is the only honest thing to say when
+    # the coordinates it needs have never been read out of a real trace.
+    # ------------------------------------------------------------------------------------
+    if [ "$unpopulated" -gt 0 ]; then
+        warn "  $unpopulated of $required required arm(s) have NO COORDINATES in the manifest, so"
+        warn "  they were NOT checked.  This is not a pass and is not counted as one."
+        warn "  The coordinates come from a real unfiltered trace after a FULL five-invocation"
+        warn "  run, which a host with no binder driver cannot produce -- so they are shipped"
+        warn "  empty rather than guessed.  Populate them on the binder-capable job: run the"
+        warn "  whole matrix, then read $RAW_TRACE and fill in the line, block and branch"
+        warn "  fields of BRANCH_MANIFEST against the source line quoted in each entry."
+        note_advisory "the branch-arm gate did not run: $unpopulated of $required required arm(s) in
+       BRANCH_MANIFEST have no line/block/branch coordinates yet, so full branch coverage of the
+       selection and array-adaptation code is NOT established by this run.  The arm list and the
+       gate are in place; the coordinates are populated from a full five-invocation trace on a
+       binder-capable host."
+    fi
+
+    if [ "$unexercisable" -gt 0 ]; then
+        log "  $unexercisable mapped arc(s) reported '-' by gcov and are recorded as unexercisable"
+        log "    rather than failed: that is the compiler's view of its own control-flow graph,"
+        log "    not a statement about the tests."
+    fi
+
+    # ------------------------------------------------------------------------------------
+    # FAILURE CONDITION (b): a mapped arm that is not in the trace at all.
+    # Listed FIRST because it usually means the source moved, which changes what the reader
+    # should do next -- review the manifest against the source, rather than write a test.
+    # ------------------------------------------------------------------------------------
+    if [ "$absent" -gt 0 ]; then
+        warn "  $absent mapped arm(s) are ABSENT FROM THE TRACE ENTIRELY:"
+        printf '%s\n' "${absent_list[@]}" | sed 's/^/[run_coverage]      /' >&2
+        warn "  An arm that is not in the trace has either been DELETED from the source or has"
+        warn "  MOVED, and both matter: a deleted branch would otherwise make this gate greener"
+        warn "  rather than redder, which is why absence fails instead of being ignored."
+        warn "  Check the source lines quoted in BRANCH_MANIFEST for each id above, then either"
+        warn "  re-derive the coordinates or remove the entry with a reason."
+        BRANCH_GATE_FAILURES=$((BRANCH_GATE_FAILURES + absent))
+    fi
+
+    # ------------------------------------------------------------------------------------
+    # FAILURE CONDITION (a): a mapped arm present and never driven.
+    # ------------------------------------------------------------------------------------
+    if [ "$zero_taken" -gt 0 ]; then
+        warn "  $zero_taken mapped arm(s) were NEVER TAKEN:"
+        printf '%s\n' "${zero_list[@]}" | sed 's/^/[run_coverage]      /' >&2
+        warn "  Each names the invocation or test that is supposed to drive it.  Where that"
+        warn "  invocation was DEFERRED on this host, the arm is unmeasured for that reason and"
+        warn "  the deferral is the finding.  Where it RAN, the arm is a genuine gap and the"
+        warn "  answer is a test -- never a smaller manifest."
+        BRANCH_GATE_FAILURES=$((BRANCH_GATE_FAILURES + zero_taken))
+    fi
+
+    if [ "$BRANCH_GATE_FAILURES" -eq 0 ] && [ "$unpopulated" -eq 0 ]; then
+        log "  every one of the $required required arm(s) is present and taken at least once"
+    fi
+    log "  checked: $covered taken, $zero_taken never taken, $absent absent, $unpopulated unchecked"
+    return 0
+}
+
 apply_gate() {
     local failures=0 rc=0
 
     rule
     log "applying the >= ${COVERAGE_MIN}% line-coverage gate to the aggregate (lcov --fail-under-lines)"
-    lcov_run --summary "$FILTERED_TRACE" \
+    lcov_run --summary "$LINE_GATE_TRACE" \
         --fail-under-lines "$COVERAGE_MIN" \
         "${LCOV_CONFIG_ARGS[@]}" \
         "${LCOV_RC_ARGS[@]}" \
@@ -2889,7 +4775,7 @@ apply_gate() {
         # coverage, and reporting that as a coverage failure would be a lie.
         die "lcov rejected the gate invocation (exit 2), which is a command-line error and
        NOT a coverage verdict. Re-run the same command without >/dev/null to see it:
-           $LCOV_BIN --summary '$FILTERED_TRACE' --fail-under-lines $COVERAGE_MIN --rc branch_coverage=1
+           $LCOV_BIN --summary '$LINE_GATE_TRACE' --fail-under-lines $COVERAGE_MIN --rc branch_coverage=1
        lcov 2.x is required; 1.x has no --fail-under-lines at all."
     else
         warn "aggregate line coverage is BELOW ${COVERAGE_MIN}% (lcov exited $rc)"
@@ -2918,10 +4804,36 @@ apply_gate() {
         done
         warn "Their uncovered line numbers are enumerated in:"
         warn "    $UNCOVERED_TXT"
-        warn "Close each gap by ADDING TESTS. Never by adding an exclusion glob, never by"
-        warn "editing production source, and never by lowering the bar: the threshold is a"
-        warn "gate, not a filter. Where a line genuinely cannot be reached from a test-only"
-        warn "change, record it with its reason in the traceability report instead."
+        # A MISSING TEST AND A DEFERRED INVOCATION ARE DIFFERENT DIAGNOSES, and telling
+        # someone to write tests that already exist wastes exactly the reader whose time this
+        # script is meant to save.
+        #
+        # THE VERDICT DOES NOT CHANGE.  Below the bar still fails, and a deferral is never a
+        # licence to pass: the code really is unmeasured, whatever the reason.  What changes is
+        # only the ADVICE, because on a host that could not run the AIDL-selected invocations
+        # the AIDL back-end's source is unmeasured BY CONSTRUCTION -- the cases that cover it
+        # are written, are in the binary, and were skipped for want of a binder driver.  Adding
+        # tests would not move those figures by a line.
+        if [ -n "$INVOCATIONS_DEFERRED" ]; then
+            warn "READ THE DEFERRALS BEFORE READING THESE FIGURES.  Invocation(s)"
+            warn "  $INVOCATIONS_DEFERRED did not run on this host, so any target reached only by"
+            warn "  them is unmeasured HERE for that reason and not for want of a test.  The AIDL"
+            warn "  back-end and the selection helper are covered by cases that exist, are"
+            warn "  compiled into the binaries and were skipped -- so these numbers are a"
+            warn "  property of this HOST, not of the test set."
+            warn "  This still FAILS, and deliberately: unmeasured is unmeasured whatever the"
+            warn "  cause, and a run that excused itself here would be the one place a real gap"
+            warn "  could hide. Re-run the whole matrix on a binder-capable host before treating"
+            warn "  any figure above as this suite's coverage."
+            warn "  Do NOT respond to this by lowering the bar, by exempting a file, or by"
+            warn "  adding an exclusion glob. Nothing about a deferred invocation is fixed by"
+            warn "  changing what the gate looks at."
+        else
+            warn "Close each gap by ADDING TESTS. Never by adding an exclusion glob, never by"
+            warn "editing production source, and never by lowering the bar: the threshold is a"
+            warn "gate, not a filter. Where a line genuinely cannot be reached from a test-only"
+            warn "change, record it with its reason in the traceability report instead."
+        fi
         if [ "$COVERAGE_PER_FILE_GATE" -eq 1 ]; then
             warn "per-file gating is IN FORCE (the default), so the above fails this run."
             failures=$((failures + 1))
@@ -2938,9 +4850,20 @@ apply_gate() {
         log "  complete set of files below it, and each carries its reason in this script."
     fi
 
+    # THE BRANCH-ARM GATE'S VERDICT IS FOLDED IN HERE RATHER THAN ISSUED SEPARATELY, so that
+    # this function stays the one place a verdict is decided and the script keeps one exit
+    # status a caller can branch on.  It is counted AFTER the line gate, which is the required
+    # ordering: coverage is subordinate to functional passes, and within coverage the line bar
+    # is the acceptance criterion while the named-arm check is the evidence that the negative
+    # and corner-case tests actually landed.
+    if [ "$BRANCH_GATE_FAILURES" -ne 0 ]; then
+        warn "the branch-arm gate reported $BRANCH_GATE_FAILURES failing arm(s) (listed above)."
+        failures=$((failures + 1))
+    fi
+
     rule
     if [ "$failures" -ne 0 ]; then
-        local artifacts="$FILTERED_TRACE
+        local artifacts="$LINE_GATE_TRACE
            $PER_FILE_TSV
            $UNCOVERED_TXT"
         if [ "$DO_HTML" -eq 1 ]; then
@@ -2974,8 +4897,15 @@ apply_gate() {
 # main.  The order is deliberate and is the whole argument of the script:
 #   parse -> require the tools -> create the private lcov HOME -> name the tool
 #   versions -> resolve artifacts -> [build] -> require an instrumented, exercised tree ->
-#   [zero + run + verify] -> capture -> filter -> report HTML -> summarise -> per-file table
-#   -> gate.
+#   [zero ONCE + run the whole invocation matrix + verify EACH invocation] -> capture ONCE
+#   -> filter -> report HTML -> summarise -> per-file table -> gate.
+#
+# THE SUITE RESULTS COME BEFORE ANY COVERAGE NUMBER, and that ordering is a requirement
+# rather than an accident of layout: a coverage figure never substitutes for a passing
+# suite.  Every invocation is run and held to its three checks BEFORE a single counter is
+# captured, and the first one that fails ends the run with nothing captured at all -- so
+# there is no arrangement of these steps in which a coverage report can be produced from a
+# red or partial matrix.
 # The private HOME is created before the FIRST lcov invocation of the run, which is the
 # version banner, not the capture: lcov reads a home configuration on every invocation and one
 # it cannot parse breaks all of them.
@@ -3035,9 +4965,14 @@ main() {
 
     capture_coverage
     filter_coverage
+    filter_dependency_headers
     generate_html
     summarise_coverage
     per_file_report
+    # The branch-arm gate runs BEFORE apply_gate and records rather than exits, so that
+    # apply_gate remains the single place a verdict is issued.  By this point every invocation
+    # has already run and passed its three checks -- a red matrix never reaches either gate.
+    apply_branch_gate
     apply_gate
 }
 
