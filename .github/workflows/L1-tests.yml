@@ -1,5 +1,46 @@
 name: L1-tests
 
+# WHAT A GREEN TICK ON THIS JOB MEANS - AND WHAT IT DOES NOT.
+#
+# This job BUILDS EVERYTHING and RUNS INVOCATION A ONLY.
+#
+# It builds the whole AIDL/Binder migration: the Binder SDK, both AIDL client stub
+# snapshots, libRCEC with both HDMI CEC HAL back-ends compiled in, and all three test
+# binaries. Then it runs exactly one of the five invocations - A, with no AIDL service
+# reachable, which selects the LEGACY back-end.
+#
+# IT IS NOT DUAL-PATH EVIDENCE, and must not be read as any. Invocations B, C, D and E -
+# the ones that select the AIDL back-end, that exercise present-but-incompatible, and that
+# cross a real Binder transport - cannot run here at all: a hosted GitHub runner has no
+# Binder kernel driver and no servicemanager. Those belong to the binder-capable job in
+# aidl-path-tests.yml, which is the only place the full matrix and the branch gate live.
+#
+# What this job DOES prove, and both halves are worth having:
+#
+#   (a) REGRESSION EVIDENCE FOR THE LEGACY PATH. The pre-existing suite still passes with
+#       both back-ends compiled into libRCEC and the Binder libraries linked in - so the
+#       migration did not disturb the path every SOC uses today.
+#
+#   (b) THAT A DRIVERLESS HOST REACHES THE LEGACY BACK-END WITHOUT ABORTING. This is not a
+#       side effect; it is the one requirement a hosted runner is uniquely placed to
+#       demonstrate, because it NATURALLY exhibits the condition the preflight exists for.
+#       The pinned Binder stack patches its failed-driver check to be fatal on Linux, so
+#       code that reaches the service manager without a preflight would abort the process
+#       outright, and a missing context manager would otherwise block initialization
+#       indefinitely. "Falls back cleanly instead of aborting or hanging" is therefore
+#       measured here on real hardware that has no Binder driver, rather than argued. The
+#       "Verify the selected HAL back-end" step below is what turns that into a gate.
+#
+# A NOTE FOR THE REVIEWER ON FILE COUNT. The close-out check counts twenty-four in-submodule
+# paths. This directory contributes a twenty-fifth, aidl-path-tests-rootfs.sh: the QEMU
+# runner's root image is required to be built by a checked-in script, and the file table
+# never enumerated one. That extra path is authorised, not an out-of-scope change.
+#
+# Two other files mirror parts of this workflow and are kept in step with it deliberately:
+# the BUILD RECIPE comment in tests/L1Tests/run_coverage.sh, and the embedded Actions
+# example in UNIT_TEST_SETUP.md. This file is the source of truth for both, so a change to
+# the build commands here belongs in those two as well.
+
 on:
   push:
     branches:
@@ -33,6 +74,69 @@ jobs:
           - compiler: gcc
             coverage: without-coverage
 
+    # THE WHOLE OF THE STAGING CONTRACT FOR THE AIDL/BINDER BACK-END, IN ONE PLACE.
+    #
+    # libRCEC carries both HDMI CEC HAL back-ends in every build - the legacy in-process C
+    # ABI and the out-of-process com.rdk.hal.hdmicec AIDL HAL - and picks between them at
+    # run time. So these four are unconditional build inputs, not a variant: there is no
+    # matrix dimension over them and no --enable switch to turn either back-end off.
+    #
+    # They are the four names configure.ac declares with AC_ARG_VAR, spelled identically
+    # here, in the ./configure line below, and in tests/L1Tests/run_coverage.sh. configure
+    # DERIVES from them the four include roots, the two library directories, the four -l
+    # edges and the C++17 flag, and substitutes those into ccec/src/Makefile.am,
+    # tests/L1Tests/Makefile.am and tests/L2Tests/Makefile.am. One definition point is the
+    # point: a root reaching one consumer and not another is the failure this prevents.
+    #
+    # HALIF_LIB_DIR and BINDER_SDK_INCLUDE_DIR are configure.ac's split-staging overrides
+    # and both are genuinely needed for the layout the build scripts produce, rather than
+    # being belt-and-braces. build_modules.sh installs the stub libraries under
+    # out/target/lib/halif, which is NOT HALIF_PREFIX/lib/halif, so the derivation from
+    # HALIF_PREFIX alone would miss them; and the Binder headers land under out/build while
+    # the runtime lands under out/target, so the header root only resolves through
+    # BINDER_SDK_INCLUDE_DIR. The two values below are also exactly build_binder.sh's own
+    # defaults, so naming them here steers the SDK staging and the middleware build from
+    # the same pair rather than leaving the two to agree by luck.
+    #
+    # LD_LIBRARY_PATH is set here for one reason: the set of libraries that must be
+    # LOADABLE is larger than the set libRCEC names. libbinder drags liblog, libbase and
+    # libcutils along behind it, and none of the three is a middleware link edge, so
+    # nothing in the build would ever mention them. Setting it at job level also means the
+    # three existing run steps below keep their own inline
+    # "LD_LIBRARY_PATH=<gtest>/lib:${LD_LIBRARY_PATH}" prefixes UNCHANGED - those prepend
+    # to this value rather than replacing it, so GoogleTest still resolves first and the
+    # AIDL and Binder directories are simply reachable behind it.
+    env:
+      HALIF_PREFIX: ${{ github.workspace }}/rdk-halif-aidl
+      HALIF_LIB_DIR: ${{ github.workspace }}/rdk-halif-aidl/out/target/lib/halif
+      BINDER_SDK_DIR: ${{ github.workspace }}/rdk-halif-aidl/out/target
+      BINDER_SDK_INCLUDE_DIR: ${{ github.workspace }}/rdk-halif-aidl/out/build
+      LD_LIBRARY_PATH: ${{ github.workspace }}/install/usr/lib:${{ github.workspace }}/rdk-halif-aidl/out/target/lib/halif:${{ github.workspace }}/rdk-halif-aidl/out/target/lib/binder
+      # THE INVOCATION-A FILTER. NEGATIVE, AND NOT OPTIONAL.
+      #
+      # The L1 binary registers the pre-existing cases plus the AIDL contract suite, and
+      # two of that suite's fixtures - DriverAidlSessionTest and DriverAidlTransmitTest -
+      # require the AIDL back-end to be the RESOLVED one, which means invocation B on a
+      # host that has a Binder driver and a running service manager. The selection resolves
+      # once per process inside LibCCEC::init, so a fixture cannot opt into a different
+      # back-end from its own SetUp; under invocation A those two fail loudly instead,
+      # naming the mode they need. That is their design, chosen over GTEST_SKIP precisely
+      # so a skipped arm cannot be mistaken for a passing one in an aggregate count. This
+      # filter is therefore what makes invocation A green, and MEASURED, not assumed:
+      # without it the run reports 31 failures on this exact tree.
+      #
+      # The filter is taken verbatim from the FIXTURE MANIFEST in
+      # tests/L1Tests/ccec/test_DriverAidl.cpp, which is where it is maintained; do not
+      # re-derive it here. It is spelled as GTEST_FILTER rather than as a --gtest_filter
+      # argument for one reason: an environment variable reaches EVERY way this job starts
+      # the binary, including the make-driven valgrind run and the subshell in its
+      # fallback arm, which an inline assignment in front of `make` does not.
+      #
+      # No expected case count is asserted anywhere in this job. The count moves whenever a
+      # test is added, and comparing an executed count against the registered inventory is
+      # run_coverage.sh's job, not this workflow's.
+      GTEST_FILTER: "-DriverAidlSessionTest.*:DriverAidlTransmitTest.*"
+
     steps:
       - name: Set up CMake
         uses: jwlawson/actions-setup-cmake@v1.13
@@ -58,6 +162,69 @@ jobs:
           path: googletest
           ref: v1.15.0
 
+      # rdk-halif-aidl supplies the com.rdk.hal.hdmicec AIDL/Binder HAL that libRCEC now
+      # carries a second back-end for. It is a SIBLING SUBMODULE OF THE SUPERPROJECT, not
+      # of hdmicec: hdmicec has no .gitmodules of its own, and "Checkout hdmicec" above
+      # fetches no submodules, so nothing brings this tree in implicitly. It has to be
+      # checked out explicitly, here.
+      #
+      # The ref is a COMMIT SHA on purpose, not a branch. It is the superproject gitlink
+      # for rdk-halif-aidl - exactly the content this migration was developed and
+      # validated against - so the generated stubs, the frozen common 0.2.0.0 import and
+      # halcompat.h stay on the one combination that was tested together. A branch name
+      # would not do that, and there is no single obvious branch to pick: the sources
+      # disagree (.gitmodules says blitzy, the workspace README table says develop, a
+      # fresh clone reports main), so any of them would make this job's result depend on
+      # whichever moved last.
+      #
+      # No token is named here. The step relies on the same default checkout credentials
+      # the two steps above already use; a private-organisation checkout would need one
+      # supplied by the platform owner.
+      - name: Checkout rdk-halif-aidl
+        uses: actions/checkout@v3
+        with:
+          repository: Blitzy-Sky/rdk-halif-aidl
+          path: rdk-halif-aidl
+          ref: 3ff17d171a46805decc7408fa69f545c80226d4b
+
+      # THE SPARSE-CHECKOUT HAZARD, caught here instead of 150 lines further down.
+      #
+      # rdk-halif-aidl is documented as sparse-checked-out to hdmicec/ only. Two of the
+      # four include roots the AIDL back-end compiles against live OUTSIDE that path,
+      # under common/: the frozen common 0.2.0.0 import, and common/current - which is
+      # the only place halcompat.h exists anywhere in the tree. actions/checkout is full
+      # by default and the step above deliberately does not use its sparse-checkout:
+      # input, so all four roots should be present. This step proves that rather than
+      # assuming it.
+      #
+      # Without it the failure surfaces much later as "halcompat.h: No such file or
+      # directory" from inside a configure probe or a DriverAidlImpl.cpp compilation - a
+      # symptom that reads like a broken build rather than an incomplete checkout. Three
+      # cheap tests turn it into one named line. Every missing root is reported before
+      # the step exits, so one run names them all.
+      - name: Verify rdk-halif-aidl source include roots
+        run: |
+          set -euo pipefail
+          aidl="$GITHUB_WORKSPACE/rdk-halif-aidl"
+          rc=0
+          if [ ! -f "$aidl/common/current/halcompat.h" ]; then
+            echo "::error::halcompat.h not found at $aidl/common/current/halcompat.h - it is the only source of the AIDL service-lookup and version-compatibility helpers, and it sits outside the hdmicec/-only sparse checkout. Materialise common/ (git sparse-checkout add common) or take a full checkout."
+            rc=1
+          fi
+          if [ ! -d "$aidl/common/0.2.0.0/include" ]; then
+            echo "::error::the frozen common 0.2.0.0 include root not found at $aidl/common/0.2.0.0/include - this is the ABI the hdmicec 0.1.0.0 snapshot was generated against, and it also sits outside the hdmicec/-only sparse checkout."
+            rc=1
+          fi
+          if [ ! -d "$aidl/hdmicec/0.1.0.0/include" ]; then
+            echo "::error::the generated AIDL stub include root not found at $aidl/hdmicec/0.1.0.0/include - the com/rdk/hal/hdmicec client stubs and Bn* server bases are compiled from it."
+            rc=1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "rdk-halif-aidl checkout is incomplete; see the errors above." >&2
+            exit 1
+          fi
+          echo "rdk-halif-aidl source include roots present at $aidl"
+
       - name: Build googletest
         run: >
           cmake -G Ninja
@@ -72,6 +239,175 @@ jobs:
           cmake --build build/googletest -j8
           &&
           cmake --install build/googletest
+
+      # TWO CMAKE INSTALLATIONS, AND WHY BOTH HAVE TO STAY.
+      #
+      # The 3.16.x pinned by "Set up CMake" above must remain what a bare `cmake` resolves
+      # to for the rest of this job - 3.20 and later break the plugin test-library
+      # configure, which is the whole reason it is pinned. The Binder SDK needs the
+      # opposite: linux_binder_idl 2.6.0 documents CMake 3.22.1 or later as its floor.
+      #
+      # Reaching the newer one by absolute path is NOT possible here. build_binder.sh
+      # invokes a bare `cmake` at four sites and build_modules.sh at five, and neither
+      # script offers an override - no CMAKE_BIN, no CMAKE_COMMAND, no `command -v cmake`
+      # indirection. The newer one is therefore reached by a PATH PREPEND SCOPED TO THE TWO
+      # STEPS THAT NEED IT, and the job-wide PATH is never touched. Where this workflow
+      # calls cmake itself, as the googletest build above does, the pinned one is used and
+      # no prepend appears. Please do not "simplify" this into a single CMake.
+      #
+      # The candidate is MEASURED against the floor, not assumed to meet it: on
+      # ubuntu-22.04 the archive cmake apt-installed above is expected to be 3.22.1 -
+      # exactly the floor - but expected is not measured, and the expectation would rot
+      # silently. If no installed candidate qualifies, a CMake pinned to the floor is
+      # fetched into a private prefix under the workspace and that is prepended instead.
+      - name: Resolve the CMake installations
+        run: |
+          set -euo pipefail
+          CMAKE_FLOOR=3.22.1
+
+          # True when $2 is at least $1, comparing version-wise rather than lexically.
+          at_least() {
+            [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$1" ]
+          }
+          cmake_version_of() {
+            "$1" --version 2>/dev/null | head -n 1 | awk '{ print $3 }'
+          }
+
+          pinned_cmake="$(command -v cmake)"
+          pinned_version="$(cmake_version_of "$pinned_cmake")"
+          echo "job-wide cmake : $pinned_cmake ($pinned_version)"
+          case "$pinned_version" in
+            3.16.*) ;;
+            *)
+              echo "::error::the job-wide cmake is $pinned_version, but the 'Set up CMake' step pins 3.16.x and the rest of this job depends on that. Either the pin changed or something later prepended a different cmake to PATH."
+              exit 1
+              ;;
+          esac
+
+          newer_cmake=""
+          newer_version=""
+          for candidate in /usr/bin/cmake /usr/local/bin/cmake; do
+            [ -x "$candidate" ] || continue
+            candidate_version="$(cmake_version_of "$candidate")"
+            [ -n "$candidate_version" ] || continue
+            echo "candidate     : $candidate ($candidate_version)"
+            if at_least "$CMAKE_FLOOR" "$candidate_version"; then
+              newer_cmake="$candidate"
+              newer_version="$candidate_version"
+              break
+            fi
+          done
+
+          if [ -z "$newer_cmake" ]; then
+            echo "no installed cmake satisfies the $CMAKE_FLOOR floor; fetching one into a private prefix"
+            private_prefix="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_FLOOR"
+            mkdir -p "$private_prefix"
+            curl -fsSL "https://github.com/Kitware/CMake/releases/download/v$CMAKE_FLOOR/cmake-$CMAKE_FLOOR-linux-x86_64.tar.gz" \
+              | tar -xz -C "$private_prefix" --strip-components=1
+            newer_cmake="$private_prefix/bin/cmake"
+            newer_version="$(cmake_version_of "$newer_cmake")"
+            if ! at_least "$CMAKE_FLOOR" "$newer_version"; then
+              echo "::error::the fetched cmake reports '$newer_version', which does not satisfy the $CMAKE_FLOOR floor the Binder SDK documents."
+              exit 1
+            fi
+          fi
+
+          echo "Binder SDK cmake: $newer_cmake ($newer_version), used only through a step-scoped PATH prepend"
+          echo "AIDL_CMAKE_BIN_DIR=$(dirname "$newer_cmake")" >> "$GITHUB_ENV"
+
+      # THE BINDER SDK, at the revision rdk-halif-aidl pins.
+      #
+      # BINDER_VERSION is deliberately NOT set. build_binder.sh takes the first
+      # non-comment line of binder_sdk.version and falls back to a hardcoded value only
+      # when that file cannot be read, so the committed pin is what governs; the older
+      # version still advertised in the script's own --help text is stale. Setting
+      # BINDER_VERSION here would silently override the pin that keeps the committed
+      # generated C++ matched to the generator that produced it, which is the one thing
+      # this job must not do quietly.
+      #
+      # Staging goes to the script's own defaults, which the job-level environment above
+      # names explicitly: the runtime under out/target and the headers under out/build.
+      # .sdk_ready is the script's completion marker, so asserting it catches a
+      # half-finished SDK; because the script short-circuits on the marker, the step is
+      # idempotent and safe to re-run.
+      - name: Build the Binder SDK
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/rdk-halif-aidl"
+          PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_binder.sh
+          if [ ! -f "$BINDER_SDK_DIR/.sdk_ready" ]; then
+            echo "::error::build_binder.sh returned success but left no $BINDER_SDK_DIR/.sdk_ready marker, so the Binder SDK is incomplete."
+            exit 1
+          fi
+          echo "Binder SDK staged at $BINDER_SDK_DIR (.sdk_ready present)"
+
+      # THE TWO AIDL CLIENT STUB SNAPSHOTS.
+      #
+      # common is built FIRST because build_modules.sh pre-checks that each dependency's
+      # shared object already exists before it configures a snapshot, and hdmicec 0.1.0.0
+      # depends on common. Reversing these two fails on a missing dependency, not on a
+      # link error.
+      #
+      # common is pinned at 0.2.0.0 AND MUST STAY THERE. It is deliberately not the newest
+      # common release: 0.2.0.0 is the ABI the released hdmicec 0.1.0.0 snapshot was
+      # generated and pinned against - that snapshot's own CMakeLists links
+      # common-v0.2.0.0-cpp and includes common/0.2.0.0/include - so building or linking a
+      # newer common would put a different ABI underneath pre-generated code compiled
+      # against the older headers. This is precisely the line a later reader will want to
+      # bump; bumping it alone is what breaks.
+      #
+      # No AIDL compiler is involved. Both snapshots ship committed pre-generated C++ and
+      # these are compile-only builds.
+      - name: Build the AIDL client stub snapshots
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/rdk-halif-aidl"
+          PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_modules.sh common --version 0.2.0.0
+          PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_modules.sh hdmicec --version 0.1.0.0
+          ls -l "$HALIF_LIB_DIR"
+
+      # EVERY -I AND -L THE NEXT STEP DEPENDS ON, ASSERTED BEFORE IT IS USED.
+      #
+      # configure.ac derives all six from the two staging prefixes and, for four of them,
+      # falls back to "relying on the ambient CPPFLAGS/LDFLAGS" when a path does not
+      # resolve. That fallback is right for a sysroot build and wrong to depend on here: a
+      # staging layout that has moved would otherwise produce a configure that quietly
+      # omits a root, and the first visible symptom would be a compile error deep inside
+      # DriverAidlImpl.cpp or a library that silently carries only one back-end.
+      #
+      # The two stub libraries are checked BY NAME rather than by directory, because the
+      # name is the only thing that distinguishes the pinned common 0.2.0.0 ABI from a
+      # newer one that would configure and link just as happily.
+      #
+      # These are the SOURCE-TREE include roots, matching what configure.ac and the three
+      # Makefile.am files use. build_modules.sh also stages copies of the generated
+      # headers under out/build/include/<comp>/<ver>/include; those are not what the
+      # middleware compiles against and are deliberately not named here.
+      - name: Verify the staged AIDL and Binder roots
+        run: |
+          set -euo pipefail
+          rc=0
+          require() {
+            if [ -e "$2" ]; then
+              printf '  %-2s %s\n' "$1" "$2"
+            else
+              echo "::error::$1 target missing: $2 ($3)"
+              rc=1
+            fi
+          }
+          require -I "$HALIF_PREFIX/hdmicec/0.1.0.0/include" "the generated com/rdk/hal/hdmicec client stubs and Bn* server bases"
+          require -I "$HALIF_PREFIX/common/0.2.0.0/include"  "com/rdk/hal/PropertyValue.h, the frozen import the hdmicec snapshot was generated against"
+          require -I "$HALIF_PREFIX/common/current"          "halcompat.h, the only source of the service-lookup and compatibility helpers"
+          require -I "$BINDER_SDK_INCLUDE_DIR/include/binder_sdk" "the Binder SDK headers the generated stubs include - binder/, utils/, android-base/"
+          require -L "$HALIF_LIB_DIR"                        "libhdmicec-v0.1.0.0-cpp and libcommon-v0.2.0.0-cpp"
+          require -L "$BINDER_SDK_DIR/lib/binder"            "libbinder and libutils, plus the transitive closure that must be loadable"
+          require -l "$HALIF_LIB_DIR/libcommon-v0.2.0.0-cpp.so"  "the pinned common ABI; a newer common release is not a substitute"
+          require -l "$HALIF_LIB_DIR/libhdmicec-v0.1.0.0-cpp.so" "the generated hdmicec client stub library"
+          if [ "$rc" -ne 0 ]; then
+            echo "the AIDL/Binder staging layout is not what the build expects; see the errors above." >&2
+            exit 1
+          fi
+          echo "all AIDL/Binder include and library roots present"
 
       - name: Generate stub headers
         # Empty headers to mute errors
@@ -92,6 +428,40 @@ jobs:
           &&
           ln -s ../../../mocks/hdmicec/hdmi_cec_driver.h ccec/drivers/hdmi_cec_driver.h
           
+      # THREE ADDITIONS TO THIS STEP, ALL STRICTLY ADDITIVE.
+      #
+      # 1. The four AIDL/Binder include roots join CPPFLAGS and the two library
+      #    directories join LDFLAGS, each derived from the job-level staging prefixes so
+      #    there is one place that decides. configure.ac derives the same set itself from
+      #    the four prefix arguments below, and for several of them falls back to "relying
+      #    on the ambient CPPFLAGS/LDFLAGS" - so passing them here is what that fallback
+      #    is for, not duplication. Nothing that was already in these three variables is
+      #    removed: the mocks, stubs and GoogleTest roots stay, and so do
+      #    -fprofile-arcs -ftest-coverage in both LDFLAGS and CXXFLAGS, without which the
+      #    coverage step further down has no counters to read.
+      #
+      # 2. The four staging prefixes are passed to ./configure by the same names
+      #    configure.ac declares with AC_ARG_VAR and that tests/L1Tests/run_coverage.sh
+      #    passes. --enable-l1tests is untouched, and nothing here is conditional: there
+      #    is no --enable-aidl to match, because both HAL back-ends are compiled into
+      #    libRCEC for every SOC vendor and the choice between them is made at run time.
+      #
+      # 3. A THIRD MAKE PASS for the L2 tier. The root `make all` recurses into osal and
+      #    ccec only - Makefile.am sets SUBDIRS = osal ccec - so it builds no test binary
+      #    at all, which is why the L1 pass already exists as its own command. Without the
+      #    L2 pass the L2 runner and the out-of-process fake service host are never built.
+      #    It is spelled `make -C tests/L2Tests all`, matching the recipe in
+      #    run_coverage.sh so this workflow and that script do not drift; the pre-existing
+      #    L1 line is left exactly as it was and the cd back to the top of the submodule is
+      #    what makes the relative -C path resolve.
+      #
+      # The dialect is NOT set here. -std=c++17 belongs to ccec/src/Makefile.am and to both
+      # test Makefile.am files, and configure.ac probes for it so that a toolchain with an
+      # older default fails at configure time rather than part-way through a compile. The
+      # requirement is not a preference: halcompat.h opens its namespace as
+      # `namespace com::rdk::hal::halcompat {`, a nested-namespace definition that does not
+      # compile as C++14 at all, and the generated headers declare std::optional
+      # parameters.
       - name: Build hdmicec
         run: >
           cd $GITHUB_WORKSPACE/hdmicec
@@ -100,27 +470,224 @@ jobs:
           &&
           CPPFLAGS="-I$GITHUB_WORKSPACE/hdmicec/mocks
           -I$GITHUB_WORKSPACE/hdmicec/stubs
-          -I$GITHUB_WORKSPACE/install/usr/include"
+          -I$GITHUB_WORKSPACE/install/usr/include
+          -I$HALIF_PREFIX/hdmicec/0.1.0.0/include
+          -I$HALIF_PREFIX/common/0.2.0.0/include
+          -I$HALIF_PREFIX/common/current
+          -I$BINDER_SDK_INCLUDE_DIR/include/binder_sdk"
           LDFLAGS="-L$GITHUB_WORKSPACE/install/usr/lib
+          -L$HALIF_LIB_DIR
+          -L$BINDER_SDK_DIR/lib/binder
           -fprofile-arcs -ftest-coverage"
           CXXFLAGS="-fprofile-arcs -ftest-coverage"
           ./configure --enable-l1tests
+          HALIF_PREFIX="$HALIF_PREFIX"
+          HALIF_LIB_DIR="$HALIF_LIB_DIR"
+          BINDER_SDK_DIR="$BINDER_SDK_DIR"
+          BINDER_SDK_INCLUDE_DIR="$BINDER_SDK_INCLUDE_DIR"
           &&
           make -j$(nproc) all
           &&
           cd tests/L1Tests && make all
+          &&
+          cd "$GITHUB_WORKSPACE/hdmicec" && make -C tests/L2Tests all
+
+      # THE LOADER CLOSURE, MEASURED RATHER THAN INFERRED.
+      #
+      # libRCEC declares four AIDL/Binder link edges, but the set that has to be LOADABLE
+      # is both larger and differently shaped, and `readelf -d` alone would report a
+      # healthy-looking library whose closure does not resolve. Two measured facts about
+      # this build are why the checks below are written the way they are:
+      #
+      #   * libcommon-v0.2.0.0-cpp is NOT among libRCEC's own DT_NEEDED entries. It is a
+      #     named link edge, but no middleware symbol references it directly, so
+      #     --as-needed drops it; it reaches the process through the hdmicec stub library
+      #     instead. It is required in the CLOSURE, and that is where it is checked.
+      #   * libcutils_sockets is staged beside the rest and is NOT reachable from libRCEC
+      #     at all - not directly, and not through libcutils, whose own DT_NEEDED names
+      #     only libbase and liblog. Asserting it appears in this closure would assert
+      #     something untrue, so what is checked is what is actually required of it: that
+      #     it is staged and loadable in its own right.
+      #
+      # Each expected library must also resolve INSIDE the staged tree, so that an
+      # unrelated system copy cannot quietly satisfy the link and leave the job green.
+      #
+      # SCOPE, stated so no more is read into a pass than it earns: this is the
+      # AUTOTOOLS-BUILT library, and this job validates the Autotools path only. It cannot
+      # check the hand-written RDK build of the same library, because ccec/src/Makefile is
+      # listed in configure.ac's AC_CONFIG_FILES and the ./configure above has already
+      # overwritten it with Automake output. That overwrite is long-standing behaviour and
+      # is not something to repair here.
+      - name: Verify the AIDL and Binder loader closure
+        run: |
+          set -euo pipefail
+          lib="$GITHUB_WORKSPACE/hdmicec/ccec/src/.libs/libRCEC.so"
+          if [ ! -f "$lib" ]; then
+            echo "::error::$lib was not built, so the AIDL/Binder link edges cannot be verified."
+            exit 1
+          fi
+
+          echo "--- readelf -d: the direct edges libRCEC declares"
+          readelf -d "$lib" | grep NEEDED
+          echo "--- ldd: the whole closure the loader has to resolve"
+          ldd "$lib"
+
+          rc=0
+          closure="$(mktemp)"
+          ldd "$lib" | awk '$2 == "=>" { print $1, $3 }' > "$closure"
+          if ldd "$lib" | grep -q 'not found'; then
+            echo "::error::libRCEC.so has unresolved dependencies - see the ldd output above. Every AIDL and Binder library, and the whole of libbinder's own closure, has to be staged and on the loader path."
+            rc=1
+          fi
+
+          for entry in \
+            "libhdmicec-v0.1.0.0-cpp.so=$HALIF_LIB_DIR" \
+            "libcommon-v0.2.0.0-cpp.so=$HALIF_LIB_DIR" \
+            "libbinder.so=$BINDER_SDK_DIR/lib/binder" \
+            "libutils.so=$BINDER_SDK_DIR/lib/binder" \
+            "libcutils.so=$BINDER_SDK_DIR/lib/binder" \
+            "libbase.so=$BINDER_SDK_DIR/lib/binder" \
+            "liblog.so=$BINDER_SDK_DIR/lib/binder"; do
+            soname="${entry%%=*}"
+            expected="${entry#*=}"
+            resolved="$(awk -v n="$soname" '$1 == n { print $2 }' "$closure")"
+            case "$resolved" in
+              "$expected"/*)
+                printf '  ok       %-28s -> %s\n' "$soname" "$resolved"
+                ;;
+              "")
+                echo "::error::$soname is absent from libRCEC.so's loader closure. Either the AIDL back-end was not linked in or the Binder SDK staging has moved."
+                rc=1
+                ;;
+              *)
+                echo "::error::$soname resolved to '$resolved', which is outside the staged $expected. An unrelated copy must not satisfy this dependency."
+                rc=1
+                ;;
+            esac
+          done
+          rm -f "$closure"
+
+          sockets="$BINDER_SDK_DIR/lib/binder/libcutils_sockets.so"
+          if [ ! -f "$sockets" ]; then
+            echo "::error::libcutils_sockets.so is not staged at $sockets. It is part of the Binder SDK runtime closure and must be present even though nothing in libRCEC reaches it."
+            rc=1
+          elif ldd "$sockets" | grep -q 'not found'; then
+            echo "::error::libcutils_sockets.so is staged but its own dependencies do not resolve:"
+            ldd "$sockets"
+            rc=1
+          else
+            printf '  ok       %-28s -> %s (staged and loadable in its own right)\n' "libcutils_sockets.so" "$sockets"
+          fi
+
+          if [ "$rc" -ne 0 ]; then
+            echo "the AIDL/Binder loader closure is incomplete; see the errors above." >&2
+            exit 1
+          fi
+          echo "libRCEC.so resolves its whole AIDL/Binder closure against the staged tree"
+
+      # INVOCATION A, AND THE PROOF THAT IT IS INVOCATION A.
+      #
+      # This is the step that discharges proof (b) at the top of this file. It runs the
+      # suite with its output captured and then gates on all of: the run succeeded; it was
+      # not killed by a signal; the selected-path line names the LEGACY back-end; it does
+      # NOT name the AIDL one; and the Binder stack's fatal failed-driver message never
+      # appeared. The last three are what make this a statement about the SELECTION rather
+      # than just another green test run.
+      #
+      # It exists as its own step rather than as a pipe bolted onto the runs below,
+      # because those two carry a `|| ( ... )` fallback whose exit-status semantics a pipe
+      # would silently change - and because a captured log is the artifact this evidence
+      # has to leave behind.
+      #
+      # The back-end is observed through the log line the factory emits, not through any
+      # introspection API: none was added, deliberately. The line is worded unlike the
+      # fallback-reason lines around it, so one grep yields exactly one hit per process,
+      # and it is emitted at LOG_INFO, which is the default level.
+      #
+      # The job-level GTEST_FILTER applies here too, so this runs the same set of cases the
+      # two steps below do - the invocation-A selection, not the whole binary.
+      - name: Verify the selected HAL back-end (invocation A, legacy)
+        id: verify_back_end
+        run: |
+          set -uo pipefail
+          cd "$GITHUB_WORKSPACE/hdmicec/tests/L1Tests"
+          log="$GITHUB_WORKSPACE/selected_back_end_invocation_A.log"
+
+          # absent registers no AIDL service, so the preflight finds no usable Binder
+          # transport and the factory must fall back to the legacy back-end. An
+          # unrecognised value is a hard failure in the harness rather than a quiet
+          # downgrade to this mode, which is what makes the assertions below meaningful.
+          set +e
+          CEC_TEST_AIDL_MODE=absent \
+          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/install/usr/lib:${LD_LIBRARY_PATH:-}" \
+            ./run_L1Tests --gtest_print_time=1 > "$log" 2>&1
+          status=$?
+          set -e
+          cat "$log"
+
+          rc=0
+          if [ "$status" -ne 0 ]; then
+            echo "::error::run_L1Tests exited $status under CEC_TEST_AIDL_MODE=absent. On a host with no Binder driver the legacy back-end must be selected and the whole suite must pass."
+            rc=1
+          fi
+          if [ "$status" -ge 128 ]; then
+            echo "::error::run_L1Tests terminated on signal $((status - 128)). An abort here is the specific failure the preflight exists to prevent: reaching the Binder service manager on a host with no driver is fatal in the pinned stack, so this must never happen."
+            rc=1
+          fi
+          if grep -q 'HDMI CEC HAL back-end selected : legacy' "$log"; then
+            echo "  ok  the factory selected the legacy back-end and said so"
+          else
+            echo "::error::the log carries no 'HDMI CEC HAL back-end selected : legacy' line, so this run did not demonstrably fall back to the legacy back-end."
+            rc=1
+          fi
+          if grep -q 'HDMI CEC HAL back-end selected : AIDL' "$log"; then
+            echo "::error::the AIDL back-end was selected, which is impossible on a runner with no Binder driver and means the selection is not reading the platform it is on."
+            rc=1
+          fi
+          # Matched on the driver message alone, deliberately narrowly: a bare
+          # "Terminating" would also match ordinary log text. An abort that produced no
+          # message at all is caught by the signal check above instead.
+          if grep -qE 'Binder driver .* could not be opened' "$log"; then
+            echo "::error::the Binder stack's fatal failed-driver path was reached. The preflight must decide that the transport is unavailable BEFORE anything opens the driver."
+            rc=1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "invocation A did not behave as a driverless host must; see the errors above." >&2
+            exit 1
+          fi
+
+      # Evidence for proof (b) gets its own upload, so that a missing log is an error
+      # rather than a shrug. It is deliberately NOT appended to the mixed-path upload at
+      # the end of this job, whose if-no-files-found MUST stay 'warn' - see the comment
+      # there.
+      - name: Upload selected back-end log
+        if: ${{ always() && !env.ACT && steps.verify_back_end.conclusion != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: selected-back-end-L1-hdmicec-${{ matrix.compiler }}-${{ matrix.coverage }}
+          path: selected_back_end_invocation_A.log
+          if-no-files-found: error
 
       - name: List available tests
         run: >
           cd $GITHUB_WORKSPACE/hdmicec/tests/L1Tests
           &&
+          CEC_TEST_AIDL_MODE=absent
           LD_LIBRARY_PATH=$GITHUB_WORKSPACE/install/usr/lib:${LD_LIBRARY_PATH}
           ./run_L1Tests --gtest_list_tests
 
+      # CEC_TEST_AIDL_MODE=absent is invocation A: the harness registers no AIDL service,
+      # the preflight finds no usable Binder transport, and the legacy back-end is
+      # selected - so all of the pre-existing cases run exactly as they did before this
+      # migration. Unset means absent too, which is why the valgrind fallback arm below
+      # still runs on the legacy back-end even though a `VAR=x cmd || ( ... )` assignment
+      # does not reach the subshell. The invocation-A case filter is not repeated here: it
+      # arrives from the job-level GTEST_FILTER, which does reach that subshell.
       - name: Run L1 Tests without valgrind
         run: >
           cd $GITHUB_WORKSPACE/hdmicec/tests/L1Tests
           &&
+          CEC_TEST_AIDL_MODE=absent
           LD_LIBRARY_PATH=$GITHUB_WORKSPACE/install/usr/lib:${LD_LIBRARY_PATH}
           GTEST_OUTPUT="json:$GITHUB_WORKSPACE/rdkL1TestResults.json"
           ./run_L1Tests --gtest_print_time=1 --gtest_output=json:$GITHUB_WORKSPACE/rdkL1TestResults.json || 
@@ -133,6 +700,7 @@ jobs:
         run: >
           cd $GITHUB_WORKSPACE/hdmicec/tests/L1Tests
           &&
+          CEC_TEST_AIDL_MODE=absent
           LD_LIBRARY_PATH=$GITHUB_WORKSPACE/install/usr/lib:${LD_LIBRARY_PATH}
           GTEST_OUTPUT="json:$GITHUB_WORKSPACE/rdkL1TestResults.json"
           make check-valgrind || (
@@ -147,6 +715,22 @@ jobs:
           &&
           cp -rf $GITHUB_WORKSPACE/rdkL1TestResults.json $GITHUB_WORKSPACE/rdkL1TestResultsWithValgrind.json
 
+      # TWO GLOBS ADDED to the removal list below, and nothing else about this step
+      # changes. The AIDL include roots mean gcov can now attribute records to header-only
+      # code it finds there - halcompat.h's templates, the generated Bp*/Bn* inline
+      # definitions, the Binder SDK headers - which would surface third-party entries in
+      # this job's HTML report. Removing them is the same category as the '*/googletest/*'
+      # entry that is already here.
+      #
+      # '*/ccec/src/*' is NEVER removed: that is where both back-ends and the selection
+      # live, and it is the whole subject of the report.
+      #
+      # This step keeps its own lcov -c / lcov -r / genhtml shape and does not become a
+      # call to run_coverage.sh. That script owns a different and larger job - the
+      # five-invocation matrix, one capture read as two traces, and a per-branch gate -
+      # and none of it belongs in a workflow that runs a single invocation. Plain lcov -c,
+      # -r and genhtml also work on lcov 1.x, so the lcov apt-installed above is enough
+      # here even though run_coverage.sh itself requires lcov 2.x.
       - name: Generate coverage
         if: ${{ matrix.coverage == 'with-coverage' && !env.ACT }}
         run: >
@@ -165,6 +749,8 @@ jobs:
           '*/googletest/*'
           '*/tests/*'
           '*/test_*.cpp'
+          '*/rdk-halif-aidl/*'
+          '*/binder_sdk/*'
           -o filtered_coverage.info
           &&
           genhtml
@@ -172,6 +758,14 @@ jobs:
           -t "hdmicec coverage"
           filtered_coverage.info
 
+      # DO NOT CHANGE if-no-files-found BELOW FROM 'warn' TO 'error'.
+      #
+      # valgrind_log is written only inside the `|| ( ... )` fallback arm of the valgrind
+      # step above. On a healthy run `make check-valgrind` succeeds, the fallback never
+      # executes, and no valgrind_log exists - so 'error' would fail this job on every
+      # SUCCESSFUL run. The 'warn' here is load-bearing, not laziness, and it is why the
+      # new selected-back-end log gets its own upload step further up with
+      # if-no-files-found: error instead of being appended to the path list below.
       - name: Upload artifacts
         if: ${{ !env.ACT }}
         uses: actions/upload-artifact@v4
