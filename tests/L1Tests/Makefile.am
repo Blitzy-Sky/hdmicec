@@ -50,20 +50,38 @@ AUTOMAKE_OPTIONS = subdir-objects
 # publish the test-scope fake service, and because ccec/src/DriverAidlImpl.hpp - included
 # by relative path, the same route the ccec/ units use for DriverImpl.hpp - declares
 # android::sp<> members of the generated interface types.
+#
+# @AIDL_ABI_CPPFLAGS@ carries the Binder WIRE ABI decision configure derives by
+# measuring the staged libbinder - -DBINDER_IPC_32BIT, or nothing for a 64-bit ABI.
+# The test tier needs it for exactly the reason the library does, and needs it to be
+# the SAME value: test_main.cpp reaches the service manager, the fake service source
+# derives from the generated Bn* bases, and ccec/ccec/test_DriverAidl.cpp includes
+# ccec/src/DriverAidlImpl.hpp - so several translation units here see Binder headers
+# whose declarations of binder_size_t, binder_uintptr_t and
+# BINDER_CURRENT_PROTOCOL_VERSION follow that macro.  Compiling the suite with one
+# setting and libRCEC with the other would put two wire layouts in one process, and
+# the failure would surface as an inexplicable test result rather than as a link
+# error.
 AM_CPPFLAGS = -I$(top_srcdir)/ccec/include \
               -I$(top_srcdir)/osal/include \
               -I$(top_srcdir)/mocks \
               -I$(top_srcdir)/mocks/hdmicec \
               -I$(GTEST_INCLUDE_DIR) \
               -I$(GMOCK_INCLUDE_DIR) \
-              @AIDL_CPPFLAGS@
+              @AIDL_CPPFLAGS@ \
+              @AIDL_ABI_CPPFLAGS@
 
 # C++17, not C++14: the generated AIDL headers include <optional> and declare
 # std::optional parameters, and halcompat.h opens a nested-namespace definition, so the
 # dialect is a requirement of the dependency rather than a preference.  It is spelled
 # explicitly here for the same reason configure.ac probes for it explicitly - a host whose
-# compiler already defaults to C++17 (this one does, which is why @AIDL_CXXFLAGS@ resolves
-# to nothing here) would otherwise hide the requirement from a SOC toolchain that does not.
+# compiler already defaults to C++17 would otherwise hide the requirement from a SOC
+# toolchain that does not.  @AIDL_CXXFLAGS@ follows it as configure's verified
+# reinforcement: configure probes this one spelling and no other, and fails outright if the
+# compiler will not take it, so the substitution is never empty and is always the same
+# -std=c++17 spelled literally above.  Belt-and-braces rather than duplication - the literal
+# pins the dialect even if the substitution were ever lost, and the substituted copy is
+# configure's proof that this compiler accepts it.
 AM_CXXFLAGS = -Wall -std=c++17 -g @AIDL_CXXFLAGS@
 
 # Define test programs
@@ -135,6 +153,21 @@ run_L1Tests_SOURCES = \
 # test_main.cpp calls defaultServiceManager() directly and the fake-service source above
 # derives from the generated Bn* server bases, so both reference the stub and Binder
 # libraries from objects that are not part of libRCEC.
+#
+# THERE IS NO LOADER-LIBRARY EDGE HERE, AND THAT IS DELIBERATE.  The two binder-preflight
+# arms beyond the BINDER_VERSION gate - a reported protocol that differs, and a context
+# manager that never answers - are reachable on a host with no binder driver through the
+# BinderPreflightProbe seam that ccec/src/DriverAidlImpl.hpp declares and
+# isBinderPreflightOk() takes as a defaulted third parameter, so ccec/test_DriverAidl.cpp
+# substitutes a probe object rather than interposing this binary's ioctl() and mmap() and
+# delegating through dlsym(RTLD_NEXT, ...).  A seam costs nothing at link time, cannot leak
+# into an unrelated syscall on any of the threads a 500-case process runs, and needs no
+# runtime symbol resolution at all - so there is no dlsym reference anywhere in this
+# component to declare a provider for.  Do not add -ldl or a substituted equivalent back
+# unless a source in this target genuinely references dlsym: on glibc 2.34 and later libdl
+# is merged into the C library and naming it is a link failure of its own, and on an RDK
+# target carrying an older glibc an undeclared edge would not link - which is exactly why
+# the requirement is best removed rather than declared.
 run_L1Tests_LDADD = \
     $(top_builddir)/ccec/src/libRCEC.la \
     $(top_builddir)/osal/src/libRCECOSHal.la \

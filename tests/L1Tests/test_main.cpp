@@ -24,11 +24,13 @@
  *
  * THE BACK-END SELECTION RESOLVES ONCE PER PROCESS, AND IT RESOLVES HERE.
  * The LibCCEC::init call in SetUp below is the first thing in this binary that forces
- * Driver::getInstance(). Its helper (ccec/src/Driver.cpp:123-152) constructs BOTH
- * back-ends, asks the AIDL one whether its service came up, and emits exactly one
- * selected-path line naming the winner - the line every functional suite, the coverage
- * runner and device-level validation match on, because no introspection API was added
- * to the Driver interface. That choice is then FIXED for the lifetime of the process.
+ * Driver::getInstance(). Its helper - resolveBackEnd in ccec/src/Driver.cpp, named by
+ * symbol rather than by line so that this note survives an edit to a file this one does
+ * not own - constructs BOTH back-ends, asks the AIDL one whether its service came up,
+ * and emits exactly one selected-path line naming the winner - the line every functional
+ * suite, the coverage runner and device-level validation match on, because no
+ * introspection API was added to the Driver interface. That choice is then FIXED for the
+ * lifetime of the process.
  *
  * Two consequences, and they are the whole reason this file is shaped the way it is:
  * anything that is to influence the selection MUST happen BEFORE that init call, and
@@ -283,7 +285,7 @@ public:
         // file, and a failure here stops the run rather than letting init() resolve a
         // selection the requested mode did not ask for.
         ASSERT_NO_FATAL_FAILURE(applyAidlModeBeforeInit());
-        
+
         // Initialize the Bus so it's ready for tests
         //
         // NO LONGER SWALLOWED, and the claim the swallow used to carry - "Ignore if

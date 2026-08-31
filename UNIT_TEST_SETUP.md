@@ -64,7 +64,9 @@ tests/L2Tests/
 │                                 #   lifecycle -- launch, readiness wait, reap
 └── ccec/
     └── test_DualPathIntegration.cpp # One CCEC round trip, asserted against each
-                                     #   HAL back-end over its real transport
+                                     #   HAL back-end over its real transport.  14 cases;
+                                     #   the legacy arm runs anywhere, the AIDL arm needs
+                                     #   a Binder-capable host and skips without one
 
 mocks/hdmicec/                    # Not a test directory: the seams both tiers build against
 ├── hdmi_cec_driver.h             # Symlinked over the driver header (see step 3a)
@@ -113,10 +115,16 @@ than translation units because `ccec/test_LibCCEC.cpp` declares `LibCCECTest` an
 and `MessageDecoderTrackingTest`.
 
 Everything above is the **legacy-path baseline**: the units enumerated in this section, unmodified.
-The binary also registers the AIDL contract suite from `ccec/test_DriverAidl.cpp`, and the L2 tier
-is a separate binary again.  No total is quoted for either, because no single invocation runs the
-whole set -- see [Back-End Selection](#back-end-selection-the-invocation-matrix) -- and because the
-figure to trust is the one `--gtest_list_tests` reports on your own build, per the note above.
+The binary also registers the AIDL contract suite from `ccec/test_DriverAidl.cpp` -- **91 cases in
+7 fixtures**, so `run_L1Tests` now registers **574 cases in 25 fixtures** -- and the L2 tier is a
+separate binary again, with **14 cases in 3 fixtures**.
+
+**Registered is not run, and this guide keeps the two apart everywhere.**  No single invocation
+runs the whole set, because a fixture cannot opt into a different back-end from its own `SetUp`
+-- see [Back-End Selection](#back-end-selection-the-invocation-matrix).  The default invocation
+selects **539 of the 574** and a measured run passes all 539; the other 35 are the two AIDL-only
+fixtures.  Re-measure with `--gtest_list_tests` on your own build rather than trusting any figure
+here, per the note above.
 
 ## Installation Steps
 
@@ -214,9 +222,12 @@ The build system has been configured with the following changes:
   Every include root and library directory is derived from those, so this build and the
   hand-written `ccec/src/Makefile` cannot end up configured with different sets.  `HALIF_PREFIX`
   falls back to a sibling `../rdk-halif-aidl` checkout when it is not given
-- Added an explicit **C++17** check, so a toolchain whose default dialect is older fails here
-  rather than part-way through compiling `ccec/src/DriverAidlImpl.cpp`.  The flag it settles on is
-  substituted for the consuming `Makefile.am` files rather than injected into `CXXFLAGS`
+- Added an explicit **C++17** check, so a toolchain that cannot compile the constructs the AIDL
+  headers use, or that rejects `-std=c++17`, fails here rather than part-way through compiling
+  `ccec/src/DriverAidlImpl.cpp`.  A toolchain whose *default* dialect is older but which accepts
+  the flag is pinned to C++17 rather than rejected.  The flag it settles on is substituted for the
+  consuming `Makefile.am` files — each of which pins the same flag with a literal of its own — and
+  is not injected into the build's `CXXFLAGS`
 
 #### Makefile.am (root)
 - Added `tests` to DIST_SUBDIRS
@@ -260,8 +271,27 @@ The build system has been configured with the following changes:
 ### 3. Configure and Build
 
 The whole sequence is automated — `cd tests/L1Tests && ./run_coverage.sh --build --run` builds
-instrumented, runs the suite, captures coverage and applies the 80% line gate.  What follows is
-that same sequence by hand.
+instrumented, runs every invocation it can, captures coverage and applies the 80% line gate.  What
+follows is that same sequence by hand.
+
+**On a host with no Binder driver, expect that command to exit `1`, and expect exactly one file to
+be named.**  Measured on this tree, where only invocations A and D could run: **32 source files,
+84.2% line coverage (2242/2663), 91.2% function, 49.6% branch** — the aggregate clears the 80% bar
+— while the **per-file half fails** on `ccec/src/DriverAidlImpl.cpp` at **41.9%** (216/515).  That
+figure is a property of the host rather than of the test set: the file is reached largely from the
+deferred invocations, and the cases that reach it exist and are compiled in, but their invocations
+are **deferred** — no binary is launched for them, so GoogleTest never sees them and they move no
+counter.  That exit `1` is the expected outcome here and is **not a threshold to lower** — do not
+pass `--no-per-file-gate`, do not exempt a file and do not add an exclusion glob.  Re-run the whole
+matrix on the binder-capable job before treating a figure from a partial matrix as this suite's
+coverage.
+
+`ccec/src/Driver.cpp` was named alongside it at **78.6% (11/14)** until recently and is not any
+more: it measures **80.0% (12/15)** and passes.  The two lines it lost were a second call to the
+Binder preflight, made only so the selection helper could decide what to report; the helper now
+reads that reason back from the single query it already made, so on a driverless host there is no
+longer an unexecutable pair to depress the figure.  Read the 80.0% as *exactly* on the bar and not
+as headroom — one further line unreachable without a driver puts the file back below it.
 
 Four prerequisites precede `configure`, and each is fatal rather than degrading if skipped:
 
@@ -406,7 +436,8 @@ argument, for one reason: it then reaches *every* way the binary is started, inc
 
 ```bash
 # The default invocation's filter.  Not optional -- see above, and see
-# "Back-End Selection" below for what the other invocations are.
+# "Back-End Selection" below for what the other invocations are.  With it set,
+# expect 539 tests from 23 test suites, 539 passed, 0 skipped, exit 0.
 export GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'
 
 # Run all tests through automake, from the hdmicec submodule root
@@ -459,19 +490,29 @@ export GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'
 ./run_L1Tests --gtest_shuffle --gtest_random_seed=12345
 ```
 
-`--gtest_shuffle` is a diagnostic, not a gate -- and it does **not** pass.  Default order is green
-and stable (thirty consecutive runs, 483/483 on the legacy-path suite as it stood then, no
-crashes), but shuffled order is not: seeds `1`,
-`2`, `42`, `100`, `500`, `777` and `20260808` fail deterministically, five of five repeats at `1`,
-`42` and `500`, and seed `54321` ends in a production SIGSEGV five of five.  Use `42` or `100` to
-reproduce the ordering failures.  Do **not** cite seed `12345` as a reproducer: it exits 0 four
-runs in five here, even though it is the seed the project's own notes recorded as failing.  The
-recurring cases are `BusTest.ListenerFiltering`, `BusTest.UnregisteredConnectionReceivesAll`,
-`ConnectionTest.MatchSourceMismatchedAddress` and `ConnectionTest.SendAsyncMatchSource`; the two
-production defects behind the crashing seed are documented in `tests/L1Tests/README.md`.  The fixtures that own the shared library's lifecycle now wait for the bus reader to
-publish RUNNING before terminating it, so that window is not opened.  One green seed is not a
-proof of order independence: use the flag to check that a test you just wrote is self-sufficient,
-and re-derive the outcome after adding tests rather than trusting the figure quoted here.
+`--gtest_shuffle` is a diagnostic, not a gate -- and the suite does **not** pass under every
+shuffled order.  Default order is green and stable; shuffled order is not, and two distinct
+problems are in play which behave differently.  Order-dependent **assertion** failures (exit `1`)
+are deterministic for a given seed: the same seed fails the same cases every run.  The
+intermittent **production SIGSEGV** (exit `139`) is **not tied to any seed** -- it fires at a
+measured rate across repeated runs, so the same seed can read as green in one pass and as a crash
+in another.  Two consequences: **no seed is a reliable crash reproducer**, so budget for repetition
+rather than for a seed; and one green seed is not a proof of order independence.
+
+**Every measured per-seed figure lives in one place and is deliberately not copied here:** the
+**Test Order Dependence (diagnostic)** section of `tests/L1Tests/README.md`, which is the
+authoritative shuffle-order record and carries the crash rate, the assertion outcome per seed, the
+two production defects behind the crashes, and the toolchain and suite size the sweeps were
+measured on.  An earlier revision of this guide named seeds that "fail deterministically" and one
+it said crashed on every repeat; later sweeps on that same tree superseded those figures -- the
+seed that had been named for the crash no longer reproduces it at all -- so they are removed here
+rather than corrected in place, because a second copy of a measurement is a second thing to go
+stale.  Read that section before quoting any seed.
+
+The fixtures that own the shared library's lifecycle wait for the bus reader to publish RUNNING
+before terminating it, so that window is not opened.  Use the flag to check that a test you just
+wrote is self-sufficient, and re-derive any figure on your own build after adding tests: the
+failing set is specific to the seed *and* to the test inventory, and the inventory has grown.
 
 ### Back-End Selection: the Invocation Matrix
 
@@ -486,17 +527,40 @@ the choice is already made and cannot be changed, so **one binary run yields exa
 outcome** and every outcome needs its own process.  No filter can make a single run exercise both
 arms of the selection — which is why there is a matrix rather than a single run.
 
-`tests/L1Tests/run_coverage.sh --run` drives all five, one process each, and writes a separate
-result and log artifact per invocation so that a later one cannot overwrite an earlier one's
-evidence:
+There are **five selection outcomes, A through E**, and **six execution records** -- the sixth is
+`A-NB`, described just after the table.  `tests/L1Tests/run_coverage.sh --run` drives every
+record, one process each, and writes a separate result and log artifact per record so that a
+later one cannot overwrite an earlier one's evidence:
 
-| Inv | Binary | Fake service | Expected selection |
-|--------|-------------|---------|---------|
-| A | `run_L1Tests` | not reachable | Legacy |
-| B | `run_L1Tests` | in-process, compatible | AIDL, via the local interface |
-| C | `run_L1Tests` | in-process, **incompatible** — reports interface hash `"-1"` | Legacy, with the incompatibility logged |
-| D | `run_L2Tests` | host not launched | Legacy |
-| E | `run_L2Tests` | host launched and ready | AIDL, over a real remote proxy |
+| Inv | Binary | Fake service | Expected selection | Cases | Has it run? |
+|--------|-------------|---------|---------|---------|---------|
+| A | `run_L1Tests` | not reachable | Legacy | 539 selected, 35 excluded | **Yes: measured 539 of 539 from 23 suites, exit `0`** |
+| B | `run_L1Tests` | in-process, compatible | AIDL, via the local interface | 382 selected, 184 excluded | **No — never executed on any host** |
+| C | `run_L1Tests` | in-process, **incompatible** — reports interface hash `"-1"` | Legacy, with the incompatibility logged | 347 selected, 219 excluded | **No — never executed on any host** |
+| D | `run_L2Tests` | host not launched | Legacy | 14 registered | **Yes: measured 10 passed, 4 skipped, exit `0`** |
+| E | `run_L2Tests` | host launched and ready | AIDL, over a real remote proxy | 14 registered | **No — never executed on any host** |
+
+**The sixth record, `A-NB`, is not a sixth selection outcome.**  It is invocation A -- same
+runner, same mode, same filter, same expected legacy back-end -- run inside a private mount
+namespace with the binder node bound over `/dev/null`, so the node is unreachable to that
+process alone while the parent's node is verified untouched before and after.  Its purpose is a
+single branch arm: `resolveBackEnd` logs two distinct legacy fallbacks, and the one that says
+the transport is unavailable -- the **preflight-FALSE** arm -- has no reacher on a
+binder-capable host, because A's own preflight is true there.  A-NB supplies it, in the same
+accumulated trace, and writes `run_invocation_A-NB.log` and `rdkTestResults_invocation_A-NB.json`
+like any other record.  **On a host with no binder node to hide it collapses into A**, which
+already takes that arm, and writes no artifact of its own; where the transport exists but
+`unshare` or the bind mount does not work, the arm has no reacher and the run says so with an
+advisory rather than in silence.
+
+**Two of the five selection outcomes have run; the other three have not run anywhere in this
+work.**  Every Cases figure is measured, because each comes from listing that invocation's own
+filter against the built binary — but a *selection* total is not a result, which is what the
+right-hand column is for.  D's four skips are the AIDL-arm cases, which skip rather than fail
+when the resolved back-end is not theirs.  **B, C and E are compile-verified only**: their cases
+exist, are compiled in and assert real outcomes, and no run of any of them exists — see
+[Runtime prerequisites for the AIDL path](#runtime-prerequisites-for-the-aidl-path) for why, and
+the Binder-capable job under [CI/CD Integration](#cicd-integration) for where they will first run.
 
 Some cases in the contract suite belong to one arm rather than both, and that is by design rather
 than a coverage gap -- a fixture cannot opt into a different back-end from its own `SetUp`, because
@@ -504,6 +568,42 @@ the selection is already resolved by then.  One such case is worth naming, so it
 defect: **physical-address retrieval is unavailable on the AIDL back-end**, pending the
 device-settings HAL contract that governs the read (tracked as blocked item **B1**).  No workaround
 is delivered and none should be added; the assertion for it therefore runs on the legacy arm only.
+
+**Of the contract suite's 83 cases, 48 run under the default invocation and 35 do not**, and the
+difference is worth holding on to when reading anything below:
+
+- **Established, inside the default invocation's measured 539.**  All 12 `DriverAidlPreflightTest`
+  cases, covering *every* decision arm of the bounded preflight -- the protocol-version mismatch
+  and the matching driver whose context manager never answers included, plus a **positive**
+  verdict, all reached through a probe seam the predicate takes as a defaulted parameter, which is
+  what puts them within reach of a host with no Binder driver at all.  All 19 compatibility arms,
+  accept and reject.  All 11 local-instance arms, on a `DriverAidlImpl` whose constructor touches
+  no Binder -- every `status != OPENED` guard, the `writeAsync` prelude ordering, and
+  `getPhysicalAddress`'s B1 block.  The 5 legacy arms, including a **measured receive-path delivery
+  case** that drives a frame from the HAL mock through to an application listener, which is what
+  makes the observation machinery the AIDL arms depend on something demonstrated rather than
+  assumed.  And a structural guard that reads the **real** HDMI CEC Sink plugin source and checks
+  that the call-path shapes the AIDL session fixture models still match it.  That source is a
+  **required acceptance input**, read at a reviewed revision: the case **fails** when it cannot be
+  found, naming `CEC_SINK_CALLER_SOURCE` and every path it tried, and both CI workflows check the
+  Sink component out as a **required step** — no `continue-on-error` — pinned to the reviewed
+  immutable commit `2ad7e1a4712908a4d0fb838caebcbfcaabba55d8`, with the resolve step exiting
+  non-zero when the file is absent.  A failure therefore means one of two things and not a third:
+  the input was not supplied, or the plugin's call paths really moved.
+- **Asserted, compiled in, and awaiting invocation B.**  Everything in `DriverAidlSessionTest` and
+  `DriverAidlTransmitTest`: the adapter's status translation, the single-element array marshalling,
+  the frame-length guard, the session lifecycle, the listener's accept-and-reject behaviour,
+  `onMessageSent`'s diagnostic carrying its status, its length **and** its message bytes — all
+  three of which production logs at `LOG_DEBUG`, the bytes as bounded lowercase hex, and all three
+  of which the case asserts **unconditionally** after raising the level through production's own
+  `check_cec_log_status()` — under a locked, `O_NOFOLLOW`, atomically-replacing custody of
+  `/tmp/cec_log_enabled`, since that path is production's own choice and is shared by every process
+  on the host — failing loudly if the level could not be raised; the synchronous listener detach
+  that makes a callback after a failed close or after owner destruction a dropped callback rather
+  than a dereference of freed state, and the caller-visible half of the
+  `addLogicalAddress` failure mapping through both modelled Sink call paths.  **None of it has
+  executed**: both fixtures are invocation-B-only, so what awaits a run is the assertion, not the
+  production line it reads.
 
 #### `CEC_TEST_AIDL_MODE`
 
@@ -536,9 +636,21 @@ exists to prevent.
 > `IServiceManager` exposes no service-removal API.
 
 For the L2 tier, `CEC_FAKE_AIDL_HOST_PATH` tells the harness where the host binary is and is set by
-the build; `CEC_FAKE_HOST_READY_FD` is the inherited pipe descriptor the host reports readiness on
-and is set by the harness — do not set it yourself.  Readiness is a pipe and a bounded wait, not a
-sleep, and the host writes no readiness line on any failure path.
+the build.  The host then inherits **two separate channels**, both set by the harness — do not set
+either yourself:
+
+- **The readiness pipe**, named by `CEC_FAKE_HOST_READY_FD`.  It carries the host's **one readiness
+  token, once**, and nothing else.  Readiness is a pipe and a bounded wait, not a sleep, and the
+  host writes no readiness line on any failure path.
+- **The control and observation channel**, a *different* inherited pipe pair named by
+  `CEC_FAKE_HOST_CONTROL_FD` (the read end the host takes commands from) and
+  `CEC_FAKE_HOST_OBSERVE_FD` (the write end it answers on).  The two travel together: both unset
+  means no channel, and one without the other is a hard failure that writes no readiness token at
+  all.  Traffic is line-oriented — one `\n`-terminated command per line, exactly one reply line per
+  command, every reply beginning `OK ` or `ERR ` — and the vocabulary is `ping`,
+  `deliver <lowercase-hex>`, `sent-count`, `last-sent`, `open-count`, `close-count`, `listener` and
+  `shutdown`.  This is how a case observes what the host actually saw; it is **not** the readiness
+  pipe.
 
 #### Why an out-of-process host exists at all
 
@@ -551,8 +663,24 @@ needed and neither substitutes for the other:
   *only* way to reach the compatibility-rejection branches — local dispatch honours a virtual
   override of the interface hash and version, whereas a remote service cannot report bad metadata
   at all, because its generated `onTransact` answers from compiled-in constants.
-- Only the **out-of-process** host makes the middleware hold a real proxy, cross the driver, and
-  receive its listener callback on a binder threadpool thread.
+- Only the **out-of-process** host can make the middleware hold a real proxy, cross the driver, and
+  receive its listener callback on a binder threadpool thread.  That is what invocation E is for,
+  and **it is what invocation E has not yet done: E has never been executed on any host in this
+  work.**
+
+**Invocation E is structurally complete, its assertions are real, and no run of it exists.**  The
+distinction is the whole point of this section, so it is spelled out rather than left to inference.
+Its four `DualPathAidlFlowTest` cases assert that the fake service is holding the very listener the
+middleware passed to `open()`; that a frame the host is told to deliver arrives decoded at a typed
+processor; that **the thread that delivered it is not the test thread**, which is the observable
+form of "a binder threadpool thread received it"; that the outbound cases reach the host with an
+**exact byte sequence and an exact call count**, read back over the host's control and observation
+channel — the inherited pipe *pair*, not the readiness pipe, which carries only the one readiness
+token — rather than inferred from the absence of an exception; and that a frame delivered while the
+driver is not opened is rejected by the state guard.  Read all of that as the assertions the
+binder-capable job will exercise on its first run — **never as evidence that delivery over a real
+proxy, or receipt on a binder threadpool thread, has been observed.**  Under invocation D those
+four cases skip, which is why D reports 10 passed and 4 skipped rather than 14 passed.
 
 #### Runtime prerequisites for the AIDL path
 
@@ -564,14 +692,22 @@ built for, and a running `servicemanager`.
 
 A hosted GitHub runner has none of them, and neither does a typical development host: measured on
 the host this was last revised on, kernel **6.12.85+**, `CONFIG_ANDROID_BINDER_IPC` not set,
-`binder` absent from `/proc/filesystems`, and no `/dev/binder*`.  There, **invocations B, C and E
-cannot run at all** — and not merely because a lookup would fail: registering a name requires
+`binder` absent from `/proc/filesystems`, no `/dev/binder*`, and no `/dev/kvm` either — so not even
+a nested binder-capable guest can be booted there.  There, **invocations B, C and E cannot run at
+all** — and not merely because a lookup would fail: registering a name requires
 `defaultServiceManager()`, which opens the driver node, and on the pinned Binder stack that call
 *aborts the process* when the node is missing.  So an in-process fake is as unreachable as a remote
 one.  `run_coverage.sh` reports those invocations as **deferred**, never attempts them and never
 lets them stand in for evidence they did not produce.  The legacy path — A and D — remains fully
-executable, and no result is claimed here for B, C or E; those belong to the binder-capable CI job
-described under [CI/CD Integration](#cicd-integration).
+executable.
+
+**No result is claimed here for B, C or E, and none exists to claim: none of the three has been
+executed on any host during this work**, for exactly the reason above.  Everything they assert —
+the adapter's translation arms, the in-process compatibility fallback, a real `Bp*` proxy carrying
+a transaction across the driver, and a listener callback arriving on a thread that is not the test
+thread — is therefore **compile-verified only**, and awaits the binder-capable CI job described
+under [CI/CD Integration](#cicd-integration).  Treat a claim anywhere that the AIDL transport has
+been observed working as a documentation defect and correct it.
 
 > **A driverless host is itself evidence.**  Such a host must reach the legacy back-end *without
 > aborting and without hanging*, which is the entire point of the middleware's bounded preflight:
@@ -648,14 +784,37 @@ There are now **two** workflows, and the division of labour between them is the 
 - **`.github/workflows/L1-tests.yml`** builds everything -- the Binder SDK, both AIDL client stub
   snapshots, `libRCEC` with both HAL back-ends compiled in, and all three test binaries -- and then
   runs **invocation A only**.
-- **`.github/workflows/aidl-path-tests.yml`** runs **the complete matrix, A through E, on one
-  instrumented build on one machine**, followed by a single coverage capture and the per-branch
-  gate.  It provisions a guest that can actually run binder, because a hosted runner cannot (see
-  [Back-End Selection](#back-end-selection-the-invocation-matrix)).
+- **`.github/workflows/aidl-path-tests.yml`** is defined to run **the complete matrix -- all five
+  selection outcomes, A through E, plus the isolated `A-NB` record -- on one instrumented build on
+  one machine**, followed by a single coverage capture and the per-branch gate.  It provisions a
+  guest that can actually run binder, because a hosted runner cannot (see
+  [Back-End Selection](#back-end-selection-the-invocation-matrix)).  **It has not yet
+  been run in this work**, which is why invocations B, C and E have no results anywhere; the
+  workflow is the delivered mechanism for producing them, not a record that they were produced.
+  The guest is a **protocol-7** one end to end -- a 4.14-series i386 kernel with
+  `CONFIG_ANDROID_BINDER_IPC_32BIT=y`, static device nodes from `CONFIG_ANDROID_BINDER_DEVICES`
+  rather than binderfs (which exists only from Linux 5.0, while the 32-bit option was removed after
+  4.17, so a protocol-7 guest is necessarily a pre-binderfs one), the SDK built with
+  `BINDER_IPC_32BIT=ON`, and a run-time gate that fails unless the kernel option, the SDK flag and
+  the protocol the `BINDER_VERSION` ioctl reports all say 7.
+
+  One provisioning detail is easy to miss and fails the guest run when it is: only the `hdmicec`
+  payload is copied into the image, so the **real HDMI CEC Sink plugin source** the L1 drift guard
+  reads has to be staged deliberately.  The guard treats that source as an acceptance input and
+  **fails** when it cannot read it, so the image builder **always stages that file into the guest**.
+  `--sink-caller-source` and a sibling checkout detected beside `--payload` are two ways of naming
+  the **same input**: whichever the builder found is canonicalised into one staged path, so a
+  detected sibling is copied in exactly as an explicitly passed flag is, and the builder **refuses
+  to build when neither is available** rather than producing an image the guard cannot use.  The
+  copy is read-only at a fixed guest path, recorded in the image manifest, and the in-guest init
+  exports `CEC_SINK_CALLER_SOURCE` to it -- that export and the guard's own path search are **belt
+  and braces over the staging, not substitutes for it**, since neither can find a file that was
+  never copied in.  The workflow passes what its own required resolve step produced and then checks
+  the manifest recorded it.
 
 Invocation A is **repeated** in the second job rather than imported from the first, and that is
 deliberate: gcov counters accumulate across repeated runs of the same instrumented binary but
-cannot accumulate across machines, so running all five against one build on one host before a
+cannot accumulate across machines, so running every record against one build on one host before a
 single capture is the only way both arms of the selection branch land in one trace.  Do not
 "optimise" it by reusing the hosted job's counters.
 
@@ -663,8 +822,48 @@ single capture is the only way both arms of the selection branch land in one tra
 > the pre-existing suite still passes with both back-ends compiled in and the Binder libraries
 > linked, and it proves that a host with no binder driver reaches the legacy back-end without
 > aborting -- which is the one requirement a driverless machine is uniquely placed to demonstrate.
-> It proves nothing about the AIDL path executing, because invocations B, C, D and E cannot run
-> there at all.  Read the binder-capable job for that, and only that.
+> It establishes nothing about the AIDL path executing: that job runs **invocation A only**, and of
+> the rest, B, C and E cannot run there at all for want of a binder driver, while D is simply not
+> run there.  Read the binder-capable job for that, and only that — and note that it has not yet
+> been run, so **neither invocation in which the AIDL back-end is resolved, B or E, has produced a
+> result anywhere, and nor has C, the third binder-dependent one, whose own outcome is a legacy
+> fallback.**
+
+### Artifacts, and the one list that decides their names
+
+Both workflows upload what `tests/L1Tests/run_coverage.sh` writes, and those names are decided in
+**exactly one place**: the fixed-artifact list in that script's header, which labels itself THE
+AUTHORITATIVE ARTIFACT MANIFEST.  Everything else -- this guide included -- **defers to it rather
+than restating it**, because an artifact no document names is an artifact a reader concludes was
+never produced.  `tests/L1Tests/README.md`, under "Coverage output is a build artifact", carries
+the full per-entry description; what follows is what a CI reader needs from it, including the two
+entries that were produced and uploaded for some time without appearing in any document:
+
+- **The trace triple and the report.**  `coverage.info` (deliberately **unfiltered** -- the branch
+  gate's input), `filtered_coverage.info` (production-source-only), `line_gate_coverage.info` (the
+  line gate's input) and `coverage/index.html`, plus `per_file_coverage.tsv` and
+  `uncovered_lines.txt`.
+- **One `rdkTestResults_invocation_<L>.json` and one `run_invocation_<L>.log` per matrix record**,
+  A through E plus `A-NB`.  The letter rather than a timestamp is what stops a failed or empty
+  record being erased by whichever green one ran after it.
+- **`provenance.txt`** -- how the measurement was produced: the toolchain, the gcov version, which
+  invocations ran and which were deferred, and the counter state the capture read.  It is what
+  makes a figure attributable months later, so it is evidence rather than a log.
+- **`filter_dependencies.log`** -- which dependency-header paths the filter dropped from
+  `filtered_coverage.info` to produce `line_gate_coverage.info`, and which it deliberately kept
+  (`halcompat.h` is kept, as a consumed HALIF header).  Without it a change in the line gate's
+  denominator cannot be explained.
+- **The per-step logs.**  `build.log`, `capture.log`, `filter.log`, `genhtml.log`.
+
+**Four more come from the binder-capable guest and not from the runner**, and they are the first
+things to read when a run in that job fails: **`run_coverage.status`**, the run's overall verdict
+and the file the workflow reads to decide the job; **`binder-platform-record.txt`**, the kernel
+option, the SDK build flag and the ioctl-reported protocol version written together by the guest
+that read all three; **`servicemanager.log`**, the binder name service's own output and the only
+evidence of why readiness failed; and **`servicemanager_readiness.log`**, every readiness attempt,
+which is what distinguishes a probe that blocked from one that could not run.  Their names live
+with their producer, `.github/workflows/aidl-path-tests-rootfs.sh`, and `run_coverage.sh` neither
+writes nor reads them.
 
 ### GitHub Actions Example
 
@@ -814,6 +1013,53 @@ jobs:
           ln -sf ../../../mocks/hdmicec/hdmi_cec_driver.h \
                  stubs/ccec/drivers/hdmi_cec_driver.h
 
+      # THE SECOND BUILD SYSTEM, AND THIS IS THE ONLY PLACE IT CAN BE CHECKED.
+      # ccec/src/Makefile is the HAND-WRITTEN RDK build of the same library -- a bare
+      # `make` from rdk_build.sh reaches it on every SOC branch -- and it carries its
+      # own -std=c++17, DriverAidlImpl.o and the four AIDL/Binder link edges.  It is
+      # listed in configure.ac's AC_CONFIG_FILES, so the ./configure in the next step
+      # OVERWRITES it: this step has to run BEFORE that autoreconf, or it would build
+      # Automake output through libtool and assert nothing at all about the RDK path.
+      #
+      # Two details here are not stylistic.  The mock and stub roots reach the
+      # compiler through CPATH and must NOT be passed as `make CFLAGS=...`: that file
+      # assigns CFLAGS with `:=` and then appends its own INCLUDE list, and a
+      # command-line variable assignment overrides both -- silently dropping
+      # -std=c++17 and all four AIDL include roots, leaving this step verifying a
+      # build nobody performs.  And there is NO -j: `all: clean library` declares no
+      # ordering between its two prerequisites, so a parallel make runs the link
+      # concurrently with the clean and fails on a missing object.
+      #
+      # libcommon-v0.2.0.0-cpp is deliberately NOT asserted as a direct edge --
+      # --as-needed drops it and it reaches the process through the hdmicec stub
+      # library, so requiring it here would assert something untrue.  It belongs to
+      # the closure check instead.
+      #
+      # The clean at the end is part of the check rather than tidiness: these objects
+      # are compiled WITHOUT -fprofile-arcs -ftest-coverage, and the libtool build
+      # below would otherwise be free to reuse them.  The real workflow runs it
+      # unconditionally, before its verdict, because the residue has to go whether
+      # the checks passed or not.
+      - name: Build and verify the hand-written RDK library (second build system)
+        working-directory: hdmicec
+        run: |
+          set -euo pipefail
+          export CPATH="$GITHUB_WORKSPACE/hdmicec/mocks:$GITHUB_WORKSPACE/hdmicec/stubs"
+          make -C ccec/src all          # no -j; see the note above
+          lib=ccec/src/install/lib/libRCEC.so
+          test -f "$lib"
+          readelf -d "$lib" | grep NEEDED
+          ldd "$lib"
+          needed="$(mktemp)"          # outside the checkout, so nothing is left behind
+          readelf -d "$lib" | awk -F'[][]' '/NEEDED/ { print $2 }' > "$needed"
+          for soname in libhdmicec-v0.1.0.0-cpp.so libbinder.so libutils.so; do
+            grep -qxF -- "$soname" "$needed" \
+              || { echo "::error::$soname is not a DT_NEEDED entry of the hand-built $lib"; exit 1; }
+          done
+          rm -f "$needed"
+          ! ldd "$lib" | grep -q 'not found'
+          make -C ccec/src clean
+
       # Three make passes.  The top-level Makefile.am declares SUBDIRS = osal ccec,
       # so `make` at the root builds the libraries but no test binary -- and root
       # `make check` never reaches this suite at all.  The third pass is what
@@ -870,7 +1116,10 @@ jobs:
       # file of any kind, so --gtest_output is what produces one.
       #
       # THIS IS INVOCATION A, and only A: the job-level GTEST_FILTER above is what
-      # makes it green, and a hosted runner cannot run B, C, D or E at all.  The
+      # makes it green.  A hosted runner cannot run B, C or E at all -- they need a
+      # binder driver, B and E to resolve the AIDL back-end and C to register the
+      # incompatible service whose rejection is the fallback it establishes -- while
+      # D needs nothing this runner lacks and is simply not scheduled by this job.  The
       # grep is what turns the run into a statement about the SELECTION rather than
       # just another green test run -- there is no introspection API, so the log
       # line the factory emits is the observable.
@@ -906,28 +1155,40 @@ Four notes on that example:
 - **What the example leaves out.**  The real workflow additionally runs a Valgrind memcheck pass,
   captures lcov coverage, and asserts each staged include root and library by name before using it.
   For coverage specifically, prefer `tests/L1Tests/run_coverage.sh` -- it reproduces the workflow's
-  capture, filter and report steps and adds the per-file 80% gate.
+  capture, filter and report steps and adds the per-file 80% gate, and the artifacts it leaves are
+  the set described under
+  [Artifacts, and the one list that decides their names](#artifacts-and-the-one-list-that-decides-their-names).
+  The hand-written RDK step above is a reduction too: the real one also requires each expected
+  library to resolve **inside the staged SDK tree**, so that an unrelated system copy of
+  `libbinder.so` cannot leave the job green, and it names the loader closure it checks rather than
+  only the direct edges.
 - **What it leaves out for the AIDL path, and cannot supply.**  A hosted runner has no binder
   kernel driver and no `servicemanager`, so the example builds the AIDL back-end and runs
-  **invocation A only** -- it never selects it.  Invocations B through E need the driver, a matching
-  binder protocol version and that daemon, which is why they live in
-  `.github/workflows/aidl-path-tests.yml` on a guest provisioned for it.  Nothing in the example
-  should be read as evidence that the AIDL path executes.
+  **invocation A only** -- it never selects it.  Invocations B, C and E need the driver, a matching
+  binder protocol version and that daemon -- C included, because registering its incompatible
+  service opens the driver even though the back-end it then resolves is the legacy one -- which is
+  why they live in `.github/workflows/aidl-path-tests.yml` on a guest provisioned for it.
+  Nothing in the example should be read as evidence that the AIDL path executes.
 
 ## Next Steps
 
 1. **Integration tests**: done -- `tests/L2Tests/` is that directory.  It holds its own runner and
-   an out-of-process fake AIDL service host, and it exercises one CCEC round trip against each HAL
-   back-end over that back-end's real transport.  Extending it means appending to
+   an out-of-process fake AIDL service host, and it asserts one CCEC round trip against each HAL
+   back-end over that back-end's real transport.  **The legacy half has run** -- invocation D,
+   measured 10 passed and 4 skipped of 14, exit `0` -- and **the AIDL half has not**: its four cases
+   are the ones that skip, and they need the binder-capable host described under
+   [Runtime prerequisites for the AIDL path](#runtime-prerequisites-for-the-aidl-path).  Extending
+   it means appending to
    `run_L2Tests_SOURCES` under the same group-end rule as item 2, and reading
    [Back-End Selection](#back-end-selection-the-invocation-matrix) first, because a case there
    belongs to one arm of the selection or to neither
-2. **Order independence**: a `--gtest_shuffle --gtest_random_seed=12345` run of this suite
-   passes 483 of 483 on this tree in four runs out of five -- the legacy-path baseline, measured
-   before the AIDL contract suite was added -- but one green seed is not a proof --
-   the fifth run of that seed ends in the production SIGSEGV documented in
-   `tests/L1Tests/README.md`, so re-derive the outcome after
-   adding tests, and new translation units must still be APPENDED to
+2. **Order independence**: shuffled ordering remains a diagnostic and it does not pass.  The
+   order-dependent assertion failures are deterministic per seed, while the production SIGSEGV
+   documented in `tests/L1Tests/README.md` is intermittent and tied to no seed at all -- so **no
+   seed is a reliable crash reproducer and a green seed proves nothing**.  The measured per-seed
+   figures are deliberately not repeated here: read the **Test Order Dependence (diagnostic)**
+   section of that README, which owns them, and re-derive the outcome on your own build after
+   adding tests -- and note that new translation units must still be APPENDED to
    `run_L1Tests_SOURCES` rather than inserted, because static-initialisation order decides
    the order the suites run in
 3. **Continuous testing**: the L1 workflow already runs this suite; `run_coverage.sh`
@@ -1009,7 +1270,9 @@ grep -A5 'AIDL stub and Binder client libraries' config.log
 directions: the generated AIDL headers include `<optional>`, and `halcompat.h` opens a
 nested-namespace definition that is C++17 syntax.
 ```bash
-# What configure settled on -- "none required" means the ambient dialect already covers it
+# What configure settled on.  It reports -std=c++17 on every path where the compiler accepts the
+# flag, including the path where the ambient dialect already covered C++17, so this line reading
+# anything else means configure did not get that far
 grep 'C++17 flag' config.log
 
 # What the failing directory actually compiles with
@@ -1036,7 +1299,7 @@ proves nothing about the AIDL path, so check the log line rather than the exit s
 # Which back-end was actually selected -- exactly one line per process
 grep 'HDMI CEC HAL back-end selected' run_invocation_*.log
 
-# Can this host run an AIDL-selected invocation at all?
+# Can this host run a binder-dependent invocation (B, C or E) at all?
 ls -l /dev/binder* ; grep -w binder /proc/filesystems
 
 # Let the runner decide, and report the ones it cannot attempt as deferred
@@ -1052,7 +1315,11 @@ ls -l /dev/binder* ; grep -w binder /proc/filesystems
 - [AIDL backends](https://source.android.com/docs/core/architecture/aidl/aidl-backends) -- the C++
   libbinder backend this middleware uses, and its threadpool requirement
 - [rdkcentral/linux\_binder\_idl](https://github.com/rdkcentral/linux_binder_idl) -- the Binder SDK,
-  including the kernel configuration and binderfs setup an AIDL-path run needs
+  including the kernel configuration an AIDL-path run needs.  Read its device-node guidance against
+  the kernel you are actually provisioning: it documents the binderfs route, which exists only from
+  Linux 5.0, whereas `.github/workflows/aidl-path-tests.yml` provisions a **protocol-7** guest and
+  therefore a pre-binderfs one, taking its nodes statically from
+  `CONFIG_ANDROID_BINDER_DEVICES`
 - `tests/L1Tests/README.md` and `tests/L1Tests/QUICK_START.md` -- the same build and invocation
   contract at suite level, in more detail
 - `mocks/README.md` -- what each seam under `mocks/hdmicec` is, including the test-scope fake AIDL
@@ -1072,10 +1339,20 @@ The L1 unit test framework provides:
 - ✅ Easy to extend and maintain
 - ✅ Integrated with build system via `--enable-l1tests`, which now brings in both the L1 suite and
   the L2 integration tier
-- ✅ Both HAL back-ends exercised from one build: `libRCEC` carries the legacy and the AIDL/Binder
-  back-end in every build for every SOC vendor, with **no build-time switch and no vendor
-  conditional** -- the choice is made at run time, so the suites are run once per selection outcome
-  (see [Back-End Selection](#back-end-selection-the-invocation-matrix))
+- ✅ Both HAL back-ends **compiled in** from one build: `libRCEC` carries the legacy and the
+  AIDL/Binder back-end in every build for every SOC vendor, with **no build-time switch and no
+  vendor conditional** -- the choice is made at run time, so the suites are run once per selection
+  outcome (see [Back-End Selection](#back-end-selection-the-invocation-matrix))
+- ⚠️ **Both back-ends are not yet both *executed*.**  The legacy selection has run and is measured
+  green -- invocation A at 539 of 539, invocation D at 10 passed and 4 skipped of 14.  The three
+  binder-dependent invocations (B, C, E) have **never been executed on any host in this work**, for
+  want of a Binder kernel; their cases are compiled in and assert real outcomes, and they are
+  **compile-verified only** until the binder-capable job runs them.  Of those three only **B and E**
+  resolve the AIDL back-end: **C resolves the legacy one**, because it registers an in-process
+  service whose interface hash is `"-1"` and asserts that the factory falls back, and it is
+  unexecuted because a registration needs the driver -- not because it selects the AIDL path.
+  Nothing in this guide should be read as evidence that the AIDL transport has been observed
+  working
 - ✅ CI/CD ready with XML output support
 - ✅ Production-grade testing infrastructure
 - ✅ Singleton and global-state handling documented: `test_main.cpp` registers a single

@@ -35,8 +35,17 @@
  *
  * There is deliberately nothing else in this file.  It declares no class, wraps nothing, registers
  * nothing with anything, and adds no abstraction of any kind: the fake it hosts is already written
- * and already knows how to publish itself, so this program is a startup order, a readiness signal
- * and a shutdown wait.
+ * and already knows how to publish itself, so this program is a startup order, a readiness signal,
+ * a line-oriented control and observation channel over two inherited descriptors, and a shutdown
+ * wait.@n
+ * The channel exists because a separate process is opaque from the outside.  Once the fake lives
+ * over here, the runner over there can no longer call fireOnMessageReceived() to stimulate the
+ * receive path, and can no longer read getLastSentMessage() to see what the middleware actually
+ * transmitted - so without a channel the out-of-process invocation can only assert that a call did
+ * not throw, which a no-op or a corrupt transmit passes just as well as a correct one.  The channel
+ * is a plain pipe rather than a second binder interface precisely so that it stays trustworthy when
+ * the binder path under test is broken, and so that no new AIDL surface is invented to test the
+ * existing one.
  *
  */
 
@@ -47,7 +56,9 @@
  *
  * Publishes the fake declared in fake_hdmi_cec_aidl_service.h under the production service name,
  * starts the SERVICE-side binder threadpool that serves incoming transactions, signals readiness to
- * the parent that launched it, and waits for a termination signal.@n
+ * the parent that launched it, then serves the parent's control and observation channel - the route
+ * by which a runner triggers an inbound event and reads back what the middleware actually sent - and
+ * stops on a `shutdown` command, on end of file, or on a termination signal.@n
  * This binary is the only place the AIDL receive path is genuinely exercised: it is the counterpart
  * of the out-of-process test invocation, in which the middleware resolves a real proxy over the
  * binder driver and its listener callback arrives on a binder threadpool thread rather than on the
@@ -61,7 +72,10 @@
  * -# Install the shutdown handlers, so that a termination signal arriving at any later point still
  *    produces a clean exit rather than a default-disposition kill.
  * -# Resolve the readiness file descriptor.  It is validated here, before any side effect, so that a
- *    botched handoff costs nothing; the readiness line itself is not written until step 6.
+ *    botched handoff costs nothing; the readiness line itself is not written until step 7.
+ * -# Resolve the control and observation channel, if the parent supplied one, validating both
+ *    descriptors here for the same reason, and - only when a channel was supplied - ignore SIGPIPE so
+ *    that a client closing its end reports EPIPE instead of terminating this process.
  * -# Confirm a binder driver node is present and openable.
  * -# Confirm nothing is already published under the production service name.  Something there is a
  *    HARD FAILURE and never a condition to work around: this run's outcome would otherwise depend on
@@ -71,7 +85,10 @@
  * -# Write the readiness line - only now, after publication has succeeded and the pool is running,
  *    so that a parent which has seen the line may rely on the service being both published and
  *    served.
- * -# Block until signalled, then return EXIT_SUCCESS.
+ * -# Serve the control and observation channel, if the parent supplied one, until a `shutdown`
+ *    command, end of file on the control descriptor, or a termination signal arrives.  Where no
+ *    channel was supplied, block until signalled exactly as this program always has.
+ * -# Return EXIT_SUCCESS.
  *
  * @par Environment
  * - `CEC_FAKE_AIDL_HOST_PATH` is where the parent finds this binary.  The build sets it and the L2
@@ -82,6 +99,94 @@
  *   from a shell and watch it work.  Set but not a usable non-negative descriptor number is a hard
  *   failure, because a parent that asked to be signalled on a pipe and was silently answered on
  *   standard output would wait out its whole timeout with nothing to explain why.
+ * - `CEC_FAKE_HOST_CONTROL_FD` is the number of an inherited file descriptor - the READ end of a
+ *   pipe the parent writes to - from which this program reads newline-terminated ASCII commands.
+ * - `CEC_FAKE_HOST_OBSERVE_FD` is the number of an inherited file descriptor - the WRITE end of a
+ *   second pipe the parent reads from - to which this program writes exactly one newline-terminated
+ *   reply per command.
+ *
+ * Both channel variables are OPTIONAL and they travel together.  Both unset means no channel: this
+ * program then behaves exactly as it did before the channel existed, which is why an existing
+ * invocation that supplies neither is unaffected.  One set without the other, or either set to
+ * something that is not a usable descriptor of the right direction, is a HARD FAILURE that exits
+ * EXIT_BAD_CONTROL_CHANNEL and writes NO readiness token - a parent that asked for a channel and
+ * was silently served without one would sit in its own bounded wait for a reply that can never
+ * come.
+ *
+ * @par The control and observation protocol, in full
+ * This block is the normative statement of the protocol.  The client end lives in the L2 runner and
+ * is written against the text here, so nothing below may be changed without changing that client.@n
+ * Framing: the parent writes one command per line, terminated by a single `\n`; this program writes
+ * exactly one reply line per command, terminated by a single `\n`.  A trailing `\r` on a command
+ * line is tolerated and stripped.  Tokens are separated by runs of spaces or tabs.  Every reply
+ * begins with either `OK ` or `ERR `, so a client can classify an outcome before parsing it.  A
+ * blank or whitespace-only line is not a command: it is ignored and produces NO reply.  A command
+ * line longer than MAX_COMMAND_LINE_LENGTH bytes is answered `ERR command-too-long` and discarded
+ * unparsed, whether or not its terminator arrived in the same read - how a client's bytes happened to
+ * be split must never decide whether its command was accepted.
+ *
+ * Commands, with every reply each can produce:
+ * - `ping` - liveness, touching nothing.  Replies `OK pong`.
+ * - `deliver <lowercase-hex>` - invokes `onMessageReceived` on the listener the middleware handed to
+ *   `open()`, with exactly the bytes the hex encodes; for example `deliver 0f8f` delivers two bytes.
+ *   Replies `OK delivered <byteCount>`, or `ERR no-listener` when no listener is held, or
+ *   `ERR bad-hex` when the payload is not an even-length run of hexadecimal digits.  `OK delivered`
+ *   states that the callback was invoked on the held listener and nothing further: the callback is
+ *   `oneway`, so whether the middleware then queued, decoded and dispatched the frame is what the
+ *   test asserts on its own side of the boundary, which is the assertion that matters anyway.
+ * - `sent-count` - replies `OK sent-count <n>`, the fake controller's real `sendMessage()`
+ *   invocation count.
+ * - `last-sent` - replies `OK last-sent <lowercase-hex>`, the bytes of the fake controller's last
+ *   captured `sendMessage()` frame.  The hex field is EMPTY when nothing has been captured, so that
+ *   reply is `OK last-sent` followed by one space and then the newline, with nothing between them.
+ * - `open-count` - replies `OK open-count <n>`, the fake service's real `open()` invocation count.
+ * - `close-count` - replies `OK close-count <n>`, the fake service's real `close()` invocation count.
+ *   Both are consumed by `DualPathAidlFlowTest` in
+ *   `tests/L2Tests/ccec/test_DualPathIntegration.cpp`, which asserts the live-session invariant
+ *   `open - close == 1` and then exact per-transition deltas around the one close/reopen cycle that
+ *   tier performs.  That is evidence only an out-of-process fake can give: it establishes that the
+ *   session lifecycle really crossed the driver, and how many times, which an in-process fake
+ *   answers from the same address space and therefore cannot.
+ * - `listener` - replies `OK listener present` or `OK listener absent`.
+ * - `shutdown` - replies `OK shutdown` and then performs the same clean teardown the signal path
+ *   performs, exiting EXIT_SUCCESS.  Anything the client had already queued behind it is NOT served,
+ *   so `shutdown` is the last command of a session by definition.
+ * - anything else - replies `ERR unknown-command <verb>` and the loop continues, so one mistyped
+ *   command does not end the session.  That includes any verb this vocabulary once carried and no
+ *   longer does, so a stale client is answered rather than silently served.
+ *
+ * That list is the whole vocabulary.  Three verbs are deliberately absent, recorded here so that
+ * nobody restores one on the assumption it was overlooked:
+ * - `state-changed` and `message-sent`, which would fire the fake's two diagnostic callbacks over
+ *   IPC.  The adapter is required to log those callbacks and to act on them in no other way, and that
+ *   requirement is already asserted in process by
+ *   DriverAidlSessionTest.DiagnosticCallbacksAreReportedWithoutDisturbingTheSession, which calls
+ *   FakeHdmiCecService::fireOnStateChanged() and fireOnMessageSent() directly and reads what they
+ *   logged, so an out-of-process variant would add a verb without adding evidence.
+ * - `reset`, which cannot be made safe: FakeHdmiCecService::reset() clears the captured listener, so
+ *   a reset issued mid-session would silently destroy the live session's receive path and every
+ *   `deliver` after it would answer `ERR no-listener` for a reason no assertion would explain.  The
+ *   out-of-process invocation opens its session once, in the harness, and reads counters rather than
+ *   rewinding them.
+ *
+ * Two further error replies apply to every command that takes arguments: `ERR bad-args <verb>` when
+ * the argument count is wrong, and `ERR no-controller` if the fake service were ever to hand out no
+ * controller - documented because a client must be able to classify every line this program can emit,
+ * not because it is reachable today.
+ *
+ * @par The parent's obligations for the channel
+ * The parent creates two pipes, passes the control READ end and the observation WRITE end to this
+ * child as inherited descriptors, and names those descriptor numbers in `CEC_FAKE_HOST_CONTROL_FD`
+ * and `CEC_FAKE_HOST_OBSERVE_FD`.  Descriptors created with `O_CLOEXEC` - which is how they should
+ * be created, so that no unrelated exec leaks them - do NOT survive the exec of this binary unless
+ * the parent CLEARS `FD_CLOEXEC` on the child's copies between fork() and exec(), exactly as it
+ * already does for the readiness descriptor.  A parent that forgets that step names descriptors this
+ * program will reject as unusable, which is the failure it is meant to be: rejected loudly beats
+ * served silently.@n
+ * The parent must keep the other two ends open for as long as it intends to drive this host, must
+ * read each reply before issuing the next command, and must bound every wait for a reply.  Closing
+ * the control write end is a legitimate way to end the session: this program reads end of file and
+ * shuts down cleanly, as it does for a signal.
  *
  * @par Readiness
  * The readiness signal is the exact line `FAKE_HDMI_CEC_AIDL_HOST_READY\n`, written once, with a raw
@@ -135,11 +240,15 @@
 #include <cerrno>
 #include <climits>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <iostream>
+#include <poll.h>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 /**
  * @brief Prefix every diagnostic line this program prints carries.
@@ -167,6 +276,71 @@ static const char READINESS_TOKEN[] = "FAKE_HDMI_CEC_AIDL_HOST_READY\n";
  * hard failure - see resolveReadinessFd().
  */
 static const char READY_FD_VARIABLE[] = "CEC_FAKE_HOST_READY_FD";
+
+/**
+ * @brief Environment variable naming the inherited descriptor commands are read from.
+ *
+ * The read end of a pipe the parent writes to.  Unset - together with OBSERVE_FD_VARIABLE - means no
+ * channel was supplied and this program serves none.  Set without its partner, or set to something
+ * unusable, is a hard failure; see resolveControlChannelFds().
+ */
+static const char CONTROL_FD_VARIABLE[] = "CEC_FAKE_HOST_CONTROL_FD";
+
+/**
+ * @brief Environment variable naming the inherited descriptor replies are written to.
+ *
+ * The write end of a second pipe the parent reads from.  Exactly one reply line is written to it per
+ * command received, and nothing else is ever written to it - every diagnostic in this program goes to
+ * standard output, so a client parsing this descriptor sees replies alone.
+ */
+static const char OBSERVE_FD_VARIABLE[] = "CEC_FAKE_HOST_OBSERVE_FD";
+
+/**
+ * @brief Longest command line this program will assemble, in bytes, excluding the terminator.
+ *
+ * A control descriptor is a pipe an authorised parent owns, not untrusted input, but an unbounded
+ * line buffer is still an unbounded allocation driven from outside this process.  The cap is far
+ * larger than any command in the vocabulary - the longest realistic one is a `deliver` carrying a
+ * maximum-length CEC frame, well under a hundred characters - so it can only ever be reached by a
+ * client that has lost its framing, which is exactly the case it exists to answer.
+ *
+ * @see serveControlChannel()
+ */
+static const size_t MAX_COMMAND_LINE_LENGTH = 4096;
+
+/**
+ * @brief Bytes read from the control descriptor per read() call.
+ *
+ * Sized to swallow a whole command, and usually several, in one call.  A short read is ordinary and
+ * costs nothing: the reader buffers a partial line and resumes on the next poll.
+ */
+static const size_t CONTROL_READ_CHUNK = 512;
+
+/**
+ * @brief Longest command text a diagnostic line reproduces, in bytes.
+ *
+ * A command may legitimately be long - a `deliver` carrying a long payload - and a client that has
+ * lost its framing may produce one longer still.  Tracing either in full drowns the very output that
+ * has to explain a failure, so a longer command is traced truncated with an ellipsis.  This bounds a
+ * diagnostic only: the command itself is dispatched whole.
+ *
+ * @see serveControlChannel()
+ */
+static const size_t TRACED_COMMAND_LIMIT = 120;
+
+/**
+ * @brief Milliseconds a single reply write may wait for the observation descriptor to accept bytes.
+ *
+ * A pipe whose reader has stopped reading eventually stops accepting writes, and a blocking write
+ * there would hang this program with no diagnostic and no exit code - the one failure mode a test
+ * harness can least afford, because it presents as a hung suite rather than a failed one.  So every
+ * reply write is bounded: this program would rather exit EXIT_CONTROL_CHANNEL_FAILED and let the
+ * parent's own bounded wait fail loudly than block.  The bound is generous by design, since a
+ * healthy parent reads each reply before sending the next command and never comes close to it.
+ *
+ * @see writeReplyLine()
+ */
+static const int OBSERVE_WRITE_TIMEOUT_MS = 5000;
 
 /**
  * @brief Binder driver node checked before anything in this process touches libbinder.
@@ -218,6 +392,33 @@ static const int EXIT_NO_BINDER_TRANSPORT = 6;
  */
 static const int EXIT_SETUP_FAILED = 7;
 
+/**
+ * @brief Exit code reported when the control and observation channel is configured wrongly.
+ *
+ * Covers every way the channel can be asked for and not be usable: one of the two variables set
+ * without the other, a value that is not a plain non-negative descriptor number, a descriptor number
+ * that is not open in this process, and a descriptor open in the wrong direction - a control
+ * descriptor that cannot be read or an observation descriptor that cannot be written.  Each of them
+ * means the parent intends to drive this host and cannot, so none may exit zero and none may write
+ * the readiness token.
+ *
+ * @see resolveControlChannelFds()
+ */
+static const int EXIT_BAD_CONTROL_CHANNEL = 8;
+
+/**
+ * @brief Exit code reported when the channel failed while it was being served.
+ *
+ * Distinct from EXIT_BAD_CONTROL_CHANNEL, which is a configuration fault found before the host ever
+ * became ready.  This code means the channel was accepted and then stopped working: poll() or read()
+ * failed for a reason other than an interruption, or a reply could not be delivered within
+ * OBSERVE_WRITE_TIMEOUT_MS.  A parent that has closed its ends deliberately is NOT this case - that
+ * is end of file, or a broken pipe, and both are clean shutdowns.
+ *
+ * @see serveControlChannel(), writeReplyLine()
+ */
+static const int EXIT_CONTROL_CHANNEL_FAILED = 9;
+
 /*
  * State the signal handler touches, and therefore the only state in this file that is not local to a
  * function.  Both objects are volatile sig_atomic_t because a handler may run between any two
@@ -244,7 +445,9 @@ extern "C" {
  * @brief Records a termination request and wakes the waiting main thread.
  *
  * The whole of the handler: record the signal number, then write one byte to the self-pipe so that
- * the blocking read in waitForShutdownSignal() completes.  Nothing else happens here, and nothing
+ * whichever waiter is running completes - the blocking read in waitForShutdownSignal() when no
+ * control channel was supplied, or the poll() in serveControlChannel() when one was, which is why
+ * that loop watches this pipe alongside the channel.  Nothing else happens here, and nothing
  * else may - this runs asynchronously between arbitrary instructions, so a stream insertion, an
  * allocation or a binder call would risk deadlocking against a lock the interrupted code already
  * holds.  Both objects it touches are volatile sig_atomic_t and write() is async-signal-safe.@n
@@ -253,13 +456,13 @@ extern "C" {
  *
  * @param [in] signalNumber               - Signal being delivered, recorded for the exit trace
  *
- * @post waitForShutdownSignal() returns, and g_shutdownSignalNumber names the signal.
+ * @post The running waiter returns, and g_shutdownSignalNumber names the signal.
  *
  * @warning Async-signal-safe by construction.  Adding any other call - tracing included - would
  *          break that property, which is why the exit trace is emitted by main after the wait
  *          returns rather than from here.
  *
- * @see waitForShutdownSignal(), installShutdownHandlers()
+ * @see waitForShutdownSignal(), serveControlChannel(), installShutdownHandlers()
  */
 static void handleShutdownSignal(int signalNumber)
 {
@@ -300,9 +503,9 @@ static void handleShutdownSignal(int signalNumber)
  *                                                  and must not continue
  *
  * @post On success g_shutdownPipeReadFd and g_shutdownPipeWriteFd are open, and a termination signal
- *       completes the wait in waitForShutdownSignal().
+ *       ends whichever wait is running - waitForShutdownSignal() or serveControlChannel().
  *
- * @see handleShutdownSignal(), waitForShutdownSignal()
+ * @see handleShutdownSignal(), waitForShutdownSignal(), serveControlChannel()
  */
 static bool installShutdownHandlers()
 {
@@ -335,6 +538,99 @@ static bool installShutdownHandlers()
               << ", write fd " << static_cast<int>(g_shutdownPipeWriteFd)
               << ", handling SIGTERM and SIGINT" << std::endl;
     return true;
+}
+
+/**
+ * @brief Parses an environment value that is supposed to be a file descriptor number.
+ *
+ * The one strict parser every descriptor-valued variable in this program goes through, so that the
+ * readiness descriptor and the two channel descriptors cannot drift into accepting different
+ * spellings of the same mistake.  Only an unadorned run of decimal digits naming a value in range is
+ * accepted: an empty value, leading whitespace, a sign, a trailing character, a negative number and
+ * a value too large to be a descriptor are all rejected rather than coerced.@n
+ * strtol() on its own would not do this.  It skips leading whitespace and accepts a sign, so " 7"
+ * and "+7" would parse as 7 and "-1" would parse as a negative descriptor the caller then has to
+ * catch.  Requiring the first character to be a digit rejects all three before the conversion
+ * matters.  A descriptor number a parent formatted correctly never needs that latitude, and a value
+ * that does need it is a botched handoff.
+ *
+ * @param [in]  rawValue                  - Environment value to parse.  Must not be null
+ * @param [out] descriptor                - Receives the parsed descriptor number.  Untouched when
+ *                                          this reports failure
+ *
+ * @return bool                                   - Whether a descriptor number was parsed
+ * @retval true                                   - descriptor holds a value in [0, INT_MAX]
+ * @retval false                                  - The value was not a plain non-negative decimal
+ *                                                  descriptor number
+ *
+ * @note Parsing only.  Whether the number names a descriptor that is actually open, and open in the
+ *       direction the caller needs, is isUsableDescriptor()'s question.
+ *
+ * @see resolveReadinessFd(), resolveControlChannelFds(), isUsableDescriptor()
+ */
+static bool parseDescriptorNumber(const char *rawValue, int &descriptor)
+{
+    if (rawValue == nullptr || rawValue[0] == '\0') {
+        return false;
+    }
+
+    const bool startsWithDigit = (rawValue[0] >= '0' && rawValue[0] <= '9');
+
+    errno = 0;
+    char *parseEnd = nullptr;
+    const long parsedFd = std::strtol(rawValue, &parseEnd, 10);
+
+    if (!startsWithDigit || errno != 0 || parseEnd == rawValue || *parseEnd != '\0' ||
+        parsedFd < 0 || parsedFd > INT_MAX) {
+        return false;
+    }
+
+    descriptor = static_cast<int>(parsedFd);
+    return true;
+}
+
+/**
+ * @brief Reports whether a descriptor is open in this process and usable in the direction needed.
+ *
+ * A parent that names a descriptor it never passed, or passes one it created with `O_CLOEXEC` and
+ * forgets to clear that flag on the child's copy before exec, leaves this program holding a number
+ * that is not open here at all.  Answering commands on it is impossible, and discovering that only
+ * when the first read fails would waste the parent's whole timeout, so it is established up front
+ * with a call that has no side effect.@n
+ * The direction is checked as well as the openness.  A pipe end has one direction, and a control
+ * descriptor that turns out to be a write end - or an observation descriptor that turns out to be a
+ * read end - means the parent crossed the two over, which is a mistake worth naming rather than
+ * discovering as an EBADF three commands later.
+ *
+ * @param [in] descriptor                 - Descriptor number to test
+ * @param [in] mustBeWritable             - true to require a descriptor this process can write,
+ *                                          false to require one it can read
+ *
+ * @return bool                                   - Whether the descriptor is open and usable
+ * @retval true                                   - The descriptor is open and its access mode allows
+ *                                                  the required direction
+ * @retval false                                  - The descriptor is not open in this process, or it
+ *                                                  is open in the wrong direction
+ *
+ * @note F_GETFL is used deliberately in place of a trial read or write: it reports the access mode
+ *       without consuming a byte, without blocking, and without side effect of any kind.
+ *
+ * @see parseDescriptorNumber(), resolveControlChannelFds()
+ */
+static bool isUsableDescriptor(int descriptor, bool mustBeWritable)
+{
+    const int flags = ::fcntl(descriptor, F_GETFL);
+    if (flags < 0) {
+        return false;
+    }
+
+    const int accessMode = flags & O_ACCMODE;
+
+    if (mustBeWritable) {
+        return (accessMode == O_WRONLY || accessMode == O_RDWR);
+    }
+
+    return (accessMode == O_RDONLY || accessMode == O_RDWR);
 }
 
 /**
@@ -387,27 +683,176 @@ static bool resolveReadinessFd(int &readinessFd)
     }
 
     /*
-     * strtol() skips leading whitespace and accepts a sign, so " 7" and "+7" would otherwise parse
-     * as 7. Requiring the first character to be a digit rejects both, and rejects "-1" before the
-     * conversion rather than after it. A descriptor number the parent formatted correctly never
-     * needs any of that latitude, and a value that does need it is a botched handoff.
+     * The strict parser is shared with the two channel variables, so every descriptor-valued
+     * variable in this program rejects the same spellings of the same mistake. What it will not
+     * accept, and why, is documented on parseDescriptorNumber().
      */
-    const bool startsWithDigit = (rawValue[0] >= '0' && rawValue[0] <= '9');
-
-    errno = 0;
-    char *parseEnd = nullptr;
-    const long parsedFd = std::strtol(rawValue, &parseEnd, 10);
-
-    if (!startsWithDigit || errno != 0 || parseEnd == rawValue || *parseEnd != '\0' ||
-        parsedFd < 0 || parsedFd > INT_MAX) {
+    int parsedFd = -1;
+    if (!parseDescriptorNumber(rawValue, parsedFd)) {
         std::cout << TRACE_PREFIX << READY_FD_VARIABLE << " is set to \"" << rawValue
                   << "\", which is not a usable non-negative file descriptor number" << std::endl;
         return false;
     }
 
-    readinessFd = static_cast<int>(parsedFd);
+    readinessFd = parsedFd;
     std::cout << TRACE_PREFIX << "The readiness token will be written to inherited fd "
               << readinessFd << ", named by " << READY_FD_VARIABLE << std::endl;
+    return true;
+}
+
+/**
+ * @brief Determines whether a control and observation channel was supplied, and validates it.
+ *
+ * Reads CEC_FAKE_HOST_CONTROL_FD and CEC_FAKE_HOST_OBSERVE_FD and resolves the pair to two usable
+ * descriptors, or to "no channel at all".  The two variables travel together and there is no third
+ * outcome: a channel with only one half is not a degraded channel, it is a channel whose replies
+ * would go nowhere or whose commands would never arrive.@n
+ * Every rejected case is rejected loudly, before this program takes any action a parent could
+ * observe and long before the readiness token is written, so a botched handoff costs the parent
+ * nothing but an exit code it can read.  Serving without the channel a parent asked for would be the
+ * worst available outcome: the run would appear to start, the client's first bounded wait for a reply
+ * would expire, and nothing would say why.
+ *
+ * @param [out] controlFd                 - Receives the descriptor commands are read from, or -1 when
+ *                                          no channel was supplied.  Untouched on failure
+ * @param [out] observeFd                 - Receives the descriptor replies are written to, or -1 when
+ *                                          no channel was supplied.  Untouched on failure
+ * @param [out] channelEnabled            - Receives whether a channel was supplied at all.  Untouched
+ *                                          on failure
+ *
+ * @return bool                                   - Whether the channel configuration is acceptable
+ * @retval true                                   - Either both descriptors are usable and
+ *                                                  channelEnabled is true, or neither variable was set
+ *                                                  and channelEnabled is false
+ * @retval false                                  - The channel was asked for and is not usable: one
+ *                                                  variable without the other, a value that is not a
+ *                                                  plain descriptor number, a descriptor not open in
+ *                                                  this process, or one open in the wrong direction
+ *
+ * @post On success with channelEnabled false, this program behaves exactly as it did before the
+ *       channel existed - which is what keeps an invocation that supplies neither variable unaffected.
+ *
+ * @warning A descriptor created with O_CLOEXEC does not survive this program's exec unless the parent
+ *          cleared FD_CLOEXEC on the child's copy first.  That omission arrives here as "not open in
+ *          this process" and is reported as such, naming the descriptor number, because it is the
+ *          single most likely handoff mistake.
+ *
+ * @see parseDescriptorNumber(), isUsableDescriptor(), serveControlChannel()
+ */
+static bool resolveControlChannelFds(int &controlFd, int &observeFd, bool &channelEnabled)
+{
+    const char *const rawControl = ::getenv(CONTROL_FD_VARIABLE);
+    const char *const rawObserve = ::getenv(OBSERVE_FD_VARIABLE);
+
+    if (rawControl == nullptr && rawObserve == nullptr) {
+        controlFd = -1;
+        observeFd = -1;
+        channelEnabled = false;
+        std::cout << TRACE_PREFIX << CONTROL_FD_VARIABLE << " and " << OBSERVE_FD_VARIABLE
+                  << " are both unset, so no control and observation channel was supplied; this host "
+                     "will publish the fake and wait to be stopped, exactly as it does when no "
+                     "channel is wanted" << std::endl;
+        return true;
+    }
+
+    if (rawControl == nullptr || rawObserve == nullptr) {
+        std::cout << TRACE_PREFIX << "Only one half of the control and observation channel was "
+                     "supplied: " << CONTROL_FD_VARIABLE << " is "
+                  << (rawControl == nullptr ? "unset" : "set") << " and " << OBSERVE_FD_VARIABLE
+                  << " is " << (rawObserve == nullptr ? "unset" : "set")
+                  << ". They travel together: commands with nowhere to reply, or replies with no "
+                     "commands to answer, is not a channel. Refusing to start" << std::endl;
+        return false;
+    }
+
+    int resolvedControlFd = -1;
+    if (!parseDescriptorNumber(rawControl, resolvedControlFd)) {
+        std::cout << TRACE_PREFIX << CONTROL_FD_VARIABLE << " is set to \"" << rawControl
+                  << "\", which is not a usable non-negative file descriptor number" << std::endl;
+        return false;
+    }
+
+    int resolvedObserveFd = -1;
+    if (!parseDescriptorNumber(rawObserve, resolvedObserveFd)) {
+        std::cout << TRACE_PREFIX << OBSERVE_FD_VARIABLE << " is set to \"" << rawObserve
+                  << "\", which is not a usable non-negative file descriptor number" << std::endl;
+        return false;
+    }
+
+    if (resolvedControlFd == resolvedObserveFd) {
+        std::cout << TRACE_PREFIX << CONTROL_FD_VARIABLE << " and " << OBSERVE_FD_VARIABLE
+                  << " both name descriptor " << resolvedControlFd
+                  << ". The channel is two pipes, not one: a single descriptor would have this host "
+                     "reading its own replies. Refusing to start" << std::endl;
+        return false;
+    }
+
+    if (!isUsableDescriptor(resolvedControlFd, false)) {
+        std::cout << TRACE_PREFIX << CONTROL_FD_VARIABLE << " names descriptor " << resolvedControlFd
+                  << ", which is not open for reading in this process (" << std::strerror(errno)
+                  << "). A descriptor created with O_CLOEXEC does not survive this program's exec "
+                     "unless the parent cleared FD_CLOEXEC on the child's copy first" << std::endl;
+        return false;
+    }
+
+    if (!isUsableDescriptor(resolvedObserveFd, true)) {
+        std::cout << TRACE_PREFIX << OBSERVE_FD_VARIABLE << " names descriptor " << resolvedObserveFd
+                  << ", which is not open for writing in this process (" << std::strerror(errno)
+                  << "). A descriptor created with O_CLOEXEC does not survive this program's exec "
+                     "unless the parent cleared FD_CLOEXEC on the child's copy first" << std::endl;
+        return false;
+    }
+
+    controlFd = resolvedControlFd;
+    observeFd = resolvedObserveFd;
+    channelEnabled = true;
+
+    std::cout << TRACE_PREFIX << "Control and observation channel accepted: commands will be read "
+                 "from fd " << controlFd << " (named by " << CONTROL_FD_VARIABLE
+              << ") and one reply line written per command to fd " << observeFd << " (named by "
+              << OBSERVE_FD_VARIABLE << ")" << std::endl;
+    return true;
+}
+
+/**
+ * @brief Stops a closed observation pipe from killing this process.
+ *
+ * Writing to a pipe whose reader has closed raises SIGPIPE, whose default disposition terminates the
+ * process outright - no diagnostic, no exit code, nothing for the parent to report.  A parent that
+ * closes its channel ends the session legitimately, so this program must see that as an EPIPE it can
+ * classify and act on rather than as a fatal signal.@n
+ * The disposition is changed only when a channel was actually supplied.  A run with no channel keeps
+ * the process defaults it has always had, which is what "both variables unset behaves exactly as
+ * before" means in practice.
+ *
+ * @return bool                                   - Whether the disposition was installed
+ * @retval true                                   - SIGPIPE is ignored, and a write to a closed pipe
+ *                                                  now fails with EPIPE
+ * @retval false                                  - The disposition could not be installed, so a
+ *                                                  closed pipe could still take this process down and
+ *                                                  it must not proceed
+ *
+ * @pre Called only when resolveControlChannelFds() reported a channel.
+ *
+ * @see writeReplyLine(), resolveControlChannelFds()
+ */
+static bool ignoreBrokenPipeSignal()
+{
+    struct sigaction action;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_IGN;
+    ::sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+
+    if (::sigaction(SIGPIPE, &action, nullptr) != 0) {
+        std::cout << TRACE_PREFIX << "Could not ignore SIGPIPE: " << std::strerror(errno)
+                  << ". A parent closing its end of the observation pipe could then terminate this "
+                     "host with no diagnostic, so it refuses to serve the channel" << std::endl;
+        return false;
+    }
+
+    std::cout << TRACE_PREFIX << "SIGPIPE is ignored, so a closed observation pipe reports EPIPE "
+                 "instead of terminating this host" << std::endl;
     return true;
 }
 
@@ -570,7 +1015,12 @@ static int verifyServiceNameIsFree(const std::string &serviceName)
  *
  * @pre installShutdownHandlers() has already reported true.
  *
- * @see handleShutdownSignal(), installShutdownHandlers()
+ * @note This is the wait used when the parent supplied NO control and observation channel, and it is
+ *       unchanged from the program's original behaviour for exactly that reason.  Where a channel was
+ *       supplied, serveControlChannel() waits instead and watches the same self-pipe, so a
+ *       termination signal is answered either way.
+ *
+ * @see handleShutdownSignal(), installShutdownHandlers(), serveControlChannel()
  */
 static bool waitForShutdownSignal(int &signalNumber)
 {
@@ -599,6 +1049,603 @@ static bool waitForShutdownSignal(int &signalNumber)
 }
 
 /**
+ * @brief Outcome of one attempt to deliver a reply line to the observation descriptor.
+ *
+ * Three outcomes, because they demand three different responses from the caller and collapsing any
+ * two of them would either hide a failure or report a deliberate shutdown as one.
+ *
+ * @see writeReplyLine(), serveControlChannel()
+ */
+enum class ReplyOutcome {
+    /** @brief The whole line reached the observation descriptor; the session continues. */
+    DELIVERED,
+
+    /**
+     * @brief The parent closed its end of the observation pipe.
+     *
+     * A legitimate way to end the session, indistinguishable in intent from end of file on the
+     * control descriptor, so the caller shuts down cleanly and exits EXIT_SUCCESS.
+     */
+    PARENT_GONE,
+
+    /**
+     * @brief The reply could not be delivered and the parent has not gone away.
+     *
+     * The write failed for a reason other than an interruption or a broken pipe, or it could not
+     * complete within OBSERVE_WRITE_TIMEOUT_MS.  Either way the client is waiting for a line it will
+     * never receive, so the caller exits EXIT_CONTROL_CHANNEL_FAILED rather than continue a session
+     * that has silently desynchronised.
+     */
+    FAILED
+};
+
+/**
+ * @brief Writes exactly one reply line to the observation descriptor, under a bounded wait.
+ *
+ * Appends the single newline that terminates a reply - callers pass the reply text without it, so
+ * there is one place in this program that decides how a reply is framed - and delivers the whole line,
+ * looping over short writes and retrying an interrupted one.@n
+ * The wait is bounded, which is the whole point of doing this by hand rather than with a stream.  A
+ * pipe whose reader has stopped reading eventually stops accepting bytes, and a blocking write there
+ * would hang this host with no diagnostic: a test harness can survive a failed host far more easily
+ * than a hung one.  The write is also raw and unbuffered, so a reply cannot sit in a stream buffer
+ * while the client waits for it.
+ *
+ * @param [in] observeFd                  - Observation descriptor to write to
+ * @param [in] reply                      - Reply text, without its terminator.  Must begin with
+ *                                          "OK " or "ERR " to satisfy the protocol
+ *
+ * @return ReplyOutcome                           - How the delivery ended
+ * @retval ReplyOutcome::DELIVERED                - Every byte of the line was written
+ * @retval ReplyOutcome::PARENT_GONE              - The reader closed its end; EPIPE, POLLERR or
+ *                                                  POLLHUP was observed
+ * @retval ReplyOutcome::FAILED                   - The descriptor rejected the write for another
+ *                                                  reason, or the bounded wait expired
+ *
+ * @pre SIGPIPE is ignored - ignoreBrokenPipeSignal() has reported true - otherwise a closed reader
+ *      terminates this process before EPIPE can be observed.
+ *
+ * @see ReplyOutcome, OBSERVE_WRITE_TIMEOUT_MS, ignoreBrokenPipeSignal()
+ */
+static ReplyOutcome writeReplyLine(int observeFd, const std::string &reply)
+{
+    const std::string line = reply + "\n";
+    size_t written = 0;
+
+    while (written < line.size()) {
+        struct pollfd watched;
+        watched.fd = observeFd;
+        watched.events = POLLOUT;
+        watched.revents = 0;
+
+        const int ready = ::poll(&watched, 1, OBSERVE_WRITE_TIMEOUT_MS);
+
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cout << TRACE_PREFIX << "Could not wait for the observation descriptor to accept a "
+                         "reply: " << std::strerror(errno) << std::endl;
+            return ReplyOutcome::FAILED;
+        }
+
+        if (ready == 0) {
+            std::cout << TRACE_PREFIX << "The observation descriptor did not accept a reply within "
+                      << OBSERVE_WRITE_TIMEOUT_MS << " ms, so the client is not reading. Refusing to "
+                         "block: a hung host is harder to diagnose than a failed one" << std::endl;
+            return ReplyOutcome::FAILED;
+        }
+
+        if ((watched.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+            std::cout << TRACE_PREFIX << "The observation descriptor reported that its reader is gone"
+                      << std::endl;
+            return ReplyOutcome::PARENT_GONE;
+        }
+
+        const ssize_t result = ::write(observeFd, line.data() + written, line.size() - written);
+
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EPIPE) {
+                std::cout << TRACE_PREFIX << "The observation pipe is broken, so the client has "
+                             "closed its end" << std::endl;
+                return ReplyOutcome::PARENT_GONE;
+            }
+            std::cout << TRACE_PREFIX << "Could not write a reply to fd " << observeFd << ": "
+                      << std::strerror(errno) << std::endl;
+            return ReplyOutcome::FAILED;
+        }
+
+        if (result == 0) {
+            /*
+             * A zero-length transfer on a positive request makes no progress, so retrying it would
+             * spin forever. Report it rather than loop, exactly as the readiness write does.
+             */
+            std::cout << TRACE_PREFIX << "A reply write to fd " << observeFd
+                      << " transferred nothing and made no progress" << std::endl;
+            return ReplyOutcome::FAILED;
+        }
+
+        written += static_cast<size_t>(result);
+    }
+
+    return ReplyOutcome::DELIVERED;
+}
+
+/**
+ * @brief Renders bytes as an unseparated run of lowercase hexadecimal digits.
+ *
+ * The protocol's one payload encoding, in both directions: a `deliver` command carries its frame this
+ * way and a `last-sent` reply reports one back the same way.  Two digits per byte, no separators, no
+ * prefix and no uppercase, so a client can compare a reply against an expected string without
+ * normalising it.
+ *
+ * @param [in] bytes                      - Bytes to render
+ *
+ * @return std::string                            - Hexadecimal text, empty when the input is empty
+ *
+ * @see parseHexPayload()
+ */
+static std::string bytesToLowercaseHex(const std::vector<uint8_t> &bytes)
+{
+    static const char digits[] = "0123456789abcdef";
+
+    std::string hex;
+    hex.reserve(bytes.size() * 2);
+
+    for (size_t index = 0; index < bytes.size(); ++index) {
+        hex.push_back(digits[(bytes[index] >> 4) & 0x0F]);
+        hex.push_back(digits[bytes[index] & 0x0F]);
+    }
+
+    return hex;
+}
+
+/**
+ * @brief Decodes a hexadecimal payload token into bytes.
+ *
+ * Strict about length and alphabet and about nothing else: an odd number of digits cannot describe
+ * whole bytes and a non-hexadecimal character cannot be guessed at, so both are rejected rather than
+ * partially decoded.  Uppercase digits are accepted even though the protocol specifies lowercase,
+ * because tolerating them costs nothing and rejecting a payload a client meant correctly costs a
+ * confusing test failure.@n
+ * The decoded bytes are never inspected.  A frame's destination nibble, its opcode and its length are
+ * the middleware's business and the assertion's; this host delivers what it was handed.
+ *
+ * @param [in]  hex                       - Token to decode
+ * @param [out] bytes                     - Receives the decoded bytes.  Cleared first, and left empty
+ *                                          when this reports failure
+ *
+ * @return bool                                   - Whether the token decoded
+ * @retval true                                   - bytes holds hex.size() / 2 decoded bytes
+ * @retval false                                  - The token was empty, of odd length, or contained a
+ *                                                  character that is not a hexadecimal digit
+ *
+ * @see bytesToLowercaseHex()
+ */
+static bool parseHexPayload(const std::string &hex, std::vector<uint8_t> &bytes)
+{
+    bytes.clear();
+
+    if (hex.empty() || (hex.size() % 2) != 0) {
+        return false;
+    }
+
+    bytes.reserve(hex.size() / 2);
+
+    for (size_t index = 0; index < hex.size(); index += 2) {
+        int nibbles[2] = { 0, 0 };
+
+        for (size_t half = 0; half < 2; ++half) {
+            const char character = hex[index + half];
+
+            if (character >= '0' && character <= '9') {
+                nibbles[half] = character - '0';
+            } else if (character >= 'a' && character <= 'f') {
+                nibbles[half] = 10 + (character - 'a');
+            } else if (character >= 'A' && character <= 'F') {
+                nibbles[half] = 10 + (character - 'A');
+            } else {
+                bytes.clear();
+                return false;
+            }
+        }
+
+        bytes.push_back(static_cast<uint8_t>((nibbles[0] << 4) | nibbles[1]));
+    }
+
+    return true;
+}
+
+/**
+ * @brief Splits a command line into its verb and arguments.
+ *
+ * Separators are runs of spaces and tabs, so repeated or mixed whitespace between tokens is
+ * harmless.  An empty result means the line carried no verb, which the caller treats as "not a
+ * command" rather than as an error.
+ *
+ * @param [in] line                       - Command line, already stripped of its terminator
+ *
+ * @return std::vector<std::string>               - The tokens, verb first, empty for a blank line
+ *
+ * @see handleControlCommand()
+ */
+static std::vector<std::string> tokenizeCommandLine(const std::string &line)
+{
+    std::vector<std::string> tokens;
+    size_t index = 0;
+
+    while (index < line.size()) {
+        while (index < line.size() && (line[index] == ' ' || line[index] == '\t')) {
+            ++index;
+        }
+
+        const size_t tokenStart = index;
+        while (index < line.size() && line[index] != ' ' && line[index] != '\t') {
+            ++index;
+        }
+
+        if (index > tokenStart) {
+            tokens.push_back(line.substr(tokenStart, index - tokenStart));
+        }
+    }
+
+    return tokens;
+}
+
+/**
+ * @brief Executes one command line against the hosted fake and composes its reply.
+ *
+ * The whole of the protocol's semantics, in one place, so that the vocabulary a client codes against
+ * and the vocabulary this program implements cannot drift apart across functions.@n
+ * Two properties matter more than anything else here and are structural rather than incidental.  The
+ * one trigger command, `deliver`, reaches the fake through its own fireOnMessageReceived() helper, so
+ * the listener it invokes is exactly the one the middleware handed to `open()` and no second delivery
+ * route is invented.  The observation commands read the fake's own counters and captures through its
+ * accessors, so what a client learns is the fake's real state and not a copy this program keeps in
+ * step by hand - a copy would be capable of reporting a transmit that never arrived, which is
+ * precisely the failure the channel exists to make impossible.
+ *
+ * @param [in]  line                      - Command line, stripped of its terminator and of a trailing
+ *                                          carriage return
+ * @param [in]  fake                      - Hosted fake the command acts on
+ * @param [out] reply                     - Receives the reply text without its terminator.  Untouched
+ *                                          when this reports that there is no reply
+ * @param [out] shutdownRequested         - Set to true by the `shutdown` command only; never cleared
+ *                                          here, so a caller may initialise it once
+ *
+ * @return bool                                   - Whether a reply is to be sent
+ * @retval true                                   - reply holds one line beginning "OK " or "ERR "
+ * @retval false                                  - The line was blank or whitespace-only, which is not
+ *                                                  a command and produces no reply
+ *
+ * @post `deliver` has invoked the listener the middleware supplied, if one is held, and an observation
+ *       command has read the fake's live state.  Nothing here clears, rewinds or reconfigures the
+ *       fake: every command either stimulates the receive path or reports what the fake already holds.
+ *
+ * @warning No verb resets the fake, deliberately.  FakeHdmiCecService::reset() clears the captured
+ *          listener, so exposing it here would let a client destroy the live session's receive path
+ *          mid-run and turn every subsequent `deliver` into `ERR no-listener` for a reason no
+ *          assertion could explain.  Per-case isolation belongs to the in-process fixtures, which call
+ *          reset() directly and re-open afterwards.
+ *
+ * @see FakeHdmiCecService::fireOnMessageReceived(), writeReplyLine()
+ */
+static bool handleControlCommand(const std::string &line, FakeHdmiCecService &fake,
+                                 std::string &reply, bool &shutdownRequested)
+{
+    const std::vector<std::string> tokens = tokenizeCommandLine(line);
+
+    if (tokens.empty()) {
+        return false;
+    }
+
+    const std::string &verb = tokens[0];
+    const size_t argumentCount = tokens.size() - 1;
+
+    if (verb == "ping") {
+        if (argumentCount != 0) {
+            reply = "ERR bad-args ping";
+            return true;
+        }
+        reply = "OK pong";
+        return true;
+    }
+
+    if (verb == "deliver") {
+        if (argumentCount != 1) {
+            reply = "ERR bad-args deliver";
+            return true;
+        }
+
+        std::vector<uint8_t> message;
+        if (!parseHexPayload(tokens[1], message)) {
+            reply = "ERR bad-hex";
+            return true;
+        }
+
+        if (!fake.fireOnMessageReceived(message)) {
+            reply = "ERR no-listener";
+            return true;
+        }
+
+        reply = "OK delivered " + std::to_string(message.size());
+        return true;
+    }
+
+    if (verb == "sent-count" || verb == "last-sent") {
+        if (argumentCount != 0) {
+            reply = "ERR bad-args " + verb;
+            return true;
+        }
+
+        const ::android::sp<FakeHdmiCecController> controller = fake.getController();
+        if (controller == nullptr) {
+            reply = "ERR no-controller";
+            return true;
+        }
+
+        if (verb == "sent-count") {
+            reply = "OK sent-count " + std::to_string(controller->getSendMessageCallCount());
+        } else {
+            reply = "OK last-sent " + bytesToLowercaseHex(controller->getLastSentMessage());
+        }
+        return true;
+    }
+
+    if (verb == "open-count") {
+        if (argumentCount != 0) {
+            reply = "ERR bad-args open-count";
+            return true;
+        }
+        reply = "OK open-count " + std::to_string(fake.getOpenCallCount());
+        return true;
+    }
+
+    if (verb == "close-count") {
+        if (argumentCount != 0) {
+            reply = "ERR bad-args close-count";
+            return true;
+        }
+        reply = "OK close-count " + std::to_string(fake.getCloseCallCount());
+        return true;
+    }
+
+    if (verb == "listener") {
+        if (argumentCount != 0) {
+            reply = "ERR bad-args listener";
+            return true;
+        }
+        reply = (fake.getListener() != nullptr) ? "OK listener present" : "OK listener absent";
+        return true;
+    }
+
+    if (verb == "shutdown") {
+        if (argumentCount != 0) {
+            reply = "ERR bad-args shutdown";
+            return true;
+        }
+        shutdownRequested = true;
+        reply = "OK shutdown";
+        return true;
+    }
+
+    reply = "ERR unknown-command " + verb;
+    return true;
+}
+
+/**
+ * @brief Serves the control and observation channel until the session ends.
+ *
+ * Waits on the shutdown self-pipe AND the control descriptor together, with poll(), so that neither
+ * starves the other: a termination signal is answered while a command is outstanding, and a command
+ * is answered while nothing has signalled.  The alternative - a blocking read on one of the two - is
+ * what makes a host either deaf to its parent or unstoppable, and this program must be neither.@n
+ * The binder threadpool is untouched by any of this.  Transactions addressed to the fake are served
+ * by pool threads that were started before publication; this loop holds one thread, the main one,
+ * and holds no lock of the fake's while it waits, so a command and an inbound transaction can be in
+ * flight at the same time.@n
+ * Framing is handled here and only here: bytes are accumulated until a newline, a partial line is
+ * carried across reads rather than mis-parsed as a whole one, and a line longer than
+ * MAX_COMMAND_LINE_LENGTH is answered and discarded rather than allowed to grow without bound.  Every
+ * read is retried on interruption.
+ *
+ * @param [in]  controlFd                 - Descriptor commands are read from
+ * @param [in]  observeFd                 - Descriptor replies are written to
+ * @param [in]  fake                      - Hosted fake the commands act on
+ * @param [out] signalNumber              - Receives the signal number that ended the session, or 0
+ *                                          when it ended for any other reason
+ *
+ * @return int                                    - EXIT_SUCCESS, or the code the program must exit with
+ * @retval EXIT_SUCCESS                           - The session ended cleanly: a `shutdown` command, end
+ *                                                  of file on the control descriptor, a parent that
+ *                                                  closed the observation descriptor, or a termination
+ *                                                  signal
+ * @retval EXIT_CONTROL_CHANNEL_FAILED            - poll() or read() failed for a reason other than an
+ *                                                  interruption, or a reply could not be delivered
+ *
+ * @pre installShutdownHandlers() has reported true, resolveControlChannelFds() has reported a channel,
+ *      and ignoreBrokenPipeSignal() has reported true.
+ *
+ * @post Every command read from the channel has been answered with exactly one reply line, in order.
+ *
+ * @note End of file on the control descriptor is a clean shutdown and not a failure: it can only mean
+ *       the parent closed its write end, which is a legitimate way to end the session and also what
+ *       happens if the parent dies, so a host left behind by a dead parent stops instead of lingering.
+ *
+ * @see handleControlCommand(), writeReplyLine(), waitForShutdownSignal()
+ */
+static int serveControlChannel(int controlFd, int observeFd, FakeHdmiCecService &fake,
+                               int &signalNumber)
+{
+    std::string pending;
+    bool discardingOverlongLine = false;
+    char buffer[CONTROL_READ_CHUNK];
+
+    std::cout << TRACE_PREFIX << "Serving the control and observation channel: commands on fd "
+              << controlFd << ", replies on fd " << observeFd
+              << ", and SIGTERM or SIGINT still stops this host at any point" << std::endl;
+
+    for (;;) {
+        struct pollfd watched[2];
+        watched[0].fd = g_shutdownPipeReadFd;
+        watched[0].events = POLLIN;
+        watched[0].revents = 0;
+        watched[1].fd = controlFd;
+        watched[1].events = POLLIN;
+        watched[1].revents = 0;
+
+        const int ready = ::poll(watched, 2, -1);
+
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cout << TRACE_PREFIX << "Could not wait on the shutdown self-pipe and the control "
+                         "descriptor: " << std::strerror(errno) << std::endl;
+            return EXIT_CONTROL_CHANNEL_FAILED;
+        }
+
+        /*
+         * The shutdown pipe is examined first, deliberately. A termination signal outranks a command
+         * that happens to be queued behind it: the parent has asked this host to stop and answering
+         * one more command first would delay a teardown it is already waiting on.
+         */
+        if ((watched[0].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0) {
+            unsigned char wakeByte = 0;
+            ssize_t consumed;
+            do {
+                consumed = ::read(g_shutdownPipeReadFd, &wakeByte, sizeof(wakeByte));
+            } while (consumed < 0 && errno == EINTR);
+
+            signalNumber = static_cast<int>(g_shutdownSignalNumber);
+            std::cout << TRACE_PREFIX << "The shutdown path woke while serving the channel, so the "
+                         "session ends here" << std::endl;
+            return EXIT_SUCCESS;
+        }
+
+        if ((watched[1].revents & POLLIN) != 0) {
+            const ssize_t received = ::read(controlFd, buffer, sizeof(buffer));
+
+            if (received < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                std::cout << TRACE_PREFIX << "Could not read from the control descriptor: "
+                          << std::strerror(errno) << std::endl;
+                return EXIT_CONTROL_CHANNEL_FAILED;
+            }
+
+            if (received == 0) {
+                signalNumber = 0;
+                std::cout << TRACE_PREFIX << "The control descriptor reached end of file, so the "
+                             "parent has closed its write end; shutting down cleanly" << std::endl;
+                return EXIT_SUCCESS;
+            }
+
+            pending.append(buffer, static_cast<size_t>(received));
+        } else if ((watched[1].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+            signalNumber = 0;
+            std::cout << TRACE_PREFIX << "The control descriptor reported that its writer is gone, so "
+                         "the session ends here" << std::endl;
+            return EXIT_SUCCESS;
+        }
+
+        size_t newlinePosition = pending.find('\n');
+        while (newlinePosition != std::string::npos) {
+            std::string line = pending.substr(0, newlinePosition);
+            pending.erase(0, newlinePosition + 1);
+
+            /*
+             * A trailing carriage return is stripped so that a client which frames its commands with
+             * CRLF is understood rather than answered "ERR unknown-command ping\r".
+             */
+            if (!line.empty() && line[line.size() - 1] == '\r') {
+                line.erase(line.size() - 1);
+            }
+
+            std::string reply;
+            bool shutdownRequested = false;
+            bool hasReply = false;
+
+            if (discardingOverlongLine || line.size() > MAX_COMMAND_LINE_LENGTH) {
+                /*
+                 * Either the terminator of a line already discarded for length, or a whole overlong
+                 * line that happened to arrive with its terminator inside one read - both are the
+                 * same answer, and both must give it, or the cap would depend on how the client's
+                 * bytes happened to be split across reads. The bytes are deliberately not parsed: a
+                 * line this long has lost its framing, and what looks like a verb at the front of it
+                 * cannot be trusted to be one.
+                 */
+                discardingOverlongLine = false;
+                reply = "ERR command-too-long";
+                hasReply = true;
+                std::cout << TRACE_PREFIX << "A command line of " << line.size()
+                          << " bytes exceeds the " << MAX_COMMAND_LINE_LENGTH
+                          << " byte cap; answering \"ERR command-too-long\" without parsing it"
+                          << std::endl;
+            } else {
+                hasReply = handleControlCommand(line, fake, reply, shutdownRequested);
+            }
+
+            if (hasReply) {
+                /*
+                 * The traced command is truncated because a line may legitimately be thousands of
+                 * bytes long - a deliver carrying a long payload, or a client that has lost its
+                 * framing - and a diagnostic that reproduces one in full drowns the log that has to
+                 * explain the failure.
+                 */
+                const std::string tracedLine = (line.size() <= TRACED_COMMAND_LIMIT)
+                                                   ? line
+                                                   : (line.substr(0, TRACED_COMMAND_LIMIT) + "...");
+
+                std::cout << TRACE_PREFIX << "Command \"" << tracedLine << "\" answered \"" << reply
+                          << "\"" << std::endl;
+
+                const ReplyOutcome outcome = writeReplyLine(observeFd, reply);
+
+                if (outcome == ReplyOutcome::PARENT_GONE) {
+                    signalNumber = 0;
+                    std::cout << TRACE_PREFIX << "The client is no longer reading replies, so the "
+                                 "session ends here" << std::endl;
+                    return EXIT_SUCCESS;
+                }
+
+                if (outcome == ReplyOutcome::FAILED) {
+                    return EXIT_CONTROL_CHANNEL_FAILED;
+                }
+            }
+
+            if (shutdownRequested) {
+                signalNumber = 0;
+                std::cout << TRACE_PREFIX << "A shutdown command was received and acknowledged, so "
+                             "this host stops through the same clean teardown a signal takes"
+                          << std::endl;
+                return EXIT_SUCCESS;
+            }
+
+            newlinePosition = pending.find('\n');
+        }
+
+        if (pending.size() > MAX_COMMAND_LINE_LENGTH) {
+            /*
+             * No terminator within the cap. The bytes are dropped now so the buffer cannot grow
+             * without bound, and a flag remembers that one "ERR command-too-long" is owed when the
+             * terminator eventually arrives - which keeps the one-reply-per-line guarantee intact
+             * even for a client that has lost its framing.
+             */
+            std::cout << TRACE_PREFIX << "A command line exceeded " << MAX_COMMAND_LINE_LENGTH
+                      << " bytes with no terminator; discarding it and answering "
+                         "\"ERR command-too-long\" when its terminator arrives" << std::endl;
+            pending.clear();
+            discardingOverlongLine = true;
+        }
+    }
+}
+
+/**
  * @brief Hosts the fake com.rdk.hal.hdmicec AIDL service until asked to stop.
  *
  * Runs the startup sequence documented on this file, in that order, and treats every step as
@@ -620,8 +1667,16 @@ static bool waitForShutdownSignal(int &signalNumber)
  * @retval EXIT_READINESS_WRITE_FAILED            - The readiness token could not be written, so the
  *                                                  parent can never learn this host is ready
  * @retval EXIT_NO_BINDER_TRANSPORT               - No usable binder driver node exists on this host
- * @retval EXIT_SETUP_FAILED                      - The shutdown path, the fake, or the service
- *                                                  manager could not be established
+ * @retval EXIT_SETUP_FAILED                      - The shutdown path, the SIGPIPE disposition, the
+ *                                                  fake, or the service manager could not be
+ *                                                  established
+ * @retval EXIT_BAD_CONTROL_CHANNEL               - A control and observation channel was asked for and
+ *                                                  is not usable: one of the two variables without the
+ *                                                  other, a value that is not a descriptor number, or
+ *                                                  a descriptor that is not open here or is open in
+ *                                                  the wrong direction
+ * @retval EXIT_CONTROL_CHANNEL_FAILED            - The channel was accepted and then failed while it
+ *                                                  was being served
  *
  * @post On every return path the process has published no readiness line unless it genuinely became
  *       ready, and holds no resource that outlives it: the binder registration is released with the
@@ -630,9 +1685,12 @@ static bool waitForShutdownSignal(int &signalNumber)
  * @warning Configuration is taken from the environment, never from the command line, so that the
  *          parent's launch is a plain exec of the path in CEC_FAKE_AIDL_HOST_PATH with no argument
  *          contract to keep in step.
+ * @warning Both channel variables are validated before this program takes any observable action, and a
+ *          rejected channel writes NO readiness token, so a parent that botched the handoff learns it
+ *          from an exit code rather than from its own expired timeout.
  *
- * @see resolveReadinessFd(), verifyServiceNameIsFree(), registerFakeHdmiCecService(),
- *      waitForShutdownSignal()
+ * @see resolveReadinessFd(), resolveControlChannelFds(), verifyServiceNameIsFree(),
+ *      registerFakeHdmiCecService(), serveControlChannel(), waitForShutdownSignal()
  */
 int main(int argc, char **argv)
 {
@@ -654,6 +1712,22 @@ int main(int argc, char **argv)
     int readinessFd = -1;
     if (!resolveReadinessFd(readinessFd)) {
         return EXIT_BAD_READY_FD;
+    }
+
+    /*
+     * The channel is resolved here, beside the readiness descriptor and before any side effect, for
+     * the same reason: a handoff this program is going to reject costs nothing when it is rejected
+     * before anything has been published and before a readiness token could mislead a parent.
+     */
+    int controlFd = -1;
+    int observeFd = -1;
+    bool channelEnabled = false;
+    if (!resolveControlChannelFds(controlFd, observeFd, channelEnabled)) {
+        return EXIT_BAD_CONTROL_CHANNEL;
+    }
+
+    if (channelEnabled && !ignoreBrokenPipeSignal()) {
+        return EXIT_SETUP_FAILED;
     }
 
     if (!isBinderTransportPresent()) {
@@ -686,8 +1760,8 @@ int main(int argc, char **argv)
      * this directory uses.  The strong reference above is what keeps it alive.
      */
     FakeHdmiCecService::setInstance(fake.get());
-    std::cout << TRACE_PREFIX << "Constructed the fake HDMI CEC AIDL service " << (void*)fake.get()
-              << std::endl;
+    std::cout << TRACE_PREFIX << "Constructed the fake HDMI CEC AIDL service "
+              << fakeHdmiCecTraceLabel(fake.get()) << std::endl;
 
     /*
      * The SERVICE-side threadpool, started before publication so that no transaction can arrive with
@@ -720,30 +1794,57 @@ int main(int argc, char **argv)
     }
 
     std::cout << TRACE_PREFIX << "Wrote the readiness token to fd " << readinessFd
-              << "; waiting for SIGTERM or SIGINT" << std::endl;
+              << (channelEnabled ? "; serving the control and observation channel, and still stoppable "
+                                   "with SIGTERM or SIGINT"
+                                 : "; waiting for SIGTERM or SIGINT")
+              << std::endl;
 
+    /*
+     * Two ways to wait, and which one applies is decided by whether a parent supplied a channel.
+     * With one, both the channel and the shutdown path are watched together so neither starves the
+     * other.  Without one, this is the same blocking wait on the self-pipe the program has always
+     * performed, unchanged, which is what keeps an invocation that supplies neither variable exactly
+     * as it was.
+     */
     int shutdownSignal = 0;
-    if (!waitForShutdownSignal(shutdownSignal)) {
-        return EXIT_SETUP_FAILED;
+    int serviceExitCode = EXIT_SUCCESS;
+
+    if (channelEnabled) {
+        serviceExitCode = serveControlChannel(controlFd, observeFd, *fake, shutdownSignal);
+    } else if (!waitForShutdownSignal(shutdownSignal)) {
+        serviceExitCode = EXIT_SETUP_FAILED;
     }
 
     if (shutdownSignal != 0) {
         std::cout << TRACE_PREFIX << "Received signal " << shutdownSignal << ", shutting down"
                   << std::endl;
     } else {
-        std::cout << TRACE_PREFIX << "The shutdown self-pipe closed, shutting down" << std::endl;
+        std::cout << TRACE_PREFIX << "The wait ended without a signal, shutting down" << std::endl;
     }
 
     /*
-     * Release what this program took.  The published pointer is cleared so nothing can reach a fake
-     * that is going away, the self-pipe descriptors are closed, and the binder registration needs no
-     * withdrawal: the pinned service manager exposes no removal API and process exit releases it.
+     * Release what this program took, on every path including a failed one.  The published pointer is
+     * cleared so nothing can reach a fake that is going away, the self-pipe descriptors are closed,
+     * the channel descriptors this process inherited are closed so the parent sees end of file
+     * promptly rather than at exit, and the binder registration needs no withdrawal: the pinned
+     * service manager exposes no removal API and process exit releases it.
      */
     FakeHdmiCecService::setInstance(nullptr);
     ::close(g_shutdownPipeReadFd);
     ::close(static_cast<int>(g_shutdownPipeWriteFd));
     g_shutdownPipeReadFd = -1;
     g_shutdownPipeWriteFd = -1;
+
+    if (channelEnabled) {
+        ::close(controlFd);
+        ::close(observeFd);
+    }
+
+    if (serviceExitCode != EXIT_SUCCESS) {
+        std::cout << TRACE_PREFIX << "Exiting with status " << serviceExitCode
+                  << " after releasing every resource this host held" << std::endl;
+        return serviceExitCode;
+    }
 
     std::cout << TRACE_PREFIX << "Exited cleanly" << std::endl;
     return EXIT_SUCCESS;

@@ -89,13 +89,17 @@ const char *const SELECTED_BACK_END_LEGACY = "legacy";
  *    is selected;
  * -# the binder transport itself is unavailable, so the legacy back-end is selected.
  *
- * The distinction between arms 2 and 3 is drawn from the same bounded preflight the
- * presence query runs as its own first stage, which is side-effect free and safe to
- * repeat. It is re-run only after the query has already answered no, so the selected
- * AIDL path pays for it exactly once. Which specific compatibility rule rejected a
- * service - an empty or "-1" interface hash, an unfrozen development server, or an
- * interface version outside the compiled-against era and major - is reported by
- * DriverAidlImpl::isServiceAvailable() itself, and is deliberately not restated here,
+ * The distinction between arms 2 and 3 is READ BACK from the query that drew it, through
+ * DriverAidlImpl::unavailabilityReason(). Nothing is asked twice: the query runs the
+ * bounded preflight as its own first stage and records which stage declined, so this
+ * function reports that record rather than re-deriving it. Re-deriving it was the earlier
+ * shape and it was wrong twice over - it paid the preflight's context-manager timeout a
+ * second time, and a servicemanager appearing or dying between the two calls could make
+ * the reported reason name a condition that did not cause the fallback.@n
+ * Which specific compatibility rule rejected a service - an empty or "-1" interface hash,
+ * an unfrozen development server, or an interface version outside the compiled-against
+ * era and major - along with the server's own reported version and hash, is logged by
+ * DriverAidlImpl::isServiceAvailable() itself and is deliberately not restated here,
  * because this function cannot observe it and must not invent it.
  *
  * @return Driver& - The selected back-end. Both candidates have static storage duration,
@@ -118,7 +122,7 @@ const char *const SELECTED_BACK_END_LEGACY = "legacy";
  *
  * @see Driver::getInstance()
  * @see DriverAidlImpl::isServiceAvailable()
- * @see DriverAidlImpl::isBinderPreflightOk()
+ * @see DriverAidlImpl::unavailabilityReason()
  */
 Driver &resolveBackEnd(void)
 {
@@ -136,15 +140,36 @@ Driver &resolveBackEnd(void)
 	}
 
 	/*
-	 * Why the AIDL back-end was not selected, at the coarsest granularity this function
-	 * can honestly observe. Kept deliberately unlike the selected-path wording above so
-	 * that grepping for the selected-path line still yields exactly one hit per process.
+	 * Why the AIDL back-end was not selected, TAKEN FROM THE QUERY THAT DECIDED IT.
+	 *
+	 * The reason is read back rather than reconstructed, and that is not a refinement.
+	 * This function used to call DriverAidlImpl::isBinderPreflightOk() here to work out
+	 * which arm had declined - but isServiceAvailable() runs that same bounded preflight
+	 * as its own first stage, so asking again was wrong in two independent ways. It paid
+	 * the context-manager timeout A SECOND TIME, doubling the worst case this function
+	 * adds to LibCCEC::init() on precisely the platform least able to absorb it; and the
+	 * second answer need not match the first, because a servicemanager that starts or
+	 * dies between the two calls flips the preflight's verdict, so the reported reason
+	 * could name a condition that did not cause the fallback at all.
+	 *
+	 * The phrases themselves live beside their producer in DriverAidlImpl.cpp, and the
+	 * two long-standing ones are preserved word for word: the line this emits is
+	 * byte-identical to what it emitted before, which matters because the coverage
+	 * runner and the L2 tier both transcribe it. It also stays deliberately unlike the
+	 * selected-path wording above, so grepping for that literal still yields exactly one
+	 * hit per process.
+	 *
+	 * NULL is not expected on this path - isServiceAvailable() records a reason on every
+	 * one of its false exits - but it is handled rather than assumed, because a silent
+	 * fallback with no reason at all would be the one outcome nobody could diagnose.
 	 */
-	if (DriverAidlImpl::isBinderPreflightOk()) {
-		CCEC_LOG(LOG_INFO, "Driver::getInstance : AIDL HDMI CEC service is not usable : the binder transport is reachable but no compatible service resolved\r\n");
+	const char *unavailability = aidlBackEnd.unavailabilityReason();
+
+	if (unavailability != NULL) {
+		CCEC_LOG(LOG_INFO, "Driver::getInstance : AIDL HDMI CEC service is not usable : %s\r\n", unavailability);
 	}
 	else {
-		CCEC_LOG(LOG_INFO, "Driver::getInstance : AIDL HDMI CEC service is not usable : the binder transport is unavailable on this platform\r\n");
+		CCEC_LOG(LOG_WARN, "Driver::getInstance : AIDL HDMI CEC service is not usable : the availability query declined without recording a reason\r\n");
 	}
 
 	CCEC_LOG(LOG_INFO, SELECTED_BACK_END_LOG_FORMAT, SELECTED_BACK_END_LEGACY);

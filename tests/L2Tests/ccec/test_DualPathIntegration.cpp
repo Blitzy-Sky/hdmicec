@@ -105,10 +105,13 @@
  * ---------------------------------------------------------------------------------------------
  * WHAT IS COVERED HERE AND WHAT IS BLOCKED.
  *
- * COVERED: the middleware leg of both flows on the legacy back-end; the outbound leg of flow B
- * on the AIDL back-end over a real proxy and a real driver transaction; and the selection
- * itself - which back-end resolved, that it is stable across repeated factory calls, and that it
- * matches the mode the harness was given.
+ * COVERED: the middleware leg of both flows on the legacy back-end; BOTH LEGS of flow B on the
+ * AIDL back-end - outbound over a real proxy and a real driver transaction, inbound over a real
+ * binder callback thread - the selection itself, which back-end resolved, that it is stable
+ * across repeated factory calls, and that it matches the mode the harness was given; and one
+ * guarantee about the HARNESS that both arms depend on - that a write to a pipe whose reader has
+ * gone reports EPIPE to the case that asked for it instead of terminating this runner before its
+ * teardown can reap the host.
  *
  * BLOCKED, and reported rather than closed:
  *
@@ -124,30 +127,29 @@
  *     the -include of Tests/mocks/HdmiCec.h for those targets.  Only then can one test span
  *     HAL -> middleware -> plugin.  Those files are outside this migration's scope.
  *
- *   INBOUND DELIVERY ON THE AIDL ARM.  The only object that can invoke the middleware's event
- *   listener is the fake service, which by design lives in the HOST process; the fake is not
- *   linked into this runner, so this file cannot call it, and the host exposes no control
- *   channel that would let the runner ask it to.  Read and confirmed rather than assumed:
- *   FakeHdmiCecController::sendMessage records the frame and returns its canned status with NO
- *   loopback, and the host's main() registers the fake, starts the service-side threadpool,
- *   writes its readiness token and then blocks until SIGTERM or SIGINT - both of which
- *   TERMINATE it.  FakeHdmiCecService::fireOnMessageReceived exists but nothing in the host
- *   ever calls it.
- *     REQUIRED CHANGE, REPORTED NOT MADE - give the host a runner-reachable inbound trigger.
- *     Either shape closes it: (a) a loopback in FakeHdmiCecController::sendMessage that fires
- *     onMessageReceived on the listener FakeHdmiCecService captured during open(), which makes
- *     the trigger an ordinary outbound transaction and needs nothing new in the runner; or
- *     (b) a non-terminating signal handled in fake_hdmi_cec_aidl_service_host.cpp - SIGUSR1
- *     alongside the SIGTERM/SIGINT pair it already installs - that calls fireOnMessageReceived
- *     with a fixed frame, which the runner would raise with kill() on the host pid that
- *     tests/L2Tests/test_main.cpp already holds.  Until one of them exists, the two inbound
- *     AIDL cases below SKIP with that reason named in the skip message.  THEY ARE NOT DROPPED
- *     AND NOT WEAKENED: a missing case is invisible, a skip with a named reason is a report,
- *     and re-asserting what the outbound cases already prove would be neither.
- *     WHAT THIS LEAVES UNDISCHARGED, stated so that no reader has to work it out: invocation E
- *     demonstrates a real proxy and a real driver transaction OUTBOUND, but it does not yet
- *     demonstrate a received frame arriving on a binder thread.  The case that would is written
- *     and registered; it needs the trigger above, and nothing else.
+ *   INBOUND DELIVERY ON THE AIDL ARM IS NO LONGER BLOCKED.  The paragraph that reported it as
+ *   blocked is retired here rather than dropped silently, because the mechanism that closed it is
+ *   what a later reader needs.  The fake service still lives in the HOST process and is still not
+ *   linked into this runner - that separation IS the tier - so this file cannot call it directly,
+ *   and FakeHdmiCecController::sendMessage still records the frame and returns its canned status
+ *   with no loopback.  What changed is that the host now serves a CONTROL/OBSERVATION CHANNEL:
+ *   two inherited pipe descriptors, named to the child by CEC_FAKE_HOST_CONTROL_FD and
+ *   CEC_FAKE_HOST_OBSERVE_FD, over which it reads newline-terminated commands and writes exactly
+ *   one reply line per command.  tests/L2Tests/test_main.cpp creates the pipes, clears FD_CLOEXEC
+ *   on the child's two ends between fork() and exec(), exports the two numbers, and exposes the
+ *   request/reply call to this translation unit through the cross-TU seam declared below.
+ *
+ *   THE CHANNEL IS A PIPE AND NOT BINDER, WHICH IS THE WHOLE REASON IT IS EVIDENCE.  Binder is the
+ *   thing under test on invocation E, so an observation that travelled over binder would be
+ *   asserting a transport with itself.  Over the pipe: `deliver <hex>` makes the host fire
+ *   onMessageReceived on the listener FakeHdmiCecService captured during open(), which arrives in
+ *   THIS process on a binder threadpool thread; `sent-count` and `last-sent` report what the fake
+ *   actually received from an outbound transaction, so a sendMessage that never arrived or arrived
+ *   corrupted is caught rather than passed; and `open-count` and `close-count` report the fake
+ *   SERVICE's own session lifecycle, so an open that never crossed the driver, a session closed
+ *   behind a case's back, or a term() that closed nothing on the far side is caught the same way.
+ *   Both legs of flow B are therefore observed from outside the transport they exercise, and no
+ *   inbound AIDL case skips inside its own arm.
  *
  *   getPhysicalAddress ON THE AIDL ARM is blocked on B1, the device-settings HAL contract that
  *   was to be supplied to this migration and was not.  It is deliberately NOT asserted on
@@ -156,9 +158,10 @@
  *
  *   close ON THE AIDL ARM maps to IHdmiCec.close, which is B2 - a HIGH-CONFIDENCE CANDIDATE
  *   PENDING OWNER CONFIRMATION, because HdmiCecClose has no mapping-table entry.  Every case
- *   here closes its own Connection, which does not reach Driver::close; the one place that does
- *   is the global environment's term(), and the one case that would have cycled the library
- *   carries the marker in its own doc block.  A GREEN RESULT HERE DOES NOT CONFIRM THAT MAPPING.
+ *   here closes its own Connection, which does not reach Driver::close; the two places that do
+ *   are the global environment's term() and the state-guard case, which cycles the library
+ *   deliberately and carries the marker in its own doc block.  A GREEN RESULT HERE DOES NOT
+ *   CONFIRM THAT MAPPING.
  *
  * ---------------------------------------------------------------------------------------------
  * THE ONE INHERITANCE FROM THE TEMPLATE THAT IS REJECTED.
@@ -185,14 +188,38 @@
  * ---------------------------------------------------------------------------------------------
  * SELF-SUFFICIENCY.
  *
- * Every case here establishes its own preconditions and leaves no shared state altered: each
- * opens its own Connection, registers its own listener, removes the listener and closes the
- * Connection before returning, and clears mock expectations in TearDown.  This is deliberate -
- * the L1 suite this file is derived from contains cases that fail under --gtest_shuffle because
- * they depend on each other, and these must not join them.  Verified both ways: each case passes
- * under a --gtest_filter that runs it alone, and the full suite stays green, including under
- * --gtest_repeat=2, which is the check that the order-dependence restoreDriverInboundRoute()
- * exists to defeat has not been reintroduced.
+ * Every case here establishes its own preconditions and leaves no shared state altered: each opens
+ * its own Connection, registers its own listener, and clears mock expectations in TearDown.  This
+ * is deliberate - the L1 suite this file is derived from contains cases that fail under
+ * --gtest_shuffle because they depend on each other, and these must not join them.
+ *
+ * THE CLEANUP IS RAII AND NOT A TRAILING CALL, and that distinction is load-bearing rather than
+ * stylistic.  A fatal assertion returns from a test body immediately, so a removeFrameListener()
+ * and a close() written at the end of a body do not run on the one exit path where they matter
+ * most - the failing one - and Connection::~Connection() is EMPTY, so nothing else runs them
+ * either.  Every case in this file therefore holds its connection in a ScopedConnection, whose
+ * destructor detaches the listener and closes the connection on a normal return, on a fatal
+ * assertion's early return, and on an exception escaping the body alike.  The one case that also
+ * cycles the CEC library holds a ScopedCecLibraryCycle beside it for the same reason.  See both
+ * guards' own doc blocks for the failure they prevent.
+ *
+ * MEASURED, on invocation D, which is the arm a host without binder support can run, over the nine
+ * cases that executed when the measurement was taken: every one of them passes when a
+ * --gtest_filter selects it alone; the whole DualPath* suite passes under --gtest_shuffle at two
+ * seeds and under --gtest_repeat=2; and with two of the fatal assertions deliberately forced to
+ * fail, the remaining seven still pass and the process still tears the library down cleanly, with no
+ * crash and no failure reported in an unrelated case.  That last run is the one that exercises the
+ * guards: it is the exit path a trailing close() does not cover.
+ *
+ * The tenth executing case - WriteControlCommandReportsEpipeAndTheChildIsStillReapedInsteadOf-
+ * KillingTheRunner - was added after that measurement and is NOT covered by it.  Its independence
+ * rests on construction rather than on that evidence, which is the stronger of the two claims: it
+ * reads the process's SIGPIPE disposition without altering it, and everything else it uses - two
+ * pipes, a child, and a third pipe of its own for the direct demonstration - it creates, drives and
+ * releases within the case.  It consults no shared state, alters none, sleeps for nothing and polls
+ * no clock, and it leaves no descriptor and no child behind on any path, including every failure
+ * path.  Nothing about it can differ between running alone, in file order, or wherever a shuffle
+ * puts it.
  *
  * ---------------------------------------------------------------------------------------------
  * EXECUTION ENVIRONMENT.
@@ -222,43 +249,88 @@
  *
  *   Fixture                  Cases  Executes under        Skips under
  *   -------------------------------------------------------------------------------------------
- *   DualPathSelectionTest        3  D and E               nothing
+ *   DualPathSelectionTest        4  D and E               nothing
  *   DualPathLegacyFlowTest       6  D                     E (fixture SetUp, back-end check)
- *   DualPathAidlFlowTest         4  E, two of the four    D (fixture SetUp, back-end check)
- *                                                         E, the two inbound cases (no trigger)
+ *   DualPathAidlFlowTest         4  E, all four           D (fixture SetUp, back-end check)
  *   -------------------------------------------------------------------------------------------
- *   REGISTERED IN THIS FILE     13
+ *   REGISTERED IN THIS FILE     14
+ *
+ *   The fourth selection-fixture case is WriteControlCommandReportsEpipeAndTheChildIsStillReaped-
+ *   InsteadOfKillingTheRunner, which is about the HARNESS rather than a back-end: it drives the
+ *   harness's OWN writeControlCommand() against a descriptor whose reader has gone, requires the
+ *   command-specific EPIPE diagnostic back, and requires the child that made the descriptor
+ *   reader-less to be reaped through the same terminate-and-reap a teardown performs - which is
+ *   exactly what keeps the host's control channel diagnosable and the host reapable.  It builds its
+ *   own pipes and its own child, so it needs no host, no driver and no service manager, and it
+ *   executes under both invocations.
  *
  *   THE FILTER THAT SELECTS THE WHOLE SUITE:  --gtest_filter=DualPath*
  *   All three fixtures share the DualPath prefix precisely so that one glob does it, matching the
  *   sibling convention in tests/L1Tests/ccec/test_DriverAidl.cpp.
  *
- * THE REGISTERED TOTAL IS 13 AND IT IS IDENTICAL FOR D AND E.  That is a deliberate property, not
+ * THE REGISTERED TOTAL IS 14 AND IT IS IDENTICAL FOR D AND E.  That is a deliberate property, not
  * a coincidence, and it is what lets the runner hold ONE expected count for both invocations.  The
  * two arm-specific fixtures SKIP rather than FAIL when the resolved back-end is not theirs, so
  * every case is registered and reported under both invocations; only the pass/skip split differs:
  *
- *   invocation D   13 registered = 3 selection PASS + 6 legacy PASS + 4 AIDL SKIP
- *   invocation E   13 registered = 3 selection PASS + 6 legacy SKIP + 2 AIDL PASS + 2 AIDL SKIP
+ *   invocation D   14 registered = 4 selection PASS + 6 legacy PASS + 4 AIDL SKIP
+ *   invocation E   14 registered = 4 selection PASS + 6 legacy SKIP + 4 AIDL PASS
  *
- * The invocation D split is MEASURED - it is the one arm a host with no binder support can run -
- * and what was observed is exactly the line above: 13 tests from 3 suites ran, 9 passed, 4 skipped,
- * exit status zero, with "back-end selected : legacy" in the log preceded by "the binder transport
- * is unavailable on this platform".  That second line is the fallback-not-abort requirement made
- * visible in the run's own output rather than argued for in a comment.
+ * THE SKIP IDENTITIES DID NOT CHANGE when the fourth selection case was added, and that is the
+ * property a skip allowlist cares about: the selection fixture skips for nothing, so under D the
+ * skips are still the four DualPathAidlFlowTest cases and nothing else, and under E still the six
+ * DualPathLegacyFlowTest cases and nothing else.  Only the passing count moves, and the runner reads
+ * every count from the binary rather than from a literal.
+ *
+ * THE MEASURED D SPLIT, AND EXACTLY WHAT IT COVERS.  Invocation D - the one arm a host with no
+ * binder support can run - was observed on the fourteen-case source as 14 tests from 3 suites ran,
+ * 10 passed, 4 skipped, exit status zero, with "back-end selected : legacy" in the log preceded by
+ * "the binder transport is unavailable on this platform".  That second line is the
+ * fallback-not-abort requirement made visible in the run's own output rather than argued for in a
+ * comment.  The four skips were the DualPathAidlFlowTest cases and nothing else.  The preceding
+ * measurement, against the thirteen-case source, was 9 passed and the same 4 skips; the one case
+ * added since executes unconditionally, which is why only the passing count moved.
  *
  * The invocation E split is DERIVED from the fixture guards above and is NOT measured anywhere in
  * this repository, because it needs a binder-capable kernel, a matching binder protocol version
  * and a running servicemanager; whoever wires the binder-capable runner should re-measure it there
  * rather than trust this table's arithmetic.
  *
- * THE TWO AIDL SKIPS UNDER INVOCATION E ARE A REPORTED GAP, NOT A PASSING RESULT.  They are
- * InboundFrameFromTheFakeServiceArrivesOnABinderThreadAndReachesTheTypedProcessor and
- * AFrameDeliveredWhileTheDriverIsNotOpenedIsRejectedByTheStateGuard, and both need one thing: a
- * runner-reachable inbound trigger on the hosted fake.  A run of invocation E that reports 13
- * registered, 5 passing and 8 skipped is CORRECT AND EXPECTED as things stand - and it does NOT
- * discharge the requirement that a received frame arrive on a binder thread.  See the REQUIRED
- * CHANGE, REPORTED NOT MADE paragraph in the file block above.
+ * NO CASE IN THIS FILE SKIPS INSIDE THE ARM IT WAS WRITTEN FOR.  There are exactly three
+ * GTEST_SKIP sites, and they are NOT all of one kind - the distinction is spelled out because a
+ * skip allowlist built on the assumption that they are would be wrong:
+ *
+ *   TWO ARE OPPOSITE-ARM FIXTURE SKIPS, one in each arm-specific fixture's SetUp.
+ *     DualPathLegacyFlowTest::SetUp skips when the resolved back-end is not legacy, so it fires
+ *     under invocation E and takes all six of its cases with it.
+ *     DualPathAidlFlowTest::SetUp skips when the resolved back-end is not AIDL, so it fires under
+ *     invocation D and takes all four of its cases with it.
+ *
+ *   ONE IS INSIDE A CASE BODY - DualPathSelectionTest.TheResolvedBackEndMatchesTheModeTheHarness-
+ *     WasGiven - and it is NOT an arm skip, which is why it is allowed to stay.  It fires only when
+ *     CEC_TEST_AIDL_MODE is unset or empty, i.e. when NO arm was requested and the case therefore
+ *     has no request to hold the outcome against; the invocation matrix sets the variable
+ *     explicitly for both D and E, so it fires under NEITHER.  Measured under invocation D: the
+ *     four skips reported are the DualPathAidlFlowTest cases and this case passes.  Its
+ *     appearance in a matrix run means the runner did not export the variable, which is a harness
+ *     fault to be treated as a failure and not allowlisted.
+ *
+ * In particular the two inbound AIDL cases - InboundFrameFromTheFakeServiceArrivesOnABinderThread-
+ * AndReachesTheTypedProcessor and AFrameDeliveredWhileTheDriverIsNotOpenedIsRejectedByTheState-
+ * Guard - EXECUTE under invocation E through the host's control channel, so an invocation E that
+ * reports any AIDL case skipped is a defect to investigate rather than an expected result.
+ *
+ * FOR WHOEVER BUILDS AN EXPLICIT SKIP ALLOWLIST IN THE RUNNER, the whole allowlist is: under D,
+ * the four DualPathAidlFlowTest cases and nothing else; under E, the six DualPathLegacyFlowTest
+ * cases and nothing else.  The third site above belongs in no allowlist.
+ *
+ * AND ONE NON-SKIP THAT MATTERS TO THE SAME READER: DualPathAidlFlowTest::SetUp ASSERTS that the
+ * host's control and observation channel is open, deliberately rather than skipping on it.  Under
+ * invocation E the AIDL back-end resolved, which means a host was published and ready, which means
+ * this harness handed it a channel and proved it with a ping - so a closed channel contradicts the
+ * arm that was selected and is a defect in the harness or the host, not a platform this tier
+ * cannot run on.  Skipping on it would let invocation E report green with every observation it
+ * exists to make quietly not made, which is the exact failure shape this tier is built to rule out.
  *
  * THE SELECTED-PATH LOG LINE, PER ARM - transcribed verbatim from ccec/src/Driver.cpp, whose three
  * constants live in an anonymous namespace in that translation unit and therefore cannot be
@@ -272,12 +344,21 @@
  *
  * Each is emitted at LOG_INFO through CCEC_LOG, so each appears on stdout prefixed by the CEC log
  * prefix and a timestamp; grep for the trailing substring rather than for a whole line.  On the
- * legacy arm ONE of two additional lines precedes it, saying why the AIDL back-end was not
- * selected - "...the binder transport is reachable but no compatible service resolved" or
- * "...the binder transport is unavailable on this platform" - and those are deliberately worded
- * unlike the selected-path line so that grepping for the selected-path line still yields exactly
- * one hit per process.  The second is what invocation D produces on a host without a binder
- * driver, which is the fallback-not-abort requirement made visible in the run's own log.
+ * legacy arm ONE of THREE additional lines precedes it, saying why the AIDL back-end was not
+ * selected.  The factory emits all three through one format string with the reason substituted
+ * into it, so they differ only in that reason:
+ *
+ *     "...the binder transport is unavailable on this platform"
+ *     "...the binder transport is reachable but no compatible service resolved"
+ *     "...the service query failed unexpectedly, so no usable service could be established"
+ *
+ * All three are deliberately worded unlike the selected-path line so that grepping for the
+ * selected-path line still yields exactly one hit per process.  The FIRST is what invocation D
+ * produces on a host without a binder driver - observed verbatim in the measured run recorded
+ * above - which is the fallback-not-abort requirement made visible in the run's own log.  The
+ * THIRD is the catch-all arm, emitted when the availability query itself failed rather than
+ * answering, and it is listed here so that a run showing it is read as a query fault rather than
+ * as either of the two ordinary fallback conditions.
  *
  * WHY THE LINE IS NOT ASSERTED BY A CASE IN THIS FILE is explained in the file block above: it is
  * emitted during the global environment's SetUp, before the first test body, and cannot be
@@ -314,6 +395,32 @@
  * before the selection resolves.
  */
 #include <cstdlib>
+/*
+ * <cstring> is for std::memset and std::strerror, used by the broken-pipe case below: the first to
+ * zero a struct sigaction before it is filled in, the second to turn a failing system call's errno
+ * into a sentence rather than a number nobody can read.
+ */
+#include <cstring>
+/*
+ * <cerrno> is for the errno the strtol() calls in the host-reply parsers below have to clear and
+ * then inspect: strtol reports a range error only through errno, and a parser that skipped that
+ * check would silently accept an out-of-range count as a number.  It is also what the broken-pipe
+ * case reads to establish that its own write failed with EPIPE rather than with anything else.
+ */
+#include <cerrno>
+/*
+ * The POSIX descriptor and signal primitives, for ONE case - the broken-pipe guarantee in
+ * DualPathSelectionTest.  It needs sigaction() from <csignal> to read back the disposition the
+ * harness installed, and pipe2() and close() from <unistd.h> with O_CLOEXEC from <fcntl.h> for the
+ * direct demonstration in its third step.  The two pipes and the child that drive the harness's own
+ * writeControlCommand() and its own reaping are NOT built here: they belong to
+ * tests/L2Tests/test_main.cpp, which owns every descriptor of that kind, and are reached through the
+ * third seam function declared below.  Nothing else in this file touches a raw descriptor, and no
+ * case here opens a file, a socket or a process.
+ */
+#include <csignal>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "ccec/Connection.hpp"
 #include "ccec/Exception.hpp"
@@ -370,6 +477,176 @@ using ::testing::DoAll;
 using ::testing::Invoke;
 using ::testing::SetArgPointee;
 
+/* =============================================================================================
+ * THE CROSS-TRANSLATION-UNIT SEAM: how a case in this file drives and observes the fake service
+ * that lives in the HOST PROCESS - and, in the third function, how it drives the harness's own
+ * control-channel write and its own child reaping.
+ *
+ * These three functions are DEFINED IN tests/L2Tests/test_main.cpp, which owns the host's lifecycle
+ * and therefore owns every pipe and every child in this binary.  The text below is the same contract
+ * that appears above their definitions, written out here in full on purpose: two declarations of
+ * one thing is the shape that usually rots, and the defence is that a reader of either side sees
+ * the whole agreement rather than a pointer to it.  If one is edited, both are.
+ *
+ * A MISMATCH CANNOT GO UNNOTICED.  The parameter types are std::string and the return type is bool,
+ * so the exported name encodes the entire signature; a change on one side that the other does not
+ * match is an UNDEFINED SYMBOL AT LINK TIME naming the function, not a silent difference in
+ * behaviour.  That is why this is an extern declaration rather than a new header: a header for two
+ * functions used by one file in one directory would add a file to the build, and nothing test-scope
+ * in this migration may grow a production or installed surface.
+ *
+ * WHY THE CHANNEL EXISTS AT ALL - the two things this process cannot see from inside itself:
+ *
+ *   OUTBOUND.  A transmit that crossed the binder driver is visible here only as "sendTo did not
+ *   throw".  The bytes the service actually received are recorded by the fake, which is IN THE HOST
+ *   PROCESS and is deliberately not linked into this runner - linking it would resolve the service
+ *   name locally and turn this tier back into the in-process case.  So a send that arrived with
+ *   corrupt bytes, or that never arrived at all, returns exactly as a correct one does, and only the
+ *   host can say which happened.
+ *
+ *   INBOUND.  The only object that can invoke the middleware's IHdmiCecEventListener is that same
+ *   fake.  Without a way to ask the host to fire a callback, no case in this binary can cause an
+ *   inbound delivery, and the requirement that a received frame arrive other than on the calling
+ *   thread has nothing to assert against.
+ *
+ * *** THE EVIDENCE TRAVELS OVER A PIPE AND NOT OVER BINDER, AND THAT IS THE POINT.  BINDER IS THE
+ * *** THING UNDER TEST.  Evidence carried over binder would be attesting to the transport with the
+ * *** transport: a transport fault could corrupt the evidence, and the corruption would be
+ * *** invisible.  The channel is two ordinary inherited pipes and behaves identically whether the
+ * *** driver is healthy, degraded or absent.
+ *
+ * The command vocabulary is stated normatively in mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp
+ * and is not restated here.  The ones this file uses are `listener`, `sent-count`, `last-sent`,
+ * `open-count`, `close-count` and `deliver <lowercase-hex>`.  Every wait is bounded against one
+ * monotonic deadline, so a host that has exited or gone silent produces a failed assertion naming
+ * the command and never a hung suite.
+ * ============================================================================================= */
+
+/**
+ * @brief Reports whether the fake service host's control and observation channel is usable.
+ *
+ * True only on an invocation that launched the host and completed its readiness handshake, which is
+ * CEC_TEST_AIDL_MODE=remote alone.  On the legacy invocation there is no second process, so there is
+ * nothing to ask and this reports false.
+ *
+ * @return bool                                   - Whether a request would have somewhere to go
+ * @retval true                                   - Both descriptors are open and the host answered a
+ *                                                  ping during setup
+ * @retval false                                  - No host was launched, the launch failed, or the
+ *                                                  channel has been closed by teardown
+ *
+ * @warning A case whose assertions depend on the channel must FAIL rather than skip when this is
+ *          false.  Skipping on it would hide a broken handoff behind a green run, which is the exact
+ *          failure this tier exists to rule out - which is why DualPathAidlFlowTest::SetUp asserts
+ *          on it once, for every case in the fixture.
+ *
+ * @see cecL2HostControlRequest()
+ */
+extern bool cecL2HostControlChannelIsOpen();
+
+/**
+ * @brief Sends one command to the fake service host and returns its single reply line.
+ *
+ * Bounded in every direction and on every path: the write waits for the pipe to accept bytes, the
+ * read waits for one newline, both against ONE deadline taken at entry, and an interrupted call
+ * resumes against that same deadline rather than restarting it.  A host that has exited is reported
+ * at once from EPIPE or end of file; a host that is alive and silent is reported when the bound
+ * expires.  Nothing here can block indefinitely, because a hung harness is killed from outside with
+ * no result recorded, which is strictly worse than any failed assertion.
+ *
+ * @param [in]  command                   - Command text WITHOUT a terminator, e.g. "sent-count".
+ *                                          Must be non-blank and free of newline and carriage
+ *                                          return; both are rejected rather than sent, because
+ *                                          either would desynchronise the one-reply-per-command
+ *                                          framing for every later request
+ * @param [out] reply                     - Receives the reply line without its terminator.
+ *                                          Untouched when this reports failure
+ * @param [out] failureDetail             - Receives a sentence naming what went wrong and what it
+ *                                          means.  Untouched when this reports success
+ *
+ * @return bool                                   - Whether one command was exchanged for one reply
+ * @retval true                                   - reply holds the host's answer, beginning "OK " or
+ *                                                  "ERR "
+ * @retval false                                  - No channel, a malformed command, the bound
+ *                                                  expired, the host exited, or the reply was
+ *                                                  unclassifiable; failureDetail says which
+ *
+ * @pre cecL2HostControlChannelIsOpen() reports true.
+ *
+ * @warning An "ERR " reply is a SUCCESSFUL EXCHANGE and reports true.  Whether the host's refusal is
+ *          expected is the calling case's judgement, not this function's, so the reply text must be
+ *          checked - which is what the askHost* helpers below do.
+ *
+ * @see cecL2HostControlChannelIsOpen()
+ */
+extern bool cecL2HostControlRequest(const std::string &command, std::string &reply,
+                                    std::string &failureDetail);
+
+/**
+ * @brief Drives the harness's own control-channel write and its own reaping against a broken pipe.
+ *
+ * THE THIRD SEAM, and the only one that is not about the fake service.  It exists because ignoring
+ * SIGPIPE buys the harness exactly two things - the EPIPE arm of its writeControlCommand() becomes
+ * reachable, and the teardown that signals and reaps the host still gets to run - and NEITHER is
+ * exercised by any ordinary invocation, since a healthy host reads its control descriptor until
+ * teardown closes it.  A case that built a look-alike instead, out of its own pipe and its own raw
+ * ::write(), would establish the kernel's behaviour and this process's signal disposition - neither
+ * of which is in doubt - while leaving both of those two things completely unexercised.
+ *
+ * So this drives the real code: the harness's own writeControlCommand(), which takes its descriptor
+ * as a parameter for exactly this reason, and the harness's own terminateAndReapChildProcess(), which
+ * is the same function the global environment's TearDown uses on the host.  Neither is a copy and
+ * neither has a test-only branch, so a change that broke either breaks this case.
+ *
+ * WHAT IT DOES, in order.  It creates a handshake pipe and a probe pipe; forks a child whose entire
+ * job is to close BOTH ends of the probe pipe, report that it has done so over the handshake pipe,
+ * make SIGTERM fatal to itself and then block; closes the parent's copy of the handshake write end
+ * and the parent's read end of the probe pipe, so that no reader of the probe pipe remains anywhere;
+ * waits, bounded, for the child's report, because until it arrives the child may still hold the
+ * inherited read end and a write would SUCCEED; calls writeControlCommand() on the probe pipe's write
+ * end and requires it to fail with a sentence naming the command AND reporting EPIPE; ends the child
+ * through terminateAndReapChildProcess() and requires the reap to succeed; and releases every
+ * descriptor it opened, on every path.
+ *
+ * DETERMINISTIC WITH NO PLATFORM SUPPORT OF ANY KIND: no fake service host, no /dev/binder, no
+ * service manager, no back-end.  close() on a pipe's last read end followed by write() to its write
+ * end returns -1 with EPIPE synchronously, and SIGTERM to a child at SIG_DFL ends it.  Nothing is
+ * slept on and no wall clock is polled - each of the three waits is a real wait on a real event under
+ * one bound - so it behaves identically under invocation D on a host with no binder support, which is
+ * where it ordinarily runs, and under invocation E on the binder-capable guest.  It touches none of
+ * the live channel's state, so it is safe to call while a real host session is open.
+ *
+ * @param [out] observedDiagnostic        - Receives the sentence writeControlCommand() produced, so
+ *                                          this case can assert on its substance at its own line
+ *                                          rather than trusting the seam's own check.  Empty if the
+ *                                          probe never reached that call, and empty if the call
+ *                                          unexpectedly succeeded
+ * @param [out] failureDetail             - Receives a sentence naming the STEP that failed and what
+ *                                          its failure means.  Untouched on success
+ *
+ * @return bool                                   - Whether every step held
+ * @retval true                                   - The real write reported EPIPE with a diagnostic
+ *                                                  naming the command, and the real terminate-and-
+ *                                                  reap collected the probe's child
+ * @retval false                                  - One step did not hold; failureDetail names which
+ *
+ * @pre SIGPIPE is not at its default disposition.  The seam VERIFIES this before it writes anything
+ *      and refuses rather than proceeding, and the case asserts it fatally first as well: a probe
+ *      that terminated the runner while establishing that the runner cannot be terminated would be
+ *      the worst available outcome.
+ *
+ * @post No descriptor and no child created by the call outlives it, on every path.
+ *
+ * @warning It does NOT and CANNOT establish what happens WITHOUT the disposition installed, because
+ *          establishing that would mean terminating this process.  That is why the case reads the
+ *          disposition back out of the process and fails fatally on SIG_DFL: that assertion and this
+ *          seam are two halves of one property.
+ *
+ * @see cecL2HostControlRequest()
+ */
+extern bool cecL2ProveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
+                                                     std::string &failureDetail);
+
 /*
  * Re-state the driver's own HAL receive registration on the process-global mock, so that a frame
  * injected afterwards actually travels HAL -> DriverImpl -> Bus -> Connection.
@@ -409,6 +686,318 @@ static void restoreDriverInboundRoute(HdmiCecDriverMock *mock) {
 
 namespace {
 
+/* ---------------------------------------------------------------------------------------------
+ * THE HOST OBSERVATION HELPERS.
+ *
+ * Each one issues exactly one command over the pipe channel, insists on the one reply shape the
+ * protocol defines for it, and hands back a TYPED value with a sentence explaining any failure.
+ * They return bool rather than asserting, so that a caller can attach its own ASSERT_TRUE and the
+ * failure appears at the case's line rather than inside a helper - and so that a case which
+ * legitimately expects a refusal can inspect the reply instead.
+ *
+ * There are exactly five, covering the six commands this file uses - one of them serves the two
+ * session counters, which are the same reply shape read for the same purpose - and every one of them
+ * is used by a case below.  A helper for a command no case sends would imply coverage that does not
+ * exist, which is the same defect as a fake control nothing exercises.
+ * --------------------------------------------------------------------------------------------- */
+
+/**
+ * @brief Splits an "OK <verb> <value>" reply into its value, insisting on the verb.
+ *
+ * The verb is checked rather than skipped because a reply for the WRONG command is precisely what a
+ * desynchronised channel produces, and a parser that read the trailing field regardless would carry
+ * that desynchronisation into an assertion as a plausible-looking number.
+ *
+ * @param [in]  reply                     - Reply line as the channel delivered it, terminator already
+ *                                          stripped
+ * @param [in]  verb                      - Verb the reply must carry, e.g. "sent-count"
+ * @param [out] value                     - Receives the text after the verb and its single separating
+ *                                          space.  EMPTY is legitimate: `last-sent` answers
+ *                                          "OK last-sent " with nothing after it when the fake has
+ *                                          captured no frame
+ * @param [out] failureDetail             - Receives a diagnostic when this reports failure
+ *
+ * @return bool                                   - Whether the reply matched "OK <verb>" and its value
+ *                                                  was extracted
+ * @retval true                                   - value holds the field, possibly empty
+ * @retval false                                  - The reply was an "ERR " line, named another verb, or
+ *                                                  was malformed; failureDetail says which
+ */
+bool parseOkReplyValue(const std::string& reply, const std::string& verb, std::string& value,
+                       std::string& failureDetail)
+{
+    const std::string expectedPrefix = "OK " + verb;
+
+    if (reply.compare(0, expectedPrefix.size(), expectedPrefix) != 0) {
+        failureDetail = "the fake service host answered \"" + reply + "\" where a reply beginning \"" +
+                        expectedPrefix + "\" was required. An \"ERR \" line means the host refused the "
+                        "command; a different verb means the channel is out of step with the commands "
+                        "being sent";
+        return false;
+    }
+
+    if (reply.size() == expectedPrefix.size()) {
+        value.clear();
+        return true;
+    }
+
+    if (reply[expectedPrefix.size()] != ' ') {
+        failureDetail = "the fake service host answered \"" + reply + "\", whose verb is not \"" + verb +
+                        "\" but a longer word beginning with it";
+        return false;
+    }
+
+    value = reply.substr(expectedPrefix.size() + 1);
+    return true;
+}
+
+/**
+ * @brief Asks the host how many times the fake controller's sendMessage() has really been called.
+ *
+ * This is the counter that makes an outbound assertion mean something.  It is the fake's OWN count,
+ * read through the fake's own accessor in the host process, so it cannot report a transmit that never
+ * arrived - which is exactly what "sendTo did not throw" can do.
+ *
+ * @param [out] count                     - Receives the invocation count.  Untouched on failure
+ * @param [out] failureDetail             - Receives a diagnostic when this reports failure
+ *
+ * @return bool                                   - Whether a count was obtained
+ * @retval true                                   - count holds the fake's real sendMessage() count
+ * @retval false                                  - The channel failed, or the reply was not a
+ *                                                  well-formed "OK sent-count <n>"
+ */
+bool askHostForSentCount(long& count, std::string& failureDetail)
+{
+    std::string reply;
+    if (!cecL2HostControlRequest("sent-count", reply, failureDetail)) {
+        return false;
+    }
+
+    std::string field;
+    if (!parseOkReplyValue(reply, "sent-count", field, failureDetail)) {
+        return false;
+    }
+
+    errno = 0;
+    char* parseEnd = nullptr;
+    const long parsed = std::strtol(field.c_str(), &parseEnd, 10);
+
+    if (field.empty() || (errno != 0) || (parseEnd == nullptr) || (*parseEnd != '\0') || (parsed < 0)) {
+        failureDetail = "the fake service host reported its sendMessage() count as \"" + field +
+                        "\", which is not a non-negative decimal number";
+        return false;
+    }
+
+    count = parsed;
+    return true;
+}
+
+/**
+ * @brief Asks the host how many times the fake SERVICE has really served open() or close().
+ *
+ * The two session counters, read the same way because they are the same reply shape asked for the
+ * same reason: they are the only evidence in this repository that the middleware's AIDL SESSION
+ * lifecycle crossed the binder driver, as against its transmits, which `sent-count` covers.  L1's
+ * in-process fake cannot give it - a locally resolved service is called inline, so a count there
+ * says nothing about a driver transaction - which is precisely why these two verbs exist in the
+ * host's vocabulary and why cases here have to consume them.
+ *
+ * They are the fake's OWN counters, read through the fake's own accessors in the host process, and
+ * they advance at the top of `open()` and `close()` before any canned result is consulted, so a
+ * refused open still counts as an open served.
+ *
+ * @param [in]  verb                      - Either "open-count" or "close-count".  Any other value is
+ *                                          a caller mistake and is refused here rather than sent, so
+ *                                          that a typo reads as a wrong call and not as a host that
+ *                                          rejected an unknown command
+ * @param [out] count                     - Receives the invocation count.  Untouched on failure
+ * @param [out] failureDetail             - Receives a diagnostic when this reports failure
+ *
+ * @return bool                                   - Whether a count was obtained
+ * @retval true                                   - count holds the fake service's real count for that
+ *                                                  verb
+ * @retval false                                  - The verb was not one of the two, the channel
+ *                                                  failed, or the reply was not a well-formed
+ *                                                  "OK <verb> <n>"
+ */
+bool askHostForSessionCount(const std::string& verb, long& count, std::string& failureDetail)
+{
+    if ((verb != "open-count") && (verb != "close-count")) {
+        failureDetail = "\"" + verb + "\" is not a session counter; the host serves \"open-count\" "
+                        "and \"close-count\" and nothing else of this shape";
+        return false;
+    }
+
+    std::string reply;
+    if (!cecL2HostControlRequest(verb, reply, failureDetail)) {
+        return false;
+    }
+
+    std::string field;
+    if (!parseOkReplyValue(reply, verb, field, failureDetail)) {
+        return false;
+    }
+
+    errno = 0;
+    char* parseEnd = nullptr;
+    const long parsed = std::strtol(field.c_str(), &parseEnd, 10);
+
+    if (field.empty() || (errno != 0) || (parseEnd == nullptr) || (*parseEnd != '\0') || (parsed < 0)) {
+        failureDetail = "the fake service host reported its " + verb + " as \"" + field +
+                        "\", which is not a non-negative decimal number";
+        return false;
+    }
+
+    count = parsed;
+    return true;
+}
+
+/**
+ * @brief Asks the host for the exact bytes of the fake controller's most recent sendMessage() frame.
+ *
+ * Rendered by the host as lowercase hexadecimal, two digits per byte and no separators, which is the
+ * protocol's one payload encoding in both directions.  An EMPTY string is a legitimate answer and
+ * means the fake has captured no frame at all - a distinct outcome from a wrong frame, and one an
+ * assertion has to be able to report differently.
+ *
+ * @param [out] hex                       - Receives the hexadecimal rendering, empty when nothing has
+ *                                          been captured.  Untouched on failure
+ * @param [out] failureDetail             - Receives a diagnostic when this reports failure
+ *
+ * @return bool                                   - Whether the capture was obtained
+ * @retval true                                   - hex holds the fake's last captured frame
+ * @retval false                                  - The channel failed, or the reply was not a
+ *                                                  well-formed "OK last-sent <hex>"
+ */
+bool askHostForLastSentFrame(std::string& hex, std::string& failureDetail)
+{
+    std::string reply;
+    if (!cecL2HostControlRequest("last-sent", reply, failureDetail)) {
+        return false;
+    }
+
+    return parseOkReplyValue(reply, "last-sent", hex, failureDetail);
+}
+
+/**
+ * @brief Asks the host whether the fake is holding an event listener from the middleware.
+ *
+ * Every inbound case checks this FIRST, and the reason is that without it the negative half of those
+ * cases would be vacuous: a `deliver` with no listener held is answered "ERR no-listener" and nothing
+ * is dispatched, so "no frame arrived" would be satisfied by the trigger having done nothing at all
+ * rather than by the middleware having rejected it.
+ *
+ * @param [out] present                   - Receives whether a listener is held.  Untouched on failure
+ * @param [out] failureDetail             - Receives a diagnostic when this reports failure
+ *
+ * @return bool                                   - Whether the answer was obtained
+ * @retval true                                   - present holds the fake's real listener state
+ * @retval false                                  - The channel failed, or the reply was neither
+ *                                                  "OK listener present" nor "OK listener absent"
+ */
+bool askHostForListenerPresence(bool& present, std::string& failureDetail)
+{
+    std::string reply;
+    if (!cecL2HostControlRequest("listener", reply, failureDetail)) {
+        return false;
+    }
+
+    std::string field;
+    if (!parseOkReplyValue(reply, "listener", field, failureDetail)) {
+        return false;
+    }
+
+    if (field == "present") {
+        present = true;
+        return true;
+    }
+
+    if (field == "absent") {
+        present = false;
+        return true;
+    }
+
+    failureDetail = "the fake service host described its listener as \"" + field +
+                    "\", where the protocol defines only \"present\" and \"absent\"";
+    return false;
+}
+
+/**
+ * @brief Asks the host to invoke onMessageReceived on the middleware's listener with these bytes.
+ *
+ * THE ONE INBOUND TRIGGER, and the only one there is: the fake fires through its own
+ * fireOnMessageReceived(), so the listener invoked is exactly the one the middleware handed to
+ * `open()` and no second delivery route exists.  Because IHdmiCecEventListener is `oneway`, the
+ * host's reply says only that the callback was INVOKED - whether the middleware then queued, decoded
+ * and dispatched the frame is what this file asserts on its own side of the boundary, which is the
+ * assertion that matters anyway.
+ *
+ * @param [in]  hex                       - Frame as lowercase hexadecimal, two digits per byte, no
+ *                                          separators
+ * @param [out] deliveredBytes            - Receives the byte count the host reports delivering, which
+ *                                          must equal half the hex length.  Untouched on failure
+ * @param [out] failureDetail             - Receives a diagnostic when this reports failure
+ *
+ * @return bool                                   - Whether the host invoked the callback
+ * @retval true                                   - It did, with deliveredBytes bytes
+ * @retval false                                  - The channel failed, or the host refused:
+ *                                                  "ERR no-listener" when it holds no listener, or
+ *                                                  "ERR bad-hex" when the payload is malformed
+ */
+bool askHostToDeliverFrame(const std::string& hex, long& deliveredBytes, std::string& failureDetail)
+{
+    std::string reply;
+    if (!cecL2HostControlRequest("deliver " + hex, reply, failureDetail)) {
+        return false;
+    }
+
+    std::string field;
+    if (!parseOkReplyValue(reply, "delivered", field, failureDetail)) {
+        return false;
+    }
+
+    errno = 0;
+    char* parseEnd = nullptr;
+    const long parsed = std::strtol(field.c_str(), &parseEnd, 10);
+
+    if (field.empty() || (errno != 0) || (parseEnd == nullptr) || (*parseEnd != '\0') || (parsed < 0)) {
+        failureDetail = "the fake service host reported delivering \"" + field +
+                        "\" bytes, which is not a non-negative decimal number";
+        return false;
+    }
+
+    deliveredBytes = parsed;
+    return true;
+}
+
+/**
+ * @brief Renders frame bytes as the lowercase hexadecimal the channel uses.
+ *
+ * Used for both directions of one comparison: to build a `deliver` payload, and to turn the bytes a
+ * case ENCODED into the exact string the host's `last-sent` reply must equal.  Written out here
+ * rather than through a stream manipulator so that the two-digits-per-byte, no-separator,
+ * lowercase form is visible at the point it is produced - it is a wire format shared with another
+ * process, and a formatting drift would present as a byte-comparison failure with no clue why.
+ *
+ * @param [in] bytes                      - Frame bytes.  May be null only when length is zero
+ * @param [in] length                     - Number of bytes to render
+ *
+ * @return std::string                            - Lowercase hexadecimal, two digits per byte
+ */
+std::string toLowercaseHex(const unsigned char* bytes, std::size_t length)
+{
+    static const char digits[] = "0123456789abcdef";
+    std::string rendered;
+    rendered.reserve(length * 2);
+
+    for (std::size_t index = 0; index < length; index++) {
+        rendered.push_back(digits[(bytes[index] >> 4) & 0x0F]);
+        rendered.push_back(digits[bytes[index] & 0x0F]);
+    }
+
+    return rendered;
+}
+
 /**
  * A MessageProcessor that records WHICH typed overload ran and what it carried.
  *
@@ -423,10 +1012,14 @@ namespace {
  * gives every other process() overload a default body, so an unexpected message type is simply
  * not counted here, which is exactly the behaviour the negative assertions rely on.
  *
- * NOT THREAD SAFE BY ITSELF, and it does not need to be.  It is written only from
- * DecodingFrameListener::notify, on the delivering thread, and read only by the test thread after
- * WaitForNotification has returned - and the listener's own lock plus that ordering is what
- * separates the two.
+ * NOT THREAD SAFE BY ITSELF, and it does not need to be - but only because of a property of
+ * DecodingFrameListener that has to be stated here too, since this is the class whose state is at
+ * risk.  These counters are written ONLY by MessageDecoder::decode, called from
+ * DecodingFrameListener::notify WHILE THAT LISTENER'S MUTEX IS HELD AND BEFORE ITS NOTIFICATION
+ * COUNTER IS PUBLISHED.  So a test thread that has returned from WaitForNotification has observed a
+ * completed decode, and no partially written counter can be read.  If that ordering is ever
+ * rearranged, this class needs a lock of its own - see the ordering paragraph on
+ * DecodingFrameListener.
  */
 class RecordingProcessor : public MessageProcessor {
 public:
@@ -436,9 +1029,14 @@ public:
         , activeSourceCount(0)
         , standbyCount(0)
         , activeSourcePhysical()
+        , activeSourcePackedHigh(-1)
+        , activeSourcePackedLow(-1)
         , lastInitiator(-1)
         , lastDestination(-1)
     {
+        for (int index = 0; index < 4; index++) {
+            activeSourceNibbles[index] = -1;
+        }
     }
 
     void process(const ImageViewOn& msg, const Header& header) override
@@ -458,7 +1056,7 @@ public:
     void process(const ActiveSource& msg, const Header& header) override
     {
         activeSourceCount++;
-        activeSourcePhysical = msg.physicalAddress.toString();
+        recordPhysicalAddress(msg.physicalAddress);
         recordHeader(header);
     }
 
@@ -473,7 +1071,40 @@ public:
     int textViewOnCount;
     int activeSourceCount;
     int standbyCount;
+
+    /**
+     * The <Active Source> physical address as PhysicalAddress renders it - dotted decimal, e.g.
+     * "1.0.0.0".  PhysicalAddress OVERRIDES CECBytes::toString() to produce that form
+     * (ccec/include/ccec/Operands.hpp:401), so this is the human-readable address and NOT the
+     * packed byte pair; the packed bytes are recorded separately below.
+     */
     std::string activeSourcePhysical;
+
+    /**
+     * The four decoded nibbles of the <Active Source> physical address, in wire order, taken from
+     * PhysicalAddress::getByteValue(0..3).  -1 in every slot until an <Active Source> is decoded.
+     *
+     * These exist because a non-empty rendered string is satisfied by ANY address: 0.0.0.0, a
+     * shifted 0.1.0.0 and a truncated value all render non-empty, so a case that only checked for
+     * emptiness would pass on a corrupted operand pair.  Asserting the four nibbles pins the value
+     * exactly, and doing it per nibble - rather than only on the rendered string - means a failure
+     * report names which digit moved.
+     */
+    int activeSourceNibbles[4];
+
+    /**
+     * The two PACKED operand bytes as they travelled on the wire, recovered by re-serializing the
+     * decoded PhysicalAddress: two nibbles per byte, so 1.0.0.0 packs to 0x10 0x00.  -1 until an
+     * <Active Source> is decoded.
+     *
+     * The nibbles above and these bytes are two views of the same two octets, and asserting both
+     * is deliberate rather than redundant: the nibbles catch a value that decoded wrongly, and
+     * these catch a value that decoded correctly but would not re-encode to the same wire image -
+     * which is the property an outbound case on the other side of the same address depends on.
+     */
+    int activeSourcePackedHigh;
+    int activeSourcePackedLow;
+
     int lastInitiator;
     int lastDestination;
 
@@ -482,6 +1113,40 @@ private:
     {
         lastInitiator = header.from.toInt();
         lastDestination = header.to.toInt();
+    }
+
+    /**
+     * @brief Records a decoded physical address three ways - rendered, per nibble and packed.
+     *
+     * CECBytes keeps its byte vector protected, so the packed pair is recovered the only way a
+     * consumer can: by serializing the operand back into a CECFrame, which is the same public
+     * path the encoder uses, and reading the two bytes out of it.  A serialization that produced
+     * anything other than two bytes leaves both packed members at -1 rather than reading past the
+     * end, so a malformed operand is reported as an unset value instead of causing a fault here.
+     *
+     * @param [in] address                - Physical address as the decoder produced it
+     *
+     * @return None
+     */
+    void recordPhysicalAddress(const PhysicalAddress& address)
+    {
+        activeSourcePhysical = address.toString();
+
+        for (int index = 0; index < 4; index++) {
+            activeSourceNibbles[index] = static_cast<int>(address.getByteValue(index));
+        }
+
+        CECFrame packed;
+        address.serialize(packed);
+
+        const uint8_t* buffer = 0;
+        size_t length = 0;
+        packed.getBuffer(&buffer, &length);
+
+        if (buffer != 0 && length == 2) {
+            activeSourcePackedHigh = static_cast<int>(buffer[0]);
+            activeSourcePackedLow = static_cast<int>(buffer[1]);
+        }
     }
 };
 
@@ -501,36 +1166,83 @@ private:
  * inside WaitForNotification while the delivery happens, so it cannot observe the delivering
  * thread any other way; by the time it wakes, the only trace left is whatever the listener kept.
  * That trace is not a diagnostic nicety on the AIDL arm - it is half the requirement.  Invocation
- * E has to show that a received frame arrived ON A BINDER THREAD, and comparing NotifyingThread()
- * against the test body's own std::this_thread::get_id() is the assertion that fails if a
- * callback were somehow delivered inline on the calling thread.
+ * E has to show that a received frame arrived without the test thread having delivered it, and
+ * comparing NotifyingThread() against the test body's own std::this_thread::get_id() is the
+ * assertion that fails if a callback were somehow delivered inline on the calling thread.
  *
- * The decode runs OUTSIDE the lock on purpose, mirroring the L1 template: inside the lock the
- * processor is only ever touched while the test is blocked in WaitForNotification, so the
- * processor's own lack of synchronization is safe, and holding the lock across a decode would put
- * arbitrary decoder work inside the critical section the waiter needs.
+ * *** THE DECODE HAPPENS BEFORE THE WAIT PREDICATE IS PUBLISHED, AND UNDER THE SAME LOCK.  THAT
+ * *** ORDERING IS A CORRECTNESS PROPERTY OF THIS CLASS AND MUST NOT BE REARRANGED.
+ *
+ * MessageProcessor state is not thread safe, and MessageDecoder::decode MUTATES IT - that is the
+ * whole reason a RecordingProcessor can be asserted on at all.  An earlier shape of this class
+ * published lastFrame, notifyingThread and the notifications counter under the lock, released it,
+ * and only then decoded.  A waiter could therefore wake - on the counter it had just been shown, or
+ * on a spurious wake of the condition variable - and read the processor's counters WHILE THE DECODE
+ * WAS STILL WRITING THEM.  That is a data race with a real failure mode rather than a theoretical
+ * one: the test thread would read a half-written processor and the case would flake, and it would
+ * flake in the direction of PASSING on a corrupt read, which is worse.
+ *
+ * The order below closes it at the root.  Everything the waiter can observe - the processor, the
+ * frame, the thread id, the counter - is written while the lock is held, and the counter that
+ * satisfies WaitForNotification's predicate is written LAST.  So a waiter that observes the counter
+ * has necessarily observed a COMPLETED decode, and a spurious wake finds the predicate unsatisfied
+ * and goes back to waiting, which is exactly what wait_for's predicate overload is for.  Holding
+ * the lock across the decode also serialises two deliveries against each other, which costs nothing
+ * here - the Bus reader is a single thread - and removes the question entirely.
+ *
+ * The cost is bounded and worth naming: a waiter that times out concurrently with a delivery blocks
+ * on the mutex until that delivery's decode finishes.  A decode is a switch and one process() call,
+ * so this is microseconds, and it cannot extend the wait beyond one delivery's work.
+ *
+ * A DECODE THAT THROWS IS CONTAINED HERE, and that is not defensive decoration either.  This
+ * notify() is called by Bus::Reader::run() from inside a try block that catches
+ * InvalidStateException ALONE (ccec/src/Bus.cpp:158-172), so any other exception escaping a listener
+ * leaves that thread's run() and terminates the process - taking the whole suite with it and
+ * reporting nothing useful.  MessageDecoder::decode already swallows std::exception around its own
+ * opcode switch (ccec/src/MessageDecoder.cpp:190-201), so this is a second line rather than the
+ * first; it is here because "the reader thread dies" is not an acceptable way for a test to fail.
+ * The failure is COUNTED rather than swallowed - DecodeFailures() is asserted to be zero by every
+ * case that expects a delivery - so a containment that fired is reported instead of hidden.
  */
 class DecodingFrameListener : public FrameListener {
 public:
     explicit DecodingFrameListener(MessageProcessor& processor)
         : decoder(processor)
         , notifications(0)
+        , decodeFailures(0)
     {
     }
 
     void notify(const CECFrame& frame) const override
     {
-        {
-            std::lock_guard<std::mutex> guard(mutex);
-            lastFrame = frame;
-            notifications++;
-            // Captured under the same lock as the counter, so a waiter that observes the
-            // notification necessarily observes the thread that produced it.
-            notifyingThread = std::this_thread::get_id();
+        std::lock_guard<std::mutex> guard(mutex);
+
+        /*
+         * (1) DECODE FIRST, so that no waiter can be woken by a predicate that is true while the
+         *     processor is still being written.  See the ordering paragraph on this class.
+         */
+        try {
+            const_cast<MessageDecoder&>(decoder).decode(frame);
         }
-        // Decoding outside the lock would race the test thread's read of the processor; inside it,
-        // the processor is only ever touched while the test is blocked in WaitForNotification.
-        const_cast<MessageDecoder&>(decoder).decode(frame);
+        catch (const std::exception& e) {
+            decodeFailures++;
+            lastDecodeError = e.what();
+        }
+        catch (...) {
+            decodeFailures++;
+            lastDecodeError = "an exception not derived from std::exception";
+        }
+
+        /*
+         * (2) PUBLISH SECOND, counter last of all.  The thread id is this thread's on purpose: this
+         *     function runs on the thread that delivered the frame - the Bus reader thread on both
+         *     arms - so recording it here is what makes NotifyingThread() meaningful to a test body
+         *     that was blocked while it happened.
+         */
+        lastFrame = frame;
+        notifyingThread = std::this_thread::get_id();
+        notifications++;
+
         condition.notify_all();
     }
 
@@ -545,6 +1257,29 @@ public:
     {
         std::lock_guard<std::mutex> guard(mutex);
         return notifications;
+    }
+
+    /**
+     * How many deliveries were counted whose decode threw, and what the most recent one said.
+     *
+     * Zero on every healthy delivery.  A non-zero value means a frame reached this listener and the
+     * decoder could not interpret it, which is a different failure from "no frame arrived" and has
+     * to read differently in a log - hence a counter of its own rather than a silent catch.
+     */
+    int DecodeFailures() const
+    {
+        std::lock_guard<std::mutex> guard(mutex);
+        return decodeFailures;
+    }
+
+    /**
+     * The most recent decode failure's text, or an empty string when there has been none.  Used only
+     * to make a DecodeFailures() assertion's message say what actually went wrong.
+     */
+    std::string LastDecodeError() const
+    {
+        std::lock_guard<std::mutex> guard(mutex);
+        return lastDecodeError;
     }
 
     /**
@@ -565,8 +1300,249 @@ private:
     mutable std::mutex mutex;
     mutable std::condition_variable condition;
     mutable int notifications;
+    mutable int decodeFailures;
+    mutable std::string lastDecodeError;
     mutable CECFrame lastFrame;
     mutable std::thread::id notifyingThread;
+};
+
+/**
+ * An open Connection whose listener is detached and whose close happens on EVERY exit path.
+ *
+ * *** THIS EXISTS BECAUSE A FATAL ASSERTION RETURNS FROM THE TEST BODY IMMEDIATELY, AND
+ * *** Connection::~Connection() IS EMPTY (ccec/src/Connection.cpp:49-51).
+ *
+ * The hazard is concrete rather than hygienic.  Connection::open() registers the connection's own
+ * busFrameListener with the Bus, and only Connection::close() removes it - the destructor removes
+ * nothing.  A case that added a stack-allocated DecodingFrameListener and then hit an ASSERT_*
+ * before its close() therefore returns with the Bus still holding a pointer to a listener that is
+ * about to be destroyed, and with the connection still registered on the Bus.  The next frame the
+ * reader thread delivers - from any later case, or from the same one's own in-flight injection -
+ * is dispatched through those dead pointers.  That is undefined behaviour on the Bus reader thread,
+ * so it does not present as the failed assertion that caused it: it presents as a crash or a
+ * corruption somewhere else, in a case that did nothing wrong, and the first failure's cause is
+ * lost.
+ *
+ * A trailing close() at the end of a body cannot fix that, because the whole point of a fatal
+ * assertion is that the statements after it do not run.  A DESTRUCTOR is what runs on every exit
+ * path - a normal return, a fatal assertion's early return, and an exception escaping the body
+ * alike - which is why cleanup lives here and not in the cases.
+ *
+ * IT CLOSES THE CONNECTION AND DOES NOT THROW.  Connection::close() clears the connection's frame
+ * listeners and removes its bus listener, so it alone is sufficient; removeFrameListener() is
+ * called first anyway, so that the case's own listener is detached before anything else and the
+ * ordering matches what the cases used to do by hand.  Everything is wrapped, because a destructor
+ * that threw during unwinding would terminate the process and replace a reported failure with an
+ * unexplained abort - and a failure to clean up is reported through ADD_FAILURE() rather than
+ * swallowed, so a close that did not work is visible.
+ */
+class ScopedConnection {
+public:
+    /**
+     * @brief Opens a Connection on the given logical address, named for the log.
+     *
+     * Always opened, because every case in this tier wants an open connection; a case that wanted a
+     * closed one would not need this guard at all.
+     *
+     * @param [in] source                 - Logical address this connection filters for
+     * @param [in] name                   - Name the CEC log identifies the connection by
+     */
+    ScopedConnection(const LogicalAddress& source, const char* name)
+        : conn(source, true, name)
+        , attached(nullptr)
+        , released(false)
+    {
+    }
+
+    ~ScopedConnection()
+    {
+        release();
+    }
+
+    /** @brief The connection itself, for a case that needs to send on it or address it. */
+    Connection& connection()
+    {
+        return conn;
+    }
+
+    /**
+     * @brief Registers a frame listener and remembers it, so that release() can detach it.
+     *
+     * @param [in] listener               - Listener to register.  Must outlive this guard, which is
+     *                                      why a case declares it BEFORE the guard
+     */
+    void addFrameListener(FrameListener* listener)
+    {
+        conn.addFrameListener(listener);
+        attached = listener;
+    }
+
+    /**
+     * @brief Detaches the listener and closes the connection.  Idempotent.
+     *
+     * Called by the destructor, and callable early by a case that needs the connection gone before
+     * its remaining assertions - the second call then does nothing, so an early release and the
+     * destructor cannot both close.
+     *
+     * @return None
+     *
+     * @post The Bus holds no pointer to this connection or to the listener that was registered
+     *       through this guard.
+     */
+    void release()
+    {
+        if (released) {
+            return;
+        }
+        released = true;
+
+        try {
+            if (attached != nullptr) {
+                conn.removeFrameListener(attached);
+                attached = nullptr;
+            }
+            conn.close();
+        }
+        catch (const std::exception& e) {
+            ADD_FAILURE() << "closing a test Connection raised " << e.what()
+                          << "; the Bus may still hold a pointer to a listener that is going out of "
+                             "scope";
+        }
+        catch (...) {
+            ADD_FAILURE() << "closing a test Connection raised an exception not derived from "
+                             "std::exception; the Bus may still hold a pointer to a listener that is "
+                             "going out of scope";
+        }
+    }
+
+private:
+    Connection conn;
+    FrameListener* attached;
+    bool released;
+};
+
+/**
+ * Takes the CEC library down and guarantees it comes back up, on every exit path.
+ *
+ * *** THIS TOUCHES PROCESS-GLOBAL STATE THAT EVERY OTHER CASE IN THIS BINARY SHARES, WHICH IS WHY
+ * *** THE RESTORATION IS A DESTRUCTOR AND NOT A STATEMENT AT THE END OF A BODY.
+ *
+ * Exactly one case needs it, and it needs it because there is no alternative: the requirement is
+ * that a frame delivered while the driver is NOT OPENED is rejected, and the driver's state is owned
+ * by the library, not by a fixture.  LibCCEC::term() is the only way to leave OPENED, and it stops
+ * the Bus and closes the HAL for the whole process while it is done.  The L1 tier records the same
+ * disposition for the same reason - "exactly one case cycles the shared library, because it has no
+ * alternative" (tests/L1Tests/ccec/test_DriverImpl_Async.cpp:29-35).
+ *
+ * A fatal assertion in the case body returns from it immediately, so a trailing init() would not
+ * run and every case after it - and the global environment's own term() - would be asserting against
+ * a stack that was never brought back up.  A destructor runs on a normal return, on a fatal
+ * assertion's early return and on an exception alike, so that is where the restoration lives.
+ *
+ * BOTH HALVES REPORT RATHER THAN THROW.  TakeDown() and Restore() hand back a bool and a sentence so
+ * that the case can attach its own ASSERT_TRUE and fail at its own line; the destructor's implicit
+ * restore reports through ADD_FAILURE(), because a library that could not be re-initialised is a
+ * fact the run has to carry even though nothing can be done about it by then.
+ *
+ * B2 APPLIES TO ANY CASE THAT USES THIS.  Cycling reaches Driver::close(), whose AIDL mapping to
+ * IHdmiCec.close is a HIGH-CONFIDENCE CANDIDATE PENDING OWNER CONFIRMATION - HdmiCecClose has no
+ * mapping-table entry.  A green result here does not confirm that mapping, and the production method
+ * carries the same marker.
+ */
+class ScopedCecLibraryCycle {
+public:
+    ScopedCecLibraryCycle()
+        : down(false)
+    {
+    }
+
+    ~ScopedCecLibraryCycle()
+    {
+        std::string detail;
+        if (!Restore(detail)) {
+            ADD_FAILURE() << "the CEC library could not be re-initialised after a case took it down: "
+                          << detail
+                          << ". Every case after this one, and the global environment's own term(), "
+                             "is now asserting against a stack that is not up";
+        }
+    }
+
+    /**
+     * @brief Terminates the CEC library, leaving the driver out of OPENED.
+     *
+     * @param [out] failureDetail         - Receives a diagnostic when this reports failure.
+     *                                      Untouched on success
+     *
+     * @return bool                               - Whether the library was terminated
+     * @retval true                               - The Bus is stopped and the HAL is closed
+     * @retval false                              - term() raised; failureDetail carries its text
+     *
+     * @post On success the driver is CLOSED, so anything the HAL delivers must be rejected.
+     *
+     * @warning On the AIDL back-end this is a real transaction to the host process, so the host must
+     *          still be serving. It is, by construction: the harness reaps the host only in TearDown.
+     */
+    bool TakeDown(std::string& failureDetail)
+    {
+        try {
+            LibCCEC::getInstance().term();
+            down = true;
+            return true;
+        }
+        catch (const std::exception& e) {
+            /*
+             * LibCCEC::term() clears its own initialized flag only AFTER Driver::close() returns
+             * (ccec/src/LibCCEC.cpp:115-124), so a close that raised leaves the library still marked
+             * initialised. Recording that here is what lets Restore() know not to call init() a
+             * second time on a library that never came down.
+             */
+            failureDetail = std::string("LibCCEC::term() raised: ") + e.what() +
+                            ". The library is still marked initialised, so the driver may not have "
+                            "left OPENED and the state guard cannot be exercised";
+            return false;
+        }
+        catch (...) {
+            failureDetail = "LibCCEC::term() raised an exception not derived from std::exception";
+            return false;
+        }
+    }
+
+    /**
+     * @brief Brings the CEC library back up.  Idempotent, and a no-op when TakeDown() did not run.
+     *
+     * @param [out] failureDetail         - Receives a diagnostic when this reports failure.
+     *                                      Untouched on success
+     *
+     * @return bool                               - Whether the library is up
+     * @retval true                               - It is, or it never came down
+     * @retval false                              - init() raised; failureDetail carries its text
+     *
+     * @post The driver is OPENED and the Bus is running, which is the baseline every other case in
+     *       this binary assumes.
+     */
+    bool Restore(std::string& failureDetail)
+    {
+        if (!down) {
+            return true;
+        }
+
+        try {
+            LibCCEC::getInstance().init("CEC_TEST");
+            down = false;
+            return true;
+        }
+        catch (const std::exception& e) {
+            failureDetail = std::string("LibCCEC::init() raised: ") + e.what();
+            return false;
+        }
+        catch (...) {
+            failureDetail = "LibCCEC::init() raised an exception not derived from std::exception";
+            return false;
+        }
+    }
+
+private:
+    bool down;
 };
 
 } // namespace
@@ -579,6 +1555,15 @@ private:
  * question it exists to answer - which back-end did the factory resolve to, and is that answer
  * stable - is meaningful under every invocation and is in fact the question that tells a reader
  * of the run whether the OTHER two fixtures did what their names claim.
+ *
+ * IT ALSO HOLDS THE ONE HARNESS-WIDE GUARANTEE THIS FILE CHECKS, and the reason is that same
+ * property rather than a shortage of anywhere else to put it.  A guarantee that has to hold on both
+ * arms belongs in the only fixture that runs on both arms, and it has to be a fixture that skips for
+ * nothing: the two arm-specific fixtures each skip on the opposite invocation, so a case placed in
+ * either would go unchecked on exactly the arm where nothing else was watching.  See
+ * WriteControlCommandReportsEpipeAndTheChildIsStillReapedInsteadOfKillingTheRunner, whose subject is
+ * the harness's own signal disposition, control-channel write and child reaping, and which touches
+ * neither back-end.
  *
  * Both casts are computed ONCE in SetUp rather than per case, because the resolved object cannot
  * change: the selection is fixed by the time any body runs, so recomputing them per assertion
@@ -692,6 +1677,10 @@ class DualPathAidlFlowTest : public ::testing::Test {
 protected:
     void SetUp() override
     {
+        // (1) THE ONLY SKIP IN THIS FIXTURE, AND IT IS AN OPPOSITE-ARM SKIP: this fixture is
+        //     invocation E and the resolved back-end is invocation D's.  Every case below then has
+        //     no subject at all - there is no AIDL session, no host process and no channel - so
+        //     skipping is the honest report and adapting would be a fiction.
         if (dynamic_cast<DriverAidlImpl *>(&Driver::getInstance()) == nullptr) {
             GTEST_SKIP() << "this fixture is invocation E, which requires the AIDL back-end; the "
                             "legacy back-end was selected instead. Run with "
@@ -700,6 +1689,25 @@ protected:
                             "running servicemanager, so that the host is published and ready "
                             "before LibCCEC::init resolves the selection";
         }
+
+        // (2) THE CHANNEL IS A PRECONDITION OF EVERY CASE IN THIS FIXTURE, AND ITS ABSENCE IS A
+        //     FAILURE AND NOT A SKIP.  The AIDL back-end resolved, so a host process was published
+        //     and ready before init - and this harness always hands that host a control and
+        //     observation channel and proves it with a ping before initializing.  A channel that is
+        //     not open here therefore contradicts the arm that was selected, which is a defect in
+        //     the harness or the host and not a platform this tier cannot run on.  Skipping on it
+        //     would let invocation E report green while every observation it exists to make was
+        //     quietly not made - the precise shape of failure the tier is built to rule out.
+        ASSERT_TRUE(cecL2HostControlChannelIsOpen())
+            << "the AIDL back-end was selected, so an out-of-process fake service host is serving "
+               "this run, but its control and observation channel is not open. Without it no case in "
+               "this fixture can read what the service actually received or cause an inbound "
+               "delivery: an outbound case would collapse into \"sendTo did not throw\", which a "
+               "dropped or corrupted send satisfies, and the inbound cases have no trigger at all. "
+               "tests/L2Tests/test_main.cpp creates both pipes before the fork, clears FD_CLOEXEC on "
+               "the child's copies between fork() and exec(), names them in CEC_FAKE_HOST_CONTROL_FD "
+               "and CEC_FAKE_HOST_OBSERVE_FD, and pings the host before LibCCEC::init; its trace and "
+               "the host's own [FakeHdmiCecAidlHost] trace name the step that failed";
     }
 
     void TearDown() override
@@ -711,8 +1719,9 @@ protected:
 
 
 // ---------------------------------------------------------------------------------------------
-// SELECTION - which back-end resolved, that it stays resolved, and that it is the one asked for.
-// These three run under every invocation.
+// SELECTION - which back-end resolved, that it stays resolved, and that it is the one asked for -
+// followed by the one guarantee about the HARNESS that has to hold on both arms.  All four run
+// under every invocation.
 // ---------------------------------------------------------------------------------------------
 
 /**
@@ -836,6 +1845,193 @@ TEST_F(DualPathSelectionTest, TheResolvedBackEndMatchesTheModeTheHarnessWasGiven
     }
 }
 
+/**
+ * The harness's OWN control-channel write reports EPIPE, and its child is still reaped, instead of
+ * this runner being killed.
+ *
+ * THE PROPERTY, AND WHY IT IS A CASE RATHER THAN A COMMENT.  This harness writes commands to a pipe
+ * whose reader is the fake service host - ANOTHER PROCESS, which can exit or close its read end at
+ * any moment.  Under SIGPIPE's default disposition that write does not return: the runner is killed
+ * at the call, and two things this tier promises die with it.  The EPIPE arm of
+ * writeControlCommand() would never run, so the failure it exists to name would be recorded NOWHERE
+ * and the run would read as a crash of unknown origin.  And the global environment's TearDown would
+ * never run, so the host would be neither signalled nor reaped: it would survive the run holding the
+ * production service name, and the NEXT run would fail on a stale registration.  So
+ * tests/L2Tests/test_main.cpp installs SIG_IGN as the first step of its SetUp and restores the
+ * previous disposition in TearDown, and THIS CASE IS WHAT NOTICES IF THAT INSTALL IS EVER REMOVED -
+ * and, more than that, what proves the two things the install buys are actually there.
+ *
+ * IT DRIVES THE REAL CODE, WHICH IS THE WHOLE POINT.  Both promises above are claims about code that
+ * runs only when a pipe's reader has gone, and no ordinary invocation ever puts it in that state: a
+ * healthy host reads its control descriptor until teardown closes it.  A case that instead built a
+ * LOOK-ALIKE - its own pipe, its own raw ::write(), its own errno - would establish the kernel's
+ * behaviour and this process's signal disposition, neither of which is in doubt, while leaving
+ * writeControlCommand()'s diagnostic and the reap that follows it entirely unexercised.  So step (2)
+ * below calls cecL2ProveEpipeDiagnosticAndChildReaping(), which makes a real call to the harness's
+ * own writeControlCommand() against a descriptor whose reader has genuinely gone, requires the
+ * command-specific EPIPE sentence back, and then ends a real child through the same
+ * terminateAndReapChildProcess() a teardown uses.  Neither is a copy; a change that broke either
+ * breaks this case.
+ *
+ * IT IS DETERMINISTIC ON ANY HOST, AND THAT IS THE WHOLE OF ITS DESIGN.  It needs no fake service
+ * host, no binder driver, no service manager and no back-end: the seam BUILDS THE HAZARD ITSELF out
+ * of two pipes and a child of its own, and close() on a pipe's last read end followed by write() to
+ * its write end returns -1 with EPIPE synchronously, while SIGTERM to a child at SIG_DFL ends it.
+ * Nothing is slept on and no wall clock is polled - each wait in the seam is a real wait on a real
+ * event under one bound - so this behaves identically under invocation D on a host with no binder
+ * support, which is where it ordinarily runs, and under invocation E on the binder-capable guest.
+ * Everything it uses is its own, so nothing it does can disturb the harness's live channel or the
+ * host's descriptors, and it leaves no descriptor and no child behind on any path.
+ *
+ * THREE STEPS, IN THIS ORDER, BECAUSE EACH ONE LICENSES THE NEXT:
+ *
+ *   (1) THE DISPOSITION is read back out of the process and must not be SIG_DFL.  This is the
+ *       precondition, and it comes FIRST and FATALLY: if the disposition were the default, the
+ *       writes in the two steps below would terminate this runner mid-case, and a suite cannot
+ *       report on the thing that killed it.  It is asserted as "not the default" rather than
+ *       "exactly SIG_IGN" on purpose - the property required is that a broken pipe does not kill
+ *       this process, which a handler satisfies as well as SIG_IGN does, and pinning the exact value
+ *       would fail a future harness that met the requirement differently.
+ *
+ *   (2) THE REAL WRITE AND THE REAL REAP, which is the substance.  The seam's own report is
+ *       asserted, and then the diagnostic it hands back is asserted here, at this case's own line,
+ *       for the two things that make it worth anything: it names the command that was lost, and it
+ *       reports EPIPE rather than a bound that expired.
+ *
+ *   (3) THE CONSEQUENCE, DEMONSTRATED DIRECTLY, on a pipe belonging to this case.  It adds the one
+ *       observation step (2) makes indirectly: write() RETURNS, returns -1, and sets EPIPE.  It is
+ *       kept because it is the cheapest possible statement of the mechanism the seam relies on, and
+ *       it is labelled as secondary because on its own it would prove nothing about the harness.
+ *
+ * Reaching the assertions at all is the rest of the evidence and cannot be written as an assertion:
+ * a process that had died would report nothing.
+ */
+TEST_F(DualPathSelectionTest,
+       WriteControlCommandReportsEpipeAndTheChildIsStillReapedInsteadOfKillingTheRunner)
+{
+    /*
+     * (1) The disposition, read straight out of the process. A null action pointer makes this a
+     *     query and changes nothing, so this case observes the harness's choice rather than
+     *     establishing one of its own - which matters, because a case that installed the
+     *     disposition itself would pass whether or not the harness had.
+     */
+    struct sigaction current;
+    std::memset(&current, 0, sizeof(current));
+
+    ASSERT_EQ(0, ::sigaction(SIGPIPE, nullptr, &current))
+        << "SIGPIPE's current disposition could not be read (" << std::strerror(errno)
+        << "), so whether this runner survives a write to a closed pipe cannot be established - and "
+           "the writes below must not be attempted without knowing";
+
+    const bool sigpipeIsDefaulted = (current.sa_handler == SIG_DFL);
+    ASSERT_FALSE(sigpipeIsDefaulted)
+        << "SIGPIPE is at its DEFAULT disposition, which TERMINATES the process. The L2 harness "
+           "writes control commands to a pipe whose reader is the out-of-process fake service host, "
+           "so with this disposition in force a host that has exited kills this runner at the "
+           "write(): writeControlCommand()'s EPIPE diagnostic never runs, so no failure is recorded, "
+           "and the global environment's TearDown never runs, so the host is neither signalled nor "
+           "reaped and outlives the run holding the production service name for the next one. "
+           "tests/L2Tests/test_main.cpp must install SIG_IGN as the first step of "
+           "CecL2TestEnvironment::SetUp - see ignoreBrokenPipeSignal() - and restore it in TearDown";
+
+    /*
+     * (2) THE SUBSTANCE. The seam drives the harness's own writeControlCommand() against a
+     *     descriptor whose reader has genuinely gone, and then ends its own child through the same
+     *     terminate-and-reap a teardown performs on the host. Both are the real functions, so this
+     *     is the assertion that makes the SIGPIPE install's two purposes - a diagnostic that gets
+     *     produced, and a reap that gets performed - facts about this binary rather than claims
+     *     about it.
+     */
+    std::string observedDiagnostic;
+    std::string seamFailure;
+
+    ASSERT_TRUE(cecL2ProveEpipeDiagnosticAndChildReaping(observedDiagnostic, seamFailure))
+        << "driving the harness's own control-channel write against a reader-less descriptor, and "
+           "reaping the child that made it reader-less, did not hold: "
+        << seamFailure
+        << ". The step named there is the one to look at; every step the seam takes is necessary to "
+           "the two properties this case exists to establish, and the seam leaves no descriptor and "
+           "no child behind whichever one failed";
+
+    /*
+     *     The diagnostic is then asserted HERE rather than only inside the seam, so that a wrong
+     *     sentence fails at this case's line with the sentence in the message. The command text is
+     *     spelled again in this file on purpose: it is a two-place contract exactly like the extern
+     *     declarations above, and if the seam ever sends a different command this assertion fails
+     *     and both places are updated together.
+     */
+    EXPECT_NE(std::string::npos, observedDiagnostic.find("epipe-probe"))
+        << "the harness's control-channel write failed as required, but its diagnostic does not "
+           "name the command that was lost. It said: \"" << observedDiagnostic
+        << "\". A failure that does not say WHICH command went missing leaves the reader of a CI log "
+           "unable to tell which observation a case never got";
+
+    EXPECT_NE(std::string::npos, observedDiagnostic.find("EPIPE"))
+        << "the harness's control-channel write failed and named the command, but its diagnostic "
+           "does not report EPIPE, so it did not take the broken-pipe arm. It said: \""
+        << observedDiagnostic
+        << "\". EPIPE is the one errno that means \"the host has closed its control descriptor or "
+           "exited\", and the deadline arm of the same function also names the command - so without "
+           "EPIPE this could be a bound that expired, which is a different failure entirely";
+
+    /*
+     * (3) THE MECHANISM, demonstrated directly and labelled as the secondary step it is: a pipe of
+     *     this case's own, its read end closed, and one byte offered to the write end. O_CLOEXEC
+     *     because every descriptor this tier creates carries it - nothing here forks, but a
+     *     descriptor that would survive an exec for no reason is the kind of difference that later
+     *     becomes a bug.
+     *
+     *     Both ends are released BEFORE anything is asserted about the outcome, so that no path out
+     *     of this case - including a fatal assertion's early return - leaks a descriptor into the
+     *     rest of the binary.
+     */
+    int probeChannel[2] = { -1, -1 };
+    ASSERT_EQ(0, ::pipe2(probeChannel, O_CLOEXEC))
+        << "a pipe could not be created (" << std::strerror(errno)
+        << "), so the mechanism this step exists to demonstrate could not be built";
+
+    const int readEndCloseResult = ::close(probeChannel[0]);
+    const int readEndCloseErrno  = errno;
+
+    ssize_t writeResult = 0;
+    int writeErrno = 0;
+
+    if (readEndCloseResult == 0) {
+        const char probeByte = 'x';
+
+        errno = 0;
+        writeResult = ::write(probeChannel[1], &probeByte, sizeof(probeByte));
+        writeErrno  = errno;
+    }
+
+    ::close(probeChannel[1]);
+
+    ASSERT_EQ(0, readEndCloseResult)
+        << "the read end of this step's own pipe could not be closed ("
+        << std::strerror(readEndCloseErrno)
+        << "), so the pipe still has a reader and a successful write below would mean nothing";
+
+    EXPECT_EQ(-1, writeResult)
+        << "writing one byte to a pipe whose only reader has been closed returned " << writeResult
+        << " where -1 was required. A write that reports success into a pipe nobody can read means "
+           "the descriptor is not the one this step created, and the EPIPE arm the harness's control "
+           "channel depends on could not be reached even with the right disposition in force";
+
+    EXPECT_EQ(EPIPE, writeErrno)
+        << "the write to a reader-less pipe failed with errno " << writeErrno << " ("
+        << std::strerror(writeErrno) << ") where EPIPE (" << EPIPE
+        << ") was required. EPIPE is the exact error writeControlCommand() classifies as \"the host "
+           "has closed its control descriptor or exited\", and it is the only errno that carries "
+           "that meaning";
+
+    /*
+     * Reaching this line is the rest of the evidence and cannot be expressed as an assertion: under
+     * the default disposition this process would have been terminated by the seam's write in step
+     * (2) or by the write in step (3), so none of the assertions above would have been reported by
+     * anybody. That they were reported at all is the property this case exists to establish.
+     */
+}
+
 
 // ---------------------------------------------------------------------------------------------
 // FLOW A on the LEGACY back-end - inbound, from the HAL Rx callback to the typed process()
@@ -859,8 +2055,11 @@ TEST_F(DualPathLegacyFlowTest, InboundImageViewOnReachesTheTypedProcessorThrough
     RecordingProcessor processor;
     DecodingFrameListener listener(processor);
 
-    Connection connection(LogicalAddress::TV, true, "L2-Legacy-FlowA-ImageViewOn");
-    connection.addFrameListener(&listener);
+    // The guard is declared AFTER the listener, so it is destroyed BEFORE it: the Bus has let go
+    // of both the connection and the listener before the listener's storage dies, on every exit
+    // path including a fatal assertion's early return.
+    ScopedConnection scoped(LogicalAddress::TV, "L2-Legacy-FlowA-ImageViewOn");
+    scoped.addFrameListener(&listener);
 
     const unsigned char frame[] = { 0x40, 0x04 };
     mock->injectReceivedMessage(frame, static_cast<int>(sizeof(frame)));
@@ -881,9 +2080,6 @@ TEST_F(DualPathLegacyFlowTest, InboundImageViewOnReachesTheTypedProcessorThrough
         << "the initiator nibble was lost or rewritten on the way up";
     EXPECT_EQ(static_cast<int>(LogicalAddress::TV), processor.lastDestination)
         << "the destination nibble was lost or rewritten on the way up";
-
-    connection.removeFrameListener(&listener);
-    connection.close();
 }
 
 /**
@@ -893,14 +2089,25 @@ TEST_F(DualPathLegacyFlowTest, InboundImageViewOnReachesTheTypedProcessorThrough
  * (<Active Source>), physical address 1.0.0.0 packed as 0x10 0x00.  This is the case that catches
  * an operand being dropped or shifted: both operand bytes have to survive the heap copy, the
  * queue, the reader thread, the filter and the decoder to be read back here.
+ *
+ * WHAT IT ASSERTS ABOUT THE OPERANDS IS THE EXACT VALUE, in three views - the rendered address
+ * "1.0.0.0", the four decoded nibbles, and the two packed bytes 0x10 0x00 - because a check that
+ * the address merely arrived NON-EMPTY is satisfied by any corruption that still yields two bytes:
+ * 0.0.0.0 from a zeroed operand pair, 0.1.0.0 from a nibble shift, and a truncated value all pass
+ * it.  Exactness is what makes this case a control on the transport rather than on the fact that
+ * something was copied.
+ *
+ * What it deliberately does NOT establish: anything about the AIDL arm.  The stimulus is the legacy
+ * HAL mock's Rx callback, so this is invocation D's evidence only; the AIDL inbound cases below
+ * carry their own, and neither substitutes for the other.
  */
 TEST_F(DualPathLegacyFlowTest, InboundBroadcastActiveSourceCarriesItsOperandsThroughTheLegacyBackEnd)
 {
     RecordingProcessor processor;
     DecodingFrameListener listener(processor);
 
-    Connection connection(LogicalAddress::TV, true, "L2-Legacy-FlowA-ActiveSource");
-    connection.addFrameListener(&listener);
+    ScopedConnection scoped(LogicalAddress::TV, "L2-Legacy-FlowA-ActiveSource");
+    scoped.addFrameListener(&listener);
 
     const unsigned char frame[] = { 0x4F, 0x82, 0x10, 0x00 };
     mock->injectReceivedMessage(frame, static_cast<int>(sizeof(frame)));
@@ -912,16 +2119,31 @@ TEST_F(DualPathLegacyFlowTest, InboundBroadcastActiveSourceCarriesItsOperandsThr
         << "the frame arrived but did not decode to <Active Source>";
     EXPECT_EQ(0, processor.imageViewOnCount)
         << "the frame decoded to <Image View On>, so the opcode was altered in transit";
-    // CECBytes::toString renders each byte unpadded in hex, so the packed 0x10 0x00 of physical
-    // address 1.0.0.0 reads back as its two bytes rather than as "1.0.0.0".  What is asserted is
-    // therefore that the operands SURVIVED, not their formatted spelling.
-    EXPECT_FALSE(processor.activeSourcePhysical.empty())
-        << "the <Active Source> operands did not survive the inbound path";
+
+    // THE OPERANDS ARE ASSERTED EXACTLY, NOT MERELY FOR SURVIVAL.  "Non-empty" is satisfied by
+    // 0.0.0.0, by a shifted 0.1.0.0 and by a truncated value alike, so a corrupted address would
+    // have passed.  PhysicalAddress overrides toString() to render dotted decimal
+    // (ccec/include/ccec/Operands.hpp:401) and getByteValue(0..3) yields the four nibbles, so the
+    // exact value is available and there is no reason to settle for less.  Both views are checked:
+    // the four decoded nibbles, and the two packed bytes 0x10 0x00 that 1.0.0.0 travels as.
+    EXPECT_EQ("1.0.0.0", processor.activeSourcePhysical)
+        << "the <Active Source> physical address did not decode to 1.0.0.0";
+    EXPECT_EQ(1, processor.activeSourceNibbles[0])
+        << "the first nibble of physical address 1.0.0.0 was lost or shifted on the inbound path";
+    EXPECT_EQ(0, processor.activeSourceNibbles[1])
+        << "the second nibble of physical address 1.0.0.0 does not match";
+    EXPECT_EQ(0, processor.activeSourceNibbles[2])
+        << "the third nibble of physical address 1.0.0.0 does not match";
+    EXPECT_EQ(0, processor.activeSourceNibbles[3])
+        << "the fourth nibble of physical address 1.0.0.0 does not match";
+    EXPECT_EQ(0x10, processor.activeSourcePackedHigh)
+        << "physical address 1.0.0.0 packs to 0x10 0x00 and the first operand byte does not match, "
+           "so the operand pair that arrived would not re-encode to the wire image it came from";
+    EXPECT_EQ(0x00, processor.activeSourcePackedLow)
+        << "the second packed operand byte of physical address 1.0.0.0 does not match";
+
     EXPECT_EQ(static_cast<int>(LogicalAddress::BROADCAST), processor.lastDestination)
         << "the broadcast destination nibble was not preserved";
-
-    connection.removeFrameListener(&listener);
-    connection.close();
 }
 
 /**
@@ -941,8 +2163,8 @@ TEST_F(DualPathLegacyFlowTest, InboundFrameForAnotherAddressIsFilteredBeforeDeco
     RecordingProcessor processor;
     DecodingFrameListener listener(processor);
 
-    Connection connection(LogicalAddress::TV, true, "L2-Legacy-FlowA-Filtered");
-    connection.addFrameListener(&listener);
+    ScopedConnection scoped(LogicalAddress::TV, "L2-Legacy-FlowA-Filtered");
+    scoped.addFrameListener(&listener);
 
     const unsigned char frame[] = { 0x43, 0x36 };
     mock->injectReceivedMessage(frame, static_cast<int>(sizeof(frame)));
@@ -957,9 +2179,6 @@ TEST_F(DualPathLegacyFlowTest, InboundFrameForAnotherAddressIsFilteredBeforeDeco
         << "a filtered frame was decoded as <Image View On>";
     EXPECT_EQ(0, processor.activeSourceCount)
         << "a filtered frame was decoded as <Active Source>";
-
-    connection.removeFrameListener(&listener);
-    connection.close();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -990,11 +2209,13 @@ TEST_F(DualPathLegacyFlowTest, OutboundImageViewOnReachesTheLegacyHalAsExactByte
             SetArgPointee<3>(HDMI_CEC_IO_SUCCESS),
             Return(HDMI_CEC_IO_SUCCESS)));
 
-    Connection connection(LogicalAddress::PLAYBACK_DEVICE_1, true, "L2-Legacy-FlowB-ImageViewOn");
+    // RAII, because every assertion below is FATAL: an ASSERT_* returns from this body at once,
+    // and a trailing close() would then never run while the Bus still held this connection.
+    ScopedConnection scoped(LogicalAddress::PLAYBACK_DEVICE_1, "L2-Legacy-FlowB-ImageViewOn");
 
     CECFrame frame;
     MessageEncoder().encode(ImageViewOn(), frame);
-    connection.sendTo(LogicalAddress(LogicalAddress::TV), frame, 1000);
+    scoped.connection().sendTo(LogicalAddress(LogicalAddress::TV), frame, 1000);
 
     ASSERT_EQ(2, capturedLength)
         << "an <Image View On> is a header and an opcode - two bytes - so the HAL was handed the "
@@ -1005,8 +2226,6 @@ TEST_F(DualPathLegacyFlowTest, OutboundImageViewOnReachesTheLegacyHalAsExactByte
         << "the header nibbles the HAL received do not match the connection source and destination";
     EXPECT_EQ(0x04, static_cast<int>(captured[1]))
         << "the opcode byte is not <Image View On>";
-
-    connection.close();
 }
 
 /**
@@ -1029,11 +2248,12 @@ TEST_F(DualPathLegacyFlowTest, OutboundActiveSourceReachesTheLegacyHalWithOperan
             SetArgPointee<3>(HDMI_CEC_IO_SUCCESS),
             Return(HDMI_CEC_IO_SUCCESS)));
 
-    Connection connection(LogicalAddress::PLAYBACK_DEVICE_1, true, "L2-Legacy-FlowB-ActiveSource");
+    // RAII, for the same reason as the case above: the length check below is fatal.
+    ScopedConnection scoped(LogicalAddress::PLAYBACK_DEVICE_1, "L2-Legacy-FlowB-ActiveSource");
 
     CECFrame frame;
     MessageEncoder().encode(ActiveSource(PhysicalAddress(1, 0, 0, 0)), frame);
-    connection.sendTo(LogicalAddress(LogicalAddress::BROADCAST), frame, 1000);
+    scoped.connection().sendTo(LogicalAddress(LogicalAddress::BROADCAST), frame, 1000);
 
     ASSERT_EQ(4u, captured.size())
         << "an <Active Source> is a header, an opcode and a two-byte physical address";
@@ -1045,8 +2265,6 @@ TEST_F(DualPathLegacyFlowTest, OutboundActiveSourceReachesTheLegacyHalWithOperan
         << "physical address 1.0.0.0 packs to 0x10 0x00 and the first operand byte does not match";
     EXPECT_EQ(0x00, static_cast<int>(captured[3]))
         << "the second operand byte of physical address 1.0.0.0 does not match";
-
-    connection.close();
 }
 
 /**
@@ -1064,17 +2282,15 @@ TEST_F(DualPathLegacyFlowTest, OutboundTransmitFailureFromTheLegacyHalSurfacesAs
             SetArgPointee<3>(HDMI_CEC_IO_SENT_FAILED),
             Return(HDMI_CEC_IO_GENERAL_ERROR)));
 
-    Connection connection(LogicalAddress::PLAYBACK_DEVICE_1, true, "L2-Legacy-FlowB-Failure");
+    ScopedConnection scoped(LogicalAddress::PLAYBACK_DEVICE_1, "L2-Legacy-FlowB-Failure");
 
     CECFrame frame;
     MessageEncoder().encode(ImageViewOn(), frame);
 
     EXPECT_THROW(
-        connection.sendTo(LogicalAddress(LogicalAddress::TV), frame, 1000, Throw_e()),
+        scoped.connection().sendTo(LogicalAddress(LogicalAddress::TV), frame, 1000, Throw_e()),
         Exception)
         << "a HAL transmit failure must not be reported to the caller as a successful send";
-
-    connection.close();
 }
 
 
@@ -1082,54 +2298,110 @@ TEST_F(DualPathLegacyFlowTest, OutboundTransmitFailureFromTheLegacyHalSurfacesAs
 // FLOW B on the AIDL back-end - outbound, across the binder driver to the hosted fake service.
 // Invocation E.
 //
-// These two cases need nothing from the host beyond its presence.  Connection::sendTo -> Bus ->
-// DriverAidlImpl::write -> IHdmiCecController::sendMessage crosses the driver into the host
-// process and comes back with a real SendMessageStatus, and completing that round trip is itself
-// the evidence: a real Bp* proxy, a real transaction, a real reply.  No in-process fake can
-// produce it, which is the entire reason this tier exists.
+// Connection::sendTo -> Bus -> DriverAidlImpl::write -> IHdmiCecController::sendMessage crosses the
+// driver into the host process and comes back with a real SendMessageStatus.  Completing that round
+// trip is part of the evidence - a real Bp* proxy, a real transaction, a real reply, none of which
+// an in-process fake can produce - but IT IS NOT THE WHOLE OF IT, and the difference is what these
+// two cases turn on.
 //
-// WHAT IS DELIBERATELY NOT ASSERTED, and why that is not a gap being glossed over: the host's own
-// capture of the bytes it received - FakeHdmiCecController's last-sent-message record - lives in
-// ANOTHER PROCESS, and the fake is not linked into this runner, so this file cannot read it and
-// must not pretend to.  The byte-exact wire image is asserted on the legacy arm above, where the
-// HAL double is in-process and the capture is genuinely readable.  Here, what crosses the boundary
-// and returns is what is asserted.
+// WHY "IT DID NOT THROW" IS NOT ENOUGH, stated plainly because an earlier shape of these two cases
+// asserted exactly that and nothing more.  sendTo returning normally is satisfied by a send that
+// reached the service with corrupt bytes, by a fake that dropped it, and by a marshalling step that
+// wrote an empty vector - every one of those completes a transaction and returns a status.  The
+// bytes the service actually received are recorded by the fake IN THE HOST PROCESS, and the fake is
+// deliberately not linked into this runner, so the only way to read them is to ASK THE HOST.
+//
+// SO EACH CASE NOW READS THE FAKE'S OWN COUNTER AND CAPTURE OVER THE PIPE CHANNEL: `sent-count`
+// before and after, asserted to have advanced by EXACTLY ONE - not merely to have moved, because a
+// retry loop that sent the frame twice is a defect and would satisfy "greater than before" - and
+// `last-sent`, asserted to equal the exact hexadecimal rendering of the bytes the case encoded.
+//
+// AND THE OBSERVATION TRAVELS OVER THE PIPE, NOT OVER BINDER, BECAUSE BINDER IS THE THING UNDER
+// TEST.  Asking the service over binder how a binder transmit went would be attesting to the
+// transport with the transport; a fault could then corrupt the evidence and the corruption would be
+// invisible.  The pipes behave identically whether the driver is healthy, degraded or absent.
 // ---------------------------------------------------------------------------------------------
 
 /**
- * <Image View On> encoded and sent completes a real binder round trip to the out-of-process fake.
+ * <Image View On> encoded and sent arrives at the out-of-process fake as EXACTLY the bytes CEC
+ * defines, once, over real binder IPC.
  *
  * Two bytes on the wire, { 0x40, 0x04 }: initiator 4 (this Connection's source, Playback Device 1)
  * in the high nibble, destination 0 (TV) in the low nibble, opcode 0x04 (<Image View On>).  A
  * DIRECTED message, which matters for the status translation below.
  *
- * THE THROWING sendTo OVERLOAD IS USED DELIBERATELY.  With the non-throwing one a failed transmit
- * is indistinguishable from a successful one - it returns either way - and the whole point of this
- * case is that the round trip completed.  EXPECT_NO_THROW here is therefore a real assertion about
- * the full stack rather than a tautology: a CECNoAckException would mean the status translation
- * read the reply as a rejection, and an IOException would mean the binder Status came back not-ok
- * or the frame failed the length guard - so either one would say that the marshalling, the
- * transport or the translation is broken.
+ * WHAT THIS ESTABLISHES, in three parts, each of which the other two do not cover:
  *
- * The expectation rests on the hosted fake's DOCUMENTED DEFAULT reply of ACK_STATE_0, which this
- * runner cannot alter because the fake is not linked into it.  That default is correct for this
- * frame: ACK_STATE_0 on a DIRECTED message means acknowledged, so DriverAidlImpl::write returns
- * normally.  Were the host's default ever changed, this case would fail loudly rather than
- * silently passing, which is the right direction for that coupling to fail in.
+ *   (1) THE ROUND TRIP COMPLETED.  The THROWING sendTo overload is used deliberately: with the
+ *       non-throwing one a failed transmit is indistinguishable from a successful one, because it
+ *       returns either way.  So EXPECT_NO_THROW here is a real assertion about the full stack rather
+ *       than a tautology - a CECNoAckException would mean the status translation read the reply as a
+ *       rejection, and an IOException would mean the binder Status came back not-ok or the frame
+ *       failed the length guard.  It rests on the hosted fake's documented default reply of
+ *       ACK_STATE_0, which this runner cannot alter because the fake is not linked into it, and
+ *       which is correct for this frame: ACK_STATE_0 on a DIRECTED message means acknowledged.
+ *
+ *   (2) IT ARRIVED, EXACTLY ONCE.  The fake's own sendMessage() invocation count, read over the pipe
+ *       channel before and after, must advance by exactly one.  Exactly rather than at least,
+ *       because a retry that transmitted the frame twice is a defect on a bus where a duplicate
+ *       <Image View On> is a second command to a real device.
+ *
+ *   (3) IT ARRIVED INTACT.  The fake's captured frame, read the same way, must equal the exact
+ *       hexadecimal rendering of the bytes this case encoded.  This is the assertion an earlier
+ *       shape of this case lacked, and it is the one a corrupt or truncated marshalling fails: the
+ *       comparison is against what the ENCODER produced, so it also catches the middleware writing
+ *       the right length with the wrong content.
+ *
+ * WHAT IT DELIBERATELY DOES NOT ESTABLISH: anything about the INBOUND direction.  Nothing here
+ * causes the service to call back, and the two inbound cases below own that.
  */
 TEST_F(DualPathAidlFlowTest, OutboundImageViewOnCrossesRealBinderIpcToTheFakeService)
 {
-    Connection connection(LogicalAddress::PLAYBACK_DEVICE_1, true, "L2-Aidl-FlowB-ImageViewOn");
+    std::string detail;
+
+    long sentBefore = -1;
+    ASSERT_TRUE(askHostForSentCount(sentBefore, detail)) << detail;
+
+    ScopedConnection scoped(LogicalAddress::PLAYBACK_DEVICE_1, "L2-Aidl-FlowB-ImageViewOn");
 
     CECFrame frame;
     MessageEncoder().encode(ImageViewOn(), frame);
 
-    EXPECT_NO_THROW(connection.sendTo(LogicalAddress(LogicalAddress::TV), frame, 1000, Throw_e()))
+    EXPECT_NO_THROW(
+        scoped.connection().sendTo(LogicalAddress(LogicalAddress::TV), frame, 1000, Throw_e()))
         << "a directed <Image View On> did not complete its round trip to the out-of-process fake "
            "service; the frame did not marshal, the transaction did not cross the binder driver, "
            "or the SendMessageStatus reply was translated as a failure";
 
-    connection.close();
+    // The bytes the wire image is compared against are the ENCODER'S, taken from the same frame the
+    // send used, so this case cannot agree with a corrupt send by having encoded it wrongly itself.
+    const uint8_t* encodedBytes = nullptr;
+    size_t encodedLength = 0;
+    frame.getBuffer(&encodedBytes, &encodedLength);
+    ASSERT_EQ(2u, encodedLength)
+        << "an <Image View On> is a header and an opcode - two bytes - so the encoder produced the "
+           "wrong frame and the comparison below would be against the wrong expectation";
+    const std::string expectedHex =
+        toLowercaseHex(reinterpret_cast<const unsigned char*>(encodedBytes), encodedLength);
+    EXPECT_EQ("4004", expectedHex)
+        << "the encoded frame is not the { 0x40, 0x04 } this case is written around";
+
+    long sentAfter = -1;
+    ASSERT_TRUE(askHostForSentCount(sentAfter, detail)) << detail;
+    EXPECT_EQ(sentBefore + 1, sentAfter)
+        << "the fake service's own sendMessage() count went from " << sentBefore << " to " << sentAfter
+        << ", where exactly one further call was expected. Equal counts mean the transmit never "
+           "reached the service at all even though sendTo returned - the failure that an assertion "
+           "on no-throw alone cannot see - and a jump of more than one means the frame was "
+           "transmitted repeatedly";
+
+    std::string observedHex;
+    ASSERT_TRUE(askHostForLastSentFrame(observedHex, detail)) << detail;
+    EXPECT_EQ(expectedHex, observedHex)
+        << "the fake service received \"" << observedHex << "\" where the encoder produced \""
+        << expectedHex << "\". The transaction crossed the driver and the bytes did not survive it: "
+           "the header nibbles or the opcode were altered, the frame was truncated, or an empty "
+           "vector was marshalled";
 }
 
 /**
@@ -1151,137 +2423,491 @@ TEST_F(DualPathAidlFlowTest, OutboundImageViewOnCrossesRealBinderIpcToTheFakeSer
  * raises CECNoAckException on that arm only for the CEC CTS 9-3-3 case, a rejected
  * <Report Physical Address>.  This frame's opcode is 0x82, so the arm does not apply and the send
  * returns normally against the host's default reply.
+ *
+ * THE OPERANDS ARE ASSERTED AT THE SERVICE, not merely at the encoder.  The fake's captured frame is
+ * read back over the pipe channel and compared byte for byte against what the encoder produced, so
+ * an operand dropped, reordered or zeroed inside the parcel fails here.  Asserting the count as well
+ * - exactly one further sendMessage() - is what separates "the bytes were wrong" from "the transmit
+ * never arrived", which are different defects and must not share one failure message.
+ *
+ * WHAT IT DELIBERATELY DOES NOT ESTABLISH: the 16-byte length guard's REFUSING side.  Four bytes
+ * exercises the compliant side only; the boundary at 16, 17 and 20 bytes belongs to the L1 contract
+ * suite, where the fake's canned status can be varied per case.
  */
 TEST_F(DualPathAidlFlowTest, OutboundActiveSourceWithOperandsCrossesRealBinderIpc)
 {
-    Connection connection(LogicalAddress::PLAYBACK_DEVICE_1, true, "L2-Aidl-FlowB-ActiveSource");
+    std::string detail;
+
+    long sentBefore = -1;
+    ASSERT_TRUE(askHostForSentCount(sentBefore, detail)) << detail;
+
+    ScopedConnection scoped(LogicalAddress::PLAYBACK_DEVICE_1, "L2-Aidl-FlowB-ActiveSource");
 
     CECFrame frame;
     MessageEncoder().encode(ActiveSource(PhysicalAddress(1, 0, 0, 0)), frame);
 
     EXPECT_NO_THROW(
-        connection.sendTo(LogicalAddress(LogicalAddress::BROADCAST), frame, 1000, Throw_e()))
+        scoped.connection().sendTo(LogicalAddress(LogicalAddress::BROADCAST), frame, 1000, Throw_e()))
         << "a four-byte broadcast <Active Source> did not complete its round trip to the "
            "out-of-process fake service; the operands did not survive the parcel, the frame was "
            "refused by the length guard, or the broadcast arm of the status translation raised "
            "where it should not";
 
-    connection.close();
+    const uint8_t* encodedBytes = nullptr;
+    size_t encodedLength = 0;
+    frame.getBuffer(&encodedBytes, &encodedLength);
+    ASSERT_EQ(4u, encodedLength)
+        << "an <Active Source> is a header, an opcode and a two-byte physical address, so the "
+           "encoder produced the wrong frame and the comparison below would be against the wrong "
+           "expectation";
+    const std::string expectedHex =
+        toLowercaseHex(reinterpret_cast<const unsigned char*>(encodedBytes), encodedLength);
+    EXPECT_EQ("4f821000", expectedHex)
+        << "the encoded frame is not the { 0x4F, 0x82, 0x10, 0x00 } this case is written around - "
+           "physical address 1.0.0.0 packs to 0x10 0x00";
+
+    long sentAfter = -1;
+    ASSERT_TRUE(askHostForSentCount(sentAfter, detail)) << detail;
+    EXPECT_EQ(sentBefore + 1, sentAfter)
+        << "the fake service's own sendMessage() count went from " << sentBefore << " to " << sentAfter
+        << ", where exactly one further call was expected. Equal counts mean the four-byte transmit "
+           "never reached the service even though sendTo returned; more than one means it was "
+           "transmitted repeatedly";
+
+    std::string observedHex;
+    ASSERT_TRUE(askHostForLastSentFrame(observedHex, detail)) << detail;
+    EXPECT_EQ(expectedHex, observedHex)
+        << "the fake service received \"" << observedHex << "\" where the encoder produced \""
+        << expectedHex << "\". A four-byte frame has to be copied into a std::vector<uint8_t>, "
+           "written into the parcel and read back on the far side, and one of those steps lost or "
+           "altered a byte - most likely an operand, which a two-byte frame would not have caught";
 }
 
 // ---------------------------------------------------------------------------------------------
 // FLOW A on the AIDL back-end - inbound, from the hosted fake service to the typed process()
 // overload.  Invocation E.
 //
-// *** BOTH CASES BELOW SKIP, FOR ONE REASON, AND IT IS A REPORTED ONE. ***  The only object that
-// can invoke the middleware's IHdmiCecEventListener is the fake service.  By design it lives in
-// the HOST process - that separation is the whole substance of this tier - and it is not linked
-// into this runner, so this file cannot call it.  Read and confirmed rather than assumed:
-// FakeHdmiCecController::sendMessage records the frame and returns its canned status with NO
-// loopback to the captured listener, and the host's main() registers the fake, starts the
-// service-side threadpool, writes its readiness token and then blocks until SIGTERM or SIGINT,
-// both of which TERMINATE it.  FakeHdmiCecService::fireOnMessageReceived exists and nothing in
-// the host ever calls it.
+// BOTH CASES BELOW EXECUTE, AND THE MECHANISM IS THE HOST'S CONTROL CHANNEL.  The only object that
+// can invoke the middleware's IHdmiCecEventListener is the fake service, and by design it lives in
+// the HOST process - that separation is the whole substance of this tier - so this runner cannot
+// call it directly and the fake is deliberately not linked here.  What it can do is ASK: `deliver
+// <hex>` reaches the fake's own fireOnMessageReceived(), which invokes the listener the middleware
+// handed to open() and no other, so the delivery route under test is the production one and not a
+// second one invented for the test.
 //
-// The file block above carries the REQUIRED CHANGE, REPORTED NOT MADE paragraph naming the two
-// shapes that would close this.  The cases are registered and skip with that reason named,
-// because a missing case is invisible while a skip with a named reason is a report - and because
-// weakening either of them into something the outbound cases already prove would be worse than
-// either.
+// WHY THAT MAKES THESE THE ONLY CASES IN THE REPOSITORY THAT CAN PROVE INBOUND AIDL DELIVERY.
+// onMessageReceived is `oneway`, so it is dispatched inside THIS process on a binder threadpool
+// thread - the pool DriverAidlImpl::open() starts, and the reason it has to.  No in-process fake can
+// produce that: a locally registered service resolves to the local BBinder and its callback would
+// run inline on the calling thread.  So an inbound frame arriving here at all is evidence about the
+// transport and the threadpool together, and the thread-identity assertion below is what
+// distinguishes it from an inline call.
+//
+// WHAT THE THREAD ASSERTION DOES AND DOES NOT SAY, stated exactly rather than overclaimed.  The
+// listener records the thread that delivered its notification, which on BOTH arms is the Bus reader
+// thread rather than the thread that produced the frame - the queue is the handoff.  So
+// NotifyingThread() != this_thread is a NECESSARY condition: it fails if delivery were somehow
+// inline on the test thread, which is what makes it worth asserting.  That the callback itself ran
+// on a BINDER thread is established structurally, and the argument is short: the frame's only
+// possible origin is the fake, the fake is in another process, its only route into this process is
+// the binder driver, and the only threads that execute an incoming oneway transaction here are the
+// client threadpool's.  A frame that arrives therefore arrived through them.
 // ---------------------------------------------------------------------------------------------
 
 /**
- * A frame delivered by the fake service arrives ON A BINDER THREAD and reaches the typed processor.
+ * A frame delivered by the fake service arrives on a thread that is NOT the test's, and reaches the
+ * typed processor decoded and intact.
  *
  * THIS IS THE CASE THAT DISCHARGES THE AIDL ARM'S INBOUND REQUIREMENT, and it is the one thing
- * invocation E can prove that no in-process fake can: that onMessageReceived is dispatched on a
- * binder threadpool thread inside this process, and that from there the frame travels the SAME
- * receive queue, the SAME Bus reader thread and the SAME filter as a legacy frame does.
+ * invocation E can prove that no in-process fake can: that a frame the service originates crosses
+ * the binder driver into this process, is dispatched by the client threadpool onto the middleware's
+ * IHdmiCecEventListener, and travels from there the SAME receive queue, the SAME Bus reader thread
+ * and the SAME address filter as a legacy frame does, to arrive at the SAME typed process()
+ * overload.
  *
- * WHAT IT WOULD ASSERT, stated precisely so that whoever adds the trigger has nothing to design:
- * open a Connection on LogicalAddress::TV with a DecodingFrameListener attached; cause the host to
- * deliver the directed <Image View On> frame { 0x40, 0x04 }; WaitForNotification(1, 3000); then
- * assert imageViewOnCount == 1 with the other three counters at zero, lastInitiator ==
- * PLAYBACK_DEVICE_1, lastDestination == TV, and - the half that is unique to this arm -
- * listener.NotifyingThread() != std::this_thread::get_id(), which is exactly the assertion that
- * fails if the callback were somehow delivered inline on the calling thread instead of by the
- * threadpool.
+ * THE FRAME.  { 0x40, 0x04 }, delivered as the hex "4004": initiator 4 (Playback Device 1) in the
+ * high nibble, destination 0 (TV) in the low nibble, opcode 0x04 (<Image View On>).  The Connection
+ * is opened as TV so the destination matches it and the filter must let the frame through.  It is
+ * deliberately the SAME frame the legacy inbound case injects, so the two arms are compared on
+ * identical input and any difference in the result is a difference in the back-end.
  *
- * WHAT IS MISSING, and it is one thing: a runner-reachable trigger on the host side.  Either shape
- * closes it.  (a) A loopback in FakeHdmiCecController::sendMessage
- * (mocks/hdmicec/fake_hdmi_cec_aidl_service.cpp) that fires onMessageReceived on the listener
- * FakeHdmiCecService captured during open() - this needs nothing new in the runner at all, because
- * an ordinary outbound sendTo then becomes the trigger.  (b) A non-terminating signal handled in
- * mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp - SIGUSR1 beside the SIGTERM/SIGINT pair it
- * already installs - whose handler calls fireOnMessageReceived with a fixed frame, raised by the
- * runner with kill() on the host pid that tests/L2Tests/test_main.cpp already holds and would
- * expose.
+ * WHAT IS ASSERTED, and each part answers a different way this case could pass while broken:
  *
- * NOT FABRICATED AND NOT WEAKENED.  The skip is the honest result: this file cannot manufacture an
- * inbound delivery, and asserting something else under this name would misreport what invocation E
- * has established.
+ *   (1) THE TRIGGER WAS REAL.  `listener` first, because a `deliver` with no listener held is
+ *       answered "ERR no-listener" and dispatches nothing - so without this check a middleware that
+ *       never registered its listener would leave the case failing on the wait with a misleading
+ *       message.  Then `deliver`, whose reply reports the byte count the fake handed to the
+ *       callback; two bytes are asserted, so a truncated trigger is caught before the wait.
+ *
+ *   (1b) THE SESSION BEHIND THAT LISTENER IS REAL AND SINGULAR.  `open-count` and `close-count` are
+ *       the fake SERVICE's own counters, so they are the only evidence available anywhere that the
+ *       session lifecycle - not just a transmit - crossed the driver: L1's in-process fake resolves
+ *       locally and is called inline, so a count there proves nothing about a transaction.  Exactly
+ *       one more open than close is asserted, which is one live session; and both counters are read
+ *       again at the end of the case and must be UNCHANGED, because receiving a frame is not a
+ *       session event.  Why the assertion is a difference rather than the literal one and zero is
+ *       explained at the assertion itself: one case in this fixture cycles the library, and this
+ *       file must hold under --gtest_shuffle.
+ *
+ *   (2) THE FRAME ARRIVED, WITHIN A BOUND.  A predicate wait, not a sleep: its expiry is the real
+ *       verdict "the frame never arrived", which is what makes the failure diagnosable.
+ *
+ *   (3) IT ARRIVED AS THE RIGHT MESSAGE.  imageViewOnCount == 1 with the other three overload
+ *       counters at zero, so a frame that decoded to some other message type fails rather than
+ *       passing on the fact that something arrived; both header nibbles are asserted, so an
+ *       initiator or destination rewritten in the marshalling fails; and DecodeFailures() == 0, so a
+ *       delivery whose decode threw and was contained is reported rather than hidden.
+ *
+ *   (4) IT WAS NOT DELIVERED INLINE.  NotifyingThread() != this thread's id.  The section comment
+ *       above states exactly what this does and does not establish: it is the necessary condition,
+ *       and the binder-thread half is structural, because the fake is in another process and no
+ *       other route into this one exists.
+ *
+ *   (5) THE SESSION SURVIVED THE DELIVERY UNCHANGED - the second half of (1b), asserted after the
+ *       frame has arrived rather than before, so that a back-end which reopened or closed its
+ *       session around the callback fails here instead of passing everything above.
+ *
+ * WHAT IT DELIBERATELY DOES NOT ASSERT: the address filter's negative side - the legacy arm's
+ * filtered case covers it, and the filter is shared code above the seam, so asserting it twice would
+ * add nothing - and anything about close-state rejection, which the next case owns.
  */
 TEST_F(DualPathAidlFlowTest, InboundFrameFromTheFakeServiceArrivesOnABinderThreadAndReachesTheTypedProcessor)
 {
-    GTEST_SKIP() << "the out-of-process fake service exposes no runner-reachable inbound trigger, "
-                    "so this process cannot cause a frame to be delivered to its "
-                    "IHdmiCecEventListener. FakeHdmiCecController::sendMessage has no loopback to "
-                    "the captured listener, and fake_hdmi_cec_aidl_service_host.cpp handles only "
-                    "SIGTERM and SIGINT, both of which terminate it; the fake is not linked into "
-                    "run_L2Tests, so fireOnMessageReceived is not callable from here either. "
-                    "REQUIRED CHANGE, REPORTED NOT MADE: add a loopback in "
-                    "FakeHdmiCecController::sendMessage that fires onMessageReceived on the "
-                    "listener captured during open(), or handle SIGUSR1 in the host and fire from "
-                    "there. Until then invocation E proves a real proxy and a real driver "
-                    "transaction OUTBOUND only, and the binder-thread inbound requirement is "
-                    "undischarged";
+    std::string detail;
+
+    /*
+     * (1) The listener the middleware handed to open() must be the one the fake is holding, or the
+     *     trigger below would do nothing and every assertion after it would be about the wrong
+     *     thing.
+     */
+    bool listenerHeld = false;
+    ASSERT_TRUE(askHostForListenerPresence(listenerHeld, detail)) << detail;
+    ASSERT_TRUE(listenerHeld)
+        << "the fake service is holding no event listener, so it has nothing to deliver to. The "
+           "middleware passes its listener to IHdmiCec::open() during LibCCEC::init, so this means "
+           "the AIDL open() never reached the service even though the AIDL back-end was selected";
+
+    /*
+     * (1b) THE SESSION THAT LISTENER CAME FROM, COUNTED AT THE SERVICE.  "A listener is held" says
+     *      an open reached the far side; it does not say how many did, nor that the session is still
+     *      open.  These two counters do, and they are the only evidence in this repository that the
+     *      SESSION lifecycle - as against a transmit - crossed the driver at all: the middleware
+     *      opens exactly once, in LibCCEC::init, and never again.
+     *
+     *      WHY THE ASSERTION IS THE DIFFERENCE AND NOT THE LITERAL 1 AND 0.  In a process where no
+     *      case has cycled the CEC library the counters ARE exactly one and zero.  One case in this
+     *      fixture cycles it deliberately - AFrameDeliveredWhileTheDriverIsNotOpened... has no
+     *      alternative, since only LibCCEC::term() can leave OPENED - and each cycle adds one to
+     *      each counter.  GoogleTest runs cases in registration order by default but this file is
+     *      required to pass under --gtest_shuffle, so a literal expectation here would be an
+     *      assertion about case ORDER dressed up as one about the middleware.  The difference is the
+     *      invariant that holds under every order: one more open than close means exactly one live
+     *      session, which is the property being claimed.
+     */
+    long openCount = -1;
+    long closeCount = -1;
+    ASSERT_TRUE(askHostForSessionCount("open-count", openCount, detail)) << detail;
+    ASSERT_TRUE(askHostForSessionCount("close-count", closeCount, detail)) << detail;
+
+    EXPECT_GE(openCount, 1)
+        << "the fake service has served " << openCount << " IHdmiCec::open() calls, so no session "
+           "was ever opened ACROSS THE DRIVER even though the AIDL back-end was selected and a "
+           "listener is held. The two cannot both be true of the same service, so the middleware is "
+           "talking to a different one";
+    EXPECT_EQ(1, openCount - closeCount)
+        << "the fake service has served " << openCount << " open() and " << closeCount
+        << " close() calls, leaving " << (openCount - closeCount)
+        << " live sessions where exactly one was expected. A difference of zero means something "
+           "closed the middleware's session behind this case's back - and every assertion below "
+           "would then be about a session that is not open; more than one means an open was issued "
+           "without a matching close, which on the real HAL fails with EX_ILLEGAL_STATE because "
+           "IHdmiCec::open() admits one controlling client at a time";
+
+    RecordingProcessor processor;
+    DecodingFrameListener listener(processor);
+
+    // Declared AFTER the listener on purpose: the guard's destructor detaches the listener from the
+    // Bus, so the listener has to outlive the guard, and the reverse declaration order would destroy
+    // it first.
+    ScopedConnection scoped(LogicalAddress::TV, "L2-Aidl-FlowA-ImageViewOn");
+    scoped.addFrameListener(&listener);
+
+    long deliveredBytes = -1;
+    ASSERT_TRUE(askHostToDeliverFrame("4004", deliveredBytes, detail)) << detail;
+    ASSERT_EQ(2, deliveredBytes)
+        << "the fake service reported delivering " << deliveredBytes << " bytes where the two bytes "
+           "of { 0x40, 0x04 } were sent, so the trigger itself is wrong and nothing below would be "
+           "measuring the middleware";
+
+    /*
+     * (2) The bound covers an inter-process oneway transaction, the queue handoff and the Bus
+     *     reader's wake-up, inside an emulated guest on a loaded machine.  It is the SAME 3000 ms the
+     *     legacy inbound cases use, so a difference in outcome between the two arms is a difference
+     *     in the back-end rather than in the patience of the test.
+     */
+    ASSERT_TRUE(listener.WaitForNotification(1, 3000))
+        << "the fake service reported invoking onMessageReceived and no frame reached the listener "
+           "within 3000 ms. The transaction left the host, so the break is on this side of the "
+           "boundary: the client binder threadpool is not running (DriverAidlImpl::open must call "
+           "startThreadPool), the listener's state guard rejected the frame, the frame was offered to "
+           "a queue other than the one the Bus reader drains, or the Connection's address filter "
+           "dropped it";
+
+    EXPECT_EQ(0, listener.DecodeFailures())
+        << "the frame arrived and its decode raised: " << listener.LastDecodeError();
+
+    EXPECT_EQ(1, processor.imageViewOnCount)
+        << "the frame arrived over binder but did not decode to <Image View On>";
+    EXPECT_EQ(0, processor.textViewOnCount)
+        << "the frame decoded to <Text View On>, so the opcode was altered crossing the driver";
+    EXPECT_EQ(0, processor.activeSourceCount)
+        << "the frame decoded to <Active Source>, so the opcode was altered crossing the driver";
+    EXPECT_EQ(0, processor.standbyCount)
+        << "the frame decoded to <Standby>, so the opcode was altered crossing the driver";
+    EXPECT_EQ(static_cast<int>(LogicalAddress::PLAYBACK_DEVICE_1), processor.lastInitiator)
+        << "the initiator nibble was lost or rewritten between the fake and the processor";
+    EXPECT_EQ(static_cast<int>(LogicalAddress::TV), processor.lastDestination)
+        << "the destination nibble was lost or rewritten between the fake and the processor";
+
+    /*
+     * (4) The assertion that fails if the delivery were inline on this thread.  It is checked only
+     *     after the wait above has established that a notification exists: NotifyingThread() is a
+     *     default-constructed id until then, and that equals no running thread, so this comparison
+     *     would pass vacuously in a case that received nothing.
+     */
+    EXPECT_NE(std::this_thread::get_id(), listener.NotifyingThread())
+        << "the frame was delivered to the listener ON THE TEST'S OWN THREAD. Nothing in this process "
+           "asked for it: the frame originated in the fake service's process and can only have "
+           "entered this one through the binder driver, dispatched by the client threadpool and handed "
+           "on by the Bus reader thread. This thread's id appearing here means the delivery was "
+           "inline, which would mean the service had been resolved LOCALLY rather than as a remote "
+           "proxy - the in-process case this tier exists to be distinguishable from";
+
+    /*
+     * (5) AND THE SESSION IS STILL THE ONE IT WAS, which is an exact expectation rather than an
+     *     invariant because it spans only this case: receiving a frame is not a session event, so
+     *     NEITHER counter may have moved while the delivery above happened. A back-end that
+     *     re-opened its session per inbound frame, or that closed and reopened around the callback,
+     *     would satisfy every assertion above and fail here.
+     */
+    long openCountAfter = -1;
+    long closeCountAfter = -1;
+    ASSERT_TRUE(askHostForSessionCount("open-count", openCountAfter, detail)) << detail;
+    ASSERT_TRUE(askHostForSessionCount("close-count", closeCountAfter, detail)) << detail;
+
+    EXPECT_EQ(openCount, openCountAfter)
+        << "the fake service's open() count went from " << openCount << " to " << openCountAfter
+        << " while a frame was being delivered. An inbound delivery must not open a session: the "
+           "middleware opens once, during LibCCEC::init, and holds that session for the life of the "
+           "process";
+    EXPECT_EQ(closeCount, closeCountAfter)
+        << "the fake service's close() count went from " << closeCount << " to " << closeCountAfter
+        << " while a frame was being delivered, so the session was closed underneath this case - the "
+           "receive path must not touch the session lifecycle at all";
 }
 
 /**
- * A frame delivered while the driver is NOT OPENED is rejected by the state guard, and the process
- * survives it.
+ * A frame delivered while the driver is NOT OPENED is rejected and RELEASED, not queued, and the
+ * process survives it.
  *
  * The AIDL counterpart of the legacy delete-on-throw path.  DriverImpl's receive callback does not
- * touch the queue directly: it offers through getIncomingQueue(), which raises
- * InvalidStateException when the status is not OPENED, and the callback then deletes the frame
+ * touch the queue directly: it offers through getIncomingQueue(), which raises InvalidStateException
+ * when the status is not OPENED, and the callback then deletes the frame
  * (ccec/src/DriverImpl.cpp:70-76).  That is what rejects a callback arriving during or after a
  * close, and the AIDL listener is required to reject identically - offering straight to the queue
- * would accept frames the legacy path refuses.
+ * would accept frames the legacy path refuses, and a frame accepted while closed is a frame
+ * delivered to the application AFTER the session it belonged to ended.
  *
- * WHAT IT WOULD ASSERT: with the driver out of OPENED, a frame delivered by the host never reaches
- * the listener, no counter moves, and the process neither crashes nor aborts - the last being the
- * real risk, since the rejection happens on a binder thread with no caller to receive a fault, so
- * an escaping exception would enter onTransact rather than surface as a failed assertion.
+ * HOW THE REJECTION IS OBSERVED, which is the whole difficulty of this case.  A `oneway` callback
+ * has no caller to receive a fault, so the fake cannot tell whether the middleware accepted or
+ * rejected what it delivered - its reply says only that the callback was invoked.  The observation
+ * therefore has to be made on THIS side, and it is made in three steps whose combination is what
+ * rules out a vacuous pass:
  *
- * HOW IT WOULD GET THERE, and this is the part that needs care.  Taking the driver out of OPENED
- * disturbs PROCESS-GLOBAL state that every other case in this binary shares, so it would cycle the
- * library through LibCCEC::getInstance().term() and init("CEC_TEST") inside a scope guard that
- * restores on EVERY exit path - a normal return, an exception, and a failed assertion alike, which
- * is why it has to be a destructor and not a statement at the end of the body - and it would be
- * registered LAST in this fixture so that nothing follows it in file order.  The L1 tier records
- * the same disposition for the same reason: "exactly one case cycles the shared library, because
- * it has no alternative" (tests/L1Tests/ccec/test_DriverImpl_Async.cpp:29-35).
+ *   (1) The delivery genuinely happened while the driver was out of OPENED.  The fake retains the
+ *       listener across close - deliberately, per its own contract, precisely so that this is
+ *       testable - so `deliver` reports the callback invoked with two bytes rather than
+ *       "ERR no-listener".  A negative that rested on the trigger having done nothing would prove
+ *       nothing at all.
  *
- * B2 APPLIES HERE.  Cycling the library reaches Driver::close(), whose AIDL mapping to
- * IHdmiCec.close is a HIGH-CONFIDENCE CANDIDATE PENDING OWNER CONFIRMATION - HdmiCecClose has no
- * mapping-table entry.  A green result for this case would not confirm that mapping, and the same
- * marker is carried on the production method.
+ *   (2) THE FRAME NEVER SURFACES, EVEN AFTER THE STACK COMES BACK UP.  This is the assertion that
+ *       distinguishes "released" from "queued".  A frame wrongly offered while closed would sit in
+ *       the receive queue, and DriverAidlImpl::read() consumes a NULL sentinel and loops rather than
+ *       draining the queue behind it (ccec/src/DriverAidlImpl.cpp:1191-1213), so the Bus reader
+ *       started by the re-initialisation WOULD deliver it.  The listener stays attached across the
+ *       whole cycle for exactly this reason.
  *
- * It skips for the SAME missing trigger as the case above, and the cycling is deliberately not
- * performed while the delivery it exists to enable is unavailable: disturbing process-global state
- * to reach an assertion that cannot then be made would risk every other case in the binary for
- * nothing.
+ *   (3) THE ROUTE IS ALIVE, PROVED AFTERWARDS.  A second frame - <Standby>, a DIFFERENT opcode - is
+ *       delivered once the stack is back up and must arrive.  Without this, step (2) would be
+ *       satisfied by a route that had simply stopped working, and the case would pass while proving
+ *       the opposite of its name.  The differing opcode is what makes the identification exact: one
+ *       notification whose message is <Standby> means the closed-window <Image View On> was released,
+ *       and an imageViewOnCount above zero at the end means it was queued and delivered late.
+ *
+ *   (4) AND THE CYCLE ITSELF REACHED THE SERVICE, ONCE EACH WAY.  The fake service's `open-count`
+ *       and `close-count` are read before the take-down, after it and after the restore, and each
+ *       transition must move exactly one of them by exactly one.  This is what turns "term() did not
+ *       raise" into "the close crossed the binder driver", and it is the assertion that would fail if
+ *       the take-down closed nothing on the far side - in which case step (2)'s negative would hold
+ *       for the wrong reason, the far side never having left its open session at all.  It is also the
+ *       only place where a session TRANSITION - as against the standing one-live-session invariant
+ *       the inbound case checks - is observed from outside the process that owns it.
+ *
+ * ORDER OF DECLARATION IS LOAD-BEARING.  The listener is declared first, then the connection guard,
+ * then the library cycle - so destruction runs in reverse: the library is restored, THEN the
+ * connection is closed against a stack that is up, THEN the listener is destroyed with nothing
+ * pointing at it.
+ *
+ * B2 APPLIES.  Cycling the library reaches Driver::close(), whose AIDL mapping to IHdmiCec.close is
+ * a HIGH-CONFIDENCE CANDIDATE PENDING OWNER CONFIRMATION.  Step (4) observes that the call was made
+ * and made once; it says NOTHING about whether that is the right call for HdmiCecClose, and a green
+ * result here does not confirm the mapping.
  */
 TEST_F(DualPathAidlFlowTest, AFrameDeliveredWhileTheDriverIsNotOpenedIsRejectedByTheStateGuard)
 {
-    GTEST_SKIP() << "this case has the same dependency as the inbound case above - it needs the "
-                    "host to deliver a frame, and the fake exposes no runner-reachable inbound "
-                    "trigger - so the state guard cannot be exercised on the AIDL arm. The "
-                    "library cycling it would require (term/init inside a restoring scope guard) "
-                    "is deliberately NOT performed while the delivery is unavailable, because "
-                    "disturbing process-global state to reach an assertion that cannot be made "
-                    "would risk every other case in this binary for nothing. REQUIRED CHANGE, "
-                    "REPORTED NOT MADE: the same trigger named by the inbound case. Note also that "
-                    "close's AIDL mapping to IHdmiCec.close is B2, pending owner confirmation";
-}
+    std::string detail;
 
+    bool listenerHeld = false;
+    ASSERT_TRUE(askHostForListenerPresence(listenerHeld, detail)) << detail;
+    ASSERT_TRUE(listenerHeld)
+        << "the fake service is holding no event listener before the driver has even been closed, so "
+           "the AIDL open() never reached the service and there is nothing for the state guard to "
+           "reject";
+
+    RecordingProcessor processor;
+    DecodingFrameListener listener(processor);
+
+    ScopedConnection scoped(LogicalAddress::TV, "L2-Aidl-FlowA-ClosedGuard");
+    scoped.addFrameListener(&listener);
+
+    ASSERT_EQ(0, listener.Notifications())
+        << "a frame reached this listener before the case delivered anything, so some earlier case "
+           "left a frame in flight and the counters below would not be attributable";
+
+    /*
+     * The session counters as they stand BEFORE the cycle. Read here rather than assumed to be one
+     * and zero, because this case must hold under --gtest_shuffle: another case may have run first,
+     * and what is being asserted is what THIS cycle does, which is a pair of deltas and not a pair
+     * of absolute values.
+     */
+    long openBeforeCycle = -1;
+    long closeBeforeCycle = -1;
+    ASSERT_TRUE(askHostForSessionCount("open-count", openBeforeCycle, detail)) << detail;
+    ASSERT_TRUE(askHostForSessionCount("close-count", closeBeforeCycle, detail)) << detail;
+    ASSERT_EQ(1, openBeforeCycle - closeBeforeCycle)
+        << "the fake service reports " << openBeforeCycle << " open() and " << closeBeforeCycle
+        << " close() calls, so there is not exactly one live AIDL session to take down and the "
+           "deltas asserted below would not be attributable to this case's own cycle";
+
+    /*
+     * Out of OPENED, with the restoration guaranteed by this guard's destructor on every exit path
+     * below - including a fatal assertion's early return.
+     */
+    ScopedCecLibraryCycle cycle;
+    ASSERT_TRUE(cycle.TakeDown(detail)) << detail;
+
+    /*
+     * THE CLOSE REACHED THE SERVICE, AND IT REACHED IT ONCE.  term() returning without raising says
+     * only that the middleware believed it closed; these counters are the far side of the driver
+     * saying so, and this is the only case that observes it. Exactly one,
+     * because a close issued twice would fail on the real HAL, and the open count must not move at
+     * all - a take-down that reopened anything would leave the state guard with nothing to reject.
+     *
+     * B2 APPLIES AND IS NOT DISCHARGED BY THIS.  What is asserted is that Driver::close() reached
+     * IHdmiCec::close at the service; whether IHdmiCec.close is the correct mapping for
+     * HdmiCecClose is a HIGH-CONFIDENCE CANDIDATE PENDING OWNER CONFIRMATION either way.
+     */
+    long openAfterTakeDown = -1;
+    long closeAfterTakeDown = -1;
+    ASSERT_TRUE(askHostForSessionCount("open-count", openAfterTakeDown, detail)) << detail;
+    ASSERT_TRUE(askHostForSessionCount("close-count", closeAfterTakeDown, detail)) << detail;
+
+    EXPECT_EQ(closeBeforeCycle + 1, closeAfterTakeDown)
+        << "the fake service's close() count went from " << closeBeforeCycle << " to "
+        << closeAfterTakeDown << " across LibCCEC::term(), where exactly one further call was "
+           "expected. An unchanged count means term() completed WITHOUT the close crossing the "
+           "binder driver - the middleware left the far side holding an open session it thinks is "
+           "gone - and more than one means close was issued repeatedly, which the real HAL refuses";
+    EXPECT_EQ(openBeforeCycle, openAfterTakeDown)
+        << "the fake service's open() count moved from " << openBeforeCycle << " to "
+        << openAfterTakeDown << " across LibCCEC::term(). Taking the library down must not open a "
+           "session; if it did, the driver would be back in OPENED and the state guard this case "
+           "exists to exercise would have nothing to reject";
+
+    long deliveredBytes = -1;
+    ASSERT_TRUE(askHostToDeliverFrame("4004", deliveredBytes, detail)) << detail;
+    ASSERT_EQ(2, deliveredBytes)
+        << "the fake service did not invoke the listener with the two bytes of { 0x40, 0x04 } while "
+           "the driver was closed, so the rejection this case exists to observe was never provoked";
+
+    /*
+     * Back up before the negative is checked, because a closed stack has no Bus reader and would
+     * satisfy "no frame arrived" whether the frame was released or sitting in the queue. It is the
+     * re-initialisation that starts a reader capable of draining a wrongly queued frame, so the
+     * negative is only meaningful on this side of it.
+     */
+    ASSERT_TRUE(cycle.Restore(detail)) << detail;
+
+    /*
+     * AND THE RE-OPEN REACHED THE SERVICE, ONCE.  The mirror of the pair above, and it is what makes
+     * the control at the end of this case interpretable: the second `deliver` can only prove the
+     * route is alive if a second session was genuinely established across the driver, and a
+     * re-initialisation that opened nothing would leave that delivery reaching a stale listener.
+     * The close count must not move here for the same reason the open count must not move above.
+     */
+    long openAfterRestore = -1;
+    long closeAfterRestore = -1;
+    ASSERT_TRUE(askHostForSessionCount("open-count", openAfterRestore, detail)) << detail;
+    ASSERT_TRUE(askHostForSessionCount("close-count", closeAfterRestore, detail)) << detail;
+
+    EXPECT_EQ(openBeforeCycle + 1, openAfterRestore)
+        << "the fake service's open() count went from " << openAfterTakeDown << " to "
+        << openAfterRestore << " across LibCCEC::init(), where exactly one further call was expected "
+           "against the " << openBeforeCycle << " served before this case's cycle began. An "
+           "unchanged count means the re-initialisation opened no session at the service, so the "
+           "middleware is back in OPENED against a far side that has none";
+    EXPECT_EQ(closeAfterTakeDown, closeAfterRestore)
+        << "the fake service's close() count went from " << closeAfterTakeDown << " to "
+        << closeAfterRestore << " across LibCCEC::init(). Bringing the library up must not close "
+           "anything, so this is one cycle producing two closes";
+
+    EXPECT_FALSE(listener.WaitForNotification(1, 1200))
+        << "the frame delivered while the driver was NOT OPENED reached the listener. The AIDL event "
+           "listener must offer through the same state-guarded accessor the legacy receive callback "
+           "uses and release the frame when the guard refuses it; a frame accepted while closed is "
+           "delivered to the application after the session it belonged to ended";
+    EXPECT_EQ(0, listener.Notifications())
+        << "a frame delivered while the driver was closed was queued and then dispatched once the "
+           "stack came back up, which is the same defect arriving one step later";
+    EXPECT_EQ(0, processor.imageViewOnCount)
+        << "the closed-window <Image View On> was decoded, so it was accepted rather than released";
+
+    /*
+     * (3) The control that stops the negative above from passing for the wrong reason. A DIFFERENT
+     *     opcode, so that what arrives can be named rather than merely counted.
+     */
+    ASSERT_TRUE(askHostForListenerPresence(listenerHeld, detail)) << detail;
+    ASSERT_TRUE(listenerHeld)
+        << "the fake service holds no listener after the library was re-initialised, so the AIDL "
+           "open() on the second cycle did not reach the service and the control below could not "
+           "distinguish a rejected frame from a dead route";
+
+    ASSERT_TRUE(askHostToDeliverFrame("4036", deliveredBytes, detail)) << detail;
+    ASSERT_EQ(2, deliveredBytes)
+        << "the fake service did not invoke the listener with the two bytes of { 0x40, 0x36 }";
+
+    EXPECT_TRUE(listener.WaitForNotification(1, 3000))
+        << "the <Standby> delivered AFTER the stack came back up did not arrive either, so the "
+           "inbound route is not working at all and the non-delivery asserted above says nothing "
+           "about the state guard";
+    EXPECT_EQ(0, listener.DecodeFailures())
+        << "the post-restore frame arrived and its decode raised: " << listener.LastDecodeError();
+    EXPECT_EQ(1, processor.standbyCount)
+        << "the frame delivered after the restore did not decode to <Standby>";
+    EXPECT_EQ(0, processor.imageViewOnCount)
+        << "the <Image View On> delivered while the driver was closed arrived alongside the "
+           "post-restore <Standby>, so it had been queued rather than released";
+    EXPECT_EQ(1, listener.Notifications())
+        << "exactly one frame was expected at this listener - the post-restore <Standby> - and "
+        << listener.Notifications() << " arrived, so the closed-window frame was delivered too";
+}

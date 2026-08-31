@@ -83,13 +83,24 @@ AUTOMAKE_OPTIONS = subdir-objects
 # GTEST_INCLUDE_DIR and GMOCK_INCLUDE_DIR are deliberately left as caller-supplied make
 # variables rather than configure substitutions, exactly as tests/L1Tests/Makefile.am has
 # them: run_coverage.sh, CI and a manual `make GTEST_INCLUDE_DIR=...` are what set them.
+#
+# @AIDL_ABI_CPPFLAGS@ carries the Binder WIRE ABI decision configure derives by
+# measuring the staged libbinder - -DBINDER_IPC_32BIT, or nothing for a 64-bit ABI.
+# BOTH TARGETS IN THIS DIRECTORY MUST HAVE IT, and both do: AM_CPPFLAGS is
+# per-directory, so run_L2Tests and fake_hdmi_cec_aidl_host each compile with it, and
+# neither declares a per-target _CPPFLAGS that would displace this assignment.  If one
+# ever does, it must restate @AIDL_ABI_CPPFLAGS@ - because this tier is the one place
+# where two PROCESSES exchange marshalled Binder data, so a runner and a host built
+# with different wire layouts would not fail to build; they would fail to talk, and
+# the symptom would look like a middleware defect rather than a build defect.
 AM_CPPFLAGS = -I$(top_srcdir)/ccec/include \
               -I$(top_srcdir)/osal/include \
               -I$(top_srcdir)/mocks \
               -I$(top_srcdir)/mocks/hdmicec \
               -I$(GTEST_INCLUDE_DIR) \
               -I$(GMOCK_INCLUDE_DIR) \
-              @AIDL_CPPFLAGS@
+              @AIDL_CPPFLAGS@ \
+              @AIDL_ABI_CPPFLAGS@
 
 # C++17 from the outset, and it is a hard requirement of the dependency rather than a
 # preference or a style choice.  halcompat.h opens a NESTED-NAMESPACE DEFINITION -
@@ -103,8 +114,12 @@ AM_CPPFLAGS = -I$(top_srcdir)/ccec/include \
 # reason configure.ac probes for it explicitly: the default happens to be gnu++17 on some
 # hosts, and that is precisely what would keep the requirement invisible until a SOC
 # toolchain with an older default failed part-way through the build.  @AIDL_CXXFLAGS@
-# carries whatever additional dialect flag configure found this compiler to need, and
-# resolves to nothing where the ambient CXXFLAGS already suffice.
+# carries the explicit dialect flag configure compiled its C++17 probe with, and configure
+# probes exactly this spelling and no other - it fails outright rather than settling for an
+# alternative - so the substitution is never empty and is always the same -std=c++17 that
+# precedes it here.  The two together are belt-and-braces, not duplication: the literal pins
+# the dialect even if the substitution were ever lost, and the substituted copy is
+# configure's proof that this compiler accepts it.
 AM_CXXFLAGS = -Wall -std=c++17 -g @AIDL_CXXFLAGS@
 
 # Define test programs
@@ -120,7 +135,28 @@ noinst_PROGRAMS = run_L2Tests fake_hdmi_cec_aidl_host
 # involved.  So compiling fake_hdmi_cec_aidl_service.cpp into run_L2Tests would silently
 # turn this tier back into the in-process case: the AIDL invocation would still pass, while
 # proving nothing about the transport it exists to prove.  Only two separate processes make
-# the middleware hold a real proxy and receive onMessageReceived on a binder thread.
+# the middleware hold a real Bp* proxy and make onMessageReceived able to arrive on a binder
+# threadpool thread AT ALL.
+#
+# THE SPLIT IS NECESSARY AND IT IS NOT SUFFICIENT, which is why this build declares a host
+# that does more than sit there.  Two processes make an inbound callback POSSIBLE; nothing
+# about them CAUSES one, because the only object that can invoke the runner's listener is
+# now in the host and the runner cannot call it.  What DRIVES an inbound frame is the host's
+# TEST-ONLY CONTROL CHANNEL: tests/L2Tests/test_main.cpp launches the host with two extra
+# inherited descriptors, a case writes one DELIVER command naming exact bytes, and the host
+# calls FakeHdmiCecService::fireOnMessageReceived() on the listener the fake captured during
+# open().  The two inbound cases in ccec/test_DualPathIntegration.cpp assert the effect.
+# That channel is a pair of pipes between two test processes - no .aidl, no interface, no
+# method on an interface, no binder object - so it changes nothing about what the middleware
+# talks to, and it is why fake_hdmi_cec_aidl_host_SOURCES below carries the host source
+# beside the fake rather than the fake alone.
+#
+# STATED SO THE BUILD FILE DOES NOT CLAIM A RESULT: those two targets and those two cases are
+# AUTHORED AND COMPILED here, and inbound delivery on a binder thread is asserted by cases
+# that HAVE NOT EXECUTED, because invocation E needs a binder kernel driver that neither a
+# development host nor a hosted CI runner has.  Building this directory establishes that they
+# build; running them belongs to .github/workflows/aidl-path-tests.yml.  `make check` in this
+# directory runs invocation D, on which the four AIDL cases skip at their fixture guard.
 #
 # The legacy mock belongs to run_L2Tests, because the legacy arm drives the legacy back-end
 # through it and without it that arm has no HAL at all.

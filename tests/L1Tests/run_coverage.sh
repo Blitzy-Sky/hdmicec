@@ -176,15 +176,21 @@
 #      Verified: exit 0 at or above the bar, exit 1 below it.  This script adds a THIRD
 #      status of its own, 3, for a measurement that is arithmetically at or above the bar
 #      but is not evidence anyone should accept -- see ADVISORY VERDICT below.
-#   1a. AN ADVISORY VERDICT IS NOT AN ACCEPTANCE VERDICT (exit 3).  Two situations produce
-#      real numbers from evidence this invocation did not establish: measuring counters
-#      without --run (gcov counters ACCUMULATE, so they may credit a test that no longer
-#      runs), and any run whose provenance checks were bypassed.  Both used to end in
-#      "COVERAGE GATE PASSED" and exit 0, which is indistinguishable from a clean
-#      acceptance to any caller, human or CI.  They now end in "COVERAGE ADVISORY" and
-#      exit 3: the figures and every artifact are still produced, and a caller that
-#      requires an acceptance verdict fails on the status instead of being told a
-#      reassuring lie.  Below the bar is still exit 1 in both modes.
+#   1a. AN ADVISORY VERDICT IS NOT AN ACCEPTANCE VERDICT (exit 3).  A whole family of
+#      situations produces real numbers from evidence this invocation did not establish, or
+#      from settings an acceptance run does not use: measuring counters without --run (gcov
+#      counters ACCUMULATE, so they may credit a test that no longer runs), running the suite
+#      with GTEST_EXTRA_ARGS instead of the matrix's own filters, deferring an invocation for
+#      want of a binder driver, moving the bar, waiving the per-file half of the gate, and
+#      either half of the branch-arm gate being unable to measure or to check a required arm.
+#      Each used to end in "COVERAGE GATE PASSED" and exit 0, which is indistinguishable from
+#      a clean acceptance to any caller, human or CI.  They now end in "COVERAGE ADVISORY"
+#      and exit 3: the figures and every artifact are still produced, and a caller that
+#      requires an acceptance verdict fails on the status instead of being told a reassuring
+#      lie.  Below the bar is still exit 1 in every mode.  EVERY trigger is enumerated in
+#      the EXIT STATUS section of --help, which is the list to keep current: a summary here
+#      that drifts from the call sites is how "currently only when --run was omitted" came
+#      to be written beside nine of them.
 #   2. FUNCTION FIGURES COME FROM THE ALIAS RECORDS, NOT THE LEADER RECORDS.  lcov 2.x
 #      writes per-function data as FNL:<index>,<start>,<end> and
 #      FNA:<index>,<count>,<name> (this trace carries 440 FNA and 431 FNL records and
@@ -216,14 +222,21 @@
 #   are UNCOMMITTABLE BUILD ARTIFACTS -- the same discipline the six configure-generated
 #   Makefiles get -- and they default to a directory OUTSIDE the git tree entirely:
 #
-#       mktemp -d "${TMPDIR:-/tmp}/hdmicec-l1-coverage.XXXXXXXX"
+#       mktemp -d "<safe parent>/hdmicec-l1-coverage.XXXXXXXX"
 #
 #   created atomically at mode 0700, with an UNPREDICTABLE name, and printed as the
 #   "artifacts:" line when the run starts.  The name is unpredictable on purpose: a fixed
-#   one under a world-writable $TMPDIR can be pre-created by any local account as a symlink
+#   one under a world-writable directory can be pre-created by any local account as a symlink
 #   or as a directory it owns, and every artifact written afterwards would land where it
 #   chose.  A fresh root per run also means a trace from an earlier run cannot be mistaken
 #   for this one's -- the same staleness discipline the counters get.
+#
+#   THE PARENT IS CHOSEN, NOT DEFAULTED TO /tmp.  select_safe_temp_parent tries TMPDIR, then
+#   XDG_RUNTIME_DIR, then HOME, and takes the first whose whole ancestry passes the same
+#   checks a caller-named --output-dir is held to; a group- or world-writable directory with
+#   no sticky bit disqualifies a candidate rather than producing a warning that is then
+#   ignored.  On this host that excludes /tmp, measured at mode 2777, and the run lands under
+#   $HOME instead.
 #   Outside the tree they cannot be staged even by `git add -A`, and a per-run root keeps
 #   parallel checkouts of this superproject from overwriting each other's evidence without
 #   needing any environment variable.  The CI file NAMES are preserved
@@ -293,7 +306,22 @@
 #     uncovered_lines.txt        per-file uncovered line numbers for below-bar targets
 #     rdkTestResults_invocation_<L>.json   GoogleTest results, ONE PER INVOCATION under --run
 #     run_invocation_<L>.log               that invocation's captured output, one per invocation
-#     capture.log filter.log genhtml.log build.log
+#     provenance.txt             the full manifest: revisions, toolchain, runner checksum
+#     run_status.txt             THE AUTHORITATIVE MARKER: which run id this directory holds,
+#                                which invocations ran, which deferred, and the outcome.  Read
+#                                this FIRST when an artifact's provenance is in doubt -- the
+#                                names above are shared by every run that writes this directory.
+#                                A run claims it BEFORE it removes or writes anything else and
+#                                stops if it cannot, and it exits non-zero if it cannot record
+#                                its own verdict -- so this file never carries one run's
+#                                acceptance verdict over another run's artifacts
+#     capture.log filter.log filter_dependencies.log genhtml.log build.log
+#
+#   THE DIRECTORY HOLDS EXACTLY ONE GENERATION.  Every artifact a previous run could have left
+#   under one of these names is removed at run start, under the output lock, before anything is
+#   written -- see ONE GENERATION PER DIRECTORY.  Without that, an invocation that DEFERS in this
+#   run (B, C and E defer on any host with no binder driver) would leave the previous run's
+#   results file standing as this run's evidence.
 #
 #   PER-INVOCATION NAMES CARRY A LETTER, NEVER A TIMESTAMP.  The suite is now run once per
 #   selection outcome (see THE INVOCATION MATRIX below), and a single results file would mean
@@ -411,7 +439,7 @@
 #
 #   THE LINE GATE READS A DERIVATIVE with the dependency headers removed, and only them.
 #   Its 80% threshold is an aggregate, and an aggregate means nothing without a stable
-#   denominator.  MEASURED: the capture holds 140 source-file records; the seven globs
+#   denominator.  MEASURED: the capture holds 145 source-file records; the seven globs
 #   reduce that to 42; and of those, 31 are this submodule's own and ELEVEN are dependency
 #   headers -- six from the binder SDK, four generated AIDL stubs, and halcompat.h.  Left
 #   in, they move the denominator away from the one the baseline was measured over and,
@@ -585,7 +613,22 @@ readonly TIMEOUT_BIN TIMEOUT_KILL_AFTER
 # stat is how the ancestry of every artifact path is checked (owner, mode, type) before a
 # byte is written to it.  It is coreutils, like the rest of the primitives above.
 STAT_BIN="$(resolve_tool stat)"
-readonly LCOV_BIN GENHTML_BIN GCOV_BIN AWK_BIN FIND_BIN MKTEMP_BIN STAT_BIN
+
+# flock is how this run proves it is the only one operating on this working tree.  Resolved
+# here with the other primitives -- rather than probed with `command -v` at the moment of use --
+# for the same reason as the rest: a PATH change made later in the run (the suite step prepends
+# an install tree) must not be able to swap or hide it.  It is util-linux, and its ABSENCE is
+# FATAL for every acceptance operation; see acquire_tree_lock for why that is not negotiable.
+FLOCK_BIN="$(resolve_tool flock)"
+
+# cmp is how the Makefile restore PROVES it put the bytes back rather than reporting that it
+# tried.  A restore that returns 0 because `cp` returned 0 establishes that a write happened,
+# not that the file now matches the snapshot -- a short write, a full filesystem or a
+# concurrent writer all leave `cp` happy.  cmp is POSIX and ships with diffutils on every
+# distribution this suite builds on; its absence is fatal at the point of use, not here,
+# because an invocation that never builds never restores.
+CMP_BIN="$(resolve_tool cmp)"
+readonly LCOV_BIN GENHTML_BIN GCOV_BIN AWK_BIN FIND_BIN MKTEMP_BIN STAT_BIN FLOCK_BIN CMP_BIN
 
 # ------------------------------------------------------------------------------------
 # Configuration.  Every value is overridable from the environment, and the defaults are
@@ -634,13 +677,14 @@ COVERAGE_GATE_EXEMPT_FILES="${COVERAGE_GATE_EXEMPT_FILES-}"
 # timeout(1) reads it as "no limit" and would silently restore the unbounded run.
 SUITE_TIMEOUT="${SUITE_TIMEOUT:-600}"
 # Artifact directory.  EMPTY BY DEFAULT, and that is the security-relevant part: with no
-# explicit choice this script creates its root with `mktemp -d` under $TMPDIR, so the name
-# is unpredictable and the directory is created atomically at mode 0700 (see
-# resolve_output_dir).  DO NOT GIVE IT A FIXED DEFAULT: a predictable path such as
-# ${TMPDIR:-/tmp}/hdmicec-l1-coverage/<workspace basename> is guessable, and anything able to
-# create entries in a world-writable $TMPDIR could pre-create that name as a symlink or as a
-# directory of its own and collect, redirect or tamper with every trace, log and HTML page
-# written under it.  An unpredictable name cannot be pre-created.
+# explicit choice this script creates its root with `mktemp -d` under the parent
+# select_safe_temp_parent chose, so the name is unpredictable and the directory is created
+# atomically at mode 0700 (see resolve_output_dir).  DO NOT GIVE IT A FIXED DEFAULT: a
+# predictable path such as <parent>/hdmicec-l1-coverage/<workspace basename> is guessable, and
+# anything able to create entries in a world-writable parent could pre-create that name as a
+# symlink or as a directory of its own and collect, redirect or tamper with every trace, log
+# and HTML page written under it.  An unpredictable name cannot be pre-created, and a
+# world-writable parent is no longer chosen at all.
 # A caller who needs a stable location still passes --output-dir / COVERAGE_OUTPUT_DIR,
 # and that path is then held to the stricter checks in resolve_output_dir, because a name
 # chosen in advance is by definition guessable.
@@ -750,7 +794,7 @@ readonly LCOV_EXCLUDES=(
 # objects reference header-only code from outside this submodule: halcompat.h's templates, the
 # generated Bp*/Bn* inline definitions, and binder SDK headers.  gcov attributes records to
 # those paths, and NONE of the seven globs describes them.  MEASURED on this host: the capture
-# holds 140 source-file records, the seven globs reduce that to 42, and of those 42 exactly 31
+# holds 145 source-file records, the seven globs reduce that to 42, and of those 42 exactly 31
 # are inside this submodule while ELEVEN are dependency headers -- six binder SDK headers, four
 # generated AIDL stub headers, and halcompat.h.  Left in, they change the file set the per-file
 # gate judges and the denominator the aggregate is computed over, so a figure produced now would
@@ -785,13 +829,39 @@ readonly DEPENDENCY_EXCLUDES=(
     '*/com/rdk/hal/*'
 )
 
-# Source files that must NEVER disappear from either trace, whatever any glob says.  They are
-# the two production files this migration is answerable for, and a filter that removed one would
-# leave a green gate over unmeasured code -- so their presence is ASSERTED after filtering rather
-# than assumed from the globs not naming them.  Paths are relative to the submodule root.
+# ------------------------------------------------------------------------------------
+# THE RECORDS THAT MUST NEVER DISAPPEAR FROM EITHER DERIVED TRACE, WHATEVER ANY GLOB SAYS.
+#
+# A filter that removed one of these would leave a green gate standing over code nobody
+# measured -- the one failure mode a filter can produce while looking like it is working.  The
+# globs above do not name them, but "the globs do not name them" is a claim about the globs, and
+# what follows is a check on the RESULT.  Asserted after BOTH filtering steps, because the two
+# steps apply two different lists and either one could be the one that goes wrong.
+#
+# WHY halcompat.h IS ON THIS LIST AND NOT MERELY MENTIONED IN A COMMENT.  AAP 0.6.5 requires it
+# retained in the filtered copy: it is CONSUMED HALIF SOURCE, not third-party toolchain code.
+# getService<I>() and isCompatible<I>() are called from the selection path, and SEVENTEEN of the
+# 64 required branch arms in BRANCH_MANIFEST below live inside isCompatible<>() -- both arms of
+# the null gate, of the empty-hash and "-1" gates, of the "notfrozen" gate, and of each of the
+# era, major and ordering comparisons.  The branch gate reads the UNFILTERED capture, so those
+# seventeen are not what a
+# missing record here would cost; what it would cost is halcompat.h's LINES silently leaving the
+# aggregate denominator and the per-file gate, so a header whose branches this migration is
+# answerable for would stop being judged at all while every step still printed success.
+#
+# It is retained by the DEPENDENCY_EXCLUDES policy above rather than by accident: it lives at
+# <halif prefix>/common/current/halcompat.h, OUTSIDE com/rdk/hal/, which is why the generated-stub
+# glob separates the two cleanly.  This entry is the check that the separation actually held.
+#
+# PATHS ARE SUFFIXES, AND ARE NOT ALL SUBMODULE-RELATIVE.  The first two are relative to this
+# submodule's root; halcompat.h lives in the SIBLING rdk-halif-aidl checkout, so its suffix
+# starts one level above.  Nothing here may be an absolute path: the same trace is read on this
+# host, on a CI runner and inside the QEMU guest, and each of the three has a different prefix.
+# ------------------------------------------------------------------------------------
 readonly PROTECTED_TRACE_FILES=(
     'ccec/src/Driver.cpp'
     'ccec/src/DriverAidlImpl.cpp'
+    'rdk-halif-aidl/common/current/halcompat.h'
 )
 
 GENHTML_TITLE='hdmicec coverage'
@@ -865,51 +935,147 @@ readonly REGENERATED_MAKEFILES=(
 # source, not output -- so the one path where the old mechanism was most dangerous is also
 # the one it was most likely to be used on.
 #
-# WHAT THIS DOES INSTEAD.  `--build` copies the working-tree bytes of all six into a
-# run-scoped mktemp -d directory immediately before autoreconf, and the EXIT/INT/TERM trap
-# restores from that copy at the end of the same invocation.  It is unconditionally correct:
-# it does not consult the index, does not care whether the file is committed, modified,
-# staged or pristine, and cannot revert anything that was not itself about to be clobbered.
-# A cancelled build restores too, because the restore hangs off the trap rather than off the
-# build's success path.
+# WHAT THIS DOES INSTEAD.  `--build` copies the working-tree bytes and the MODE of all six
+# into a run-scoped mktemp -d directory immediately before autoreconf -- with autoreconf as the
+# literal next mutating command, since the stub-header step was lifted out ahead of it -- and
+# the EXIT/INT/TERM trap restores from that copy at the end of the same invocation.  It is
+# unconditionally correct: it does not consult the index, does not care whether the file is
+# committed, modified, staged or pristine, and cannot revert anything that was not itself about
+# to be clobbered.  A cancelled build restores too, because the restore hangs off the trap
+# rather than off the build's success path.
 #
-# WHAT IT DELIBERATELY DOES NOT DO.  It does not fall back to git when there is no snapshot.
-# A fallback would reintroduce exactly the destruction this replaced, at the one moment a
-# caller is least able to notice -- and "we could not do the safe thing so we did the unsafe
-# thing" is not a recovery.  A standalone `--restore` that finds the six dirty with no
-# snapshot of its own says so and exits non-zero.
+# THREE PROPERTIES THE RESTORE HAS THAT A `cp` LOOP DOES NOT, each closing a way the old shape
+# could leave the tree worse than it found it:
+#   * ATOMIC PER FILE.  Each path is written to a temporary IN THE SAME DIRECTORY and renamed
+#     into place, so there is no moment at which a tracked Makefile holds a partial write for
+#     an impatient second Ctrl-C to catch.
+#   * UNINTERRUPTIBLE AS A WHOLE.  INT, TERM and HUP are masked across the loop and re-armed
+#     after it, so a signal cannot land between two of the six and leave half the tree
+#     pre-build and half generated.
+#   * VERIFIED, NOT ASSUMED.  Every restored file is compared against the snapshot and its mode
+#     re-read afterwards; every recorded-absent path is confirmed absent.  A failure keeps the
+#     snapshot, names it, and makes the run exit non-zero.
 #
-#   MAKEFILE_SNAPSHOT_DIR    the run-scoped copy, empty when none has been taken
-#   MAKEFILE_SNAPSHOT_TAKEN  newline-separated list of the paths actually captured, so the
-#                            restore puts back exactly what was saved and a file that did
-#                            not exist beforehand is not conjured into existence
+# WHAT IT DELIBERATELY DOES NOT DO.  It does not fall back to git when there is no snapshot,
+# and it does not treat a git index comparison as a substitute for one.  A fallback would
+# reintroduce exactly the destruction this replaced, at the one moment a caller is least able
+# to notice -- and "we could not do the safe thing so we did the unsafe thing" is not a
+# recovery.  A standalone `--restore` has no snapshot by construction, so it always reports
+# that and exits non-zero.
+#
+# PRESENCE IS PART OF THE SNAPSHOT, NOT A SIDE EFFECT OF WHAT WAS COPIED.
+#
+# The record used to be a list of the paths that were successfully copied, which made "was
+# absent" and "was never recorded" the same value.  The consequence was one-directional: a
+# path that did NOT exist when the snapshot was taken -- an unconfigured checkout has none of
+# the five toolchain-generated Makefiles -- was created by configure and then left behind,
+# because the restore only ever put back what it had copied.  The tree that came out of the
+# run therefore differed from the tree that went in, in the one respect the mechanism exists
+# to prevent, and `git status` reported five untracked-looking modifications nobody asked for.
+#
+# So every allowlisted path now gets an EXPLICIT state, and the restore acts on both:
+#   present -- content and mode were captured; the restore puts those bytes back and proves it
+#   absent  -- the path did not exist; the restore REMOVES it if the build created one
+# A path with no record at all is a defect in the snapshot, and the restore says so rather
+# than skipping it.
+#
+#   MAKEFILE_SNAPSHOT_DIR       the run-scoped copy, empty when none has been taken
+#   MAKEFILE_SNAPSHOT_STATE     one '<state>|<mode>|<path>' line per allowlisted path, where
+#                               state is `present` or `absent` and mode is the octal mode as
+#                               it was found (or '-' for an absent path).  '|' is the
+#                               separator this script already uses for its record tables, and
+#                               none of the six literal paths contains one.
+#   MAKEFILE_SNAPSHOT_IDENTITY  "<device>:<inode>" of the snapshot directory, recorded when it
+#                               is created and re-checked before the restore reads from it.
+#                               The snapshot is the ONLY copy of six tracked files, one of
+#                               them hand-written build source, so restoring from a directory
+#                               that is no longer the one this run wrote is not a degraded
+#                               restore -- it is writing someone else's content over tracked
+#                               files under the name of a recovery.
+#   MAKEFILE_SNAPSHOT_RETAIN    1 once a restore has failed.  The snapshot is then the only
+#                               remaining copy of the pre-build content, so cleanup_makefile_
+#                               snapshot leaves it on disk and names it.  Removing the recovery
+#                               evidence at the exact moment recovery became necessary is the
+#                               one outcome this mechanism must never produce.
 # ------------------------------------------------------------------------------------
 MAKEFILE_SNAPSHOT_DIR=''
-MAKEFILE_SNAPSHOT_TAKEN=''
+MAKEFILE_SNAPSHOT_STATE=''
+MAKEFILE_SNAPSHOT_IDENTITY=''
+MAKEFILE_SNAPSHOT_RETAIN=0
+
+# Re-prove custody of the snapshot directory at the moment it is read from or written to.
+# Same four properties as assert_output_dir_still_safe, for the same reason, against a
+# directory whose contents matter even more: this is the recovery copy.
+assert_snapshot_dir_still_safe() { # $1=what is about to happen, for the message
+    local what="${1:-a snapshot operation}" dir_now
+
+    [ -n "$MAKEFILE_SNAPSHOT_DIR" ] || die "internal error: assert_snapshot_dir_still_safe
+       called with no snapshot directory recorded ($what)"
+    assert_safe_ancestry "$MAKEFILE_SNAPSHOT_DIR" minted
+    [ -d "$MAKEFILE_SNAPSHOT_DIR" ] || die "the Makefile snapshot directory disappeared during
+       the run: $MAKEFILE_SNAPSHOT_DIR
+       It holds the only copy of the six tracked Makefiles as they were before this run, and
+       $what cannot proceed without it."
+    assert_private_dir "$MAKEFILE_SNAPSHOT_DIR"
+
+    if [ -n "$MAKEFILE_SNAPSHOT_IDENTITY" ]; then
+        dir_now="$(path_identity "$MAKEFILE_SNAPSHOT_DIR")"
+        [ "$dir_now" = "$MAKEFILE_SNAPSHOT_IDENTITY" ] || die "the Makefile snapshot directory is
+       no longer the directory this run created: $MAKEFILE_SNAPSHOT_DIR
+       created $MAKEFILE_SNAPSHOT_IDENTITY, the name now resolves to ${dir_now:-nothing} (device:inode).
+       Refusing $what: restoring from a substituted snapshot would write content this run
+       never saved over six tracked files, one of which is hand-written build source."
+    fi
+}
 
 # ------------------------------------------------------------------------------------
-# THE BUILD LOCK -- tree-scoped, not artifact-scoped, and that distinction is the point.
+# THE TREE LOCK -- one lock, tree-scoped, covering EVERY stage, fail-closed.
 #
-# acquire_output_lock() below already serialises two runs that share an --output-dir.  It
-# cannot serialise these: two runs with two different minted artifact roots build in the
-# SAME working tree, so one can snapshot while the other is half way through configure and
-# then "restore" the other run's generated content as though it were the original.  The
-# shared resource is the tree, so the lock has to be keyed to the tree.
+# WHAT IT PROTECTS, AND WHY ONE LOCK RATHER THAN A LOCK PER STAGE.  Every stage of this
+# script writes to, or reads a verdict out of, the SAME working tree:
 #
-# The name is derived from the absolute path of the submodule root, because that is what
-# makes it tree-scoped: two clones of this superproject under /tmp/blitzy get two different
-# locks and do not block each other, which is the behaviour parallel clones need.
+#   the stub headers and the HAL mock symlink       written into the tree
+#   the six tracked Makefiles                       overwritten by autoreconf/configure,
+#                                                   snapshotted before and restored after
+#   the object and .gcno files                      produced by the build
+#   the .gcda counters                              zeroed once, then accumulated by every
+#                                                   invocation in the matrix
+#   the capture, the filter and the gate            READ those counters and decide the verdict
 #
-# A DERIVED NAME IN A SHARED DIRECTORY IS PREDICTABLE, and that trade-off is accepted here
-# rather than glossed: the ancestry checks (assert_safe_ancestry) still refuse a symlinked
-# or foreign-owned component, the lock file itself is refused if it is a symlink or not a
-# regular file, it is opened with `>>` so nothing is truncated, and if a local account
-# squats the name then flock fails and THIS RUN REFUSES TO PROCEED.  Every failure mode
-# lands on "do not build", which is the safe direction for a lock whose job is to stop two
-# builds interleaving.
+# A lock that covered only the build (which is all the previous one did) left the rest of
+# that list unprotected, and the unprotected part is where a second run does the most damage:
+# it can zero the counters between this run's last invocation and its capture, so the capture
+# reports a tree that nothing exercised; or run its own suite while this one captures, so the
+# trace mixes two runs' counters and the coverage figure belongs to neither.  Neither shows
+# up as an error -- both produce a plausible number -- which is exactly why the lock has to
+# span from the first write to the last read rather than bracket the build alone.
+#
+# So: ONE lock, taken before the first stage that touches the tree and held until the exit
+# trap has finished restoring and cleaning up.  Re-entrant by memo (acquire_tree_lock is a
+# no-op once it holds it), so any stage may assert it without a second acquisition.
+#
+# TREE-SCOPED, from the absolute path of the submodule root: two clones of this superproject
+# get two different locks and never block each other, which is what parallel clones need.
+#
+# THE NAME IS PREDICTABLE AND THAT IS UNAVOIDABLE -- two runs that must exclude each other
+# have to agree on it -- so the DIRECTORY it lives in is what carries the safety: a private
+# per-user directory created with mkdir (so it cannot be adopted from a foreign owner) and
+# re-read with lstat, under a parent chosen by select_safe_temp_parent for not being
+# group- or world-writable.  On top of that the leaf is verified BY IDENTITY: device and
+# inode are read before the open, compared against what the descriptor actually refers to,
+# and compared again after flock returns.  A mismatch at any of the three points means
+# somebody unlinked and recreated the name, which is the precise mechanism by which two
+# contenders end up flocking two different inodes and both believing they hold the lock.
+#
+# MISSING flock IS FATAL, not advisory.  It used to warn and record an advisory, which meant
+# an acceptance run on a host without flock still reached a verdict while having proved
+# nothing about exclusivity.  An advisory that reaches acceptance is indistinguishable from
+# no check at all: the only two honest outcomes are "the lock is held" and "this run stops".
 # ------------------------------------------------------------------------------------
-BUILD_LOCK_FD=''
-BUILD_LOCK_PATH=''
+TREE_LOCK_FD=''            # open descriptor while held; empty when not
+TREE_LOCK_PATH=''          # the lock leaf
+TREE_LOCK_IDENTITY=''      # "<device>:<inode>" the descriptor refers to
+TREE_LOCK_PURPOSE=''       # what the first acquisition said it was for, for the log
 
 # ------------------------------------------------------------------------------------
 # Output helpers.  A single prefix makes this script's lines distinguishable from lcov's
@@ -924,14 +1090,19 @@ rule() { printf '%s\n' '--------------------------------------------------------
 # ------------------------------------------------------------------------------------
 # PATH SAFETY -- the ancestry of every path this script writes to.
 #
-# The artifact root is PREDICTABLE by design: ${TMPDIR:-/tmp}/hdmicec-l1-coverage/<ws>,
-# fixed names underneath it, so a reader knows where to look and CI can collect them.  A
-# predictable path under a world-writable directory is also an invitation: anything that
-# can create entries in /tmp can create hdmicec-l1-coverage FIRST -- as a symlink to a
-# directory it does not own, or as a directory it does own -- and then every trace, log
-# and HTML page this script writes lands somewhere it chose, with this script's
-# privileges.  On a CI runner that is a write into another job's workspace; run under
-# sudo, it is a write anywhere.
+# A CALLER-NAMED artifact root is PREDICTABLE by construction -- it is chosen in advance and
+# usually appears in a CI file -- and the artifact names underneath any root are fixed, so a
+# reader knows where to look and CI can collect them.  A predictable path under a
+# world-writable directory is an invitation: anything that can create entries there can
+# create the root FIRST -- as a symlink to a directory it does not own, or as a directory it
+# does own -- and then every trace, log and HTML page this script writes lands somewhere it
+# chose, with this script's privileges.  On a CI runner that is a write into another job's
+# workspace; run under sudo, it is a write anywhere.
+#
+# The root this script MINTS is not predictable (mktemp -d), and since select_safe_temp_parent
+# was introduced it is not under a world-writable parent either.  Both roots are held to the
+# checks below regardless, because "unpredictable" and "unreachable" are different properties
+# and only the second one survives another account being able to write the parent.
 #
 # Checking only the leaf does not close that, and must not be reduced to it: the leaf can be
 # perfectly ordinary while its PARENT is the substitution.  So the whole chain
@@ -1038,8 +1209,9 @@ assert_artifact_location_plausible() { # $1=canonical absolute path  $2=how it w
     [ "${#path}" -gt 4 ] || die "the artifact directory '$path' is implausibly short ($origin).
        Fixed artifact names are created and overwritten underneath it, so a near-root path is
        refused.  Give a path that is unmistakably yours, for example
-       \"\${TMPDIR:-/tmp}/hdmicec-l1-coverage\", or drop --output-dir entirely and let this
-       script mint an unpredictable mode-0700 root with mktemp -d."
+       \"\$HOME/.cache/hdmicec-l1-coverage\", or drop --output-dir entirely and let this
+       script mint an unpredictable mode-0700 root with mktemp -d under a parent it has
+       proved safe."
 
     # Checked BEFORE the protected-root loop, because /var/tmp and /run/user/<uid> are
     # ordinary per-user scratch directories that happen to live under a protected root.
@@ -1057,9 +1229,9 @@ assert_artifact_location_plausible() { # $1=canonical absolute path  $2=how it w
        .run.lock inside it, and overwrites fixed artifact names on every run; none of that
        belongs in a system tree, and a value that reaches one is nearly always a '..' that
        collapsed out of the intended path or a mistyped root.
-       Use \"\${TMPDIR:-/tmp}/hdmicec-l1-coverage\", a directory inside your own tree, or
+       Use \"\$HOME/.cache/hdmicec-l1-coverage\", a directory inside your own tree, or
        drop --output-dir / COVERAGE_OUTPUT_DIR and let this script mint an unpredictable
-       mode-0700 root with mktemp -d." ;;
+       mode-0700 root with mktemp -d under a parent it has proved safe." ;;
         esac
     done
     return 0
@@ -1078,6 +1250,72 @@ path_metadata() { # $1=path
     "$STAT_BIN" -c '%u %a %F' -- "$1" 2>/dev/null || true
 }
 
+# "<device>:<inode>" for an existing path, empty for one that does not exist.  lstat
+# semantics, so a symlink reports ITS OWN identity rather than its target's.
+#
+# WHY IDENTITY AND NOT JUST THE NAME.  A name is a lookup, not a thing: the file a name
+# resolved to a microsecond ago can be unlinked and a different file put in its place under
+# the same name, and every subsequent open of that name reaches the new file while an already
+# open descriptor still refers to the old one.  For a lock that is not a subtlety but the whole
+# failure: two contenders that flock two different inodes both believe they hold it.  Device
+# and inode together are the only identity a filesystem offers, so they are what gets compared.
+path_identity() { # $1=path
+    [ -n "${STAT_BIN:-}" ] || die "stat was not found on PATH, so this script cannot verify the
+       identity of the files it locks and writes.  Refusing to continue.  stat ships with
+       coreutils."
+    "$STAT_BIN" -c '%d:%i' -- "$1" 2>/dev/null || true
+}
+
+# "<device>:<inode>" of the file an OPEN DESCRIPTOR refers to -- which is the question that
+# matters after an open, because the descriptor cannot be redirected by anything happening to
+# the name afterwards.
+#
+# /proc/<pid>/fd/<n> is a symlink to the open file, so `stat -L` on it reports the target.
+# `$$` rather than `self` because the read happens in a command-substitution SUBSHELL: the
+# descriptor is inherited (bash does not set close-on-exec on `exec {var}>`, measured on this
+# host), so both spellings resolve, but the owning shell's pid is the one that is true by
+# construction rather than by inheritance.  A fallback to `self` covers a /proc that hides
+# other pids; if neither can be read this FAILS CLOSED, because an unverifiable lock is
+# indistinguishable from an unheld one.
+open_fd_identity() { # $1=file descriptor number
+    local fd="$1" ident=''
+    [ -n "${STAT_BIN:-}" ] || die "stat was not found on PATH, so this script cannot verify the
+       identity of the descriptors it holds.  Refusing to continue."
+    ident="$("$STAT_BIN" -L -c '%d:%i' "/proc/$$/fd/$fd" 2>/dev/null || true)"
+    if [ -z "$ident" ]; then
+        ident="$("$STAT_BIN" -L -c '%d:%i' "/proc/self/fd/$fd" 2>/dev/null || true)"
+    fi
+    [ -n "$ident" ] || die "could not read back which file descriptor $fd refers to via /proc.
+       This script verifies every lock it takes by device and inode, and a lock it cannot
+       verify is one it cannot claim to hold.  Mount /proc, or run this script somewhere it
+       is visible."
+    printf '%s\n' "$ident"
+}
+
+# ------------------------------------------------------------------------------------
+# PROBE MODE FOR THE PATH CHECKS.
+#
+# The ancestry checks below are written to be FATAL: they exist to stop a write, so ending the
+# run is the correct response to an unsafe path.  Choosing BETWEEN candidate parents needs the
+# same rules with a different verdict -- "this one is not safe, try the next" -- and the one
+# thing that must not happen is a second, subtly different copy of the rules for the choosing.
+#
+# So the rules stay in one place and the VERDICT becomes a mode.  While PATH_CHECK_PROBE is 1,
+# a violation records its reason and returns non-zero instead of exiting; every other caller
+# leaves the flag at 0 and gets exactly the behaviour it had before.  `die` never returns, so
+# `path_check_reject ... || return 1` is a no-op in fatal mode rather than a second code path.
+# ------------------------------------------------------------------------------------
+PATH_CHECK_PROBE=0        # 1 only inside probe_safe_ancestry
+PATH_CHECK_REASON=''      # why the last probe rejected its candidate
+
+path_check_reject() { # $1=message
+    if [ "$PATH_CHECK_PROBE" -eq 1 ]; then
+        PATH_CHECK_REASON="$1"
+        return 1
+    fi
+    die "$1"
+}
+
 # One component of a chain: must exist, be a directory, be ours or root's, and not be
 # writable by anyone else unless the sticky bit protects it.
 # $3 is how the path below this component was chosen, and it changes only the verdict for
@@ -1090,61 +1328,72 @@ assert_component_safe() { # $1=path  $2=context for the message  $3=named|minted
     local comp="$1" context="$2" choice="${3:-named}" meta uid rest mode kind numeric_mode
 
     meta="$(path_metadata "$comp")"
-    [ -n "$meta" ] || die "could not stat $comp while validating the ancestry of
+    [ -n "$meta" ] || path_check_reject "could not stat $comp while validating the ancestry of
        $context
-       Refusing to write below a path whose ownership and permissions cannot be read."
+       Refusing to write below a path whose ownership and permissions cannot be read." || return 1
 
     uid="${meta%% *}"
     rest="${meta#* }"
     mode="${rest%% *}"
     kind="${rest#* }"
 
-    [ "$kind" = "directory" ] || die "$comp is a $kind, not a directory, while validating
+    [ "$kind" = "directory" ] || path_check_reject "$comp is a $kind, not a directory, while validating
        the ancestry of
        $context
-       Choose an --output-dir whose every parent is a real directory."
+       Choose an --output-dir whose every parent is a real directory." || return 1
 
     if [ "$uid" != "$EUID_VALUE" ] && [ "$uid" != "0" ]; then
-        die "$comp is owned by uid $uid, which is neither this user ($EUID_VALUE) nor root,
+        path_check_reject "$comp is owned by uid $uid, which is neither this user ($EUID_VALUE) nor root,
        while validating the ancestry of
        $context
        Another user who owns a parent directory can replace it underneath this run, so the
        artifacts would be written somewhere they chose.  Use --output-dir (or
-       COVERAGE_OUTPUT_DIR) to name a location you own."
+       COVERAGE_OUTPUT_DIR) to name a location you own." || return 1
     fi
 
     numeric_mode="$(( 8#$mode ))"
     if [ "$(( numeric_mode & 0022 ))" -ne 0 ] && [ "$(( numeric_mode & 01000 ))" -eq 0 ]; then
         # Writable by others, with no sticky bit to stop them renaming or removing what is
-        # inside it.  How much that matters depends entirely on whether the name underneath
-        # it is guessable, which is why the two cases are separated instead of both being
-        # forced into one verdict:
+        # inside it.  BOTH VERDICTS ARE NOW FATAL, and the change from a warning on the
+        # `minted` arm is the point of this block rather than an incidental tightening.
         #
         #   * A CALLER-CHOSEN path is guessable by construction -- it was chosen in advance
-        #     and often appears in a CI file -- so this is fatal.  Pre-creating the name is
-        #     enough to collect or redirect the evidence.
-        #   * A path this script MINTED with mktemp -d cannot be pre-created, because the
-        #     name does not exist until the moment it is created and is not predictable.
-        #     What remains is a race: another account could remove the directory mid-run and
-        #     put its own there.  That is reported, and every destructive step re-validates
-        #     (assert_output_dir_still_safe) so the substitution is refused rather than
-        #     written into -- but it is not pretended away either.
-        if [ "$choice" = "named" ]; then
-            die "$comp has mode $mode -- writable by group or world, without the sticky bit --
+        #     and often appears in a CI file -- so pre-creating the name is enough to collect
+        #     or redirect the evidence.
+        #   * A path this script MINTED with mktemp -d cannot be pre-created, so it used to be
+        #     reported and accepted.  That reasoning covered only half the attack: the name is
+        #     unguessable, but another local account able to write the PARENT can still remove
+        #     the minted directory mid-run and put its own there under the same name, and it
+        #     can do it in the window between any two of this script's steps.
+        #
+        # The warning was not theoretical either.  Measured on this host: /tmp is mode 2777 --
+        # world-writable, setgid, no sticky bit -- so every run printed it, twice, and wrote
+        # its trace, its lock and its Makefile snapshot below /tmp anyway.  A warning nobody
+        # can act on is a warning that trains readers to ignore it.
+        #
+        # WHAT MAKES FAILING CLOSED SAFE HERE, and why this is not simply the script refusing
+        # to run on a normal container: nothing this script mints lands under an unsafe parent
+        # any more.  select_safe_temp_parent chooses the parent -- TMPDIR, then
+        # XDG_RUNTIME_DIR, then HOME -- and holds each candidate to these same rules at
+        # `named` strictness before choosing it, so on this host the lock, the snapshot,
+        # lcov's HOME and the minted artifact root all land under $HOME (0700) and this arm
+        # is never reached.  It is reached only if a parent that measured safe at selection
+        # time is loosened during the run, which is a fact worth stopping for.  Re-validation
+        # before every destructive step (assert_output_dir_still_safe) is kept as well: the
+        # two checks answer different questions and neither replaces the other.
+        path_check_reject "$comp has mode $mode -- writable by group or world, without the sticky bit --
        while validating the ancestry of
        $context
-       That path was named explicitly, so it is predictable, and any local account able to
-       write $comp can pre-create or replace it and collect this run's evidence.  Either set
-       the sticky bit on $comp (as a conventional /tmp has), tighten its mode, or drop
-       --output-dir / COVERAGE_OUTPUT_DIR and let this script mint an unpredictable
-       mode-0700 root with mktemp -d instead."
-        fi
-        warn "$comp has mode $mode: writable by group or world with no sticky bit."
-        warn "  The artifact root below it was created with mktemp -d, so its name cannot be"
-        warn "  guessed or pre-created; what is left is that another local account could"
-        warn "  remove it mid-run.  Every destructive step re-validates the directory before"
-        warn "  writing, so a substitution is refused rather than written into."
-        warn "  Fix the host if you can: chmod +t $comp"
+       (that path was chosen: $choice)
+       Any local account able to write $comp can remove or replace what is below it, and this
+       run's trace, lock and Makefile snapshot are what it would be replacing.  A path this
+       script minted has an unguessable NAME, which is not the same as an unreachable one.
+       Either of these makes it work:
+           chmod +t $comp   (the sticky bit a conventional /tmp has), or
+           TMPDIR=\"\$HOME/.cache/hdmicec-coverage\"   (create it mode 0700 first)
+       For a path you named yourself, tighten its mode or drop --output-dir /
+       COVERAGE_OUTPUT_DIR and let this script mint a mode-0700 root under a safe parent." \
+            || return 1
     fi
 }
 
@@ -1158,7 +1407,7 @@ assert_safe_ancestry() { # $1=absolute path  $2=named|minted (see assert_compone
         *)  die "internal error: assert_safe_ancestry needs an absolute path; got: $target" ;;
     esac
 
-    assert_component_safe "/" "$target" "$choice"
+    assert_component_safe "/" "$target" "$choice" || return 1
 
     local saved_ifs="$IFS"
     IFS='/'
@@ -1173,15 +1422,152 @@ assert_safe_ancestry() { # $1=absolute path  $2=named|minted (see assert_compone
         # Checked BEFORE -e, because -e is false for a dangling symlink and a dangling
         # symlink is precisely how a path gets created somewhere unintended.
         if [ -L "$walked" ]; then
-            die "$walked is a symbolic link, and this script will not write through one.
+            path_check_reject "$walked is a symbolic link, and this script will not write through one.
        It is a component of
        $target
-       Remove it, or use --output-dir (or COVERAGE_OUTPUT_DIR) to name a real directory."
+       Remove it, or use --output-dir (or COVERAGE_OUTPUT_DIR) to name a real directory." || return 1
         fi
         [ -e "$walked" ] || return 0
-        assert_component_safe "$walked" "$target" "$choice"
+        assert_component_safe "$walked" "$target" "$choice" || return 1
     done
     return 0
+}
+
+# The same rules, asked as a question.  Returns 0 when $1's whole existing ancestry is safe
+# under the $2 strictness, non-zero with the reason in PATH_CHECK_REASON when it is not.
+# Never exits, and always restores the flag -- including on the failing path, which is why
+# the return value is captured rather than the call being the function's last command.
+probe_safe_ancestry() { # $1=absolute path  $2=named|minted
+    local rc=0
+    PATH_CHECK_PROBE=1
+    PATH_CHECK_REASON=''
+    assert_safe_ancestry "$1" "${2:-named}" || rc=1
+    PATH_CHECK_PROBE=0
+    return "$rc"
+}
+
+# ------------------------------------------------------------------------------------
+# WHERE THIS RUN'S PRIVATE DIRECTORIES GO, AND WHY IT IS NOT "${TMPDIR:-/tmp}".
+#
+# Every private path this script needs -- the tree lock, the Makefile snapshot, lcov's
+# throwaway HOME, the minted artifact root -- used to be created under "${TMPDIR:-/tmp}"
+# with an UNCONDITIONAL fallback to /tmp, and an unsafe /tmp was reported as a warning
+# because failing closed there would have made the script unrunnable on a host whose /tmp is
+# group- or world-writable without the sticky bit.
+#
+# MEASURED ON THIS HOST: /tmp is mode 2777 -- world-writable, setgid, and NO sticky bit --
+# TMPDIR and XDG_RUNTIME_DIR are both unset, and $HOME is /root at mode 0700.  So the warning
+# was not theoretical: every run on this host wrote its evidence and its lock below a
+# directory any local account could rename or remove entries in, and said so twice in the log
+# while doing it.
+#
+# The fix is to CHOOSE a parent rather than to accept one and complain.  In order:
+#   TMPDIR            -- the caller's explicit choice, honoured first when it is safe
+#   XDG_RUNTIME_DIR   -- per-user, mode 0700 by specification, the right answer on a systemd
+#                        host and empty on a container like this one
+#   HOME              -- always private in practice and the last resort that keeps this
+#                        script runnable on a host whose /tmp is unsafe
+# Each candidate is measured with the SAME rules that guard the artifact directory, at
+# `named` strictness -- these names are all predictable, so group/world-writable without a
+# sticky bit disqualifies them, which is exactly what excludes this host's /tmp.
+#
+# NO ESCAPE HATCH IS PROVIDED, deliberately: no --allow-unsafe, no environment override.  An
+# override would be used by the one caller whose host is misconfigured, which is the caller
+# whose evidence is at risk.  If none of the three is safe the run stops with the two
+# one-line fixes that would make it work.
+# ------------------------------------------------------------------------------------
+RUNNER_TEMP_PARENT=''          # memoised: chosen once, reported once, reused everywhere
+RUNNER_TEMP_PARENT_SOURCE=''   # which of the three it came from, for the log
+
+# Try one candidate.  0 and RUNNER_TEMP_PARENT set when it is usable.
+consider_temp_parent() { # $1=variable name it came from  $2=its value
+    local name="$1" candidate="$2"
+
+    [ -n "$candidate" ] || return 1
+    case "$candidate" in
+        /*) ;;
+        *)  warn "$name is not an absolute path and cannot be checked safely; skipping it: $candidate"
+            return 1 ;;
+    esac
+    candidate="$(canonicalise_path_lexically "$candidate")"
+    [ -d "$candidate" ] || return 1
+    if ! probe_safe_ancestry "$candidate" named; then
+        warn "$name ($candidate) is not a safe parent for this run's private directories:"
+        printf '%s\n' "$PATH_CHECK_REASON" | sed 's/^/[run_coverage]     /' >&2
+        return 1
+    fi
+    RUNNER_TEMP_PARENT="$candidate"
+    RUNNER_TEMP_PARENT_SOURCE="$name"
+    return 0
+}
+
+# Chooses once and records the answer in RUNNER_TEMP_PARENT / RUNNER_TEMP_PARENT_SOURCE.
+#
+# IT SETS GLOBALS RATHER THAN PRINTING THE PATH, and that is not a style preference.  A
+# printing form has to be read with a command substitution, which runs it in a SUBSHELL: the
+# memo assignment then dies with the subshell, so the selection was re-derived on every call,
+# the announcement was printed once per call, and RUNNER_TEMP_PARENT_SOURCE -- which one
+# caller puts in a diagnostic -- was permanently empty in the caller.  Measured: three
+# identical "private directories for this run go under" lines in a single measure-only run.
+select_safe_temp_parent() { # -> sets RUNNER_TEMP_PARENT and RUNNER_TEMP_PARENT_SOURCE
+    [ -z "$RUNNER_TEMP_PARENT" ] || return 0
+
+    consider_temp_parent TMPDIR          "${TMPDIR:-}"          \
+        || consider_temp_parent XDG_RUNTIME_DIR "${XDG_RUNTIME_DIR:-}" \
+        || consider_temp_parent HOME     "${HOME:-}"            \
+        || die "none of TMPDIR, XDG_RUNTIME_DIR or HOME names a directory this run can safely
+       put its lock, its Makefile snapshot and its private lcov HOME under.  The reasons are
+       above, one per candidate.
+       This script will not fall back to a world-writable /tmp: the Makefile snapshot is the
+       only way back from a build that overwrites six tracked files, and the lock is the only
+       thing that stops two runs interleaving those restores.
+       Either of these makes it work:
+           TMPDIR=\"\$HOME/.cache/hdmicec-coverage\" (create it mode 0700 first), or
+           chmod +t /tmp   (the sticky bit a conventional /tmp has)"
+
+    log "private directories for this run go under $RUNNER_TEMP_PARENT (from \$$RUNNER_TEMP_PARENT_SOURCE)"
+}
+
+# ------------------------------------------------------------------------------------
+# A VERIFIED PRIVATE PER-USER DIRECTORY FOR THIS RUN'S LOCKS.
+#
+# The lock leaf cannot be minted per run -- two runs that must exclude each other have to
+# agree on the name, so it is derived from the tree path and it PERSISTS between runs.  That
+# makes it predictable, and a predictable name in a shared directory is the inode-substitution
+# hole: a foreign-owned regular file sitting at that name was previously accepted and locked,
+# and a contender that unlinked and recreated it split the two runs across two inodes so that
+# both held "the" lock.
+#
+# The name stays predictable -- it has to -- but it now lives one level down, inside a
+# directory that is proved to be ours and unreachable by anyone else.  `mkdir` is the
+# primitive that does the proving: it either creates the directory or fails, so an existing
+# entry of the wrong kind or ownership cannot be silently adopted, and assert_private_dir then
+# re-reads it with lstat and demands owner == this user and mode & 0077 == 0.
+# ------------------------------------------------------------------------------------
+RUNNER_LOCK_DIR=''
+
+# Sets RUNNER_LOCK_DIR, for the same subshell reason select_safe_temp_parent sets a global:
+# a printing form memoises nothing when it is read with a command substitution, so the
+# directory was re-created and re-validated on every call.
+runner_lock_dir() { # -> sets RUNNER_LOCK_DIR
+    [ -z "$RUNNER_LOCK_DIR" ] || return 0
+
+    local leaf
+    select_safe_temp_parent
+    leaf="$RUNNER_TEMP_PARENT/hdmicec-l1-locks-$EUID_VALUE"
+
+    if ! mkdir -m 0700 -- "$leaf" 2>/dev/null; then
+        [ -d "$leaf" ] || die "could not create the private lock directory $leaf, and nothing
+       usable is there already.  This run needs it before it may build, snapshot, run or
+       capture anything."
+    fi
+    [ ! -L "$leaf" ] || die "the private lock directory is a symbolic link: $leaf
+       Remove it.  This script will not place a lock through a link it does not control."
+    # Owner, mode, kind and not-a-symlink, re-read with lstat after the create rather than
+    # assumed from it.
+    assert_private_dir "$leaf"
+
+    RUNNER_LOCK_DIR="$leaf"
 }
 
 # Create $1 and any missing parent, 0700 and one component at a time, after proving the
@@ -1276,10 +1662,35 @@ restrict_artifact_dir_to_owner() { # $1=directory this run writes its artifacts 
     assert_private_dir "$dir"
 }
 
-# Re-run the ancestry check immediately before a destructive step, and check the specific
-# artifact path too.  A path that was safe when the run started is not necessarily safe
-# thirty seconds later: this is the check that makes the guarantee hold at the moment of
-# the write rather than at startup.
+# ------------------------------------------------------------------------------------
+# RE-VALIDATE CUSTODY IMMEDIATELY BEFORE EVERY DESTRUCTIVE OR PUBLISHING STEP.
+#
+# A path that was safe when the run started is not necessarily safe thirty seconds later, and
+# a check performed once at startup answers a question about the past.  Every call site that
+# writes, removes or publishes goes through here first, so the guarantee holds at the moment
+# of the write.
+#
+# FOUR PROPERTIES ARE CHECKED, and the fourth is the one a name-based check cannot give:
+#   * the whole ancestry, walked from / down, under the strictness the directory was chosen
+#     with -- so a loosened parent or a symlink that appeared anywhere on the chain is caught;
+#   * ownership and mode of the directory ITSELF, via assert_private_dir, which is stricter
+#     than the ancestry component check: the walk refuses group/world WRITE without a sticky
+#     bit, whereas a directory holding this run's evidence must grant no group or other access
+#     at all, read included;
+#   * the artifact leaf is not a symlink that appeared during the run;
+#   * DEVICE AND INODE of the directory, compared against what was recorded when it was
+#     resolved.  This is what catches a substitution that reproduces every other property: a
+#     replacement directory can be made to have the same name, the same owner, the same mode
+#     and the same ancestry, and it cannot be made to have the same inode.  A mismatch is
+#     fatal, never a warning -- the artifacts in the directory this run believes it is writing
+#     would then be a mixture of two directories' contents.
+#
+# The run lock's own identity is checked too, for the same reason and separately: the lock is
+# what makes this run the only writer, so a lock file that is no longer the file this run
+# locked means the exclusion no longer holds even if the directory is unchanged.
+# ------------------------------------------------------------------------------------
+OUTPUT_DIR_IDENTITY=''    # "<device>:<inode>" of OUTPUT_DIR, recorded once it is resolved
+
 assert_output_dir_still_safe() { # $1=artifact path about to be written (optional)
     local artifact="${1:-}"
 
@@ -1287,10 +1698,42 @@ assert_output_dir_still_safe() { # $1=artifact path about to be written (optiona
        the output directory was resolved"
     assert_safe_ancestry "$OUTPUT_DIR" "$( [ "${OUTPUT_DIR_EXPLICIT:-1}" -eq 1 ] && printf 'named' || printf 'minted' )"
     [ -d "$OUTPUT_DIR" ] || die "the output directory disappeared during the run: $OUTPUT_DIR"
+    # Owner and mode, stricter than the ancestry walk: no group or other access whatsoever.
+    assert_private_dir "$OUTPUT_DIR"
+
+    # Identity.  Skipped only before prepare_output_dir has recorded it, which is the one
+    # window in which OUTPUT_DIR_IDENTITY is legitimately empty.
+    if [ -n "$OUTPUT_DIR_IDENTITY" ]; then
+        local dir_now
+        dir_now="$(path_identity "$OUTPUT_DIR")"
+        [ "$dir_now" = "$OUTPUT_DIR_IDENTITY" ] || die "the output directory is no longer the
+       directory this run resolved: $OUTPUT_DIR
+       resolved $OUTPUT_DIR_IDENTITY, the name now resolves to ${dir_now:-nothing} (device:inode).
+       The name was re-pointed at a different directory underneath this run, so the artifacts
+       already written and the one about to be written would belong to two different places.
+       Refusing to write ${artifact:-into it}."
+    fi
 
     if [ -n "$artifact" ]; then
         [ ! -L "$artifact" ] || die "refusing to write through a symbolic link that appeared
        during the run: $artifact"
+    fi
+
+    # The run lock lives inside this directory, so if the directory this run is writing into
+    # is still the one it locked, the lock file's identity is unchanged too.  Checking it is
+    # how a directory that was swapped for another one holding a same-named lock file is
+    # caught: the ancestry and mode of the replacement can be made to look identical, its
+    # inode cannot.  Skipped before the lock is taken, which is the only window in which
+    # LOCK_IDENTITY is legitimately empty.
+    if [ -n "$LOCK_IDENTITY" ]; then
+        local lock_now
+        lock_now="$(path_identity "$OUTPUT_DIR/.run.lock")"
+        [ "$lock_now" = "$LOCK_IDENTITY" ] || die "the run lock inside the output directory is
+       no longer the file this run locked: $OUTPUT_DIR/.run.lock
+       locked $LOCK_IDENTITY, the name now resolves to ${lock_now:-nothing} (device:inode).
+       Either the lock file or the whole directory was replaced underneath this run, so this
+       run no longer excludes another one writing the same artifacts.  Refusing to write
+       ${artifact:-into it}."
     fi
 }
 
@@ -1299,61 +1742,129 @@ assert_output_dir_still_safe() { # $1=artifact path about to be written (optiona
 # running the trap on a normal exit and again on a signal is harmless.
 #   LCOV_HOME   private, empty, mode-0700 HOME handed to every lcov and genhtml call
 #   STAGE_DIR   private staging directory for the HTML report
+# Each carries the device:inode it had when this script created it, so the recursive remove
+# below can prove it is deleting the directory it made -- see remove_minted_dir.
 # ------------------------------------------------------------------------------------
 LCOV_HOME=''
+LCOV_HOME_IDENTITY=''
 STAGE_DIR=''
+STAGE_DIR_IDENTITY=''
+
+# ------------------------------------------------------------------------------------
+# `rm -rf` A DIRECTORY THIS SCRIPT MINTED, HAVING RE-PROVED IT IS THE SAME DIRECTORY.
+#
+# A recursive remove is the most destructive thing this script does, and every one of them
+# used to rest on a two-component path pattern alone: enough to keep the remove away from '/'
+# and '/anything', not enough to establish that the name still refers to the directory this
+# script created.  Between creation and cleanup the name can be re-pointed -- that is the
+# whole reason the minted-parent arm of assert_component_safe is now fatal -- and the remove
+# would then delete whatever the new target is, recursively, as the last act of a run whose
+# only job was to measure.
+#
+# So the identity recorded at creation is compared before the remove, and it is deliberately
+# checked BEFORE the -d test: -d follows symlinks, so a name replaced with a link to somebody
+# else's directory looks like a directory to it.
+#
+# A MISMATCH IS A WARNING THAT LEAVES THE DIRECTORY ALONE, not a fatal error, and that is a
+# considered choice rather than leniency.  Every caller is a cleanup function running from the
+# exit trap: the run's verdict is already decided, the remaining work is housekeeping, and
+# `die` from inside the trap would replace the run's real exit status with this one.  Not
+# removing costs a leaked private directory that the message names; removing the wrong one
+# cannot be undone.
+# ------------------------------------------------------------------------------------
+remove_minted_dir() { # $1=path  $2=identity recorded at creation  $3=what it is, for messages
+    local dir="$1" recorded="$2" label="$3" now
+
+    case "$dir" in
+        /*/*) ;;
+        *)    warn "refusing to remove an implausible $label path: $dir"
+              return 0 ;;
+    esac
+    if [ -L "$dir" ]; then
+        warn "not removing the $label directory: its name is now a symbolic link: $dir"
+        return 0
+    fi
+    [ -d "$dir" ] || return 0
+    if [ -n "$recorded" ]; then
+        now="$(path_identity "$dir")"
+        if [ "$now" != "$recorded" ]; then
+            warn "not removing the $label directory: it is no longer the one this run created."
+            warn "  $dir"
+            warn "  created $recorded, the name now resolves to ${now:-nothing} (device:inode)."
+            warn "  It is left in place: deleting a directory this run did not create is worse"
+            warn "  than leaking one it did."
+            return 0
+        fi
+    fi
+    rm -rf -- "$dir" || warn "could not remove the $label directory: $dir"
+    return 0
+}
 
 cleanup_lcov_home() {
     [ -n "$LCOV_HOME" ] || return 0
-    local home="$LCOV_HOME"
+    local home="$LCOV_HOME" identity="$LCOV_HOME_IDENTITY"
     LCOV_HOME=''
-    # Only ever a directory this script created with mktemp -d, never a caller-supplied
-    # path, and the two-component pattern keeps a recursive remove away from '/' and
-    # '/anything'.
-    case "$home" in
-        /*/*) [ -d "$home" ] && rm -rf -- "$home" ;;
-        *)    warn "refusing to remove an implausible private HOME path: $home" ;;
-    esac
+    LCOV_HOME_IDENTITY=''
+    remove_minted_dir "$home" "$identity" "private lcov HOME"
     return 0
 }
 
 cleanup_stage_dir() {
     [ -n "$STAGE_DIR" ] || return 0
-    local stage="$STAGE_DIR"
+    local stage="$STAGE_DIR" identity="$STAGE_DIR_IDENTITY"
     STAGE_DIR=''
-    # Only ever a directory this script created with mktemp -d, never a caller-supplied path.
-    case "$stage" in
-        /*/*) [ -d "$stage" ] && rm -rf -- "$stage" ;;
-        *)    warn "refusing to remove an implausible staging path: $stage" ;;
-    esac
+    STAGE_DIR_IDENTITY=''
+    remove_minted_dir "$stage" "$identity" "HTML staging"
     return 0
 }
 
 cleanup_makefile_snapshot() {
     [ -n "$MAKEFILE_SNAPSHOT_DIR" ] || return 0
-    local snapshot="$MAKEFILE_SNAPSHOT_DIR"
+
+    # THE ONE CASE WHERE CLEANUP IS THE WRONG ANSWER.  A restore that did not fully succeed
+    # leaves the snapshot as the only surviving copy of the pre-build content of six tracked
+    # files, one of them hand-written build source.  Removing it here would destroy the
+    # recovery evidence at the exact moment recovery became necessary, and would do it inside
+    # an exit trap where nobody is looking.  So it is kept, named, and left for a human.
+    if [ "$MAKEFILE_SNAPSHOT_RETAIN" -ne 0 ]; then
+        warn "the Makefile snapshot is DELIBERATELY LEFT IN PLACE, because the restore did not"
+        warn "  fully succeed and it is now the only copy of the pre-build content:"
+        warn "    $MAKEFILE_SNAPSHOT_DIR"
+        warn "  It holds the six under their own relative paths, plus a manifest.txt recording"
+        warn "  which of them existed and at what mode.  Copy them back from there by hand."
+        warn "  Do NOT reach for 'git checkout' over these paths: it restores what the INDEX"
+        warn "  holds, so on ccec/src/Makefile -- hand-written source -- it would destroy an"
+        warn "  uncommitted edit.  Remove the snapshot yourself once you are done with it."
+        return 0
+    fi
+
+    local snapshot="$MAKEFILE_SNAPSHOT_DIR" identity="$MAKEFILE_SNAPSHOT_IDENTITY"
     MAKEFILE_SNAPSHOT_DIR=''
-    MAKEFILE_SNAPSHOT_TAKEN=''
-    # Only ever a directory this script created with mktemp -d, never a caller-supplied path,
-    # and the two-component pattern keeps a recursive remove away from '/' and '/anything'.
-    case "$snapshot" in
-        /*/*) [ -d "$snapshot" ] && rm -rf -- "$snapshot" ;;
-        *)    warn "refusing to remove an implausible snapshot path: $snapshot" ;;
-    esac
+    MAKEFILE_SNAPSHOT_STATE=''
+    MAKEFILE_SNAPSHOT_IDENTITY=''
+    remove_minted_dir "$snapshot" "$identity" "Makefile snapshot"
     return 0
 }
 
 # ------------------------------------------------------------------------------------
-# Take the snapshot.  Called from do_build IMMEDIATELY BEFORE autoreconf -- not earlier,
-# because a snapshot taken before the stub-header step would still be correct but would
-# widen the window in which a concurrent build could interleave, and not later, because
-# autoreconf is the first command that can rewrite any of the six.
+# Take the snapshot.  Called from do_build with AUTORECONF AS THE NEXT MUTATING COMMAND --
+# the stub-header step that used to sit in between is now its own step ahead of this one, so
+# the snapshot is provably of pre-build content rather than argued to be (see do_build).
 #
-# A file that does not exist is recorded as absent rather than faked: MAKEFILE_SNAPSHOT_TAKEN
-# lists only what was actually copied, so the restore cannot conjure a file into a tree that
-# never had one.  A file that exists and cannot be read is FATAL, because carrying on would
-# mean building with no way back for that path.
+# EVERY allowlisted path gets a record, present or absent, and the mode is captured with the
+# content.  A file that exists and cannot be read, or whose copy does not compare equal to it,
+# is FATAL: carrying on would mean building with no way back for that path, and a `cp` that
+# returned 0 is not evidence that the bytes arrived.  ccec/src/Makefile is mode 0755 in this
+# tree, so a restore that silently dropped the executable bit would be a change of its own --
+# which is why the mode is recorded rather than inferred from the copy.
 # ------------------------------------------------------------------------------------
+# Append one record to MAKEFILE_SNAPSHOT_STATE.  A function rather than an inline append so
+# the record format is written in exactly one place.
+snapshot_record_state() { # $1=present|absent  $2=octal mode or '-'  $3=relative path
+    MAKEFILE_SNAPSHOT_STATE="${MAKEFILE_SNAPSHOT_STATE}$1|$2|$3
+"
+}
+
 snapshot_regenerated_makefiles() {
     [ -n "$MKTEMP_BIN" ] || die "internal error: snapshot_regenerated_makefiles needs mktemp"
     [ -z "$MAKEFILE_SNAPSHOT_DIR" ] || die "internal error: a Makefile snapshot already exists at
@@ -1361,12 +1872,15 @@ snapshot_regenerated_makefiles() {
        Taking a second one would overwrite the record of what the tree looked like before
        this invocation touched it."
 
-    local parent="${TMPDIR:-/tmp}"
-    case "$parent" in
-        /*) ;;
-        *)  die "TMPDIR must be an absolute path to be checked safely; got: $parent" ;;
-    esac
-    parent="$(canonicalise_path_lexically "$parent")"
+    # THE SNAPSHOT IS THE ONLY WAY BACK from a build that overwrites six tracked files, one
+    # of which -- ccec/src/Makefile -- is hand-written RDK build SOURCE that `git checkout`
+    # would destroy rather than restore.  It therefore gets the strictest parent this host
+    # can offer, chosen by select_safe_temp_parent rather than defaulted to /tmp, which is
+    # mode 2777 with no sticky bit here: any local account could have removed the recovery
+    # copy mid-build.
+    local parent
+    select_safe_temp_parent
+    parent="$RUNNER_TEMP_PARENT"
     assert_safe_ancestry "$parent/hdmicec-makefile-snapshot" minted
 
     MAKEFILE_SNAPSHOT_DIR="$("$MKTEMP_BIN" -d "$parent/hdmicec-makefile-snapshot.XXXXXXXX")" \
@@ -1378,16 +1892,37 @@ snapshot_regenerated_makefiles() {
     chmod 700 -- "$MAKEFILE_SNAPSHOT_DIR" \
         || die "could not restrict the Makefile snapshot directory to mode 0700: $MAKEFILE_SNAPSHOT_DIR"
     assert_private_dir "$MAKEFILE_SNAPSHOT_DIR"
+    # Recorded now, checked by assert_snapshot_dir_still_safe before every later read or write.
+    MAKEFILE_SNAPSHOT_IDENTITY="$(path_identity "$MAKEFILE_SNAPSHOT_DIR")"
+    [ -n "$MAKEFILE_SNAPSHOT_IDENTITY" ] || die "could not read the identity (device:inode) of
+       the Makefile snapshot directory: $MAKEFILE_SNAPSHOT_DIR"
 
-    local f captured=0 absent=0
+    local f mode captured=0 absent=0
     for f in "${REGENERATED_MAKEFILES[@]}"; do
+        # Checked before -e, which is false for a dangling link: a tracked Makefile that is a
+        # symlink is not something this mechanism can snapshot or safely restore, and quietly
+        # treating it as absent would license the restore to delete it.
+        [ ! -L "$HDMICEC_ROOT/$f" ] || die "$HDMICEC_ROOT/$f is a symbolic link.
+       The six tracked Makefiles are regular files; a link means something else supplies that
+       path, and this run will neither snapshot it nor restore over it.  Investigate it
+       before building."
+
         if [ ! -e "$HDMICEC_ROOT/$f" ]; then
+            # RECORDED, not skipped.  The restore reads this and REMOVES the path if configure
+            # creates one, which is what returns the tree to the state it was found in.
+            snapshot_record_state absent '-' "$f"
             absent=$((absent + 1))
             continue
         fi
         [ -f "$HDMICEC_ROOT/$f" ] || die "$HDMICEC_ROOT/$f exists but is not a regular file, so it
        cannot be snapshotted and this build would have no way to restore it.  Investigate that
        path before building."
+
+        mode="$("$STAT_BIN" -c '%a' -- "$HDMICEC_ROOT/$f" 2>/dev/null || true)"
+        [ -n "$mode" ] || die "could not read the mode of $HDMICEC_ROOT/$f.
+       The mode is restored alongside the content -- ccec/src/Makefile is 0755 here -- so a
+       snapshot that cannot record it is not a snapshot this run may build on top of."
+
         mkdir -p -- "$MAKEFILE_SNAPSHOT_DIR/$(dirname -- "$f")" \
             || die "could not create the snapshot subdirectory for $f under $MAKEFILE_SNAPSHOT_DIR"
         # -p preserves the mode, which matters: ccec/src/Makefile is mode 0755 in this tree
@@ -1395,36 +1930,220 @@ snapshot_regenerated_makefiles() {
         cp -p -- "$HDMICEC_ROOT/$f" "$MAKEFILE_SNAPSHOT_DIR/$f" \
             || die "could not snapshot $HDMICEC_ROOT/$f.
        Refusing to run autoreconf and configure without a way back for every one of the six."
-        MAKEFILE_SNAPSHOT_TAKEN="${MAKEFILE_SNAPSHOT_TAKEN}${f}
-"
+        # VERIFY THE COPY NOW, while the original is still there to compare against.  `cp`
+        # returning 0 establishes that a write happened, not that the bytes match: a full
+        # filesystem, a short write or a concurrent writer all leave it happy, and a snapshot
+        # that silently holds truncated content is worse than no snapshot at all because the
+        # restore would confidently write it back.
+        if [ -n "$CMP_BIN" ]; then
+            "$CMP_BIN" -s -- "$HDMICEC_ROOT/$f" "$MAKEFILE_SNAPSHOT_DIR/$f" \
+                || die "the snapshot copy of $f does not match the original.
+       original: $HDMICEC_ROOT/$f
+       copy:     $MAKEFILE_SNAPSHOT_DIR/$f
+       Refusing to run autoreconf and configure on top of a snapshot that cannot restore
+       this file faithfully."
+        fi
+        snapshot_record_state present "$mode" "$f"
         captured=$((captured + 1))
     done
 
+    # A HUMAN-READABLE COPY OF THE SAME RECORD, inside the snapshot, for the one case that
+    # matters: a restore that failed leaves this directory behind (see cleanup_makefile_
+    # snapshot), and whoever picks it up needs to know which paths were supposed to exist and
+    # at what mode.  The in-process string stays authoritative; this is documentation.
+    {
+        printf '# hdmicec run_coverage.sh Makefile snapshot\n'
+        printf '# taken before autoreconf by pid %s\n' "$$"
+        printf '# tree: %s\n' "$HDMICEC_ROOT"
+        printf '# format: <state>|<octal mode>|<path relative to the tree above>\n'
+        printf '%s' "$MAKEFILE_SNAPSHOT_STATE"
+    } >"$MAKEFILE_SNAPSHOT_DIR/manifest.txt" \
+        || die "could not write the snapshot manifest to $MAKEFILE_SNAPSHOT_DIR/manifest.txt"
+
     log "snapshotted $captured of ${#REGENERATED_MAKEFILES[@]} tracked Makefile(s) before autoreconf"
     if [ "$absent" -ne 0 ]; then
-        log "  ($absent did not exist yet and are recorded as absent, not fabricated)"
+        log "  ($absent did not exist and are RECORDED AS ABSENT, so the restore removes any"
+        log "   that configure creates rather than leaving them behind)"
     fi
-    log "  snapshot: $MAKEFILE_SNAPSHOT_DIR (removed when this run exits)"
+    log "  snapshot: $MAKEFILE_SNAPSHOT_DIR (removed when this run exits, unless a restore fails)"
 }
 
 # ------------------------------------------------------------------------------------
-# Put the six back from the snapshot.  Idempotent, so the trap and an explicit --restore
-# can both call it, and safe to call when no snapshot was ever taken.
+# PUT ONE PATH BACK, ATOMICALLY, AND PROVE IT.
 #
-# The pre-check/post-check discipline of the old git-based do_restore is KEPT VERBATIM in
-# spirit, because it was the good part: report what was dirty going in (`was:`), do the work,
-# then re-read git and report anything still dirty (`still:`) as a hard failure.  What
-# changed is only the verb in the middle -- a copy from the snapshot instead of a checkout
-# from the index.
+# The old restore was `cp -p snapshot target` and a `die` if cp complained.  Two defects
+# followed from that shape, and both are the kind that only show up on the bad day:
 #
-# `git` is used here for REPORTING ONLY.  When it is absent or this is not a working tree the
-# restore still happens and the reporting degrades to a note; the restore does not depend on
-# git in any way, which is the whole point.
+#   * IT WAS INTERRUPTIBLE IN THE MIDDLE OF A FILE.  `cp` writes into the target in place, so
+#     a second Ctrl-C landing during the write left a tracked Makefile that was neither the
+#     pre-build content nor the generated content -- a truncated hybrid, and the snapshot was
+#     then removed by the cleanup that followed.  So the write now goes to a temporary in the
+#     SAME DIRECTORY and is renamed into place: `mv` within one directory is rename(2), which
+#     either has happened or has not, and there is no state in between for a signal to catch.
+#     The whole restore also runs with INT/TERM/HUP masked (see the caller).
+#   * IT PROVED NOTHING.  A `cp` that returns 0 establishes that a write was attempted.  Full
+#     filesystem, short write, a concurrent writer -- all leave it happy.  So the temporary is
+#     compared against the snapshot BEFORE the rename, and the target is compared again AFTER
+#     it, together with its mode.
+#
+# Returns 0 only when the target is byte-identical to the snapshot at the recorded mode.  Every
+# failure warns with the path and the operation and returns non-zero; nothing here calls `die`,
+# because the caller runs from the exit trap and has cleanup of its own left to do.
+# ------------------------------------------------------------------------------------
+restore_one_makefile() { # $1=relative path  $2=octal mode recorded at snapshot time
+    local rel="$1" want_mode="$2"
+    local src="$MAKEFILE_SNAPSHOT_DIR/$rel" dst="$HDMICEC_ROOT/$rel"
+    local dir tmp now_mode
+
+    if [ ! -f "$src" ]; then
+        warn "the snapshot is missing $rel although it was recorded as present."
+        warn "  looked in: $src"
+        return 1
+    fi
+    if [ -L "$dst" ]; then
+        warn "refusing to restore through a symbolic link: $dst"
+        return 1
+    fi
+    dir="$(dirname -- "$dst")"
+    if [ ! -d "$dir" ]; then
+        warn "the directory that should hold $rel does not exist: $dir"
+        return 1
+    fi
+
+    # THE TEMPORARY LIVES BESIDE THE TARGET, not in a temp directory, and that is the whole
+    # mechanism: rename(2) is atomic only within one filesystem, and a cross-filesystem `mv`
+    # silently degrades to copy-then-unlink, which reintroduces the partial-write window this
+    # exists to close.  The leading dot and the pid keep it out of the way; it is removed on
+    # every failure path, so only a SIGKILL between the copy and the rename can leave one.
+    tmp="$dir/.run_coverage-restore.$$.$(basename -- "$rel")"
+    rm -f -- "$tmp" 2>/dev/null || true
+    if [ -e "$tmp" ] || [ -L "$tmp" ]; then
+        warn "could not clear the restore temporary $tmp, so $rel was not restored."
+        return 1
+    fi
+    if ! cp -p -- "$src" "$tmp"; then
+        warn "could not stage the restore of $rel into $tmp"
+        rm -f -- "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    if [ -n "$CMP_BIN" ] && ! "$CMP_BIN" -s -- "$src" "$tmp"; then
+        warn "the staged copy of $rel does not match the snapshot, so it was NOT put in place."
+        warn "  snapshot: $src"
+        warn "  staged:   $tmp"
+        rm -f -- "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    # Set explicitly rather than trusted to cp -p: the recorded mode is the authority, and this
+    # is the one line that makes ccec/src/Makefile come back executable.
+    if ! chmod -- "$want_mode" "$tmp"; then
+        warn "could not set mode $want_mode on the staged copy of $rel, so it was NOT put in place."
+        rm -f -- "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    if ! mv -f -- "$tmp" "$dst"; then
+        warn "could not move the staged copy of $rel into place: $tmp -> $dst"
+        rm -f -- "$tmp" 2>/dev/null || true
+        return 1
+    fi
+
+    # POSTCONDITIONS, read back from the filesystem rather than inferred from the exit statuses
+    # above.  A rename that succeeded still has to have produced the right file.
+    if [ -n "$CMP_BIN" ] && ! "$CMP_BIN" -s -- "$src" "$dst"; then
+        warn "$rel was restored but does not match the snapshot afterwards."
+        warn "  snapshot: $src"
+        warn "  tree:     $dst"
+        return 1
+    fi
+    now_mode="$("$STAT_BIN" -c '%a' -- "$dst" 2>/dev/null || true)"
+    if [ "$now_mode" != "$want_mode" ]; then
+        warn "$rel was restored with mode ${now_mode:-unreadable}, not the recorded $want_mode: $dst"
+        return 1
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------------------------------
+# TAKE ONE PATH BACK OUT, because it did not exist when the snapshot was taken.
+#
+# This is the other half of F3's exactness: an unconfigured checkout has none of the five
+# toolchain-generated Makefiles, configure creates them, and a restore that only replaced what
+# it had copied left all five behind.  The tree that came out of the run then differed from the
+# tree that went in.  Only paths RECORDED ABSENT are removed, and only when they are regular
+# files -- so this can never delete content the snapshot holds, and never follows a link.
+# ------------------------------------------------------------------------------------
+remove_regenerated_makefile() { # $1=relative path recorded as absent
+    local rel="$1"
+    local dst="$HDMICEC_ROOT/$rel"
+
+    if [ -L "$dst" ]; then
+        warn "$rel was recorded as absent and is now a symbolic link: $dst"
+        warn "  Not removing it: this run did not create a link there and will not delete one."
+        return 1
+    fi
+    # Already absent is the ordinary case: a build that failed before configure ran.
+    [ -e "$dst" ] || return 0
+    if [ ! -f "$dst" ]; then
+        warn "$rel was recorded as absent and is now a $( [ -d "$dst" ] && printf 'directory' || printf 'special file' ): $dst"
+        warn "  Not removing it."
+        return 1
+    fi
+    if ! rm -f -- "$dst"; then
+        warn "could not remove $dst, which did not exist before this run."
+        return 1
+    fi
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
+        warn "$dst still exists after being removed; something is recreating it."
+        return 1
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------------------------------
+# Put the allowlisted Makefiles back the way this run found them.  Idempotent, so the trap and
+# an explicit --restore can both call it, and a no-op when no snapshot was ever taken.
+#
+# UNINTERRUPTIBLE FOR ITS DURATION.  INT, TERM and HUP are masked across the whole loop and
+# re-armed afterwards, because a signal arriving between two of the six leaves half the tree
+# holding pre-build content and half holding generated content -- and the second Ctrl-C that
+# does it is exactly what an impatient caller sends when the first one appears to have done
+# nothing.  Masking discards the signal rather than deferring it, which shell offers no way
+# around; the trade is deliberate and small, because the restore is six file copies and is
+# bounded by that, whereas a half-restored hand-written Makefile is unbounded work for a human.
+#
+# RETURNS NON-ZERO AND KEEPS THE SNAPSHOT when any path fails.  MAKEFILE_SNAPSHOT_RETAIN is
+# what tells the cleanup not to delete the only remaining copy of the pre-build content, and
+# the caller (on_exit) turns the non-zero into the run's exit status.  Nothing in here calls
+# `die`: a `die` from inside the exit trap would skip the staging cleanup, the private lcov
+# HOME and the lock release, so every failure is reported and returned instead.
+#
+# The pre-check/post-check discipline of the old git-based do_restore is KEPT, because it was
+# the good part: report what was dirty going in (`was:`), do the work, then re-read git and
+# report anything still dirty (`still:`).  `git` is used here for REPORTING ONLY -- when it is
+# absent or this is not a working tree the restore still happens and the reporting degrades to
+# a note.  The restore does not depend on git in any way, which is the whole point.
 # ------------------------------------------------------------------------------------
 restore_regenerated_makefiles_from_snapshot() {
     [ -n "$MAKEFILE_SNAPSHOT_DIR" ] || return 0
-    [ -d "$MAKEFILE_SNAPSHOT_DIR" ] || return 0
-    [ -n "$MAKEFILE_SNAPSHOT_TAKEN" ] || return 0
+    [ -n "$MAKEFILE_SNAPSHOT_STATE" ] || return 0
+
+    # MASK FIRST, so even the custody check and the reporting cannot be interrupted half way
+    # into the loop that follows.
+    trap '' INT TERM HUP
+
+    # Custody of the snapshot, re-proved at the moment it is read from.  The assertions are
+    # fatal by design, so they are run in a SUBSHELL and their status captured: measured on
+    # this host, a ( ) subshell does NOT run the parent's EXIT trap, so a `die` in there ends
+    # the subshell and nothing else, while its message still reaches the caller's stderr.
+    if ! ( assert_snapshot_dir_still_safe "restoring the tracked Makefiles" ); then
+        MAKEFILE_SNAPSHOT_RETAIN=1
+        warn "the snapshot directory cannot be vouched for (see above), so NOTHING was restored."
+        warn "  The snapshot is left in place; treat its contents with suspicion and compare"
+        warn "  them against your own copy before using them."
+        trap 'on_signal INT 130' INT
+        trap 'on_signal TERM 143' TERM
+        trap 'on_signal HUP 129' HUP
+        return 1
+    fi
 
     local git_usable=0
     if command -v git >/dev/null 2>&1 \
@@ -1447,24 +2166,59 @@ restore_regenerated_makefiles_from_snapshot() {
         log "  is a no-op rather than a risk."
     fi
 
-    local f restored=0
-    while IFS= read -r f; do
+    local state mode f restored=0 removed=0 failures=0 seen=0
+    while IFS='|' read -r state mode f; do
         [ -n "$f" ] || continue
-        [ -f "$MAKEFILE_SNAPSHOT_DIR/$f" ] || die "the snapshot is missing $f although it was
-       recorded as captured ($MAKEFILE_SNAPSHOT_DIR).  Refusing to restore a partial set: some
-       of the six would be pre-build content and the rest generated content, which is worse
-       than either."
-        [ ! -L "$HDMICEC_ROOT/$f" ] || die "refusing to restore through a symlink: $HDMICEC_ROOT/$f"
-        cp -p -- "$MAKEFILE_SNAPSHOT_DIR/$f" "$HDMICEC_ROOT/$f" \
-            || die "could not restore $HDMICEC_ROOT/$f from the snapshot at
-       $MAKEFILE_SNAPSHOT_DIR/$f
-       The snapshot is still there: copy it back by hand.  Do NOT reach for
-       'git checkout' over these paths -- it restores what the index holds and would
-       destroy any uncommitted edit, which is the defect this mechanism replaced."
-        restored=$((restored + 1))
-    done <<< "$MAKEFILE_SNAPSHOT_TAKEN"
+        seen=$((seen + 1))
+        case "$state" in
+            present)
+                if restore_one_makefile "$f" "$mode"; then
+                    restored=$((restored + 1))
+                else
+                    failures=$((failures + 1))
+                fi
+                ;;
+            absent)
+                if remove_regenerated_makefile "$f"; then
+                    removed=$((removed + 1))
+                else
+                    failures=$((failures + 1))
+                fi
+                ;;
+            *)
+                # A record this function does not understand is a defect in the snapshot, and
+                # guessing would mean either fabricating a file or deleting one.
+                warn "the snapshot record for $f has an unrecognised state '$state', so that path"
+                warn "  was left exactly as it is.  This is a defect in this script; report it."
+                failures=$((failures + 1))
+                ;;
+        esac
+    done <<< "$MAKEFILE_SNAPSHOT_STATE"
 
-    log "restored $restored tracked Makefile(s) from the snapshot"
+    # EVERY ALLOWLISTED PATH MUST HAVE HAD A RECORD.  A path with none was never snapshotted
+    # and is therefore neither restorable nor safe to remove, so its absence from the record is
+    # reported as a failure rather than passing unnoticed as a shorter loop.
+    if [ "$seen" -ne "${#REGENERATED_MAKEFILES[@]}" ]; then
+        warn "the snapshot holds $seen record(s) for ${#REGENERATED_MAKEFILES[@]} allowlisted path(s)."
+        warn "  A path with no record was not snapshotted, so this run cannot say what it looked"
+        warn "  like before the build.  Compare the six against your own copy."
+        failures=$((failures + 1))
+    fi
+
+    log "restored $restored file(s) from the snapshot; removed $removed that did not exist before"
+
+    if [ "$failures" -ne 0 ]; then
+        MAKEFILE_SNAPSHOT_RETAIN=1
+        warn "$failures of $seen allowlisted path(s) could NOT be returned to the state this run"
+        warn "  found them in; the reasons are above, one per path.  The tree is therefore a"
+        warn "  MIXTURE of pre-build and generated content and must not be committed as it is."
+        # Re-armed before returning, so a caller that continues after the failure is once again
+        # cancellable.
+        trap 'on_signal INT 130' INT
+        trap 'on_signal TERM 143' TERM
+        trap 'on_signal HUP 129' HUP
+        return 1
+    fi
 
     if [ "$git_usable" -eq 1 ]; then
         local after
@@ -1488,20 +2242,43 @@ restore_regenerated_makefiles_from_snapshot() {
         log "git is not usable here, so the restore was not cross-checked against the index."
         log "  The copy itself does not depend on git and has already been verified above."
     fi
+
+    # THE SUCCESS PATH RE-ARMS TOO.  The mask covers the restore and nothing else; leaving it
+    # in place would make the rest of the exit trap, and anything a --restore caller does next,
+    # silently uncancellable.
+    trap 'on_signal INT 130' INT
+    trap 'on_signal TERM 143' TERM
+    trap 'on_signal HUP 129' HUP
     return 0
 }
 
 # ------------------------------------------------------------------------------------
-# Serialise builds in this working tree.  See THE BUILD LOCK above for why this cannot be
-# the artifact-directory lock and why a derived name is the accepted trade-off.
+# Take the one tree lock.  Idempotent: the first caller acquires it, every later caller is a
+# no-op that simply confirms it is still held.  See THE TREE LOCK above for what it covers
+# and why nothing here is advisory.
 # ------------------------------------------------------------------------------------
-acquire_build_lock() {
-    local parent="${TMPDIR:-/tmp}" key
-    case "$parent" in
-        /*) ;;
-        *)  die "TMPDIR must be an absolute path to be checked safely; got: $parent" ;;
-    esac
-    parent="$(canonicalise_path_lexically "$parent")"
+acquire_tree_lock() { # $1=short description of what this run is about to do, for the log
+    local purpose="${1:-work in this tree}"
+
+    if [ -n "$TREE_LOCK_FD" ]; then
+        verify_tree_lock_identity "$purpose"
+        return 0
+    fi
+
+    [ -n "$FLOCK_BIN" ] || die "flock was not found on PATH, so this run cannot prove it is the
+       only one operating on
+       $HDMICEC_ROOT
+       That proof is not decoration.  Without it a second run can zero the .gcda counters
+       between this run's last invocation and its capture, or run its own suite while this one
+       captures, and in both cases the coverage figure that comes out belongs to neither run
+       while looking entirely plausible.  It can also interleave the Makefile snapshot with a
+       restore and put the other run's GENERATED content back over your source.
+       flock ships with util-linux; install it, or run this script on a host that has it.
+       (This used to be a warning.  A warning that still reaches a verdict proves nothing.)"
+
+    local dir key path identity_before identity_open identity_after
+    runner_lock_dir
+    dir="$RUNNER_LOCK_DIR"
 
     # '/' is not legal in a filename, so the tree's own path becomes the key with the
     # separators flattened.  A path long enough to exceed the filename limit keeps its TAIL,
@@ -1511,50 +2288,116 @@ acquire_build_lock() {
     if [ "${#key}" -gt 180 ]; then
         key="${#key}${key: -180}"
     fi
-    BUILD_LOCK_PATH="$parent/hdmicec-l1-build$key.lock"
+    path="$dir/tree$key.lock"
 
-    # THE ANCESTRY CHECK IS ON THE PARENT DIRECTORY, NOT ON THE LOCK PATH, and getting this
-    # wrong is a defect a concurrency test found rather than a subtlety worth guessing at.
-    # assert_safe_ancestry validates every EXISTING component of the path it is given, which
-    # means it requires each one to be a directory.  The lock's leaf is a regular FILE and --
-    # unlike the artifact root, which is minted fresh -- it PERSISTS between runs, so on the
-    # second run the walk reached an existing regular file where it expected a directory and
-    # refused.  Measured symptom: the first --build succeeded because the leaf did not exist
-    # yet, and every subsequent one died with "is a regular empty file, not a directory".
+    # THE LEAF GETS FILE CHECKS, NOT THE ANCESTRY WALK, and that is a measured correction
+    # rather than a subtlety worth guessing at.  assert_safe_ancestry validates every EXISTING
+    # component of the path it is given and requires each one to be a DIRECTORY.  The lock's
+    # leaf is a regular FILE and -- unlike the artifact root, which is minted fresh -- it
+    # PERSISTS between runs, so on the second run the walk reached an existing regular file
+    # where it expected a directory and refused.  Measured symptom: the first --build
+    # succeeded because the leaf did not exist yet, and every subsequent one died with "is a
+    # regular empty file, not a directory".
     #
-    # So the parent chain gets the ancestry walk and the leaf gets the two checks that are
-    # actually meaningful for a file -- the same division acquire_output_lock already uses,
-    # where OUTPUT_DIR's ancestry is validated separately and the lock itself only has to not
-    # be a symlink.
-    assert_safe_ancestry "$parent" minted
-    [ ! -L "$BUILD_LOCK_PATH" ] || die "refusing to lock through a symlink: $BUILD_LOCK_PATH
-       Something pre-created that name.  Remove it, or point TMPDIR somewhere you own."
-    if [ -e "$BUILD_LOCK_PATH" ] && [ ! -f "$BUILD_LOCK_PATH" ]; then
-        die "the build lock path exists and is not a regular file: $BUILD_LOCK_PATH"
-    fi
-    # '>>' so an existing lock file is never truncated: another run may be holding it.
-    exec {BUILD_LOCK_FD}>>"$BUILD_LOCK_PATH" || die "could not open the build lock: $BUILD_LOCK_PATH"
-
-    if command -v flock >/dev/null 2>&1; then
-        flock -n "$BUILD_LOCK_FD" || die "another run of this script is building in
-       $HDMICEC_ROOT
-       Two builds in one tree would interleave their Makefile snapshots and restores, and
-       the loser would 'restore' the winner's generated content as though it were the
-       original.  Wait for the other run to finish.
-       (The lock is $BUILD_LOCK_PATH, held on an open descriptor and released when that
-       run's shell exits, so a crashed run does not leave it stuck.)"
-        log "holding the exclusive build lock for $HDMICEC_ROOT"
+    # So the ancestry is proved once, for the DIRECTORY, by runner_lock_dir -- which is
+    # strictly stronger than the old walk, because that directory is created by mkdir and
+    # verified owner-only, so no other account can put anything beside the leaf at all -- and
+    # the leaf itself gets the checks that are meaningful for a file: not a symlink, a regular
+    # file, created exclusively when it is new, and verified by device and inode across the
+    # open and across the flock.
+    [ ! -L "$path" ] || die "refusing to lock through a symbolic link: $path
+       Remove it.  Nothing but this script should be creating entries in $dir."
+    if [ -e "$path" ]; then
+        [ -f "$path" ] || die "the tree lock path exists and is not a regular file: $path"
     else
-        # Stated, not silently tolerated: without flock the snapshot/restore pairing across
-        # two concurrent runs cannot be guaranteed, and the caller is the only one who can
-        # know whether a second run is possible on this host.
-        warn "flock is not available, so two concurrent builds in $HDMICEC_ROOT cannot be"
-        warn "  prevented.  If anything else may be building this tree, do not run --build"
-        warn "  now: the two runs' Makefile snapshots would interleave."
-        note_advisory "flock was unavailable, so this run could not prove it was the only build in
-       $HDMICEC_ROOT.  The Makefile snapshot and restore are correct for THIS run, but a
-       concurrent build could have interleaved with them."
+        # noclobber makes '>' fail if the name exists AND refuses to follow a symlink to a
+        # non-existent target, which is the create-exclusive semantics this needs.  Losing the
+        # race to a concurrent run of this same script is fine: what matters is that the leaf
+        # is a regular file in a directory only this user can write.
+        ( set -o noclobber; : > "$path" ) 2>/dev/null || {
+            [ -f "$path" ] || die "could not create the tree lock file: $path"
+        }
     fi
+
+    identity_before="$(path_identity "$path")"
+    [ -n "$identity_before" ] || die "the tree lock file vanished immediately after it was
+       created: $path"
+
+    # '>>' so an existing lock file is never truncated: another run may be holding it, and its
+    # descriptor is the only thing that matters -- the contents are deliberately empty.
+    exec {TREE_LOCK_FD}>>"$path" || die "could not open the tree lock: $path"
+
+    identity_open="$(open_fd_identity "$TREE_LOCK_FD")"
+    [ "$identity_open" = "$identity_before" ] || die "the tree lock file was replaced between
+       the check and the open: $path
+       checked $identity_before, opened $identity_open (device:inode).
+       Somebody unlinked and recreated that name.  Two runs holding two different inodes both
+       believe they hold this lock, which is the failure this check exists to catch.  Refusing
+       to continue."
+
+    "$FLOCK_BIN" -n "$TREE_LOCK_FD" || die "another run of this script is already working in
+       $HDMICEC_ROOT
+       One run per tree: the build, the Makefile snapshot and restore, the counter reset, the
+       five invocations and the capture all operate on this one tree, and two runs interleaving
+       them produce a verdict that belongs to neither.  Wait for the other run to finish.
+       (The lock is $path, held on an open descriptor and released when that run's shell exits,
+       so a crashed run does not leave it stuck.)"
+
+    identity_after="$(path_identity "$path")"
+    [ "$identity_after" = "$identity_before" ] || die "the tree lock file was replaced while
+       this run was acquiring it: $path
+       locked $identity_before, the name now resolves to $identity_after (device:inode).
+       The lock this run holds no longer guards the name a second run would open, so it no
+       longer excludes anything.  Refusing to continue."
+
+    TREE_LOCK_PATH="$path"
+    TREE_LOCK_IDENTITY="$identity_before"
+    TREE_LOCK_PURPOSE="$purpose"
+    log "holding the exclusive tree lock for $HDMICEC_ROOT ($purpose)"
+    log "  lock: $path [$identity_before]"
+}
+
+# Confirm the lock this run took still guards the name it took it on.  Called at the start of
+# every stage that writes to the tree or reads a verdict out of it, because "the lock was held
+# when the run started" is a weaker statement than "the lock is held now" -- and the gap
+# between them is exactly where a second run gets in.
+verify_tree_lock_identity() { # $1=what is about to happen, for the message
+    local what="${1:-this step}" identity_open identity_now
+
+    [ -n "$TREE_LOCK_FD" ] || die "internal error: $what was reached without the tree lock.
+       Every stage that touches this tree must run under it; this is a defect in this script,
+       not in the caller's invocation."
+
+    identity_open="$(open_fd_identity "$TREE_LOCK_FD")"
+    [ "$identity_open" = "$TREE_LOCK_IDENTITY" ] || die "the descriptor holding the tree lock no
+       longer refers to the file it was taken on, before $what.
+       held $TREE_LOCK_IDENTITY, descriptor now refers to $identity_open (device:inode)."
+
+    identity_now="$(path_identity "$TREE_LOCK_PATH")"
+    [ "$identity_now" = "$TREE_LOCK_IDENTITY" ] || die "the tree lock file was replaced during
+       this run, before $what: $TREE_LOCK_PATH
+       locked $TREE_LOCK_IDENTITY, the name now resolves to ${identity_now:-nothing}
+       (device:inode).  A second run opening that name would not be excluded by this run's
+       lock, so this run can no longer claim exclusive use of
+       $HDMICEC_ROOT
+       (this run holds it for: ${TREE_LOCK_PURPOSE:-unrecorded})
+       Refusing to continue."
+    return 0
+}
+
+# Release it, and only ever as the LAST thing the exit trap does.  The cleanup it runs after
+# the work -- restoring the six tracked Makefiles, removing the snapshot -- is itself work on
+# this tree, so releasing before that finishes would let a second run start half way through
+# a restore.
+release_tree_lock() {
+    [ -n "$TREE_LOCK_FD" ] || return 0
+    local fd="$TREE_LOCK_FD"
+    TREE_LOCK_FD=''
+    # Closing the descriptor releases the flock; the empty lock file is deliberately left in
+    # place, because it is the agreed name and re-creating it per run is what would make it
+    # substitutable.
+    exec {fd}>&- 2>/dev/null || true
+    return 0
 }
 
 # ------------------------------------------------------------------------------------
@@ -1595,6 +2438,18 @@ await_process_exit() { # $1 = kill target  $2 = seconds
 # the signal handler and the EXIT handler can both call it.  The group is addressed by id -- never
 # by a command-line pattern, because `pkill -f run_L1Tests` would also match anything that merely
 # mentions the name, including the harness that started this script.
+#
+# RETURN CONTRACT, AND WHY IT IS NOT ALWAYS 0.
+#   0 -- there was no group, or the group is now provably extinct.  SUITE_PGID is cleared.
+#   1 -- the group STILL EXISTS after SIGTERM and SIGKILL.  Extinction could not be established,
+#        so SUITE_PGID is DELIBERATELY LEFT POPULATED: the EXIT trap calls this function again
+#        and gets another attempt, and the id stays in every diagnostic printed after this point.
+#        Clearing it here was the defect -- it discarded the only custody record this script has
+#        for the group at the exact moment that record became load-bearing, leaving a live
+#        process nothing could address and nothing could report.
+# A caller that cannot act on the status must say so explicitly (`|| warn …`), never by ignoring
+# it: this runs under `set -e`, and a bare call inside the EXIT trap would abort the rest of the
+# trap -- the Makefile restore included -- the first time a group outlived a SIGKILL.
 stop_suite_group() { # $1 = signal name to forward
     local signal="${1:-TERM}"
     [ -n "$SUITE_PGID" ] || return 0
@@ -1611,8 +2466,80 @@ stop_suite_group() { # $1 = signal name to forward
         await_process_exit "-$SUITE_PGID" 5 \
             || warn "process group $SUITE_PGID survived SIGKILL; report this, it should not happen."
     fi
+    # EXTINCTION IS VERIFIED, NOT ASSUMED FROM THE KILL.  `kill` returning 0 means the signal
+    # was delivered, not that anything acted on it, so the group is re-probed here after the
+    # grace period and the escalation.  await_process_exit returns 0 only when `kill -0` on the
+    # group has actually started failing, and this last probe is what turns "we sent SIGKILL"
+    # into "there is nothing left in that group" for the log.
+    if kill -0 -- "-$SUITE_PGID" 2>/dev/null; then
+        warn "process group $SUITE_PGID STILL EXISTS after SIG$signal and SIGKILL."
+        warn "  Something in it is unkillable (a task blocked in the kernel, most likely in a"
+        warn "  binder ioctl).  On invocation E that process is still holding the \"HdmiCec\""
+        warn "  service name, which is fixed in production code and cannot be worked around:"
+        warn "  no later AIDL invocation on this host will resolve correctly until it is gone."
+        warn "  This run therefore CANNOT report success: it is leaving a process behind that"
+        warn "  changes the result of the next run on this host.  Kill it by hand -- the group"
+        warn "  id above is the whole handle you need -- before starting another invocation."
+        # SUITE_PGID is left set on purpose.  See the return contract above: it is the custody
+        # record for a group that is still alive, and the EXIT trap's own call is the retry.
+        return 1
+    fi
+    log "suite process group $SUITE_PGID is confirmed gone"
     SUITE_PGID=''
     return 0
+}
+
+# ------------------------------------------------------------------------------------
+# Close out an invocation's process group ON THE SUCCESS PATH, and account for anything that
+# outlived the runner.
+#
+# WHY THE SUCCESS PATH NEEDS THIS AT ALL.  `wait "$SUITE_PGID"` waits for the subshell LEADER --
+# that is `timeout`, and through it the test binary.  It says nothing about the rest of the
+# group.  The L2 harness forks the fake service host into that same group, and if a teardown
+# path in the harness ever fails to reap it, the runner exits 0 while the host keeps running and
+# keeps the global "HdmiCec" registration.  The next AIDL invocation then resolves against a
+# process from a previous run: not a crash, but a silently wrong selection, which is the worst
+# shape a false green can take here.  So the group is closed out explicitly even when everything
+# passed, and a survivor is REPORTED rather than quietly cleaned up -- a harness that leaks its
+# host is a defect worth someone's attention, and this is the only place it surfaces.
+#
+# A DETECTED SURVIVOR NOW FAILS THE INVOCATION, WHICH IS THE POINT OF THE FUNCTION.  Reporting
+# it and returning 0 was the defect: the run continued, later invocations ran against a process
+# from this one, and the coverage verdict was issued as though nothing had happened.  Nothing
+# downstream can distinguish "the harness reaped its host" from "the harness leaked it and this
+# script cleaned up after it", so the two cannot share an outcome -- the second is a failed
+# invocation whether or not the cleanup then worked, because the evidence the invocation
+# produced was gathered with a process alive that the harness believed it had stopped.
+#
+# RETURN CONTRACT:
+#   0 -- the group was empty at close-out (the ordinary case).  SUITE_PGID is cleared.
+#   1 -- a survivor was found and this function extinguished it.  The invocation FAILS; the
+#        host is gone, so the next invocation is not endangered, but the harness leaked it.
+#   2 -- a survivor was found and could NOT be extinguished.  The invocation fails and the
+#        surviving process still holds whatever it registered; SUITE_PGID stays populated.
+# The caller distinguishes 1 from 2 in its message, because the two need different actions from
+# whoever reads the log: fix the harness, versus fix the harness AND kill something by hand
+# before the next run on this host means anything.
+#
+# Idempotent and cheap in the ordinary case: the group is already empty, the first `kill -0`
+# fails, and this is one probe and an assignment.
+# ------------------------------------------------------------------------------------
+finish_suite_group() { # $1 = invocation label, for the message
+    local label="${1:-?}"
+    [ -n "$SUITE_PGID" ] || return 0
+    if ! kill -0 -- "-$SUITE_PGID" 2>/dev/null; then
+        SUITE_PGID=''
+        return 0
+    fi
+    warn "invocation $label finished, but its process group $SUITE_PGID is NOT EMPTY."
+    warn "  The runner exited and something it started is still alive -- on an L2 invocation"
+    warn "  that is the fake service host, which the harness is supposed to terminate and reap"
+    warn "  in its own teardown.  Terminating the group here so it cannot outlive this run and"
+    warn "  hold the \"HdmiCec\" service name, and FAILING the invocation because the evidence"
+    warn "  it just produced was gathered with a process alive that the harness thought it had"
+    warn "  stopped -- which is exactly the state the next invocation must not inherit."
+    stop_suite_group TERM || return 2
+    return 1
 }
 
 on_exit() {
@@ -1621,7 +2548,17 @@ on_exit() {
     # still running is a cleanup that has to be done twice.  The signal that cancelled the run,
     # when there was one, is the signal forwarded on -- a run cancelled with SIGHUP should not
     # report that it sent SIGTERM.
-    stop_suite_group "${SUITE_SIGNAL:-TERM}"
+    #
+    # A GROUP THAT SURVIVES ITS SIGKILL MAKES THE RUN FAIL, AND CANNOT MASK A FAILURE THAT WAS
+    # ALREADY THERE.  Those are two requirements, not one, and the `[ "$rc" -ne 0 ] || rc=1`
+    # shape is what satisfies both: a run that measured cleanly cannot report success while
+    # leaving a process behind that changes the next run's result, and a run that was cancelled
+    # (130/143/129), that failed a gate (1) or that reached only an advisory verdict (3) keeps
+    # its own status, because that status is the primary finding and the leak is a second one.
+    # The explicit `||` is also structural: this trap runs under `set -e`, so a bare call whose
+    # status is now sometimes non-zero would abort the rest of the trap -- the Makefile restore
+    # included -- exactly when the tree most needs restoring.
+    stop_suite_group "${SUITE_SIGNAL:-TERM}" || { [ "$rc" -ne 0 ] || rc=1; }
     # THE MAKEFILE RESTORE HANGS OFF THE TRAP, NOT OFF THE BUILD'S SUCCESS PATH, and that is
     # the reason it is here rather than at the end of do_build.  A build that fails half way
     # through configure has already had some of the six overwritten; a run cancelled with
@@ -1630,10 +2567,77 @@ on_exit() {
     # covers every exit path there is -- success, failure, gate failure and cancellation --
     # with one mechanism and no special cases.  It runs BEFORE the snapshot is removed, and
     # both are no-ops when no snapshot was ever taken (any invocation without --build).
-    restore_regenerated_makefiles_from_snapshot || true
+    #
+    # A FAILED RESTORE CHANGES THE RUN'S EXIT STATUS, and `return` from an EXIT trap is what
+    # does it.  Measured on this host's bash: a trap that `return N`s sets the script's status
+    # to N (probe: body `exit 0`, trap `return 1` -> script exits 1; body `exit 5`, trap
+    # `return 3` -> script exits 3).  So the `|| rc=1` below is not decorative -- a run that
+    # measured cleanly but left the tree half restored cannot report success, because the tree
+    # is then a mixture of pre-build and generated content and must not be committed.
+    #
+    # cleanup_makefile_snapshot RUNS EITHER WAY and decides for itself whether to remove the
+    # snapshot: a failed restore sets MAKEFILE_SNAPSHOT_RETAIN and the snapshot is kept and
+    # named, because it is the only remaining copy of the pre-build content.
+    restore_regenerated_makefiles_from_snapshot || rc=1
     cleanup_makefile_snapshot
     cleanup_stage_dir
     cleanup_lcov_home
+    # THE MARKER IS REWRITTEN HERE AND NOWHERE ELSE, so that one line of code covers every exit
+    # path there is: success, a die anywhere above, a failed gate, and a cancellation through
+    # on_signal (which exits rather than re-raising precisely so that this trap runs).  It is
+    # written AFTER the restore, because a restore that failed changes the status this run must
+    # report, and BEFORE the locks are released, so no second run can start while the directory
+    # still claims to be IN-PROGRESS.
+    #
+    # AND THE VERDICT IS ONLY REPORTED IF IT WAS PUBLISHED.  A run that passed every gate and
+    # could not record that fact has not produced the evidence it exists to produce, so its
+    # status becomes 1 -- which `return "$rc"` below turns into the script's own exit status,
+    # measured on this host's bash.  Two things make that safe rather than merely strict.  The
+    # marker on disk at that moment cannot be another generation's verdict: the purge superseded
+    # or removed the prior one and prepare_output_dir refused to run without publishing this
+    # run's IN-PROGRESS, so what survives a failed final write is at worst THIS run's own
+    # IN-PROGRESS or PURGING marker -- a same-run, conservative "did not reach its end", which is
+    # exactly what a reader should conclude.  And the conservative write is attempted anyway,
+    # because a failure that was transient (a full filesystem that has since drained, a content
+    # composition that failed) is worth one more try at the honest answer.
+    #
+    # A FAILURE ON THE OTHER TWO PATHS CHANGES NOTHING, deliberately.  A cancelled run reports
+    # the cancellation and a failed run reports its failure: those statuses are already correct
+    # and already non-zero, and overwriting them with 1 because a marker could not be written
+    # would replace a specific finding with a vaguer one.  The unwritten marker is warned about
+    # and the run's own status stands.
+    if [ "$rc" -eq 0 ]; then
+        if ! write_run_status 'COMPLETE-PASS' 'the run reached its end and every gate passed'; then
+            warn "this run passed every gate and COULD NOT PUBLISH that verdict (see above)."
+            warn "  It therefore reports FAILURE: the numbers were real, and nothing in"
+            warn "  $OUTPUT_DIR"
+            warn "  can be shown to belong to the run that produced them.  The marker left there"
+            warn "  is this run's own earlier one, which says the run did not reach its end --"
+            warn "  conservative and same-generation, never a previous run's verdict."
+            rc=1
+            write_run_status 'COMPLETE-FAIL' \
+                'every gate passed but the COMPLETE-PASS marker could not be published; treat this bundle as unverified' \
+                || warn "the conservative marker could not be published either, so the marker on" \
+                        "disk is this run's earlier IN-PROGRESS or PURGING one -- same run, and" \
+                        "still the conservative reading"
+        fi
+    elif [ -n "${SUITE_SIGNAL:-}" ]; then
+        write_run_status 'CANCELLED' "the run was cancelled by SIG${SUITE_SIGNAL}; exit status $rc" \
+            || warn "the CANCELLED marker could not be published; this run reports the" \
+                    "cancellation (status $rc) regardless, and the marker on disk is this run's" \
+                    "earlier one rather than any previous run's verdict"
+    else
+        write_run_status 'COMPLETE-FAIL' "the run reached its end and reported failure; exit status $rc" \
+            || warn "the COMPLETE-FAIL marker could not be published; this run reports its" \
+                    "failure (status $rc) regardless, and the marker on disk is this run's" \
+                    "earlier one rather than any previous run's verdict"
+    fi
+    # LAST, and after the restore rather than before it.  The restore and the snapshot removal
+    # are themselves work on this tree, so releasing the lock any earlier would let a second
+    # run start while the six tracked Makefiles are half restored -- which is the exact
+    # interleaving the lock exists to prevent, moved into the cleanup where it would be
+    # hardest to see.
+    release_tree_lock
     return "$rc"
 }
 
@@ -1644,7 +2648,16 @@ on_exit() {
 on_signal() { # $1 = signal name  $2 = exit status
     SUITE_SIGNAL="$1"
     warn "received SIG$1 -- cancelling this run"
-    stop_suite_group "$1"
+    # THE CANCELLATION STATUS IS AUTHORITATIVE HERE, so a group that could not be extinguished
+    # is reported and the handler still exits with the signal's own status.  The `||` is not
+    # optional: under `set -e` a non-zero return from this call would end the shell with THAT
+    # status instead of reaching `exit "$2"`, and the run would report 1 for a cancellation.
+    # The EXIT trap calls stop_suite_group again -- SUITE_PGID is deliberately still populated
+    # when extinction failed -- and folds the survivor into the status there, where it cannot
+    # overwrite the 130/143/129 this line is about to set.
+    stop_suite_group "$1" \
+        || warn "a process from this run survived the cancellation; it is named above and this" \
+                "run still reports the cancellation as its primary status"
     exit "$2"
 }
 trap on_exit EXIT
@@ -1682,11 +2695,15 @@ trap 'on_signal HUP 129' HUP
 # overrides, which is what makes the run reproducible on any host.
 # ------------------------------------------------------------------------------------
 make_private_lcov_home() {
-    local parent="${TMPDIR:-/tmp}"
-    case "$parent" in
-        /*) ;;
-        *)  die "TMPDIR must be an absolute path to be checked safely; got: $parent" ;;
-    esac
+    # The parent comes from select_safe_temp_parent, not from "${TMPDIR:-/tmp}": the fallback
+    # to /tmp put lcov's configuration directory below a world-writable directory on this
+    # host (measured mode 2777, no sticky bit).  The chosen parent has already been proved
+    # safe at `named` strictness, so the ancestry check below is a re-assertion at the moment
+    # of use rather than the first check -- which is the posture every custody path in this
+    # script now has.
+    local parent
+    select_safe_temp_parent
+    parent="$RUNNER_TEMP_PARENT"
     assert_safe_ancestry "$parent/hdmicec-lcov-home" minted
 
     LCOV_HOME="$("$MKTEMP_BIN" -d "$parent/hdmicec-lcov-home.XXXXXXXX")" \
@@ -1704,6 +2721,11 @@ make_private_lcov_home() {
        mktemp -d had just created that directory, so something raced this run.  Refusing to
        run lcov against a configuration file this script did not put there."
     fi
+    # Recorded so cleanup_lcov_home's recursive remove can prove it is deleting this run's
+    # own directory rather than whatever the name points at by then.
+    LCOV_HOME_IDENTITY="$(path_identity "$LCOV_HOME")"
+    [ -n "$LCOV_HOME_IDENTITY" ] || die "could not read the identity (device:inode) of the
+       private lcov HOME: $LCOV_HOME"
     log "lcov runs with a private empty HOME: $LCOV_HOME (your \$HOME is not read or written)"
 }
 
@@ -1816,8 +2838,8 @@ reference_audit() {
     # Names that are genuinely read from the environment and are MEANT to be unassigned here are
     # listed below with the reason.  Every other tool handle, path and tunable this script uses is
     # assigned in one place, so the list stays short by construction.
-    #   TMPDIR       - a standard environment variable; \${TMPDIR:-/tmp} is the documented way
-    #                  to read it
+    #   TMPDIR       - a standard environment variable, read by consider_temp_parent as the
+    #                  first candidate parent for this run's private directories
     #   X            - not a variable: it appears as \${X:-...} inside this audit's own
     #                  explanatory comment, describing the default FORM rather than naming a
     #                  real reference
@@ -1830,8 +2852,16 @@ reference_audit() {
     #                  which is the same convention the build itself uses
     for w in $defaulted; do
         printf '%s\n' "$setglob" | grep -qx -- "$w" && continue
+    #   XDG_RUNTIME_DIR - the per-user runtime directory a systemd host provides at mode 0700.
+    #                  Read only by select_safe_temp_parent, as the second candidate parent for
+    #                  this run's private directories; unset is the normal case in a container
+    #                  and is handled by moving on to the next candidate
+    #   HOME         - the standard environment variable, and the last-resort candidate parent.
+    #                  Never written: lcov and genhtml are given a private HOME of their own by
+    #                  lcov_run/genhtml_run, which is a per-command assignment and not an
+    #                  assignment to this shell's HOME
         case " $w " in
-            " TMPDIR " | " X " | " CLONE_INDEX " | " CXX ") continue ;;
+            " TMPDIR " | " X " | " CLONE_INDEX " | " CXX " | " XDG_RUNTIME_DIR " | " HOME ") continue ;;
         esac
         warn "reference audit: \$$w is only ever read with a default (\${$w:-...}) and is never"
         warn "    assigned by this script.  It cannot abort the run, so it will silently be empty"
@@ -1876,9 +2906,9 @@ usage() {
     # exist.  It caught this one when it was written the other way -- which is the audit doing
     # its job, and the fix is to write it so there is nothing to except.
     local matrix_summary='' record
-    local label tier mode back_end select_filter exclude_filter synopsis
+    local label tier mode back_end select_filter exclude_filter synopsis permit_skip
     for record in "${INVOCATION_MATRIX[@]}"; do
-        IFS='|' read -r label tier mode back_end select_filter exclude_filter synopsis <<< "$record"
+        IFS='|' read -r label tier mode back_end select_filter exclude_filter synopsis permit_skip <<< "$record"
         matrix_summary="${matrix_summary}$(printf '  %s  %-3s CEC_TEST_AIDL_MODE=%-13s expects %-6s  %s' \
             "$label" "$tier" "$mode" "$back_end" "$synopsis")
 "
@@ -1913,13 +2943,25 @@ OPTIONS
                            An invocation that cannot run on this host -- no binder driver,
                            for the AIDL-selected ones -- is reported as DEFERRED and the
                            verdict becomes advisory.  It is never counted as passed.
-  -t, --threshold N        Line-coverage bar, an integer percentage.  Default ${COVERAGE_MIN}.
+  -t, --threshold N        Line-coverage bar.  Default ${COVERAGE_MIN}.  N is spelled as
+                           digits or digits.digits and must be between 0 and 100 -- 80, 0,
+                           100 and 80.5 are all accepted, because lcov's
+                           --fail-under-lines takes a fraction.  Anything that would have
+                           to be guessed at is REFUSED rather than coerced: an empty
+                           value, a letter, a sign, surrounding spaces, or more than one
+                           decimal point.
                            Lower it only for a deliberate diagnostic run; 80 is the
-                           required bar.
+                           required bar, and any other value makes the verdict ADVISORY
+                           (exit 3), never an acceptance.
   -o, --output-dir DIR     Write artifacts to DIR.  Left unset -- the default -- the root
                            is MINTED per run with
-                           mktemp -d "\${TMPDIR:-/tmp}/hdmicec-l1-coverage.XXXXXXXX",
-                           which is outside the git tree because this suite's .gitignore
+                           mktemp -d "<safe parent>/hdmicec-l1-coverage.XXXXXXXX",
+                           where <safe parent> is the first of \$TMPDIR, \$XDG_RUNTIME_DIR
+                           and \$HOME whose whole ancestry passes the custody checks -- a
+                           group- or world-writable directory without the sticky bit is
+                           skipped rather than warned about, so /tmp is not used on a host
+                           where it is mode 2777.  The root is outside the git tree because
+                           this suite's .gitignore
                            does not cover coverage.info, filtered_coverage.info or
                            coverage/ and is out of scope for editing, and unpredictable so
                            it cannot be pre-created by another account.  The chosen path is
@@ -1932,6 +2974,16 @@ OPTIONS
                            /var/tmp, /run/user, /opt, /home, /root and anywhere in your own
                            checkout are all accepted.  It is then brought to mode 0700, and
                            every file written under it is 0600.
+                           REUSING A DIR IS SAFE: every artifact a previous run could have
+                           left under one of this runner's fixed names is removed at run
+                           start, under the run lock, so the directory holds exactly one
+                           generation.  Nothing else under DIR is touched -- the removal
+                           works from a fixed list of names, never recursively over DIR.
+                           run_status.txt names the run id the directory holds; read it
+                           first when an artifact's provenance is in doubt.  A run takes
+                           that marker over before it removes or writes anything else and
+                           refuses to start if it cannot, so a previous run's verdict can
+                           never stand over this run's artifacts.
       --per-file-gate      In addition to the aggregate gate, fail when ANY non-exempt file
                            in the filtered trace is below the bar.  ON by default, because
                            Directive 4 states the bar per target; the flag exists so a
@@ -1942,17 +2994,26 @@ OPTIONS
                            run uses.  Below-bar files are enumerated either way.
       --no-html            Skip the genhtml report (the trace and the tables are still
                            produced).
-      --restore            Report on the six git-tracked Makefiles that autoreconf and
-                           configure rewrite, restore them from THIS invocation's snapshot
-                           if it has one, and exit.  Since --build restores from its own
-                           snapshot before it exits, the expected outcome here is "nothing
-                           to restore".  With the six dirty and no snapshot it REFUSES and
-                           exits non-zero: the only remaining mechanism would be
-                           'git checkout' over those paths, which restores what the index
-                           holds rather than what was there and would destroy an
-                           uncommitted edit to ccec/src/Makefile -- hand-written source,
-                           not generated output.  This script runs no git command that
-                           writes, in any mode.
+      --restore            Restore the six git-tracked Makefiles that autoreconf and
+                           configure rewrite from THIS invocation's snapshot, and exit.
+                           AS A STANDALONE FLAG IT ALWAYS FAILS, and that is the contract
+                           rather than a limitation: a snapshot exists only inside the
+                           invocation that took it, --build is the only thing that takes
+                           one, and parse_args forbids combining the two.  So a bare
+                           --restore has no authority to restore from, says so, and exits
+                           non-zero.  It does NOT substitute a git index comparison for
+                           that authority -- clean-against-the-index does not mean
+                           unchanged-since-this-run-started, and a tree whose Makefiles
+                           were committed in generated form reads as perfectly clean while
+                           holding exactly the content that needs replacing.  What git says
+                           is still printed, as information about the tree.
+                           It never runs 'git checkout' over those paths, in any mode: that
+                           restores what the index holds rather than what was there, and
+                           would destroy an uncommitted edit to ccec/src/Makefile --
+                           hand-written RDK build source, not generated output.
+                           You normally need none of this: --build snapshots all six before
+                           autoreconf and restores them from its exit trap on every path
+                           out, including a failure and a Ctrl-C.
   -h, --help               Print this help and exit.
       --selftest           Audit every internal function and variable reference in this
                            script, re-parse it, and verify the measurement tooling -- then
@@ -2040,15 +3101,37 @@ EXIT STATUS
      at or above the bar.  This is the only status that means "measured and passing".
   1  a prerequisite is missing, a step failed, or the coverage gate failed
   3  ADVISORY: coverage is at or above the bar, but this invocation did not establish the
-     evidence for it -- currently only when --run was omitted, so the figures come from
-     pre-existing cumulative counters.  All artifacts are produced; the numbers are real
-     but unattributable.  Do not treat 3 as a pass.
+     evidence for it, or did not hold itself to the acceptance settings.  All artifacts are
+     produced; the numbers are real but not an acceptance verdict.  Do not treat 3 as a
+     pass.  EVERY trigger is listed here, because a status whose causes are summarised is
+     a status a caller cannot reason about:
+       * --run was omitted, so the figures come from pre-existing cumulative counters that
+         may credit a test that no longer runs
+       * GTEST_EXTRA_ARGS was set, so the suite ran with arguments other than the
+         invocation matrix's own filters
+       * one or more invocations were DEFERRED rather than run (no usable binder driver
+         for the AIDL-selected ones), so at least one arm of the selection branch was
+         never exercised
+       * --threshold set the bar to anything other than the 80% Directive 4 requires
+       * --no-per-file-gate / COVERAGE_PER_FILE_GATE=0 turned the per-file half off
+       * COVERAGE_GATE_EXEMPT_FILES is set, so at least one target's per-file vote was
+         waived
+       * the line gate's trace holds dependency-header records from outside this submodule
+         that the DEPENDENCY_EXCLUDES policy has not classified, so its denominator is not
+         the one the recorded baseline was measured over
+       * the branch-arm gate could not MEASURE one or more required arms because the
+         invocation or the binder driver that arm needs was unavailable
+       * the branch-arm gate could not CHECK one or more required arms because a manifest
+         entry was added without coordinates
+     Two conditions that USED to end here no longer do, and are now fatal: a missing or
+     unusable flock (a run that cannot prove it is alone must not reach a verdict), and a
+     minted directory whose ancestry is unsafe (a safe parent is chosen instead).
 
 RESOLVED PATHS FOR THIS INVOCATION
   script          ${SCRIPT_PATH}
   submodule root  ${HDMICEC_ROOT}      (the lcov capture directory)
   workspace root  ${WS}
-  artifacts       ${OUTPUT_DIR:-<created with mktemp -d under ${TMPDIR:-/tmp}; printed as "artifacts:" when the run starts>}
+  artifacts       ${OUTPUT_DIR:-<minted with mktemp -d under the first safe parent of \$TMPDIR, \$XDG_RUNTIME_DIR, \$HOME; printed as "artifacts:" when the run starts>}
   L1 runner       ${HDMICEC_ROOT}/${TEST_BINARY_REL}
   L2 runner       ${HDMICEC_ROOT}/${L2_TEST_BINARY_REL}
   fake host       ${HDMICEC_ROOT}/${FAKE_HOST_BINARY_REL}   (launched by the L2 harness, never by this script)
@@ -2163,7 +3246,8 @@ parse_args() {
     if [ "$OUTPUT_DIR_EXPLICIT" -eq 1 ] && [ -z "$OUTPUT_DIR" ]; then
         die "--output-dir (or COVERAGE_OUTPUT_DIR) was given as an empty value.  An empty path
        would resolve to this run's working directory; leave it unset to have an unpredictable
-       mode-0700 root minted under \${TMPDIR:-/tmp} instead, or give a real directory."
+       mode-0700 root minted under a parent it has proved safe instead, or give a real
+       directory."
     fi
 }
 
@@ -2330,6 +3414,113 @@ require_instrumented_tree() {
 }
 
 # ------------------------------------------------------------------------------------
+# THE STUB HEADERS AND THE HAL MOCK SYMLINK -- ITS OWN STEP, AHEAD OF THE SNAPSHOT.
+#
+# stubs/ mutes the IARM bus headers this middleware includes but does not ship, and the
+# symlink is what substitutes the HAL driver mock for the real driver header.  Both are build
+# prerequisites, not committed artifacts, and both are stripped from the coverage denominator
+# by the '*/stubs/*' and '*/mocks/*' globs.
+#
+# WHY IT IS LIFTED OUT OF THE BUILD CHAIN.  It used to be the first link of the `&&` chain
+# inside the build subshell, which put a MUTATING step between the Makefile snapshot and
+# autoreconf.  The mutation was benign -- it creates directories and one symlink under stubs/
+# and touches none of the six -- but "benign" is a property of today's step list, and the
+# snapshot's guarantee should not depend on a reader re-deriving it every time the chain
+# changes.  With the step lifted out, autoreconf is literally the next mutating command after
+# the snapshot, so the guarantee is structural rather than argued.
+#
+# IT ALSO GAINS VALIDATION, which the inline version had none of: `touch` and `ln -sf` both
+# succeed in situations that leave the build unable to compile -- a stubs/ path that is a
+# symlink to somewhere else, a mock header that has been moved so the link dangles, a stub
+# that exists as a directory.  Each is checked, and each failure names the file and the
+# operation rather than surfacing later as a missing-header error from the compiler.
+#
+# The `###STEP:` marker is written to the same build log the chain writes to, so the failure
+# attribution the chain relies on -- grep the last marker -- keeps working across the move.
+# ------------------------------------------------------------------------------------
+STUB_HEADER_DIRS=(
+    'stubs/rdk/iarmbus'
+    'stubs/ccec/drivers/iarmbus'
+)
+STUB_HEADER_FILES=(
+    'stubs/rdk/iarmbus/libIARM.h'
+    'stubs/rdk/iarmbus/libIBus.h'
+    'stubs/rdk/iarmbus/libIBusDaemon.h'
+    'stubs/ccec/drivers/iarmbus/CecIARMBusMgr.h'
+)
+readonly STUB_HEADER_DIRS STUB_HEADER_FILES
+# The link, its literal target as written, and the file that target must resolve to.  The
+# target is RELATIVE and is spelled exactly as the workflow and the setup documents spell it;
+# the resolved path is derived from it here only so the check can compare content.
+readonly STUB_HAL_SYMLINK='stubs/ccec/drivers/hdmi_cec_driver.h'
+readonly STUB_HAL_SYMLINK_TARGET='../../../mocks/hdmicec/hdmi_cec_driver.h'
+readonly STUB_HAL_MOCK_HEADER='mocks/hdmicec/hdmi_cec_driver.h'
+
+prepare_stub_headers() { # $1=build log the step marker and any tool output are appended to
+    local build_log="$1" d f
+
+    printf '%s\n' '###STEP:generate stub headers and inject the HAL driver mock' >>"$build_log"
+    log "  generating the stub headers and the HAL driver mock symlink"
+
+    # The mock header has to be there BEFORE the link is made, because a link created to a
+    # missing target is a dangling link that `ln -sf` reports as success.
+    [ -f "$HDMICEC_ROOT/$STUB_HAL_MOCK_HEADER" ] || die "the HAL driver mock header is missing:
+       $HDMICEC_ROOT/$STUB_HAL_MOCK_HEADER
+       It is what stubs/$STUB_HAL_SYMLINK stands in for, so without it the build compiles
+       against the real driver header -- which this tree does not ship -- or against nothing.
+       This is a checkout problem, not a build problem."
+
+    # Each directory component is created and then re-read: `mkdir -p` is content with an
+    # existing symlink-to-directory, and a build that writes its stubs through one is writing
+    # them somewhere this script did not choose.
+    for d in "${STUB_HEADER_DIRS[@]}"; do
+        mkdir -p -- "$HDMICEC_ROOT/$d" >>"$build_log" 2>&1 \
+            || die "could not create the stub directory $HDMICEC_ROOT/$d (step: generate stub headers)"
+        [ ! -L "$HDMICEC_ROOT/$d" ] || die "the stub directory $HDMICEC_ROOT/$d is a symbolic link.
+       This build will not write its stub headers through a link it did not create.  Remove it."
+        [ -d "$HDMICEC_ROOT/$d" ] || die "$HDMICEC_ROOT/$d exists and is not a directory, so the
+       stub headers cannot be created there (step: generate stub headers)."
+    done
+
+    for f in "${STUB_HEADER_FILES[@]}"; do
+        [ ! -L "$HDMICEC_ROOT/$f" ] || die "the stub header $HDMICEC_ROOT/$f is a symbolic link.
+       Stub headers are empty files this build creates; a link means something else is
+       supplying that header.  Remove it (step: generate stub headers)."
+        touch -- "$HDMICEC_ROOT/$f" >>"$build_log" 2>&1 \
+            || die "could not create the stub header $HDMICEC_ROOT/$f (step: generate stub headers)"
+        [ -f "$HDMICEC_ROOT/$f" ] || die "$HDMICEC_ROOT/$f is not a regular file after touch, so
+       the compiler cannot include it (step: generate stub headers)."
+    done
+
+    # -n as well as -f: without it, a link that already points at a DIRECTORY makes ln create
+    # the new link INSIDE that directory instead of replacing it.
+    ln -sfn -- "$STUB_HAL_SYMLINK_TARGET" "$HDMICEC_ROOT/$STUB_HAL_SYMLINK" >>"$build_log" 2>&1 \
+        || die "could not create the HAL driver mock symlink
+       $HDMICEC_ROOT/$STUB_HAL_SYMLINK -> $STUB_HAL_SYMLINK_TARGET
+       (step: generate stub headers)"
+
+    [ -L "$HDMICEC_ROOT/$STUB_HAL_SYMLINK" ] || die "$HDMICEC_ROOT/$STUB_HAL_SYMLINK exists but is
+       not a symbolic link, so the HAL driver mock is not being injected and the build would
+       compile against whatever that file happens to contain (step: generate stub headers)."
+    # -f follows the link, so this is the dangling-link check.
+    [ -f "$HDMICEC_ROOT/$STUB_HAL_SYMLINK" ] || die "the HAL driver mock symlink dangles:
+       $HDMICEC_ROOT/$STUB_HAL_SYMLINK -> $STUB_HAL_SYMLINK_TARGET
+       ln reports a link to a missing target as success, which is why this is checked rather
+       than assumed (step: generate stub headers)."
+    # And that it lands on the mock rather than on some other header of the same name.  Content
+    # equality rather than path resolution, so no readlink -f is needed and a bind mount or a
+    # relocated checkout does not produce a false failure.
+    if [ -n "$CMP_BIN" ]; then
+        "$CMP_BIN" -s -- "$HDMICEC_ROOT/$STUB_HAL_SYMLINK" "$HDMICEC_ROOT/$STUB_HAL_MOCK_HEADER" \
+            || die "$HDMICEC_ROOT/$STUB_HAL_SYMLINK does not resolve to the HAL driver mock:
+       it should reach $HDMICEC_ROOT/$STUB_HAL_MOCK_HEADER, and the two differ.
+       Something else is at that path (step: generate stub headers)."
+    fi
+
+    log "    ${#STUB_HEADER_FILES[@]} stub header(s) and 1 HAL mock symlink in place and verified"
+}
+
+# ------------------------------------------------------------------------------------
 # Optional build.  A faithful replay of the workflow's "Generate stub headers" and
 # "Build hdmicec" steps.  Off by default, because a rebuild is the one action that can
 # destroy an existing measurement, and this script's primary job is to measure.
@@ -2342,6 +3533,10 @@ do_build() {
     local build_log="$OUTPUT_DIR/build.log"
     local nproc_count
     nproc_count="$( (command -v nproc >/dev/null 2>&1 && nproc) || echo 1 )"
+    # Custody is re-checked here for the same reason it is re-checked before every trace
+    # write: build.log is the record a failed build is diagnosed from, and truncating a file
+    # in a directory that was substituted since startup would write it somewhere else.
+    assert_output_dir_still_safe "$build_log"
     : >"$build_log"
 
     # configure.ac locates GoogleTest with PKG_CHECK_MODULES([GTEST], [gtest >= 1.10.0]),
@@ -2397,11 +3592,6 @@ do_build() {
         done
     fi
 
-    # stubs/ mutes the IARM bus headers this middleware includes but does not ship, and
-    # the symlink is what substitutes the HAL driver mock for the real driver header.
-    # Both are build prerequisites, not committed artifacts, and both are stripped from
-    # the coverage denominator by the '*/stubs/*' and '*/mocks/*' globs.
-    #
     # WHY THE STEPS ARE CHAINED WITH EXPLICIT `&&` RATHER THAN LEFT TO `set -e`:
     # a compound command that is the left operand of `||` runs with errexit SUPPRESSED,
     # and that suppression reaches inside a subshell, so a `set -e` written in here would
@@ -2410,31 +3600,29 @@ do_build() {
     # committed non-autotools Makefiles and buried the real cause under a cascade of
     # unrelated link errors.  The explicit `&&` chain short-circuits regardless of errexit
     # state, and the `###STEP:` markers make the failure attributable to one step.
-    # THE SNAPSHOT AND THE LOCK GO HERE: ahead of the build chain and OUTSIDE the subshell.
+    # THE ORDER OF THE NEXT THREE STATEMENTS IS THE WHOLE OF THE SNAPSHOT CONTRACT.
     #
-    # OUTSIDE, because a variable assigned inside a subshell is lost the moment it exits, and
-    # MAKEFILE_SNAPSHOT_DIR has to survive into the exit trap that does the restoring.  That
-    # rules out the literally-adjacent placement -- a snapshot step wedged between the
-    # `ln -sf` and the `autoreconf` lines inside the chain -- and it is the only reason it is
-    # not spelled that way.
+    #   1. THE LOCK, first, because every one of the remaining steps mutates this tree and a
+    #      second run interleaving with any of them can put its generated content back over
+    #      your source.  It is idempotent -- main() already took it -- so this call confirms
+    #      the same descriptor still refers to the same inode rather than taking it again.
+    #   2. THE STUBS, second and as their own step, because they are the only mutation that
+    #      has to happen before autoreconf and yet must not sit between the snapshot and it.
+    #      See prepare_stub_headers for what it writes and what it verifies.
+    #   3. THE SNAPSHOT, third, so that AUTORECONF IS THE VERY NEXT MUTATING COMMAND.  Nothing
+    #      between them writes anything at all, so the snapshot is provably of pre-build
+    #      content instead of being argued to be.
     #
-    # AHEAD OF THE CHAIN rather than immediately adjacent to autoreconf costs nothing, and
-    # that is a statement about the two steps in between rather than a hope: the stub-header
-    # step creates stubs/ and one symlink under it and touches none of the six.  autoreconf is
-    # still the first command in this function that can rewrite any of them, so the snapshot
-    # is still of pre-build content -- which is the property that matters, not the line number.
-    acquire_build_lock
+    # THE SNAPSHOT IS ALSO OUTSIDE THE SUBSHELL, and that is a separate constraint: a variable
+    # assigned inside a subshell is lost the moment it exits, and MAKEFILE_SNAPSHOT_DIR has to
+    # survive into the exit trap that does the restoring.  So the snapshot cannot be a link of
+    # the `&&` chain even though that is where it reads most naturally.
+    acquire_tree_lock "building the middleware and both test suites"
+    prepare_stub_headers "$build_log"
     snapshot_regenerated_makefiles
 
     (
         cd "$HDMICEC_ROOT" || exit 1
-        echo '###STEP:generate stub headers and inject the HAL driver mock' &&
-        mkdir -p stubs/rdk/iarmbus stubs/ccec/drivers/iarmbus &&
-        touch stubs/rdk/iarmbus/libIARM.h \
-              stubs/rdk/iarmbus/libIBus.h \
-              stubs/rdk/iarmbus/libIBusDaemon.h \
-              stubs/ccec/drivers/iarmbus/CecIARMBusMgr.h &&
-        ln -sf ../../../mocks/hdmicec/hdmi_cec_driver.h stubs/ccec/drivers/hdmi_cec_driver.h &&
         echo '###STEP:autoreconf -if' &&
         autoreconf -if &&
         echo '###STEP:configure --enable-l1tests' &&
@@ -2529,72 +3717,90 @@ announce_regenerated_makefiles() {
 }
 
 # ------------------------------------------------------------------------------------
-# `--restore` as a standalone action.
+# `--restore` as a standalone action.  IT SUCCEEDS ONLY WHEN IT ACTUALLY RESTORED SOMETHING.
 #
-# WHAT IT IS FOR NOW.  Since `--build` restores from its own snapshot on every exit path,
-# the normal case is that there is nothing left to do -- and confirming that is worth doing,
-# because "the tree is clean" is the thing a caller actually wants to know after a build.
+# THE ONE AUTHORITY IS A SNAPSHOT FROM THIS SAME INVOCATION, and nothing else is admitted.
+# The snapshot holds the WORKING-TREE bytes and modes as this run found them, per path, with
+# presence recorded; it is the only record that can put the tree back the way it was.
 #
-# WHAT IT REFUSES TO DO, AND WHY THE REFUSAL IS THE FEATURE.  With the six dirty and no
-# snapshot from THIS invocation, the only mechanism left is the `git checkout` this script
-# has removed everywhere else.  Reaching for it here would mean the one code path a caller
-# invokes precisely when something has gone wrong is also the one that can destroy their
-# work: an uncommitted edit to ccec/src/Makefile -- hand-written source, not output -- would
-# be gone with no prompt and no copy.  So it reports what is dirty, says plainly why it will
-# not act, and exits non-zero.  A non-zero status is the honest answer: the caller asked for
-# a restore and did not get one.
+# WHAT THIS USED TO DO AND MUST NOT.  With no snapshot, it fell back to asking git whether the
+# six differed from the INDEX, and when they did not it printed "nothing to restore" and
+# returned 0.  That is a success status for an invocation that restored nothing and, worse, it
+# is a success status derived from the wrong reference:
+#
+#   * clean-against-the-index does not mean unchanged-since-this-run-started.  A tree whose
+#     six were committed in their GENERATED form reads as perfectly clean while holding exactly
+#     the content this mechanism exists to remove.
+#   * a path that was already modified before any build started reads as dirty and always
+#     will, so the same reference calls a correct state a failure.
+#
+# Either way the caller asked for a restore and did not get one, so the honest answer is an
+# error and a non-zero status.  git is still consulted, and what it says is still printed --
+# as INFORMATION about the tree, never as the basis for the verdict.
+#
+# AND IT NEVER REACHES FOR `git checkout`.  That is the mechanism this whole snapshot machinery
+# replaced: it restores what the index holds rather than what was there, so on ccec/src/Makefile
+# -- hand-written RDK build source that configure clobbers because it is in AC_CONFIG_FILES --
+# it would silently destroy an uncommitted edit.  The one code path a caller invokes precisely
+# when something has already gone wrong must not be the one that loses their work.
 # ------------------------------------------------------------------------------------
 do_restore() {
     rule
     log "checking the tracked Makefiles in $HDMICEC_ROOT"
 
-    # A snapshot from this same invocation is the only thing that can be restored from, and
-    # the only way to have one is to have run --build here -- which parse_args forbids
-    # combining with --restore.  So this arm exists for the internal caller (the exit trap)
-    # rather than for the flag, and it is kept for exactly one reason: if the two are ever
-    # allowed to combine, this function must restore rather than refuse.
+    # A snapshot from this same invocation is the only thing that can be restored from, and the
+    # only way to have one is to have run --build here -- which parse_args forbids combining
+    # with --restore.  So this arm exists for the internal caller (the exit trap) rather than
+    # for the flag, and it is kept for exactly one reason: if the two are ever allowed to
+    # combine, this function must restore rather than refuse.  Its STATUS IS PROPAGATED: a
+    # restore that could not put every path back is not a successful --restore.
     if [ -n "$MAKEFILE_SNAPSHOT_DIR" ]; then
-        restore_regenerated_makefiles_from_snapshot
+        restore_regenerated_makefiles_from_snapshot || return 1
         return 0
     fi
 
-    if ! command -v git >/dev/null 2>&1 \
-       || ! git -C "$HDMICEC_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-        die "no snapshot exists for this invocation, and git is not usable here either, so
-       there is no way to tell whether the six tracked Makefiles even need restoring.
-       Nothing was changed.
-           the six: ${REGENERATED_MAKEFILES[*]}
-       Run '$SCRIPT_PATH --build ...' and it will snapshot them before autoreconf and
-       restore them itself when it exits."
+    # Whatever git can tell us is printed, because it is genuinely useful to see -- and then
+    # the refusal happens regardless of what it said.
+    if command -v git >/dev/null 2>&1 \
+       && git -C "$HDMICEC_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        local before
+        before="$(git -C "$HDMICEC_ROOT" status --porcelain -- "${REGENERATED_MAKEFILES[@]}" 2>/dev/null || true)"
+        if [ -n "$before" ]; then
+            printf '%s\n' "$before" | sed 's/^/[run_coverage]   differs from the index: /' >&2
+        else
+            warn "none of the allowlisted paths differs from the index right now."
+            warn "  THAT IS NOT THE SAME AS 'nothing to restore', which is why it does not make"
+            warn "  this invocation a success: the index is not the reference.  A tree whose"
+            warn "  Makefiles were committed in their generated form reads as clean while"
+            warn "  holding exactly the content that needs replacing."
+        fi
+    else
+        warn "git is not usable here, so not even the index comparison is available."
     fi
 
-    local before
-    before="$(git -C "$HDMICEC_ROOT" status --porcelain -- "${REGENERATED_MAKEFILES[@]}" 2>/dev/null || true)"
-    if [ -z "$before" ]; then
-        log "none of the six differs from the index; nothing to restore."
-        log "  (--build restores them from its own snapshot before it exits, so this is the"
-        log "  expected state after a build rather than a sign that nothing ran.)"
-        return 0
-    fi
-
-    printf '%s\n' "$before" | sed 's/^/[run_coverage]   dirty: /' >&2
-    die "the paths above differ from the index, and THIS INVOCATION HAS NO SNAPSHOT to
-       restore them from.  Nothing was changed, deliberately.
-       WHY THIS IS A REFUSAL AND NOT A FALLBACK.  The only other mechanism available is
-       'git -C $HDMICEC_ROOT checkout -- <the six>', and this script does not run it in
-       any mode.  That command restores whatever the INDEX holds rather than what was
-       there, so on ccec/src/Makefile -- a hand-written RDK build file with its own object
-       list and link command, which configure clobbers because it is in AC_CONFIG_FILES --
-       it would silently destroy an uncommitted edit.  Losing someone's source is not an
-       acceptable way to tidy up generated content.
-       WHAT TO DO INSTEAD.  A snapshot only exists inside the invocation that took it, so
-       let the build take one and put them back for you:
+    die "THIS INVOCATION HAS NO SNAPSHOT, so there is nothing it can authoritatively restore
+       from, and nothing was changed.
+           the allowlisted paths: ${REGENERATED_MAKEFILES[*]}
+       WHY THIS IS AN ERROR RATHER THAN 'nothing to do'.  A snapshot records the WORKING-TREE
+       bytes, the modes and the presence of each path as this run found them, and it exists
+       only inside the invocation that took it.  Without one, this script cannot tell what any
+       of these paths looked like before -- so reporting success would be reporting that a
+       restore happened when none did.
+       WHAT IT WILL NOT DO INSTEAD.  It will not run
+           git -C $HDMICEC_ROOT checkout -- <the allowlisted paths>
+       in this or any other mode.  That restores whatever the INDEX holds rather than what was
+       there, so on ccec/src/Makefile -- a hand-written RDK build file with its own object list
+       and link command, which configure clobbers because it is in AC_CONFIG_FILES -- it would
+       silently destroy an uncommitted edit.  Losing someone's source is not an acceptable way
+       to tidy up generated content.  It will not substitute the index comparison above for a
+       verdict either, for the reason printed with it.
+       WHAT TO DO INSTEAD.  Let the build take a snapshot and put them back for you:
            $SCRIPT_PATH --build --run
-       That snapshots all six before autoreconf and restores them from its exit trap on
-       every path, including a failure or a Ctrl-C.  If you already know these six hold
-       nothing you want, revert them however you normally revert a file -- that decision
-       is yours to take deliberately, and it is not one a measurement tool should take for
-       you."
+       That snapshots every allowlisted path before autoreconf and restores it from the exit
+       trap on every path out -- success, build failure, gate failure and Ctrl-C -- so there is
+       normally nothing left for --restore to do.  If you already know these paths hold nothing
+       you want, revert them however you normally revert a file: that decision is yours to take
+       deliberately, and it is not one a measurement tool should take for you."
 }
 
 # ====================================================================================
@@ -2687,7 +3893,7 @@ readonly LEGACY_BOUND_SUITES='BusTest.*:ConnectionTest.*:IntegrationFlowTest.*:D
 # The contract suite's own fixtures, partitioned by which back-end each one requires.  Read
 # from the FIXTURE MANIFEST in tests/L1Tests/ccec/test_DriverAidl.cpp, which is the authority
 # for its own case set, and cross-checked against the built binary.
-#   back-end independent  Compatibility 11, Preflight 5, LocalInstance 9   -- run under A, B and C
+#   back-end independent  Compatibility 11, Preflight 7, LocalInstance 9   -- run under A, B and C
 #   legacy back-end only  Selection 4, LegacyArm 4                         -- run under A only
 #   AIDL back-end only    Session 19, Transmit 12                          -- run under B only
 readonly CONTRACT_ANY_BACKEND_SUITES='DriverAidlCompatibilityTest.*:DriverAidlPreflightTest.*:DriverAidlLocalInstanceTest.*'
@@ -2711,6 +3917,33 @@ readonly L2_SUITES='DualPath*'
 #   5 select filter     --gtest_filter for the run; empty means "no filter"
 #   6 exclude filter    the COMPLEMENT, spelled out as suite globs rather than derived
 #   7 synopsis          one line, printed when the invocation starts
+#   8 permitted skips   the ONLY cases this invocation may report as SKIPPED, as gtest globs.
+#                       Empty means none: any skip fails the invocation.
+#
+# FIELD 8 IS THE MANDATORY-PASS CONTRACT, and it exists because a skipped case used to count as
+# an executed one.  The count check compares the JSON's "tests" against the filter's selection,
+# and GoogleTest counts a case it SKIPPED among "tests" -- so an invocation whose cases all
+# skipped in SetUp reconciled perfectly, exited 0, and reported a full complement of evidence it
+# had not produced.  On invocation E that is not a hypothetical: its four AIDL-flow cases are the
+# only proof this suite ever has that a frame crosses real binder IPC and arrives on a binder
+# thread, and they skip rather than fail when the resolved back-end is not theirs.  A green E
+# with those four skipped is the exact false green this whole matrix exists to prevent.
+#
+# WHAT IT IS NOT: a count.  A tolerance of "up to four skips" would accept four skipped
+# MANDATORY cases while four permitted ones ran, which is the same false green wearing a
+# different number.  So the permitted set is named, every skip is matched against it, and a skip
+# that does not match is fatal WITH ITS NAME.  The mandatory count is then MEASURED from the
+# binary as "the selection minus the permitted set", never written down, so adding a case to a
+# fixture needs no edit here -- and the numbers it derives on this host are the settled contract:
+# D has 10 mandatory (14 selected less the 4 permitted DualPathAidlFlowTest cases) and E has 8
+# (14 less the 6 permitted DualPathLegacyFlowTest cases), which is exactly the four
+# DualPathSelectionTest cases plus all four DualPathAidlFlowTest cases.
+#
+# THE TWO L2 INVOCATIONS ARE MIRROR IMAGES, which is the point of naming rather than counting:
+# the AIDL-flow fixture is PERMITTED to skip under D (legacy is resolved, so it cannot run) and
+# MANDATORY under E, and the legacy-flow fixture is the other way round.  One number could never
+# express that.  The L1 invocations permit nothing: their arm-specific fixtures assert in SetUp
+# and FAIL rather than skip, deliberately, so a skip there is already a defect.
 #
 # WHY FIELD 6 EXISTS RATHER THAN BEING COMPUTED.  The check it feeds is
 # `selected + excluded == registered`, measured all three times from the binary, and that is
@@ -2729,12 +3962,15 @@ readonly L2_SUITES='DualPath*'
 # one in an aggregate count, which is the swallowed-failure shape the whole suite is built to
 # avoid.  So A excludes them by name.  Everything else in the binary runs.
 # ------------------------------------------------------------------------------------
+readonly L2_LEGACY_FLOW_SUITE='DualPathLegacyFlowTest.*'
+readonly L2_AIDL_FLOW_SUITE='DualPathAidlFlowTest.*'
+
 readonly INVOCATION_MATRIX=(
-    "A|L1|absent|legacy|-${CONTRACT_AIDL_ONLY_SUITES}|${CONTRACT_AIDL_ONLY_SUITES}|no service registered: the regression arm, and the fallback-not-abort demonstration"
-    "B|L1|compatible|AIDL|DriverAidl*:${NEUTRAL_SUITES}-${CONTRACT_LEGACY_ONLY_SUITES}|${LEGACY_BOUND_SUITES}:${CONTRACT_LEGACY_ONLY_SUITES}|in-process compatible fake: the adapter-translation arm"
-    "C|L1|incompatible|legacy|${CONTRACT_ANY_BACKEND_SUITES}:${NEUTRAL_SUITES}|${LEGACY_BOUND_SUITES}:${CONTRACT_LEGACY_ONLY_SUITES}:${CONTRACT_AIDL_ONLY_SUITES}|in-process fake reporting hash \"-1\": present but not usable falls back"
-    "D|L2|absent|legacy|${L2_SUITES}||legacy round trip through the in-process mock, end to end"
-    "E|L2|remote|AIDL|${L2_SUITES}||out-of-process fake over real binder IPC, end to end"
+    "A|L1|absent|legacy|-${CONTRACT_AIDL_ONLY_SUITES}|${CONTRACT_AIDL_ONLY_SUITES}|no service registered: the regression arm, and the fallback-not-abort demonstration|"
+    "B|L1|compatible|AIDL|DriverAidl*:${NEUTRAL_SUITES}-${CONTRACT_LEGACY_ONLY_SUITES}|${LEGACY_BOUND_SUITES}:${CONTRACT_LEGACY_ONLY_SUITES}|in-process compatible fake: the adapter-translation arm|"
+    "C|L1|incompatible|legacy|${CONTRACT_ANY_BACKEND_SUITES}:${NEUTRAL_SUITES}|${LEGACY_BOUND_SUITES}:${CONTRACT_LEGACY_ONLY_SUITES}:${CONTRACT_AIDL_ONLY_SUITES}|in-process fake reporting hash \"-1\": present but not usable falls back|"
+    "D|L2|absent|legacy|${L2_SUITES}||legacy round trip through the in-process mock, end to end|${L2_AIDL_FLOW_SUITE}"
+    "E|L2|remote|AIDL|${L2_SUITES}||out-of-process fake over real binder IPC, end to end|${L2_LEGACY_FLOW_SUITE}"
 )
 
 # ------------------------------------------------------------------------------------
@@ -2750,9 +3986,12 @@ readonly INVOCATION_MATRIX=(
 # remote one, and an attempt would take the whole runner down with it.
 #
 # The consequence for this script is a hard rule: an invocation that cannot run is REPORTED AS
-# DEFERRED AND SKIPPED.  It is never attempted, never counted as passed, and never allowed to
-# stand in for evidence it did not produce.  The final report says which invocations ran and
-# which did not, and a run that skipped any of them cannot produce an acceptance verdict.
+# DEFERRED AND NEVER ATTEMPTED.  It is not launched, not counted as passed, and never allowed to
+# stand in for evidence it did not produce.  DEFERRED is not the same thing as SKIPPED, and the
+# distinction is deliberate: a skip is something GoogleTest does to a case inside a process that
+# started, whereas a deferred invocation never starts a process at all, so none of its cases is
+# reported in any state.  The final report says which invocations ran and which did not, and a
+# run that deferred any of them cannot produce an acceptance verdict.
 #
 # The probe is the driver node itself, checked exactly as the middleware's own bounded
 # preflight checks it first: does the node exist and can it be opened.  This script does NOT
@@ -2927,9 +4166,76 @@ registered_test_count() { # $1=directory  $2=binary name  $3=LD_LIBRARY_PATH  $4
 # mismatch FAILS rather than merely noting, and a suite classified into neither the select nor
 # the exclude group breaks the reconciliation instead of quietly going unrun.
 # ------------------------------------------------------------------------------------
-verify_results() { # $1=results JSON  $2=LD_LIBRARY_PATH  $3=label  $4=fixture pattern  $5=expected executed  $6=registered  $7=excluded
-    local results="$1" ld_path="${2:-}" label="$3" fixture_pattern="$4"
-    local expected="$5" registered="$6" excluded="$7" count
+# ------------------------------------------------------------------------------------
+# THE NAMES OF THE CASES A RUN REPORTED AS SKIPPED, one per line, as Fixture.Case.
+#
+# WHY PER CASE RATHER THAN FROM THE HEADER.  Measured on this host's GoogleTest: the JSON
+# header carries exactly disabled, errors, failures, name, tests, testsuites, time and
+# timestamp -- and NO "skipped" field.  There is therefore no total to read, and a run whose
+# every case skipped has a header indistinguishable from a run whose every case passed.  The
+# per-case objects are where the evidence is: a skipped case carries "result": "SKIPPED" and a
+# "skipped" member, a passing one carries "result": "COMPLETED".
+#
+# HOW A CASE IS TOLD FROM A SUITE.  Both objects have a "name", so a scan keyed on that alone
+# would attribute a suite's name to a case.  Only CASE objects carry "classname" -- measured --
+# and its field order puts it AFTER "result", so buffering the name, flagging on the result and
+# emitting on the classname yields Fixture.Case for cases and nothing at all for suites.
+#
+# awk rather than a JSON parser for the reason the rest of this file gives: no dependency beyond
+# the POSIX tools already required.  The output is a name list, so a case whose name contained a
+# newline would corrupt it -- GoogleTest case names are C++ identifiers plus '/' for
+# parameterised suites, so that cannot arise.
+# ------------------------------------------------------------------------------------
+skipped_case_names() { # $1 = results JSON
+    # shellcheck disable=SC2016  # single quotes are the awk program's own; $0 is awk's line
+    "$AWK_BIN" '
+        /^[[:space:]]*"name"[[:space:]]*:/ {
+            n = $0
+            sub(/^[^:]*:[[:space:]]*"/, "", n)
+            sub(/".*$/, "", n)
+            nm = n
+            sk = 0
+            next
+        }
+        /^[[:space:]]*"result"[[:space:]]*:[[:space:]]*"SKIPPED"/ { sk = 1; next }
+        /^[[:space:]]*"classname"[[:space:]]*:/ {
+            c = $0
+            sub(/^[^:]*:[[:space:]]*"/, "", c)
+            sub(/".*$/, "", c)
+            if (sk && nm != "") { print c "." nm }
+            next
+        }
+    ' "$1"
+}
+
+# Does $1 match any of the ':'-separated gtest globs in $2?  Shell pattern matching is what
+# gtest's own filter uses -- '*' and '?' over the Fixture.Case name -- so `case` is the right
+# tool and no pattern translation is needed.  An empty pattern list matches nothing, which is
+# the "no skips permitted" case and must not degenerate into "everything permitted".
+name_matches_any_pattern() { # $1 = Fixture.Case  $2 = ':'-separated globs
+    local name="$1" patterns="$2" pat rest
+    [ -n "$patterns" ] || return 1
+    rest="$patterns"
+    while [ -n "$rest" ]; do
+        pat="${rest%%:*}"
+        if [ "$pat" = "$rest" ]; then rest=''; else rest="${rest#*:}"; fi
+        [ -n "$pat" ] || continue
+        # shellcheck disable=SC2254  # the glob is the pattern; quoting it would defeat the match
+        case "$name" in $pat) return 0 ;; esac
+    done
+    return 1
+}
+
+verify_results() { # $1=results JSON  $2=label  $3=fixture pattern  $4=expected executed  $5=registered  $6=excluded  $7=permitted-skip globs  $8=mandatory count  $9=log to append the accounting marker to
+    # THE LD_LIBRARY_PATH PARAMETER IS GONE.  It was accepted, assigned and never read: this
+    # function reads a results file and a listing that the CALLER has already produced, and it
+    # runs nothing that needs a loader path.  A parameter that is only positional padding is a
+    # standing invitation to pass the wrong argument in the right slot, which is exactly the
+    # class of mistake the reconciliation below exists to catch -- so it is removed rather than
+    # documented.
+    local results="$1" label="$2" fixture_pattern="$3"
+    local expected="$4" registered="$5" excluded="$6"
+    local permit_skip="${7:-}" mandatory="${8:-}" accounting_log="${9:-/dev/null}" count
 
     [ -f "$results" ] || die "invocation $label exited 0 but wrote no results file at
        $results
@@ -2988,7 +4294,7 @@ verify_results() { # $1=results JSON  $2=LD_LIBRARY_PATH  $3=label  $4=fixture p
        cases."
 
     # ------------------------------------------------------------------------------------
-    # CHECK 2 OF THE THREE PER-INVOCATION CHECKS: the executed count is the count this
+    # CHECK 2 OF THE FOUR PER-INVOCATION CHECKS: the executed count is the count this
     # invocation's own filter selects.
     #
     # Everything above establishes that SOMETHING from this tier ran; none of it establishes
@@ -3070,10 +4376,90 @@ verify_results() { # $1=results JSON  $2=LD_LIBRARY_PATH  $3=label  $4=fixture p
         log "invocation $label EXECUTED all $executed declared case(s) -- matching the $expected its"
         log "  filter selects, with $excluded excluded and $registered registered in the binary"
     fi
+
+    # ------------------------------------------------------------------------------------
+    # THE MANDATORY-PASS CONTRACT.  Everything above counts cases; this is the only part that
+    # asks whether they PASSED.
+    #
+    # "executed" up to here includes cases GoogleTest skipped, because its "tests" total counts
+    # them -- so an invocation whose mandatory cases all skipped in SetUp reconciles perfectly
+    # against its own filter and exits 0.  That is the false green this check closes: every skip
+    # is matched by NAME against the invocation's permitted set, an unpermitted skip is fatal
+    # with its name printed, and the mandatory count is measured from the binary rather than
+    # written down.
+    # ------------------------------------------------------------------------------------
+    local skipped_names skipped=0 unpermitted='' one
+    skipped_names="$(skipped_case_names "$results")"
+    if [ -n "$skipped_names" ]; then
+        while IFS= read -r one; do
+            [ -n "$one" ] || continue
+            skipped=$((skipped + 1))
+            name_matches_any_pattern "$one" "$permit_skip" \
+                || unpermitted="${unpermitted}${unpermitted:+
+}           $one"
+        done <<< "$skipped_names"
+    fi
+
+    if [ -n "$unpermitted" ]; then
+        die "invocation $label SKIPPED case(s) it is required to PASS:
+$unpermitted
+       This invocation permits skips only in: ${permit_skip:-<none: every case is mandatory>}
+       A skipped case is reported among GoogleTest's \"tests\" total, so it reconciles against
+       the filter and leaves the exit status at 0 -- which is why this is checked by name and
+       not by arithmetic.  Nothing above would have noticed it.
+       WHAT A SKIP HERE USUALLY MEANS.  These fixtures skip in SetUp when the resolved back-end
+       is not the one they exercise, so a mandatory case skipping says the invocation resolved
+       the WRONG BACK-END while still logging a plausible selection -- or that the harness could
+       not reach the state the case needs.  On invocation E specifically, the AIDL-flow cases are
+       the only evidence this suite ever produces that a frame crosses real binder IPC and
+       arrives on a binder thread: a green E with those skipped is a run that proved nothing it
+       exists to prove.  Read $results and the run log before treating this as a test defect."
+    fi
+
+    local passed=$((executed - skipped))
+    # DEFAULTED TO "EVERYTHING IS MANDATORY", which is the fail-closed direction: a caller that
+    # supplies no floor gets the strictest one rather than none.  Validated as a number because
+    # an arithmetic comparison against a stray word would abort with a shell error instead of a
+    # verdict, and this function's whole job is to produce a verdict.
+    : "${mandatory:=$executed}"
+    case "$mandatory" in
+        ''|*[!0-9]*) die "internal error: invocation $label was given a non-numeric mandatory
+       case count [$mandatory].  A contract that cannot be compared is not a contract." ;;
+    esac
+
+    # The permitted skips are PERMITTED, not required: a host on which they can also run leaves
+    # more passes than the floor, which is a better result and not a discrepancy.  Fewer is
+    # impossible without an unpermitted skip or a failure, both fatal above -- so this is a
+    # cross-check on the three numbers agreeing rather than a second policy.
+    if [ "$passed" -lt "$mandatory" ]; then
+        die "invocation $label passed $passed case(s) but $mandatory are mandatory.
+           executed : $executed
+           skipped  : $skipped (each one permitted by name)
+           passed   : $passed
+           mandatory: $mandatory  (measured from the binary as its selection less ${permit_skip:-nothing})
+       An unpermitted skip is fatal above and a recorded failure is fatal earlier still, so a
+       shortfall here means these numbers disagree with each other.  Report it."
+    fi
+
+    log "  MANDATORY-PASS CONTRACT MET: $passed passed, $skipped skipped, $failures failed"
+    if [ -n "$permit_skip" ]; then
+        log "    $mandatory of the $executed selected case(s) were mandatory, and all $mandatory passed"
+        log "    the $skipped skip(s) are all inside [$permit_skip], which this invocation permits"
+    else
+        log "    every one of the $executed selected case(s) was mandatory, and none was skipped"
+    fi
+
+    # MACHINE-READABLE, so the numbers are auditable rather than only printed.  It goes into the
+    # per-invocation run log rather than a new artifact: the artifact name set is fixed and
+    # enumerated in one place, and a reader or a CI step can grep one marker out of the log it
+    # already collects.  Every field is a bare integer or a glob, on one line, in a fixed order.
+    printf '###ACCOUNTING invocation=%s declared=%s disabled=%s executed=%s passed=%s failed=%s errors=%s skipped=%s mandatory=%s permitted_skips=%s\n' \
+        "$label" "$declared" "$disabled" "$executed" "$passed" "$failures" "$errors" \
+        "$skipped" "${mandatory:-0}" "${permit_skip:-none}" >>"$accounting_log"
 }
 
 # ------------------------------------------------------------------------------------
-# CHECK 3 OF THE THREE: the selected-path line, in THIS invocation's own log.
+# CHECK 3 OF FOUR: the selected-path line, in THIS invocation's own log.
 #
 # WHY THIS CHECK IS NOT OPTIONAL AND CANNOT BE INFERRED.  An invocation that was supposed to
 # resolve the AIDL back-end and quietly resolved the legacy one instead is GREEN in every
@@ -3196,7 +4582,7 @@ $survivors
 }
 
 # ------------------------------------------------------------------------------------
-# Run ONE invocation of the matrix and hold it to all three checks.
+# Run ONE invocation of the matrix and hold it to all four checks.
 #
 # ARTIFACTS ARE PER-INVOCATION AND A LATER ONE CANNOT OVERWRITE AN EARLIER ONE.  This used to
 # be a single hard-coded run_L1Tests.log and a single rdkL1TestResults.json, which under a
@@ -3216,9 +4602,9 @@ $survivors
 # before the process starts, and then the assertion that the intended back-end actually
 # resolved -- which is the only check that can catch a mis-ordering after the fact.
 # ------------------------------------------------------------------------------------
-run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=exclude $7=synopsis
+run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=exclude $7=synopsis $8=permitted skips
     local label="$1" tier="$2" mode="$3" back_end="$4"
-    local select_filter="$5" exclude_filter="$6" synopsis="$7"
+    local select_filter="$5" exclude_filter="$6" synopsis="$7" permit_skip="${8:-}"
     local binary_rel binary_name binary_dir fixture_pattern
 
     case "$tier" in
@@ -3239,6 +4625,14 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     local run_log="$OUTPUT_DIR/run_invocation_${label}.log"
     local results_json="$OUTPUT_DIR/rdkTestResults_invocation_${label}.json"
     local ld_path="${LD_LIBRARY_PATH:-}"
+
+    # Custody first, because the next two statements REMOVE a file and then have the suite
+    # write two more.  A removal is the most destructive thing this function does, and the
+    # directory it removes from is re-proved to be the one this run resolved and locked before
+    # the unlink rather than after it.  Both artifact paths are checked, since either could
+    # have acquired a symlink since the run started.
+    assert_output_dir_still_safe "$results_json"
+    assert_output_dir_still_safe "$run_log"
 
     # Deleted BEFORE the binary starts, so a results file that exists afterwards can only
     # have been written by this invocation.  Without this, a binary that produced nothing would
@@ -3265,6 +4659,37 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     fi
     : "${registered:=0}" "${selected:=0}" "${excluded:=0}"
 
+    # THE MANDATORY COUNT IS MEASURED, NEVER WRITTEN DOWN.  It is this invocation's selection
+    # with its permitted-skip set subtracted, obtained from the binary by a fourth listing so
+    # that adding a case to a fixture changes it automatically.  A hard-coded 9 and 7 would have
+    # to be edited by whoever next adds an L2 case, and the one thing worse than no contract is
+    # a contract that silently stops matching the suite.
+    #
+    # THE COMPOSITION IS GUARDED.  gtest filter syntax is `positive-negative` with at most ONE
+    # '-', so appending a negative clause to a select filter that already carries one would
+    # produce a filter that means something else entirely -- and it would still parse, still
+    # exit 0, and still yield a plausible number.  Every invocation that permits skips has a
+    # purely positive select filter today; if that ever changes this refuses rather than guesses.
+    local mandatory="$selected"
+    if [ -n "$permit_skip" ]; then
+        case "$select_filter" in
+            *-*) die "internal error: invocation $label permits skips in [$permit_skip] but its
+       select filter already carries a negative clause:
+           $select_filter
+       gtest filters allow one '-' only, so the mandatory set cannot be derived by appending
+       another.  Express this invocation's mandatory set as its own positive filter instead." ;;
+        esac
+        mandatory="$(registered_test_count "$binary_dir" "$binary_name" "$ld_path" \
+                        "${select_filter}-${permit_skip}")"
+        : "${mandatory:=0}"
+        [ "$mandatory" -gt 0 ] || die "invocation $label derives a mandatory set of $mandatory case(s)
+       from filter [${select_filter}-${permit_skip}].
+       An invocation with nothing mandatory can pass while skipping everything it exists to
+       prove, which is precisely the shape this contract exists to reject.  Either the permitted
+       set in INVOCATION_MATRIX now covers the whole selection, or the fixtures it names have
+       been renamed."
+    fi
+
     rule
     log "INVOCATION $label -- $synopsis"
     log "  runner            : $binary_rel"
@@ -3272,6 +4697,7 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     log "  expected back-end : $back_end"
     log "  filter            : ${select_filter:-<none: the whole registered inventory>}"
     log "  expected cases    : $selected selected, $excluded excluded, $registered registered"
+    log "  mandatory passes  : $mandatory of $selected; skips permitted only in ${permit_skip:-<nothing>}"
     log "  results JSON      : $results_json"
     log "  log               : $run_log"
     log "  time limit        : ${SUITE_TIMEOUT}s (SUITE_TIMEOUT)"
@@ -3355,9 +4781,34 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # NOTHING HERE STARTS A BINDER THREADPOOL.  The client-side pool is DriverAidlImpl::open()'s
     # to start, during init; the host starts its own service-side pool.  A third one from the
     # harness or from here would duplicate an ownership the production back-end already holds.
+    # ------------------------------------------------------------------------------------
+    # THE LAUNCH IS UNINTERRUPTIBLE UNTIL THE GROUP IS REGISTERED, and the child undoes the
+    # mask before it execs.  Both halves are necessary and each is useless without the other.
+    #
+    # THE WINDOW.  `( … ) &` and `SUITE_PGID=$!` are two commands, and bash runs a pending trap
+    # BETWEEN commands.  A SIGINT arriving in that gap therefore reached on_signal with
+    # SUITE_PGID still empty, so stop_suite_group returned immediately and the suite -- and, on
+    # invocation E, the fake service host forked into its group -- was left running while this
+    # script exited.  The orphan then held the global "HdmiCec" binder service name, which is
+    # not a name a second run can work around: it is fixed in production code by
+    # IHdmiCec::serviceName(), so one leak makes every later AIDL invocation on the host resolve
+    # against a stale process.  Masking INT/TERM/HUP across the launch and the registration
+    # closes the window; the signal is discarded rather than deferred, which across two commands
+    # is the smaller loss.
+    #
+    # WHY THE CHILD RESETS THEM.  Measured on this host: a subshell forked while the parent has
+    # `trap '' INT TERM HUP` in force inherits those signals as SIG_IGN (/proc/self/status
+    # SigIgn=0x4003 = HUP|INT|TERM), and an exec'd binary keeps that mask -- so `timeout` and the
+    # test binary would IGNORE the SIGTERM stop_suite_group sends, and the group could then only
+    # be removed with SIGKILL.  A `trap - INT TERM HUP` as the child's first statement restores
+    # the default disposition (measured SigIgn=0x0, and the child then dies on TERM); bash's rule
+    # that signals ignored ON SHELL ENTRY cannot be reset does not apply to a signal the script
+    # itself set to ignore.  So the mask protects the registration and nothing else.
     local rc=0
+    trap '' INT TERM HUP
     set -m
     (
+        trap - INT TERM HUP
         cd "$binary_dir"
         CEC_TEST_AIDL_MODE="$mode" \
         CEC_FAKE_AIDL_HOST_PATH="$HDMICEC_ROOT/$FAKE_HOST_BINARY_REL" \
@@ -3369,6 +4820,9 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     ) >"$run_log" 2>&1 &
     SUITE_PGID=$!
     set +m
+    trap 'on_signal INT 130' INT
+    trap 'on_signal TERM 143' TERM
+    trap 'on_signal HUP 129' HUP
     # `|| rc=$?` rather than a set +e / set -e pair: toggling errexit inside a function that may
     # itself have been invoked in a `||` or `if !` context re-arms it where the caller had
     # deliberately suppressed it.  A trapped signal interrupts the wait either way, which is the
@@ -3379,15 +4833,43 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # invocation has its host signalled along with the runner by stop_suite_group, which
     # addresses the group BY ID.  That matters: a pattern-based kill would match anything merely
     # mentioning the binary's name, up to and including the harness that started this script.
+    #
+    # THE REGISTRATION SURVIVES THE WAIT, and that is the whole of the second half of the fix.
+    # It used to be cleared on the line after this one -- before the exit-status check, before
+    # the case-count check and before the selected-path check, all three of which are FATAL.  A
+    # `die` from any of them therefore ran on_exit with SUITE_PGID already empty, so
+    # stop_suite_group had nothing to address and every surviving member of the group was
+    # orphaned by the very failure that was supposed to end the run.  On invocation E that
+    # member is the fake service host.  It is cleared instead by finish_suite_group, once the
+    # invocation is fully accounted for, so every path out of the three checks below -- pass,
+    # die, timeout and signal -- goes through a terminate-reap-verify.
     wait "$SUITE_PGID" || rc=$?
-    SUITE_PGID=''
+
+    # STAMP THE GENERATION INTO THE LOG, and do it here rather than as a header.  The redirect
+    # above TRUNCATES this file, so anything written before the suite starts is destroyed by the
+    # suite's own first byte; and it is written before the three fatal checks below, so a log
+    # from a FAILED invocation carries the stamp too -- which is the log a reader is most likely
+    # to be holding beside one from another run.  The GoogleTest JSON cannot carry this, because
+    # the test binary writes it; run_status.txt is what ties the JSONs to a generation.
+    printf '###RUNID invocation=%s run_id=%s runner_pid=%s\n' "$label" "$RUN_ID" "$$" >>"$run_log"
 
     # The tail is the part a reader needs; the whole log is on disk either way.
     "$AWK_BIN" '/^\[==========\]|^\[  PASSED  \]|^\[  FAILED  \]|^\[  SKIPPED \]|tests? from .* ran/' "$run_log" \
         | sed 's/^/[run_coverage]   /' || true
 
     # ------------------------------------------------------------------------------------
-    # CHECK 1 OF THE THREE: the exit status.
+    # CHECK 1 OF FOUR: the exit status.
+    #
+    # WHAT `timeout` DOES AND DOES NOT BOUND HERE.  The bound is on the process `timeout`
+    # exec'd -- the test binary -- and on nothing else.  `--foreground` is passed so the binary
+    # keeps this run's terminal and stays in the group this shell registered, and the measured
+    # consequence on the uutils `timeout` this host provides (0.2.2, not GNU) is that a timeout
+    # signals THAT process only: a descendant the binary forked, which on an L2 invocation is
+    # the fake service host, is not signalled and does not stop.  So the 124/137 status below is
+    # a report that the runner was cut short, never evidence that everything it started is gone.
+    # WHAT ACTUALLY STOPS THE DESCENDANTS is the process-group signal -- stop_suite_group,
+    # reached from on_exit because the `die` here leaves SUITE_PGID registered -- which
+    # addresses the whole group by id and then verifies it is extinct.
     # ------------------------------------------------------------------------------------
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
         printf '%s\n' "--- last 30 lines ---" >&2
@@ -3414,13 +4896,55 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     log "invocation $label exited 0"
 
     # ------------------------------------------------------------------------------------
-    # CHECKS 2 AND 3.  Both are FATAL, and both run before the next invocation starts.
+    # CHECKS 2 AND 3.  Both are FATAL, and both run before the next invocation starts, as
+    # does check 4 below.
     # ------------------------------------------------------------------------------------
-    verify_results "$results_json" "$ld_path" "$label" "$fixture_pattern" \
-                   "$selected" "$registered" "$excluded"
+    verify_results "$results_json" "$label" "$fixture_pattern" \
+                   "$selected" "$registered" "$excluded" \
+                   "$permit_skip" "$mandatory" "$run_log"
     assert_selected_back_end "$run_log" "$back_end" "$label"
 
-    log "invocation $label PASSED all three checks (exit status, case count, selected back-end)"
+    # ------------------------------------------------------------------------------------
+    # CHECK 4 OF FOUR: NOTHING THIS INVOCATION STARTED IS STILL RUNNING.
+    #
+    # THE INVOCATION IS ONLY NOW FULLY ACCOUNTED FOR, so and only so is the process group
+    # released.  Every fatal path above left SUITE_PGID registered on purpose, which is what
+    # lets on_exit's stop_suite_group reach the group instead of finding nothing to reach.
+    #
+    # AND THE RESULT IS GATED, which is the whole of this check.  finish_suite_group used to be
+    # called for its side effect and its status thrown away, so an invocation that passed its
+    # three checks while leaking a live descendant was recorded as a pass and the matrix went on
+    # to the next letter.  On an L2 invocation that descendant is the fake service host, holding
+    # the "HdmiCec" name that IHdmiCec::serviceName() fixes in production code -- so the NEXT
+    # invocation resolves against a process from this one and reports a selection that is not
+    # the one under test.  A leaked descendant therefore fails the invocation it belongs to,
+    # here, before any later invocation can inherit it.
+    #
+    # `die` rather than a status carried onwards, because that is what checks 1 to 3 above do and
+    # this script keeps ONE verdict and one exit status: the matrix stops at the first failing
+    # invocation, nothing is captured, and apply_gate is never reached.  Every artifact written
+    # so far survives for diagnosis.
+    # ------------------------------------------------------------------------------------
+    local close_rc=0
+    finish_suite_group "$label" || close_rc=$?
+    if [ "$close_rc" -eq 2 ]; then
+        die "invocation $label passed its three checks but LEFT A PROCESS RUNNING that could not
+       be killed, in the process group named above.  Coverage is not captured and no later
+       invocation is run: on this host that process still holds whatever it registered -- the
+       fixed \"HdmiCec\" service name, on an L2 invocation -- so every later AIDL invocation
+       would resolve against it and report a selection that is not the one under test.
+       Kill it by hand before re-running.  Full log: $run_log"
+    elif [ "$close_rc" -ne 0 ]; then
+        die "invocation $label passed its three checks but LEAKED A DESCENDANT PROCESS, which
+       this script has now terminated (see the group id above).  The invocation is failed
+       deliberately rather than reported clean: its results were produced with a process alive
+       that the harness's own teardown is supposed to have reaped, so the harness -- not this
+       script -- has the defect, and the next invocation must not be run on the strength of
+       evidence gathered in that state.  Full log: $run_log"
+    fi
+
+    log "invocation $label PASSED all four checks (exit status, case count, selected back-end,"
+    log "  and an empty process group at close-out)"
 }
 
 # ------------------------------------------------------------------------------------
@@ -3461,9 +4985,9 @@ run_invocation_matrix() {
         log "     needs none of those and has already been verified by the build."
     fi
 
-    local record label tier mode back_end select_filter exclude_filter synopsis
+    local record label tier mode back_end select_filter exclude_filter synopsis permit_skip
     for record in "${INVOCATION_MATRIX[@]}"; do
-        IFS='|' read -r label tier mode back_end select_filter exclude_filter synopsis <<< "$record"
+        IFS='|' read -r label tier mode back_end select_filter exclude_filter synopsis permit_skip <<< "$record"
 
         if [ "$binder_available" -eq 0 ] && invocation_needs_binder "$label"; then
             rule
@@ -3478,7 +5002,7 @@ run_invocation_matrix() {
         fi
 
         run_one_invocation "$label" "$tier" "$mode" "$back_end" \
-                           "$select_filter" "$exclude_filter" "$synopsis"
+                           "$select_filter" "$exclude_filter" "$synopsis" "$permit_skip"
         INVOCATIONS_RUN="${INVOCATIONS_RUN}${INVOCATIONS_RUN:+, }$label"
     done
 
@@ -3513,6 +5037,376 @@ HTML_DIR=''
 PER_FILE_TSV=''
 UNCOVERED_TXT=''
 
+# ------------------------------------------------------------------------------------
+# ONE GENERATION PER DIRECTORY -- THE RUN IDENTITY, THE PURGE AND THE STATUS MARKER.
+#
+# THE DEFECT THIS CLOSES.  Every artifact name above is FIXED, which clause 5 of the governing
+# contract requires and which this design keeps: fixed names are what make a local run's bundle
+# interchangeable with CI's.  But fixed names have a consequence that was not handled.  Point an
+# explicit --output-dir at a directory a previous run already wrote, and every artifact that
+# THIS run happens not to produce is left standing from the previous one -- with a modification
+# time, a plausible name and no way for a reader to tell it apart from this run's output.
+#
+# The worst case is precisely the case this host produces.  Invocations B, C and E DEFER here,
+# and they defer BEFORE run_one_invocation writes anything, so rdkTestResults_invocation_B.json
+# and run_invocation_B.log are never created.  A directory that once held a full binder-capable
+# A-E bundle would therefore present a complete five-invocation result set of which two
+# invocations never ran in this generation -- and the per-invocation JSON is the artifact the
+# mandatory-pass contract's evidence is read from.  That is a false green with a file to point
+# at, which is worse than no evidence at all.
+#
+# WHY A PURGE AND NOT A PRIVATE STAGING DIRECTORY.  Staging one complete generation and
+# publishing it by rename is the other correct answer, and it is what generate_html already does
+# for the HTML tree.  It is the wrong answer for the directory as a whole: RAW_TRACE and the five
+# other artifact paths are declared `readonly` the moment prepare_output_dir resolves them, on
+# purpose, so that nothing downstream can re-point a destination mid-run.  Staging would mean
+# making all six mutable and rewriting every consumer to compose paths at use time -- a change
+# whose blast radius is every write in the file, to fix a problem that removing a known,
+# enumerated file set solves completely.  The purge also degrades better: an interrupted purge
+# has removed some of a stale generation, which is strictly safer than leaving all of it.
+#
+# WHAT IS REMOVED, AND WHAT IS DELIBERATELY NOT.  The set below is the complete list of fixed
+# names any code path in this file writes below OUTPUT_DIR, enumerated by name.  It is NOT an
+# `rm -rf "$OUTPUT_DIR"`: the caller may legitimately have named a directory that holds other
+# things (a CI job's shared artifact root, for instance), and recursively deleting a
+# caller-supplied path is how a runner destroys something it was never asked to touch.
+#
+#   .run.lock       is EXCLUDED, and must stay excluded.  This run holds an open descriptor and
+#                   an flock on it; removing it would unlink the inode a second contender is
+#                   about to create afresh, splitting two runs across two inodes -- the exact
+#                   failure mode acquire_tree_lock's identity checks exist to prevent, recreated
+#                   here by a cleanup.
+#   run_status.txt  is REPLACED FIRST, ATOMICALLY, AND WITH THIS RUN'S OWN MARKER -- and the
+#                   reasoning that once made it an exclusion is kept here because it was half
+#                   right and the half that was wrong is the F30 defect.  Right: there must be
+#                   no window in which the directory holds artifacts and no marker saying which
+#                   run they belong to, so removing it and writing a new one later is not
+#                   acceptable.  WRONG: "rewritten" was treated as something the run would get
+#                   round to.  The rewrite was optional (write_run_status warned and returned 0
+#                   on every failure) and it happened AFTER the purge, so a directory whose
+#                   marker leaf could not be replaced kept the PREVIOUS generation's
+#                   COMPLETE-PASS while this run removed the rest of that generation and wrote
+#                   its own artifacts beside it.  A current artifact set under a prior run's
+#                   acceptance verdict is the worst outcome available here, and it was reachable
+#                   with no warning a reader would see in the bundle.
+#                   So it is now the FIRST thing the purge touches, replaced by rename with a
+#                   marker naming THIS run id, before any other artifact of the previous
+#                   generation is removed; a leaf that cannot be rewritten is removed instead;
+#                   and a leaf that can be neither rewritten nor removed ENDS THE RUN.  There is
+#                   no path from here on which another generation's verdict outlives the purge.
+#   .run_status.txt.tmp is in the purge list below and is removed like any other artifact: it is
+#                   this mechanism's own temp leaf, and a stale one is content from another run.
+#
+# THE RUN ID DOES NOT GO INTO ANY FILENAME.  Clause 5 forbids a timestamp in an artifact name,
+# and a run id in a name would break the interchangeability the fixed names buy.  It goes into
+# the CONTENT: the status marker, the provenance artifact and the header of every per-invocation
+# log.  The one artifact that cannot carry it is the GoogleTest JSON, which the test binary
+# writes and this script only reads -- which is itself a reason the marker enumerates, per
+# invocation, which JSONs belong to this generation.
+# ------------------------------------------------------------------------------------
+RUN_ID=''
+RUN_STATUS_TXT=''
+
+# Every fixed name written below OUTPUT_DIR by any path in this file.  Kept in one place so that
+# adding an artifact and forgetting to purge it is a single-line omission a reader can spot,
+# rather than a name that exists in one function and in nobody's cleanup.
+readonly PURGEABLE_ARTIFACT_FILES=(
+    'coverage.info'
+    'filtered_coverage.info'
+    'line_gate_coverage.info'
+    'per_file_coverage.tsv'
+    'uncovered_lines.txt'
+    'provenance.txt'
+    'build.log'
+    'capture.log'
+    'filter.log'
+    'filter_dependencies.log'
+    'genhtml.log'
+    '.per_file_coverage.tsv.tmp'
+    '.uncovered_lines.txt.tmp'
+    '.run_status.txt.tmp'
+)
+readonly PURGEABLE_ARTIFACT_DIRS=(
+    'coverage'
+)
+# Per-invocation artifacts, one pair per letter in the matrix.  Spelled from the letters rather
+# than from the matrix array so that this list is complete even when a filter or a deferral means
+# the matrix is never walked.
+readonly PURGEABLE_INVOCATION_LETTERS='A B C D E'
+
+# ------------------------------------------------------------------------------------
+# Mint the run identity.  Readable, unique per run, and cheap: a UTC timestamp for a human
+# reading two artifacts side by side, and the pid so that two runs started inside the same
+# second are still distinguishable.  Not used to name anything -- see above.
+# ------------------------------------------------------------------------------------
+mint_run_id() {
+    local stamp
+    stamp="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null)" || stamp=''
+    [ -n "$stamp" ] || stamp='time-unavailable'
+    RUN_ID="${stamp}-pid${$}"
+    readonly RUN_ID
+}
+
+# ------------------------------------------------------------------------------------
+# STEP ZERO OF THE PURGE: TAKE THE MARKER AWAY FROM THE PREVIOUS GENERATION, ATOMICALLY, AND
+# BEFORE ANYTHING ELSE IS TOUCHED.
+#
+# The marker is the one artifact whose staleness is dangerous rather than merely confusing: it is
+# the authoritative statement of a run's verdict, and every other artifact in the directory is
+# read in its light.  So it is the first thing the purge deals with, and it is dealt with by
+# RENAME rather than by remove-then-write-later: a rename replaces the old marker with a marker
+# naming THIS run in one step, so there is no instant at which the directory holds a previous
+# generation's artifacts and no marker, and none at which it holds them under a stale verdict.
+#
+# THE ORDER OF PREFERENCE IS DELIBERATE.
+#   1. Replace it with this run's PURGING marker.  A reader arriving mid-purge sees this run id
+#      and a phase that says the directory is mid-takeover, which is the truth.
+#   2. If it cannot be replaced -- an immutable leaf, an ACL, an I/O failure -- REMOVE it.  A
+#      directory with artifacts and no marker is unattributable, which is strictly safer than
+#      one whose marker asserts another run's COMPLETE-PASS over this run's files.
+#   3. If it can be neither replaced nor removed, END THE RUN.  Measured on this host: `chattr
+#      +i` on the leaf makes both `mv` onto it and `rm -f` of it fail with EPERM, so this arm is
+#      reachable and is not theoretical.  Dying here is what makes the guarantee absolute: the
+#      run stops before it has removed one previous-generation artifact and before it has written
+#      one of its own, so the directory is left exactly as it was found, wholly the previous
+#      generation's, with nothing of this run's mixed into it.
+#
+# A NON-REGULAR OBJECT AT THE MARKER NAME CANNOT REACH THIS FUNCTION: prepare_output_dir runs
+# assert_safe_artifact_path "$RUN_STATUS_TXT" file first, which dies on a symlink, a directory or
+# anything else that is not a regular file.  The `-L`/`-f` tests below are therefore a
+# re-assertion at the moment of use, in the posture every custody path in this script has, and
+# the reason the fallback needs only `rm -f`.
+# ------------------------------------------------------------------------------------
+invalidate_previous_run_status() {
+    [ -n "$RUN_STATUS_TXT" ] || return 0
+    # -e is false for a dangling symlink, so test both.
+    if [ ! -e "$RUN_STATUS_TXT" ] && [ ! -L "$RUN_STATUS_TXT" ]; then
+        return 0          # no marker to take away; the required IN-PROGRESS write puts ours in
+    fi
+    assert_output_dir_still_safe "$RUN_STATUS_TXT"
+
+    if [ ! -L "$RUN_STATUS_TXT" ] && [ -f "$RUN_STATUS_TXT" ] && write_run_status 'PURGING' \
+        "this run has taken the directory over; the previous generation is being removed"; then
+        log "the status marker in $OUTPUT_DIR now names this run (id $RUN_ID); the previous"
+        log "  generation's verdict has been superseded before any of its artifacts were touched"
+        return 0
+    fi
+
+    warn "the status marker at $RUN_STATUS_TXT could not be replaced by this run's."
+    warn "  Removing it instead: a directory whose artifacts have no marker is unattributable,"
+    warn "  which is safe, whereas one carrying another run's verdict over this run's files is"
+    warn "  a false green with a file to point at."
+    rm -f -- "$RUN_STATUS_TXT" || die "the previous run's status marker can be neither replaced
+       nor removed: $RUN_STATUS_TXT
+       Check for an immutable bit (lsattr), an ACL, or a read-only filesystem.  This run has
+       stopped BEFORE removing any artifact of the previous generation and before writing any of
+       its own, so that directory is still wholly the previous run's and nothing in it is a
+       mixture.  Clear the obstruction, or point --output-dir/COVERAGE_OUTPUT_DIR at a directory
+       whose marker this run can own: continuing would mean writing this run's artifacts under
+       another run's recorded verdict, which is the one thing this mechanism exists to prevent."
+    log "the previous run's status marker was removed; this run's IN-PROGRESS marker follows"
+    return 0
+}
+
+# ------------------------------------------------------------------------------------
+# Remove every artifact a previous generation could have left in this directory.
+#
+# Called with the tree lock AND the output lock held, and with OUTPUT_DIR_IDENTITY already
+# recorded, so the directory being emptied is provably the one this run validated.  Every removal
+# re-checks custody first, because "the directory was safe when the run started" is a statement
+# about the past and a removal happens now.
+# ------------------------------------------------------------------------------------
+purge_previous_generation() {
+    local name path removed=0 letter
+
+    # FIRST, AND BEFORE ANY REMOVAL.  See the function above: the marker is the artifact whose
+    # staleness turns the rest of the bundle into a false green, so this run owns it before it
+    # begins removing anything the previous generation left.
+    invalidate_previous_run_status
+
+    for name in "${PURGEABLE_ARTIFACT_FILES[@]}"; do
+        path="$OUTPUT_DIR/$name"
+        # -e is false for a dangling symlink, so test both: a stale symlink at an artifact name
+        # is exactly the object that must not survive into this generation.
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            assert_output_dir_still_safe "$path"
+            rm -f -- "$path" || die "could not remove the previous generation's $name from
+       $OUTPUT_DIR
+       This run cannot continue: leaving it would put an artifact from another run beside this
+       run's own, under the same name the reader expects to be current."
+            removed=$((removed + 1))
+        fi
+    done
+
+    for letter in $PURGEABLE_INVOCATION_LETTERS; do
+        for name in "rdkTestResults_invocation_${letter}.json" "run_invocation_${letter}.log"; do
+            path="$OUTPUT_DIR/$name"
+            if [ -e "$path" ] || [ -L "$path" ]; then
+                assert_output_dir_still_safe "$path"
+                rm -f -- "$path" || die "could not remove the previous generation's $name from
+       $OUTPUT_DIR
+       An invocation that DEFERS in this run never writes its own results file, so a stale one
+       left here would be read as this run's evidence for an invocation that did not happen."
+                removed=$((removed + 1))
+            fi
+        done
+    done
+
+    for name in "${PURGEABLE_ARTIFACT_DIRS[@]}"; do
+        path="$OUTPUT_DIR/$name"
+        if [ -L "$path" ]; then
+            assert_output_dir_still_safe "$path"
+            rm -f -- "$path" || die "could not remove a symlink at the artifact path $path"
+            removed=$((removed + 1))
+        elif [ -d "$path" ]; then
+            assert_output_dir_still_safe "$path"
+            # Recursive, but ONLY over a name from the fixed list above and only after custody
+            # has just been re-verified -- never over the caller's directory itself.
+            rm -rf -- "$path" || die "could not remove the previous generation's $name/ from
+       $OUTPUT_DIR
+       A partially overwritten HTML report shows pages from two different traces."
+            removed=$((removed + 1))
+        fi
+    done
+
+    # Any leftover HTML staging directory from a run that was killed between mktemp and its
+    # own cleanup.  Matched by the fixed prefix, so nothing outside this script's own naming
+    # can be caught by it; the glob is evaluated with nullglob-equivalent care below.
+    local stage
+    for stage in "$OUTPUT_DIR"/.genhtml-stage.*; do
+        [ -e "$stage" ] || continue          # no match: the glob came back literal
+        assert_output_dir_still_safe "$stage"
+        rm -rf -- "$stage" || die "could not remove an abandoned HTML staging directory: $stage"
+        removed=$((removed + 1))
+    done
+
+    if [ "$removed" -gt 0 ]; then
+        log "removed $removed artifact object(s) left by a previous run in $OUTPUT_DIR"
+        log "  this directory now holds exactly one generation: run id $RUN_ID"
+    else
+        log "no artifacts from a previous run were present; run id $RUN_ID"
+    fi
+}
+
+# ------------------------------------------------------------------------------------
+# The authoritative status marker.
+#
+# Written three times at most and always by rename, so it is never half a file and never another
+# run's: PURGING as this run takes a reused directory over (invalidate_previous_run_status),
+# IN-PROGRESS the moment the directory is prepared, and the run's real outcome from the EXIT trap.
+# A reader that finds artifacts and a marker saying IN-PROGRESS knows the run was killed; one that
+# finds a marker naming a different run id than the one they expected knows the bundle is not
+# theirs.  A reader is the one party who cannot be asked to retry.
+#
+# TOLERANT OF BEING CALLED TOO EARLY, AND ONLY OF THAT.  The EXIT trap runs for every exit,
+# including a die inside require_tools before an output directory exists.  With no directory
+# there is nothing to mark and nothing to mislead, so that one case returns 0 quietly.
+#
+# EVERY OTHER FAILURE RETURNS NON-ZERO, WHICH IS THE WHOLE OF THE F30 FIX.  This function used
+# to warn and return 0 for all three of its failures -- a refused custody check, a temp file it
+# could not write, and a rename it could not complete -- so the marker was advisory in exactly
+# the situations it exists for.  Combined with a purge that spared the marker, a reused
+# directory whose marker leaf could not be replaced (a path-specific immutable bit, an ACL, an
+# I/O error) kept the PREVIOUS run's COMPLETE-PASS verdict while this run removed the rest of
+# that generation and wrote its own artifacts beside it, and could still exit 0.  That is the
+# mixed-generation false green in its purest form: a current artifact set under a prior run's
+# acceptance verdict.
+#
+# The status is what the callers act on, each differently and each documented at its call site:
+# purge_previous_generation falls back to removing the leaf, prepare_output_dir dies, and
+# on_exit turns a clean run non-zero while leaving the cancellation status of a cancelled one
+# alone.  Nothing here decides the run's fate; it only reports honestly whether the marker on
+# disk is this run's.
+#
+#   0 -- the marker on disk now names this run and this phase, or there is no directory to mark.
+#   1 -- the marker on disk is NOT this run's.  Whatever stands at that path is either the
+#        previous generation's or nothing at all.
+# ------------------------------------------------------------------------------------
+write_run_status() { # $1=phase word  $2=one-line detail
+    local phase="$1" detail="$2" tmp letter
+    [ -n "$RUN_STATUS_TXT" ] || return 0
+    [ -n "$OUTPUT_DIR" ] && [ -d "$OUTPUT_DIR" ] || return 0
+
+    # A failure here must not mask the run's own outcome, so custody is CHECKED and a refusal
+    # warns rather than dies -- this is the last thing a cancelled run does -- but it is
+    # REPORTED, because a marker that was not written is not a marker.
+    if ! ( assert_output_dir_still_safe "$RUN_STATUS_TXT" ) >/dev/null 2>&1; then
+        warn "not writing the run status marker: the output directory no longer passes its"
+        warn "  custody check ($OUTPUT_DIR).  Nothing was written."
+        return 1
+    fi
+
+    # THE DESTINATION MUST BE A REGULAR FILE OR ABSENT, and this check is not defensive
+    # boilerplate.  Measured on this host: `mv -f -- <tmp> <path>` where <path> is a DIRECTORY
+    # moves the temp file INSIDE it and exits 0.  Without this refusal a directory at the marker
+    # name -- planted, or left by an interrupted tool -- would make the publish below report
+    # success while nothing was published under the name a reader looks at, which is the one
+    # failure mode this whole mechanism must not have.  A symlink is already refused by the
+    # custody check above; anything else non-regular is refused here.
+    if [ -e "$RUN_STATUS_TXT" ] && [ ! -f "$RUN_STATUS_TXT" ]; then
+        warn "not writing the run status marker: $RUN_STATUS_TXT exists and is not a regular"
+        warn "  file, so it cannot be replaced by rename.  Remove it, or choose another"
+        warn "  --output-dir; this run's marker cannot be published while it stands there."
+        return 1
+    fi
+
+    tmp="$OUTPUT_DIR/.run_status.txt.tmp"
+    {
+        printf 'HDMI-CEC middleware L1 coverage -- AUTHORITATIVE RUN STATUS\n'
+        printf '==========================================================\n\n'
+        printf 'Run id           : %s\n' "$RUN_ID"
+        printf 'Phase            : %s\n' "$phase"
+        printf 'Detail           : %s\n' "$detail"
+        printf 'Written (UTC)    : %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf 'unavailable')"
+        printf 'Runner pid       : %s\n' "$$"
+        printf 'Output directory : %s\n' "$OUTPUT_DIR"
+        printf '\nWHAT THIS RUN ASKED FOR\n'
+        printf '  --build          : %s\n' "$( [ "$DO_BUILD" -eq 1 ] && printf yes || printf no )"
+        printf '  --run            : %s\n' "$( [ "$DO_RUN" -eq 1 ] && printf yes || printf no )"
+        printf '  line bar         : %s%%  (per-file gating: %s)\n' \
+            "$COVERAGE_MIN" "$( [ "$COVERAGE_PER_FILE_GATE" -eq 1 ] && printf on || printf off )"
+        printf '\nINVOCATIONS\n'
+        printf '  ran              : %s\n' "${INVOCATIONS_RUN:-none}"
+        printf '  deferred         : %s\n' "${INVOCATIONS_DEFERRED:-none}"
+        printf '\nPER-INVOCATION ARTIFACTS BELONGING TO THIS GENERATION\n'
+        printf '%s\n' "  (the GoogleTest JSON is written by the test binary and cannot carry the run"
+        printf '%s\n' "   id, so this list is what says which of those files are this run's)"
+        # THE PURGING PHASE MUST NOT CLAIM AN INVENTORY, and this is not a cosmetic distinction.
+        # This marker is written by invalidate_previous_run_status, which runs BEFORE the previous
+        # generation's per-invocation files are removed -- so every one of them is still on disk
+        # at this instant.  Listing them under a heading that says "belonging to this generation"
+        # would put the previous run's results files into this run's inventory, which is the
+        # mislabelling the whole mechanism exists to prevent, introduced by the fix for it.
+        if [ "$phase" = 'PURGING' ]; then
+            printf '%s\n' "  none yet: this run has taken the directory over and is still removing the"
+            printf '%s\n' "  previous generation.  Any per-invocation file present at this moment belongs"
+            printf '%s\n' "  to THAT generation and is about to be removed, so none is listed here."
+        else
+            for letter in $PURGEABLE_INVOCATION_LETTERS; do
+                if [ -f "$OUTPUT_DIR/rdkTestResults_invocation_${letter}.json" ]; then
+                    printf '  %s : rdkTestResults_invocation_%s.json, run_invocation_%s.log\n' \
+                        "$letter" "$letter" "$letter"
+                else
+                    printf '  %s : no results file -- this invocation did not run in this generation\n' "$letter"
+                fi
+            done
+        fi
+        printf '\nHOW TO READ THIS\n'
+        printf '  Phase IN-PROGRESS means the run did not reach its own end: it was cancelled or\n'
+        printf '  killed, and every artifact beside this marker is from an incomplete run.\n'
+        printf '%s\n' "  Phase PURGING means it did not get past taking the directory over: this run"
+        printf '  claimed the marker and then stopped, so whatever else is here is a mixture of\n'
+        printf '  what the previous run left and nothing of this one.  Treat none of it as evidence.\n'
+        printf '%s\n' "  A run id that is not the one you started is somebody else's bundle: the fixed"
+        printf '  artifact names are shared by every run that writes this directory, and this\n'
+        printf '  marker is the only thing that says which run they came from.\n'
+    } >"$tmp" || { warn "could not write the run status marker to $tmp"; rm -f -- "$tmp" 2>/dev/null || true; return 1; }
+
+    mv -f -- "$tmp" "$RUN_STATUS_TXT" \
+        || { warn "could not publish the run status marker to $RUN_STATUS_TXT"; rm -f -- "$tmp"; return 1; }
+    return 0
+}
+
 assert_safe_artifact_path() { # $1=path  $2=file|dir
     local path="$1" kind="$2"
     [ ! -L "$path" ] || die "refusing to write through a symlink: $path
@@ -3529,7 +5423,8 @@ assert_safe_artifact_path() { # $1=path  $2=file|dir
 }
 
 # ------------------------------------------------------------------------------------
-# EVIDENCE CUSTODY.  The default output directory is under $TMPDIR, and its name is
+# EVIDENCE CUSTODY.  The default output directory is under the parent
+# select_safe_temp_parent chose, and its name is
 # derivable from the workspace path -- so on a shared host any local user can work out
 # where the next run will write and pre-create it, or plant files in it, BEFORE this run
 # starts.  Everything downstream then treats what it finds there as this run's evidence:
@@ -3613,20 +5508,48 @@ assert_ancestors_safe() { # $1=path -- walks upwards from the parent to /
 # anything else in the run wanted it, releasing the lock without a word.  `{LOCK_FD}>>` asks bash
 # for a free descriptor (>= 10) and records which one it got; it stays open, and the lock stays
 # held, until this shell exits.
+#
+# SECOND LOCK, DIFFERENT RESOURCE, SAME FAIL-CLOSED RULE.  The tree lock excludes two runs
+# operating on this working tree; this one excludes two runs writing the same artifact
+# directory, which is a different pair -- one tree can be measured into two output directories,
+# and one output directory can be targeted from two trees.  Both are needed and neither
+# subsumes the other.
+#
+# Missing flock is FATAL here for the same reason it is fatal there: the alternative was a
+# warning followed by a verdict, and a verdict produced without exclusivity over the files it
+# read is not evidence.  The identity checks are lighter than the tree lock's because
+# OUTPUT_DIR has already been proved to be a directory owned by this user at mode 0700
+# (assert_owned_and_private + restrict_artifact_dir_to_owner), so no other account can create
+# or replace an entry inside it; what remains worth checking is that the name this run opened
+# is the file the descriptor holds.
 LOCK_FD=''
+LOCK_IDENTITY=''
 acquire_output_lock() {
-    local lock="$OUTPUT_DIR/.run.lock"
+    local lock="$OUTPUT_DIR/.run.lock" identity_before identity_open
+
+    [ -n "$FLOCK_BIN" ] || die "flock was not found on PATH, so this run cannot prove it is the
+       only one writing
+       $OUTPUT_DIR
+       Two runs write the same fixed artifact names there, and the gate reads whichever
+       finished last -- which is a verdict about a mixture of two runs.  flock ships with
+       util-linux.  (This used to be a warning that still let the run reach a verdict.)"
+
     [ ! -L "$lock" ] || die "refusing to lock through a symlink: $lock"
     exec {LOCK_FD}>>"$lock" || die "could not open the run lock: $lock"
-    if command -v flock >/dev/null 2>&1; then
-        flock -n "$LOCK_FD" || die "another coverage run holds the lock on $OUTPUT_DIR.
+
+    identity_before="$(path_identity "$lock")"
+    identity_open="$(open_fd_identity "$LOCK_FD")"
+    [ "$identity_open" = "$identity_before" ] || die "the run lock file was replaced between the
+       open and the check: $lock
+       checked $identity_before, descriptor refers to $identity_open (device:inode)."
+
+    "$FLOCK_BIN" -n "$LOCK_FD" || die "another coverage run holds the lock on $OUTPUT_DIR.
        Two runs would write the same artifact names ($(basename -- "$RAW_TRACE"),
        $(basename -- "$FILTERED_TRACE")) and the gate would read whichever finished last.
        Wait for it, or use a different --output-dir."
-        log "holding the exclusive run lock on $OUTPUT_DIR"
-    else
-        warn "flock is not available, so concurrent runs into $OUTPUT_DIR cannot be prevented."
-    fi
+
+    LOCK_IDENTITY="$identity_before"
+    log "holding the exclusive run lock on $OUTPUT_DIR [$identity_before]"
 }
 
 prepare_output_dir() {
@@ -3635,18 +5558,17 @@ prepare_output_dir() {
         # directory and the name in one atomic step, which is the property a pre-creation
         # attack needs and cannot get: there is no window in which the name exists but the
         # directory does not, and nothing to guess beforehand.
-        local parent="${TMPDIR:-/tmp}"
-        case "$parent" in
-            /*) ;;
-            *)  die "TMPDIR must be an absolute path to be checked safely; got: $parent" ;;
-        esac
-        # TMPDIR is caller-controlled too, so it gets the same treatment as --output-dir:
-        # collapsed first, then checked for where it actually lands.  Without this, a TMPDIR
-        # of /tmp/x/../../../etc would put the minted root under /etc by exactly the route
-        # the named branch refuses -- the guard has to cover both ways in or it covers
-        # neither.
-        parent="$(canonicalise_path_lexically "$parent")"
-        assert_artifact_location_plausible "$parent/hdmicec-l1-coverage" "TMPDIR"
+        # THE PARENT IS CHOSEN, NOT DEFAULTED.  select_safe_temp_parent tries TMPDIR, then
+        # XDG_RUNTIME_DIR, then HOME, and holds each to the same rules that guard a named
+        # --output-dir; it collapses the candidate lexically before checking it, so a TMPDIR
+        # of /tmp/x/../../../etc is rejected for where it actually lands rather than for how
+        # it is spelled.  The unconditional fall back to /tmp that used to be here put this
+        # run's evidence below a directory measured at mode 2777 on this host.
+        local parent
+        select_safe_temp_parent
+        parent="$RUNNER_TEMP_PARENT"
+        assert_artifact_location_plausible "$parent/hdmicec-l1-coverage" \
+            "\$${RUNNER_TEMP_PARENT_SOURCE} (chosen automatically for this run's private directories)"
         assert_safe_ancestry "$parent/hdmicec-l1-coverage" minted
         OUTPUT_DIR="$("$MKTEMP_BIN" -d "$parent/hdmicec-l1-coverage.XXXXXXXX")" \
             || die "could not create an artifact directory under $parent.
@@ -3688,6 +5610,18 @@ prepare_output_dir() {
     # the same posture instead of being trusted as found.  See the function's own comment.
     restrict_artifact_dir_to_owner "$OUTPUT_DIR"
 
+    # RECORD THE DIRECTORY'S IDENTITY, once, now that it is fully resolved and its posture is
+    # settled.  Every later destructive or publishing step compares against this through
+    # assert_output_dir_still_safe, so a directory re-pointed mid-run is refused rather than
+    # written into.  Taken after restrict_artifact_dir_to_owner deliberately: a chmod changes
+    # the mode, never the inode, so the value recorded here is the one that stays true for a
+    # directory nobody substituted.
+    OUTPUT_DIR_IDENTITY="$(path_identity "$OUTPUT_DIR")"
+    [ -n "$OUTPUT_DIR_IDENTITY" ] || die "could not read the identity (device:inode) of the
+       output directory: $OUTPUT_DIR
+       Every write below it is checked against that identity, and a directory whose identity
+       cannot be read is one whose substitution cannot be detected."
+
     RAW_TRACE="$OUTPUT_DIR/coverage.info"
     FILTERED_TRACE="$OUTPUT_DIR/filtered_coverage.info"
     # The line gate's own input: filtered_coverage.info with the dependency headers removed.
@@ -3699,15 +5633,49 @@ prepare_output_dir() {
     UNCOVERED_TXT="$OUTPUT_DIR/uncovered_lines.txt"
     readonly RAW_TRACE FILTERED_TRACE LINE_GATE_TRACE HTML_DIR PER_FILE_TSV UNCOVERED_TXT
 
+    # The status marker is NOT in the readonly artifact set above, because it is the one path
+    # written more than once: replaced by rename at every phase change, from this run taking the
+    # directory over to the verdict the EXIT trap records.  It IS dealt with by the purge, first
+    # of everything and atomically -- see invalidate_previous_run_status -- so that there is never
+    # a moment when this directory holds artifacts under another run's verdict, and never one
+    # where it holds them with no marker at all.
+    RUN_STATUS_TXT="$OUTPUT_DIR/run_status.txt"
+
     assert_safe_artifact_path "$RAW_TRACE" file
     assert_safe_artifact_path "$FILTERED_TRACE" file
     assert_safe_artifact_path "$LINE_GATE_TRACE" file
     assert_safe_artifact_path "$HTML_DIR" dir
     assert_safe_artifact_path "$PER_FILE_TSV" file
     assert_safe_artifact_path "$UNCOVERED_TXT" file
+    assert_safe_artifact_path "$RUN_STATUS_TXT" file
     acquire_output_lock
 
     log "artifacts: $OUTPUT_DIR (owner-only, locked for this run)"
+
+    # ONE GENERATION PER DIRECTORY.  Ordered deliberately: the output lock is held (so no second
+    # run is removing the same names), the directory's identity is recorded (so the removals are
+    # provably inside the directory this run validated), and the marker is written IMMEDIATELY
+    # afterwards so the window in which the directory is empty and unexplained is as small as a
+    # single mv.  A reader who arrives during the run finds IN-PROGRESS, which is the truth.
+    #
+    # PUBLISHING THIS MARKER IS A PRECONDITION OF THE RUN, NOT A COURTESY, and the `die` is the
+    # whole of that.  Every artifact this run is about to write -- build.log, the per-invocation
+    # logs and results, the traces, the HTML tree -- is read in the light of the marker beside it,
+    # so a run that cannot publish its own marker cannot honestly write any of them: the bundle
+    # would be this generation's files under either nothing or, before the purge learnt to take
+    # the marker first, a previous run's verdict.  Dying HERE is what bounds the damage: the
+    # purge has already superseded or removed the prior marker, and not one artifact of this
+    # generation has been written yet, so there is no mixture to clean up.
+    purge_previous_generation
+    write_run_status 'IN-PROGRESS' 'the run has started; no verdict has been reached' \
+        || die "this run cannot publish its own status marker in $OUTPUT_DIR
+       The authoritative marker is what ties every artifact in that directory to a run id, and
+       this run is unable to write it (the warning above says why: a refused custody check, a
+       temp file that could not be written, or a rename that could not complete).  Nothing of
+       this run's has been written yet and nothing more will be: a bundle whose artifacts cannot
+       be attributed to the run that produced them is worse than no bundle at all.
+       Fix the obstruction -- lsattr for an immutable bit, getfacl for an ACL, df for a full
+       filesystem -- or point --output-dir/COVERAGE_OUTPUT_DIR at a directory this run owns."
 
     # The one case worth a warning: artifacts placed inside the git tree, where this
     # suite's .gitignore does not cover them and an `git add -A` would pick them up.
@@ -3758,6 +5726,50 @@ $(tail -n 20 -- "$OUTPUT_DIR/capture.log" 2>/dev/null | sed 's/^/         /')"
        Refusing to report a coverage figure that was not measured. See
        $OUTPUT_DIR/capture.log"
     log "raw trace: $RAW_TRACE ($(grep -c '^SF:' "$RAW_TRACE" || true) source file record(s))"
+}
+
+# ------------------------------------------------------------------------------------
+# ASSERT THAT EVERY PROTECTED RECORD SURVIVED A FILTERING STEP.
+#
+# Called after BOTH filtering steps, on the trace each one produced.  One function rather than
+# two loops, so the two derived traces cannot drift apart in what they guarantee -- which is
+# exactly what happened before: the line gate's trace was checked and the filtered trace, which
+# is the input to that step and the trace the aggregate figure is quoted from, was not.
+#
+# WHY THE MATCH IS A `case` GLOB AND NOT A grep PATTERN.  The obvious spelling is
+#     grep -q "^SF:.*/${protected_file}\$"
+# and it is wrong in a way that only ever fails silently.  Every entry in the list contains a
+# '.', which in a basic regular expression is ANY CHARACTER -- so that pattern accepts
+# 'ccec/src/DriverXcpp' as proof that 'ccec/src/Driver.cpp' is present.  A trace that had lost
+# the real record but held a differently-named neighbour would pass.  `case` with the variable
+# QUOTED compares literally, and because `case` matches the WHOLE word, '*/'"$suffix" is
+# end-anchored by construction: it cannot be satisfied by 'halcompat.h.orig' or by
+# 'common/current/halcompat.hpp', and it cannot be defeated by the absolute prefix differing
+# between this host, a CI runner and the QEMU guest.  The leading '*/' is what makes it a
+# SUFFIX check and forbids a bare basename match at the filesystem root.
+# ------------------------------------------------------------------------------------
+assert_protected_records_present() { # $1=trace file  $2=human label for the trace
+    local trace="$1" label="$2"
+    local protected_file sf found
+
+    for protected_file in "${PROTECTED_TRACE_FILES[@]}"; do
+        found=0
+        while IFS= read -r sf; do
+            case "$sf" in
+                */"$protected_file") found=1; break ;;
+            esac
+        done < <(grep '^SF:' "$trace" | sed 's/^SF://')
+
+        [ "$found" -eq 1 ] || die "$protected_file is ABSENT from $label
+       ($trace), and it must never be.  It is source this migration is answerable for, so a
+       figure computed without it would be quoted over code nobody measured.  Either one of the
+       exclusion globs applied to produce that trace matches it -- compare them against
+           grep '^SF:' $RAW_TRACE
+       -- or it was never compiled into the objects the capture walked.  If this is halcompat.h,
+       note that AAP 0.6.5 requires it RETAINED as consumed HALIF source: it is not third-party
+       toolchain code and must not be added to DEPENDENCY_EXCLUDES to make this message go away."
+    done
+    log "verified: all ${#PROTECTED_TRACE_FILES[@]} protected record(s) present in $label"
 }
 
 # ------------------------------------------------------------------------------------
@@ -3812,6 +5824,12 @@ $(tail -n 20 -- "$OUTPUT_DIR/filter.log" 2>/dev/null | sed 's/^/         /')"
        build tree lives somewhere the globs cannot describe."
     fi
     log "verified: the denominator is production source only"
+
+    # The protected records, asserted on the FILTERED trace as well as on the line gate's.  This
+    # is the trace the aggregate figure is quoted from and the input to the next step, so a
+    # record lost HERE is lost from both consumers -- and one of the seven verbatim globs
+    # matching this migration's own source is precisely the accident nobody would notice.
+    assert_protected_records_present "$FILTERED_TRACE" "the filtered trace"
 
     # BRANCH DATA IS A DELIVERABLE, so its absence is fatal here rather than a note later.
     #
@@ -3907,23 +5925,10 @@ $(tail -n 20 -- "$OUTPUT_DIR/filter_dependencies.log" 2>/dev/null | sed 's/^/   
        ($LINE_GATE_TRACE).  One of the globs above must be matching this submodule's own source;
        compare them against the file list in $FILTERED_TRACE before changing anything else."
 
-    # ------------------------------------------------------------------------------------
-    # THE TWO FILES THAT MUST SURVIVE, ASSERTED RATHER THAN ASSUMED.
-    #
-    # A glob that accidentally described this migration's own source would leave a gate passing
-    # over code nobody measured -- the exact failure mode a filter can produce while looking
-    # like it is working.  The globs above do not name them, but "the globs do not name them" is
-    # a claim about the globs and this is a check on the result.
-    # ------------------------------------------------------------------------------------
-    local protected_file
-    for protected_file in "${PROTECTED_TRACE_FILES[@]}"; do
-        grep -q "^SF:.*/${protected_file}\$" "$LINE_GATE_TRACE" || die "$protected_file is
-       ABSENT from the line gate's trace, and it must never be.  It is production source this
-       migration is answerable for, so a gate computed without it would pass over unmeasured
-       code.  Either one of the exclusion globs above matches it -- check them against
-           grep '^SF:' $FILTERED_TRACE
-       -- or it was never compiled into the objects the capture walked."
-    done
+    # The protected records, asserted on the trace the LINE GATE reads.  This is the step whose
+    # exclusions could plausibly take halcompat.h out -- it is the step that removes dependency
+    # headers, and halcompat.h is a dependency header that must nevertheless stay.
+    assert_protected_records_present "$LINE_GATE_TRACE" "the line gate's trace"
 
     # THE FILE SET IS ENUMERATED, NOT SUMMARISED.  What came out and what stayed are both
     # printed, because a policy about which dependency headers belong in a denominator is only
@@ -3988,6 +5993,10 @@ generate_html() {
     # The report is assembled here and then moved into place, so the staging directory is
     # held to the private standard rather than merely the ancestry one.
     assert_private_dir "$STAGE_DIR"
+    # Recorded for cleanup_stage_dir's recursive remove, same reason as the lcov HOME.
+    STAGE_DIR_IDENTITY="$(path_identity "$STAGE_DIR")"
+    [ -n "$STAGE_DIR_IDENTITY" ] || die "could not read the identity (device:inode) of the
+       HTML staging directory: $STAGE_DIR"
 
     genhtml_run \
         -o "$STAGE_DIR/coverage" \
@@ -4077,9 +6086,17 @@ BELOW_BAR_FILES=''
 # single quotes") is a false positive here.  Values that genuinely must come from the
 # shell are passed in properly with `-v` instead, which is why HDMICEC_ROOT and
 # COVERAGE_MIN appear as `-v root=` and `-v min=` rather than being interpolated.  The
-# suppression is scoped to these functions rather than to the whole file so that a future
-# quoting mistake anywhere else is still reported.
-# shellcheck disable=SC2016
+# suppressions below are placed at the specific expressions, or immediately before the one
+# function that holds them, rather than on the file, so that a future quoting mistake anywhere
+# else is still reported.
+#
+# A DIRECTIVE ATTACHES TO THE NEXT COMMAND, NOT TO THE NEXT FEW FUNCTIONS.  There used to be a
+# single blanket SC2016 suppression here (the directive text is deliberately not written out,
+# so that a grep for suppressions finds only real ones), intended to cover this function and
+# the three below it.  MEASURED: deleting it changed nothing -- shellcheck skips comments when it looks
+# for what a directive annotates, so it landed on git_sha_of(), which contains no single-quoted
+# awk program at all, while all seven real diagnostics went on being reported.  A suppression
+# that suppresses nothing is worse than none: it reads as "this was considered" when it was not.
 # ------------------------------------------------------------------------------------
 # PROVENANCE.  Who produced these artifacts, from which tree, with which script.
 #
@@ -4118,6 +6135,7 @@ sha256_of() { # $1 = file;  prints the hex digest, or a reason
     local f="$1"
     [ -f "$f" ] || { printf 'absent\n'; return 0; }
     if command -v sha256sum >/dev/null 2>&1; then
+        # shellcheck disable=SC2016  # $1 is awk's first field, not a shell parameter
         sha256sum -- "$f" 2>/dev/null | "$AWK_BIN" '{print $1; exit}'
     else
         printf 'unavailable (no sha256sum)\n'
@@ -4140,6 +6158,7 @@ write_provenance() {
     {
         printf 'HDMI-CEC middleware L1 coverage -- ARTIFACT PROVENANCE\n'
         printf '=====================================================\n\n'
+        printf 'Run id               : %s\n' "$RUN_ID"
         printf 'Generated (UTC)      : %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf 'unavailable')"
         printf 'Host                 : %s\n' "$(uname -n 2>/dev/null || printf 'unavailable')"
         printf 'Clone index          : %s\n' "${CLONE_INDEX:-unset}"
@@ -4169,7 +6188,9 @@ write_provenance() {
         printf '  gcov               : %s\n' "$(gcov --version 2>/dev/null | head -n1 || printf 'unavailable')"
         printf '  compiler           : %s\n' "$("${CXX:-g++}" --version 2>/dev/null | head -n1 || printf 'unavailable')"
         printf '\nHOW TO CHECK THIS ARTIFACT STILL APPLIES\n'
+        # shellcheck disable=SC2016  # literal backticks: this line QUOTES a command to type
         printf '  1. Compare the superproject revision above with `git rev-parse HEAD`.\n'
+        # shellcheck disable=SC2016  # literal backticks, same reason as the line above
         printf '  2. Compare the runner sha256 above with `sha256sum %s`.\n' "$SCRIPT_PATH"
         printf '  If either differs, these numbers were produced from a different tree or a\n'
         printf '  different script, and the acceptance decision they carry does not transfer.\n'
@@ -4181,6 +6202,13 @@ write_provenance() {
     log "  runner sha256: $(sha256_of "$SCRIPT_PATH")"
 }
 
+# The directive is on the FUNCTION rather than on the two expressions, and that is forced
+# rather than lax: the second awk program is the third stage of a backslash-continued pipeline
+# ('... ' "$LINE_GATE_TRACE" \ | sort \ | "$AWK_BIN" ...), and a comment cannot be inserted
+# between two segments of one continued command.  Function scope is still narrow -- it is the
+# same form used for write_uncovered_lines and per_file_report below -- and a quoting mistake
+# in any other function is still reported.
+# shellcheck disable=SC2016  # both single-quoted blocks are awk programs; see the note above
 write_per_file_tsv() {
     local tmp_tsv="$OUTPUT_DIR/.per_file_coverage.tsv.tmp"
     assert_output_dir_still_safe "$PER_FILE_TSV"
@@ -4448,9 +6476,15 @@ per_file_report() {
 # beside each entry so that a later reader can re-derive it rather than take it on trust.
 #
 # WHY IT LIVES IN THIS SCRIPT RATHER THAN IN A FILE OF ITS OWN.  A sibling manifest file would
-# be a twenty-fifth path in a change whose diff check requires exactly twenty-four in-submodule
-# paths and nothing more, so it would fail that check.  The manifest is data plus gate logic,
-# both of which a shell script can hold perfectly well, so it holds them.
+# be a TWENTY-SIXTH in-submodule path in a change whose diff check requires exactly TWENTY-FIVE
+# and nothing more, so it would fail that check.  The scope identity, measured rather than
+# recalled -- `git diff --name-status` against the change's baseline reports 25 paths inside
+# this submodule, 13 modified and 12 added, and the superproject diff reports the `hdmicec`
+# gitlink advancing plus `blitzy/documentation/Project Guide.md`, giving 26 LOGICAL FILES:
+# 14 UPDATE, of which the Guide is one, and 12 CREATE.  An extra file here would therefore be
+# both a twenty-sixth submodule path and a twenty-seventh logical file, and the check names its
+# allowlist exactly, so neither number has any slack to absorb it.  The manifest is data plus
+# gate logic, both of which a shell script can hold perfectly well, so it holds them.
 #
 # IDENTIFICATION IS BY BLOCK AND BRANCH INDEX, NEVER BY LINE ALONE.  A short-circuited
 # condition contributes several arcs on ONE line -- `if (a && b)` is at least two -- so a
@@ -4463,9 +6497,19 @@ per_file_report() {
 #       refactor that silently deleted an arm.  Without (b), deleting the branch would make the
 #       gate greener rather than redder, and a gate that rewards deletion is worse than none.
 #
-# `-` IS RECORDED AS UNEXERCISABLE, NOT AS A FAILURE.  gcov emits `-` for an arc it considers
-# impossible to drive.  That is information about the compiler's control-flow graph, not about
-# the test set, and treating it as a failure would produce a gate nobody can ever satisfy.
+# WHAT `-` ACTUALLY MEANS, MEASURED, BECAUSE THIS FILE PREVIOUSLY HAD IT WRONG.  An earlier
+# version of this comment said gcov emits `-` for an arc it considers impossible to drive, and
+# the gate accordingly recorded every `-` as "unexercisable" and absolved it.  That is FALSE, and
+# it was the single largest false-green vector in this gate: `-` means THE ENCLOSING BASIC BLOCK
+# WAS NEVER ENTERED.  A four-function probe compiled with the same gcc-13 and read back through
+# the same lcov settles it -- a function that is compiled, linked and never called reports `-`
+# on BOTH arcs of its `if`, while the identical `if` in a function that is called reports `1` and
+# `0`.  So "unexercisable" was indistinguishable from "untested", and the gate was treating the
+# latter as the former for every arm nothing drove.
+#
+# `-` IS THEREFORE A FAILURE ON ANY ARM THIS RUN COULD HAVE MEASURED, and is expected only where
+# the arm's reacher could not run at all.  Which of those two applies is not guesswork: field 9
+# of each record states what the arm NEEDS, and the gate compares that against what actually ran.
 #
 # THIS MANIFEST IS REVIEWED WHENEVER A MAPPED FILE CHANGES.  Coordinates are a function of the
 # source: inserting a line above a mapped arm moves it, and adding a condition to a mapped `if`
@@ -4474,112 +6518,337 @@ per_file_report() {
 # belongs with the source change and not with a puzzled reading of this gate's output.
 #
 # ------------------------------------------------------------------------------------
-# THE COORDINATES ARE NOT POPULATED IN THIS COMMIT, AND THAT IS STATED RATHER THAN FAKED.
+# WHERE THESE COORDINATES CAME FROM, AND WHAT IS AND IS NOT PROVEN BY THEM.
 #
-# A coordinate is only real if it came out of a real unfiltered trace produced by a full
-# five-invocation run.  Three of those five invocations cannot execute on a host without a
-# binder driver, so the arms belonging to them have no trace to be read out of here, and the
-# arms that DO have one would be a half-populated manifest presenting itself as a whole one.
-# Writing plausible-looking numbers would be the exact failure this whole script is built
-# against: a figure that looks measured and is not.
+# EVERY COORDINATE BELOW WAS READ OUT OF A REAL UNFILTERED TRACE.  Not guessed, not derived from
+# the source by counting conditions: captured from `coverage.info` after a real `--build --run`
+# on a host running invocations A and D, and cross-checked arm by arm against `gcov -b -c -t`'s
+# own labelled output so that each index is tied to the branch the entry names.
 #
-# So the manifest below ships the ARM LIST -- which is knowledge, and is the part that took the
-# analysis -- with its coordinate fields empty, and the gate reports honestly that it could not
-# check them.  An unpopulated gate NEVER reports success and never contributes a pass: it
-# records an advisory reason, which is what stops the run producing an acceptance verdict.
-# Populating it is a one-time step on the binder-capable job: run the full matrix, read
-# coverage.info, and fill in the line, block and branch fields against the quoted source lines.
+# THAT IS POSSIBLE WITHOUT A BINDER DRIVER, AND THE REASON MATTERS.  BRDA coordinates come from
+# the COMPILE-TIME .gcno, not from execution: a file that is compiled and linked emits a BRDA
+# record for every branch in it, with a `taken` of 0 or `-` where nothing drove it.  So the
+# COORDINATES of an arm belonging to a deferred invocation are as measurable here as any other,
+# and only its `taken` COUNT is unavailable.  An earlier version of this block reasoned that a
+# host without a driver could produce no coordinates at all and shipped every one of them empty; that was
+# a wrong inference from a correct principle, and the principle -- never write a number that was
+# not measured -- is what is kept.
+#
+# WHAT IS STILL UNPROVEN, STATED PRECISELY.  The `taken` counts of the 30 arms that carry a
+# prerequisite -- 28 needing invocation B, 1 needing invocation C, and 1 needing a usable binder
+# driver without a service registered on it -- have NOT been observed non-zero anywhere.  That is
+# the whole of the unproven set as this manifest stands, and the other 34 required arms were all
+# observed non-zero by a driverless run: every arm of the bounded preflight, including the two
+# beyond the BINDER_VERSION gate, is reached under invocation A through the BinderPreflightProbe
+# seam that ccec/src/DriverAidlImpl.hpp declares and isBinderPreflightOk() takes as a defaulted
+# third parameter, so their `needs` fields are empty and their counts are real.  A seam rather
+# than syscall interposition is what makes that true without a driver and without redefining
+# ioctl() or mmap() for a 539-case process.  The receive path's own two guards and the
+# slow-call diagnostic are the arms that most recently joined the deferred set, because a
+# listener callback and a synchronous AIDL call both need a live session; the queue handoff's
+# reserved-slot arithmetic and the context-manager timeout ceiling did NOT, because a
+# test-local subclass drives offerReceivedFrame() directly and the probe seam records the
+# bound it was handed, so both of those pairs are enforced on any host.  branch_arm_unmet_requirement() below understands a
+# `binder` resource token and one arm -- availability.service-absent -- declares it, because that
+# arm needs the preflight to SUCCEED and the lookup to then return nothing, which is a driver
+# present with no service on it and is not the same condition as any invocation letter.
+# Arms with an unmet prerequisite are reported DEFERRED with the missing invocation or resource
+# NAMED, they are folded into the advisory that stops this run producing an acceptance verdict,
+# and they are never counted as passes.  The arms reachable under invocation A were observed and
+# their counts are real; if one of those ever reads zero it is a FAILURE on this host, today.
+#
+# HOW EACH INDEX WAS TIED TO ITS ARM, so a later reader can repeat it rather than trust it:
+#   * lcov DROPS gcov's `call` records, renumbers the surviving branches from 0 in gcov's order,
+#     and writes block `e0` for the arcs gcov labels "(throw)".  Block ids are therefore NOT
+#     always numeric, which is why the gate compares them as strings.
+#   * For a plain `if (cond)`, the FIRST non-throw record on the line is gcov's "(fallthrough)"
+#     arc, which is the condition TRUE / body-entered arm.  Verified on Driver.cpp:133,
+#     DriverAidlImpl.cpp:1562 and the probe.
+#   * For a `&&`/`||` chain the per-operand arcs appear in evaluation order, and "fallthrough"
+#     there means "carry on evaluating" rather than "true" -- which is why halcompat.h's entries
+#     do not all sit on the line the condition is written on.  Its `era(server) == era(client)`
+#     is written on line 112 and its arcs are recorded against line 114; that is gcc's
+#     attribution, it was measured one semantic case at a time with volatile arguments to defeat
+#     constexpr folding, and the entries below follow the measurement rather than the source
+#     layout.
+#
+# THIS MANIFEST IS REVIEWED WHENEVER A MAPPED FILE CHANGES, and the ABSENT check is what enforces
+# it: a coordinate whose arm has moved or been deleted fails loudly rather than passing quietly.
 # ------------------------------------------------------------------------------------
 #
 # RECORD FORMAT, '|'-separated:
 #   1 id         short stable name for the arm, used in the gate's output
 #   2 file       path suffix as it appears after SF: in the trace
-#   3 line       gcov line number     -- EMPTY until populated on a binder-capable host
-#   4 block      gcov block index     -- EMPTY until populated
-#   5 branch     gcov branch index    -- EMPTY until populated
-#   6 reacher    the invocation or unit test that drives this arm.  An arm with no named
-#                reacher is a DEFECT IN THE TEST SET, not a target to lower -- so every entry
-#                below has one, and a future entry without one is the finding rather than the
-#                gate's problem.
+#   3 line       gcov line number, measured
+#   4 block      gcov block index, measured -- a STRING, because `e0` is a legitimate value
+#   5 branch     gcov branch index, measured
+#   6 reacher    the invocation or unit test that drives this arm, in prose, for the report.
+#                An arm with no named reacher is a DEFECT IN THE TEST SET, not a target to
+#                lower -- so every entry below has one.
 #   7 status     required | unreachable
-#   8 source     the source line, quoted, so the coordinate can be re-derived
+#   8 needs      what must have been available for this run to MEASURE the arm: a
+#                space-separated conjunction of invocation letters and the literal `binder`.
+#                EMPTY means "measurable whenever invocation A runs", which is every run --
+#                so an empty-needs arm reading 0 or `-` is a failure here and now.
+#   9 source     the source line, quoted, so the coordinate can be re-derived
+#
+# THE QUOTED SOURCE IS DELIBERATELY THE LAST FIELD, and that is not cosmetic.  It is free text
+# lifted out of C++, so it can and does contain the '|' this format separates on -- halcompat.h's
+# `if (hash.empty() || hash == "-1")` contains two.  A `read` with a fixed field list puts all
+# remaining text into its LAST variable, so keeping the quote last makes an embedded '|' harmless
+# rather than something to escape and get wrong.  Measured the other way round first: with the
+# quote in field 8, those two entries had their source truncated at the '||' and the fragment
+# after it parsed as a requirement token, and the gate duly reported "needs invocation |".
+# Every other field is a token this script generates or a short prose phrase with no '|' in it.
+#
+# WHY FIELD 9 IS A SEPARATE FIELD RATHER THAN PARSED OUT OF FIELD 6.  Field 6 is prose written
+# for a human reading a failure report, and it says things like "invocation C at factory level;
+# unit test otherwise".  A gate that scraped invocation letters out of that would be deciding
+# fatal-versus-deferred by regex over an English sentence, and would silently change verdict the
+# next time someone improved the wording.  So the machine-readable requirement is stated once,
+# separately, and the prose stays prose.
 # ====================================================================================
 readonly BRANCH_MANIFEST=(
-    # ---- GROUP 1: the selection helper's three arms and their log lines.
-    # Reached by invocations A, B and C -- one arm each, which is the whole reason the matrix
-    # has three L1 invocations rather than one.
-    "selection.aidl-selected|ccec/src/Driver.cpp||||invocation B|required|if (aidlBackEnd.isServiceAvailable()) {"
-    "selection.legacy-fallback|ccec/src/Driver.cpp||||invocations A and C|required|if (aidlBackEnd.isServiceAvailable()) {"
-    "selection.preflight-ok-no-service|ccec/src/Driver.cpp||||invocation C|required|if (DriverAidlImpl::isBinderPreflightOk()) {"
-    "selection.preflight-unavailable|ccec/src/Driver.cpp||||invocation A|required|if (DriverAidlImpl::isBinderPreflightOk()) {"
+# THE `needs` FIELD IS THIS RUNNER'S OWN, and the values below are stated in its terms rather
+#   than as a list of every invocation that happens to reach an arm.  It names the PREREQUISITES
+#   an arm has, whitespace separated, ALL of which must be satisfied before the gate will judge
+#   its takenness -- so an EMPTY field means "measurable on any run, including a driverless one",
+#   an invocation letter means "defer unless that invocation ran", and `binder` means "defer
+#   unless a usable binder driver is present".  An arm a driverless invocation reaches therefore
+#   carries an EMPTY field and is ENFORCED here, which is the disposition that matters: it is
+#   the only half of this manifest a host without a binder kernel can hold to account, and
+#   leaving those arms nominally waiting on an invocation that did run would have enforced
+#   nothing.  ABSENCE is judged before prerequisites either way, so a coordinate that has moved
+#   or been deleted fails whatever its needs field says.
+    # ---- GROUP 1: THE SELECTION HELPER.  resolveBackEnd in ccec/src/Driver.cpp decides once per
+    # process at line 137 and then reports the reason at line 168, so there are four arms: the
+    # two outcomes of the decision, and the two arms of the reason report.
+    #
+    # THE REASON ARMS MOVED, AND THAT IS WHY THIS GROUP IS SHAPED DIFFERENTLY THAN IT WAS.  The
+    # factory used to work out WHY the AIDL back-end had been declined by calling
+    # DriverAidlImpl::isBinderPreflightOk() a second time, so the two reason arms were a branch
+    # in this file and were mapped here.  It no longer does: isServiceAvailable() records which
+    # of its ordered stages declined and the factory reads that back through
+    # unavailabilityReason(), because re-running the preflight paid its context-manager timeout
+    # twice and could report a reason that did not cause the fallback.  So line 168's branch is
+    # now only "was a reason recorded", and the arms that distinguish transport-unavailable from
+    # no-compatible-service are in isServiceAvailable() -- mapped in GROUP 1B below, at their
+    # real home rather than at a proxy for it.
+    "selection.aidl-selected|ccec/src/Driver.cpp|137|0|0|invocation B, and invocation E in the L2 tier: a compatible service resolves and the AIDL back-end is returned|required|B|if (aidlBackEnd.isServiceAvailable()) {"
+    "selection.legacy-fallback|ccec/src/Driver.cpp|137|0|1|invocations A, C and D (measured taken 2 by A and D on a driverless host)|required||if (aidlBackEnd.isServiceAvailable()) {"
+    "selection.reason-reported|ccec/src/Driver.cpp|168|0|0|every legacy fallback: the query recorded a reason and the factory logs it (measured taken 2 by A and D on a driverless host)|required||if (unavailability != NULL) {"
+    "selection.reason-unrecorded|ccec/src/Driver.cpp|168|0|1|NOTHING, and that is the point. isServiceAvailable() assigns a reason on every one of its false exits, so a NULL reason cannot arise from any code path that exists; the arm is a defensive report for an outcome nobody could otherwise diagnose. It is recorded UNREACHABLE rather than required so the gate still fails if it is DELETED while exempting it from the taken check -- exactly the disposition the one pre-existing unreachable record has|unreachable||if (unavailability != NULL) {"
+
+    # ---- GROUP 1B: THE AVAILABILITY QUERY, which now owns the arms GROUP 1 used to proxy.
+    # DriverAidlImpl::isServiceAvailable() answers in THREE ordered stages and records which one
+    # declined.  ALL THREE ARE GATED HERE, in six records -- two arms each.  AAP section 0.9.3
+    # requires the service-found, service-NOT-found and found-but-incompatible arms by name, and
+    # an aggregate branch percentage cannot stand in for a named-arm gate: a high file figure and
+    # an uncovered selection arm coexist perfectly well.
+    #
+    # AN EARLIER REVISION OF THIS MANIFEST OMITTED THE MIDDLE STAGE, on the reasoning that no
+    # invocation reaches it on EVERY host -- A stops at the preflight where there is no
+    # transport, and B, C and E all register a service.  That reasoning was sound about the
+    # reachability and wrong about the remedy: the answer is a HOST-AWARE REACHER, not an
+    # omission.  The NO-SERVICE token resolves through NO_SERVICE_EVIDENCE exactly as
+    # PREFLIGHT-FALSE resolves through PREFLIGHT_FALSE_EVIDENCE, so the arm is DEFERRED on a
+    # driverless host and REQUIRED on a binder-capable one, and neither host reports a false
+    # verdict.
+    #
+    # Arc numbering follows the same rule as everywhere else in this manifest: a condition whose
+    # evaluation involves calls contributes a call-and-exception arc PAIR per call BEFORE the
+    # decision pair, so the decision is the LAST pair on the line.  Read from the unfiltered
+    # trace of this tree rather than assumed:
+    #   * line 2378 carries EIGHT arcs -- its condition calls isBinderPreflightOk() with three
+    #     defaulted arguments -- so the decision is arcs 6 and 7.
+    #   * lines 2387 and 2393 carry FOUR arcs each, so the decision is arcs 2 and 3.  At 2387 the
+    #     condition is a comparison against a call result; at 2393 it is one call.
+    "availability.transport-declined|ccec/src/DriverAidlImpl.cpp|2998|0|6|the preflight-false arm, read at its source: invocation A on a driverless host, or invocation A-NB on a binder-capable one (measured taken 2)|required||if (!isBinderPreflightOk()) {"
+    "availability.transport-usable|ccec/src/DriverAidlImpl.cpp|2998|0|7|invocations B and C, the two that register an in-process fake and therefore need the transport to be usable before the lookup is attempted at all|required|B|if (!isBinderPreflightOk()) {"
+    "availability.service-absent|ccec/src/DriverAidlImpl.cpp|3011|0|2|invocation A on a host WITH a usable binder transport: it registers nothing, so the lookup reaches the service manager and returns null. This is the service-NOT-FOUND arm AAP section 0.9.3 requires by name. Its reacher is the host-aware NO-SERVICE token, so it is DEFERRED rather than failed where there is no transport for A to reach|required|binder|if (service == 0) {"
+    "availability.service-present|ccec/src/DriverAidlImpl.cpp|3011|0|3|invocations B, C and E: each registers a service under the production name, so the lookup returns non-null and the query proceeds to the compatibility stage. This is the service-FOUND arm|required|B|if (service == 0) {"
+    "availability.service-incompatible|ccec/src/DriverAidlImpl.cpp|3023|0|0|invocation C: a registered service whose metadata halcompat rejects. The compatibility verdict is now taken into a named local so the F10 elapsed-time diagnostic can bracket the call, so the branch is the negation of that local and carries two arcs rather than the call/throw pair the inline call produced|required|C|if (!compatible) {"
+    "availability.service-compatible|ccec/src/DriverAidlImpl.cpp|3023|0|1|invocation B, and invocation E in the L2 tier: halcompat accepts the registered service and the AIDL back-end becomes selectable. Same named-local shape as the sibling arm above|required|B|if (!compatible) {"
 
     # ---- GROUP 2: halcompat's compatibility predicate, arm by arm.
     # The template form is what the selection calls; the reject arms are only reachable
     # IN-PROCESS, because a remote Bn* service answers metadata transactions from compiled-in
-    # constants and so cannot report a bad hash or a bad version at all.
-    "compat.reject-null|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|if (service == nullptr) {"
-    "compat.reject-empty-hash|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|if (hash.empty() || hash == \"-1\") {"
-    "compat.reject-minus-one-hash|rdk-halif-aidl/common/current/halcompat.h||||invocation C at factory level; unit test otherwise|required|if (hash.empty() || hash == \"-1\") {"
-    "compat.reject-notfrozen|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|if (hash == \"notfrozen\") {"
-    "compat.accept-exact|rdk-halif-aidl/common/current/halcompat.h||||invocation B; unit test|required|return detail::isCompatible(I::VERSION, service->getInterfaceVersion());"
-    "compat.accept-newer-same-major|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|&& serverVersion >= clientVersion);"
-    "compat.reject-cross-major|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|&& major(serverVersion) == major(clientVersion)"
-    "compat.reject-cross-era|rdk-halif-aidl/common/current/halcompat.h||||unit test, DriverAidlCompatibilityTest|required|: (era(serverVersion) == era(clientVersion)"
+    # constants and so cannot report a bad hash or a bad version at all.  Every arm here is
+    # driven by DriverAidlCompatibilityTest, which is back-end independent and therefore runs
+    # under A, B and C -- so `requires` is A,B,C throughout and A alone always satisfies it.
+    #
+    # The counts quoted are from the measured trace and are what fixes each label.  Re-measured
+    # after the production-emitter cases were added: 17 calls to the template (1 null, 16 with a
+    # service); 16 interface-hash reads inside it (1 empty, 4 "-1", 2 "notfrozen", 9 frozen); and
+    # 19 evaluations of detail::isCompatible -- the 9 that reach it through the template plus 10
+    # made DIRECTLY, by the ordering case with a client of its own and by
+    # DriverAidlImpl::observedMetadataWouldBeAccepted(), which the emitter calls on every
+    # rejection it describes.
+    #
+    # THESE COUNTS ARE VOLATILE BY CONSTRUCTION and every one of them is re-measured whenever a
+    # case is added or removed.  They are quoted because on a short-circuited condition the
+    # count is what DISTINGUISHES one arc pair from another on the same line -- see the era and
+    # ordering records on line 114 -- not because the gate compares them; the gate checks
+    # presence and non-zero taken, so a stale count here misleads a reader without failing a
+    # run, which is exactly why it is checked by hand against the trace.
+    "compat.reject-null|rdk-halif-aidl/common/current/halcompat.h|161|0|2|unit test, DriverAidlCompatibilityTest.IncompatibleWhenServiceIsNull (measured taken 1 of 17 calls)|required||if (service == nullptr) {"
+    "compat.service-present|rdk-halif-aidl/common/current/halcompat.h|161|0|3|every non-null case in DriverAidlCompatibilityTest (measured taken 16 of 17 calls)|required||if (service == nullptr) {"
+    "compat.reject-empty-hash|rdk-halif-aidl/common/current/halcompat.h|165|0|1|unit test, DriverAidlCompatibilityTest.IncompatibleWhenInterfaceHashIsEmpty (measured taken 1; this is the hash.empty() TRUE arc, and on this short-circuited condition index 1 is the true arm, not index 0)|required||if (hash.empty() || hash == \"-1\") {"
+    "compat.hash-non-empty|rdk-halif-aidl/common/current/halcompat.h|165|0|0|every case reporting a non-empty hash (measured taken 15, which is the number of times the second condition was evaluated at all)|required||if (hash.empty() || hash == \"-1\") {"
+    "compat.reject-minus-one-hash|rdk-halif-aidl/common/current/halcompat.h|165|0|4|unit test, DriverAidlCompatibilityTest.IncompatibleWhenInterfaceHashIsMinusOne; also reached at FACTORY level by invocation C, whose in-process fake reports \"-1\" (measured taken 4 on a driverless host, where C is deferred. The four are TEMPLATE calls, which is the only way this arc is reachable: .IncompatibleWhenInterfaceHashIsMinusOne once, .ARecoveredMetadataReadMakesTwoCompatibilityCallsDisagree once on its first read, and .DelayedMetadataRecoveryOnAThirdReadCannotBeBlamedOnTheVersionRule twice while its double is still failing. DriverAidlImpl::observedMetadataWouldBeAccepted() does NOT contribute here and must not be credited with it -- it takes a hash by value, tests it inline and calls only detail::isCompatible, so it never enters this template at all)|required||if (hash.empty() || hash == \"-1\") {"
+    "compat.hash-not-minus-one|rdk-halif-aidl/common/current/halcompat.h|165|0|5|every case reporting a usable hash (measured taken 11)|required||if (hash.empty() || hash == \"-1\") {"
+    "compat.reject-notfrozen|rdk-halif-aidl/common/current/halcompat.h|168|0|2|unit test, DriverAidlCompatibilityTest.UnfrozenServerIsRejectedByDefaultAndAcceptedOnlyWhenOptedIn (measured taken 2: once rejected by default, once accepted with allowUnfrozen)|required||if (hash == \"notfrozen\") {"
+    "compat.hash-frozen|rdk-halif-aidl/common/current/halcompat.h|168|0|3|the frozen-hash cases, which are the ones that reach the version rule at all (measured taken 9)|required||if (hash == \"notfrozen\") {"
+    "compat.server-era-frozen|rdk-halif-aidl/common/current/halcompat.h|111|0|0|unit test, DriverAidlCompatibilityTest.IncompatibleWhenServerReportsDifferentEra: the only server value with era >= 1 (measured taken 2 of the 19 evaluations on this line, which is what identifies this pair as era(serverVersion) >= 1 rather than the ternary's true arm)|required||? (serverVersion >= clientVersion)"
+    "compat.server-era-zero|rdk-halif-aidl/common/current/halcompat.h|111|0|1|every era-0 server value the version cases use (measured taken 17)|required||? (serverVersion >= clientVersion)"
+    "compat.client-era-zero|rdk-halif-aidl/common/current/halcompat.h|110|0|1|unit test, DriverAidlCompatibilityTest.IncompatibleWhenServerReportsDifferentEra: this client is era 0, so the second conjunct is false whenever it is evaluated at all (measured taken 2 of the 2 evaluations, which is what identifies this pair as era(clientVersion) >= 1)|required||return (era(serverVersion) >= 1 && era(clientVersion) >= 1)"
+    "compat.era-equal|rdk-halif-aidl/common/current/halcompat.h|114|0|0|every same-era pair the version cases use (measured taken 17 of the 19 evaluations that reach the era-0 branch, which is what identifies this FIRST arc pair on line 114 as the era EQUALITY test)|required||&& serverVersion >= clientVersion);"
+    "compat.reject-cross-era|rdk-halif-aidl/common/current/halcompat.h|114|0|1|unit test, DriverAidlCompatibilityTest.IncompatibleWhenServerReportsDifferentEra, plus the observation case that drives a cross-era snapshot through observedMetadataWouldBeAccepted (measured taken 2)|required||&& serverVersion >= clientVersion);"
+    "compat.major-equal|rdk-halif-aidl/common/current/halcompat.h|113|0|0|the exact-version, newer-same-major and ordering cases (measured taken 12 of 17 evaluations)|required||&& major(serverVersion) == major(clientVersion)"
+    "compat.reject-cross-major|rdk-halif-aidl/common/current/halcompat.h|113|0|1|unit tests, DriverAidlCompatibilityTest.IncompatibleWhenServerReportsDifferentMajor and .IncompatibleWhenServerReportsUnfrozenGeneratorVersion -- version 1 decodes to major 0 and is rejected here, not by the ordering conjunct; the further reachers are the observation case driving a cross-major snapshot through observedMetadataWouldBeAccepted and the two production-emitter cases that drive a cross-major server through the emitter (measured taken 5)|required||&& major(serverVersion) == major(clientVersion)"
+    "compat.accept-not-older|rdk-halif-aidl/common/current/halcompat.h|114|0|2|unit tests, DriverAidlCompatibilityTest.CompatibleWhenServerReportsThisClientsVersion and .CompatibleWhenServerReportsNewerVersionInSameMajor, which pin both ends of [1000,1999]; this SECOND arc pair on line 114 is the era-0 ordering conjunct, evaluated 12 times (measured taken 10)|required||&& serverVersion >= clientVersion);"
+    "compat.reject-older-same-major|rdk-halif-aidl/common/current/halcompat.h|114|0|3|unit test, DriverAidlCompatibilityTest.OlderSameMajorServerIsRejectedByTheOrderingRule, which calls detail::isCompatible DIRECTLY with a client of 3020 and a server of 3000 because the arm is unreachable through the template for a client of 1000; the second reacher is DelayedMetadataRecoveryOnAThirdReadCannotBeBlamedOnTheVersionRule, whose observation snapshot pins the same ordering rule (measured taken 2)|required||&& serverVersion >= clientVersion);"
 
-    # ---- GROUP 2a: TWO ARMS THAT ARE UNREACHABLE BY CONSTRUCTION.  Recorded with their
-    # proofs so that nobody spends time hunting them, and NOT gated -- an unreachable arm
-    # cannot be covered and a gate that demanded it could never be satisfied.
+    # ---- GROUP 2a: ONE ARM THAT IS UNREACHABLE BY CONSTRUCTION.  Recorded with its proof so
+    # that nobody spends time hunting it, and exempt from the TAKEN half of the gate only -- it
+    # must still be PRESENT in the trace, so deleting it is caught like any other deletion.
     #
-    # PROOF FOR BOTH.  IHdmiCec::VERSION is 1000.  Under the encoding
-    # era*100000 + major*1000 + minor*10 + bugfix that decodes to era 0, major 1.
+    # PROOF.  IHdmiCec::VERSION is 1000.  Under the encoding era*100000 + major*1000 + minor*10
+    # + bugfix that decodes to era 0, major 1.  The era >= 1 ternary arm therefore cannot be
+    # reached through halcompat::isCompatible<IHdmiCec>: (era(server) >= 1 && era(client) >= 1)
+    # has era(client) == 0 as a conjunct and is false for every possible server value.  Measured
+    # taken 0, on the one evaluation the cross-era case produces.
     #
-    # (1) OLDER-SAME-MAJOR IS AN EMPTY SET for this client.  A server value with era 0 and
-    #     major 1 satisfies v < 100000 and (v/1000) % 100 == 1, which for era 0 means
-    #     v/1000 == 1, i.e. v in [1000, 1999] -- and EVERY member of that range is >= 1000.
-    #     So "same era, same major, server older than client" has no members at all.
-    #     A server reporting 999 does NOT belong here: major(999) == 0, so it is rejected by
-    #     the CROSS-MAJOR condition, and labelling such a case "older same-major" would
-    #     mis-attribute which condition decided it.
-    # (2) THE ERA >= 1 TERNARY ARM is unreachable for this client, because
-    #     (era(server) >= 1 && era(client) >= 1) has era(client) == 0 as a conjunct and is
-    #     therefore false for every possible server value.
+    # THE SECOND ARM THIS GROUP USED TO HOLD IS NOW GATED RATHER THAN EXEMPT, and the correction
+    # is worth recording.  It was "older-same-major", proved unreachable on the grounds that for
+    # client 1000 the same-era same-major servers are exactly [1000,1999] and every one of them
+    # satisfies server >= client.  That proof is sound as far as it goes -- and it is about the
+    # TEMPLATE, not about the ARC.  The ordering conjunct's false arc IS reachable, by calling
+    # detail::isCompatible with a client of its own, which is what
+    # OlderSameMajorServerIsRejectedByTheOrderingRule does; the arc is measured taken 2.  So it
+    # is a required record above, not an exemption here.  An arm is exempt only when no test can
+    # drive it, never merely because one route to it is closed.
     #
     # WORTH KNOWING WHILE READING halcompat.h's OWN PROOFS: its
     # static_assert(!isCompatible(3000, 2000), "era0 older rejected") is MISLABELLED.
     # major(3000) == 3 and major(2000) == 2, so that case is decided by the major inequality
     # and merely re-covers cross-major.  A genuine older-same-major call needs equal era AND
-    # equal major with a lower server -- detail::isCompatible(3020, 3000), for instance.
-    "compat.older-same-major|rdk-halif-aidl/common/current/halcompat.h||||UNREACHABLE: era-0/major-1 servers occupy [1000,1999], all >= VERSION 1000|unreachable|&& serverVersion >= clientVersion);"
-    "compat.era1-ordering|rdk-halif-aidl/common/current/halcompat.h||||UNREACHABLE: era(client) == 0 falsifies the conjunction for every server|unreachable|return (era(serverVersion) >= 1 && era(clientVersion) >= 1)"
+    # equal major with a lower server -- detail::isCompatible(3020, 3000), which is the pair the
+    # test above uses for exactly this reason.
+    "compat.client-era-frozen|rdk-halif-aidl/common/current/halcompat.h|110|0|0|UNREACHABLE: IHdmiCec::VERSION is 1000, so era(client) == 0 falsifies the conjunction for every server value; measured taken 0|unreachable||return (era(serverVersion) >= 1 && era(clientVersion) >= 1)"
 
-    # ---- GROUP 3: the bounded binder preflight.
-    # The POSITIVE arm needs a driver, so invocation B owns it; every negative arm is driven by
-    # a unit test calling the predicate with a driver path of the test's choosing, which is what
-    # makes them testable without rendering the runner's own driver unusable.
-    "preflight.positive|ccec/src/DriverAidlImpl.cpp||||invocation B|required|the preflight's all-checks-passed arm"
-    "preflight.node-absent|ccec/src/DriverAidlImpl.cpp||||unit test, DriverAidlPreflightTest|required|the driver-node existence check"
-    "preflight.node-unopenable|ccec/src/DriverAidlImpl.cpp||||unit test, DriverAidlPreflightTest|required|the driver-node open check"
-    "preflight.protocol-mismatch|ccec/src/DriverAidlImpl.cpp||||unit test, DriverAidlPreflightTest|required|the protocol-version equality check"
-    "preflight.handle-zero-timeout|ccec/src/DriverAidlImpl.cpp||||unit test, DriverAidlPreflightTest|required|the bounded wait for binder handle 0"
+    # ---- GROUP 3: THE BOUNDED BINDER PREFLIGHT, one record per arc of each of the five decision
+    # points isBinderPreflightOk is built from -- the source labels them "Decision point N of 5"
+    # so that this mapping can be checked against it by reading rather than by inference.
+    #
+    # THIS GROUP REPLACES AN EARLIER FOUR-RECORD SET THAT DID NOT MATCH THE CODE.  That set had
+    # node-absent and node-unopenable as separate arms although both reach the SAME arc -- there
+    # is one open call and one `driverFd < 0` test, and a missing node and an unopenable one are
+    # indistinguishable at it -- and it had no record at all for the empty-path check or for the
+    # protocol-version READ, as distinct from the protocol-version COMPARISON.  Both halves of
+    # that mismatch are corrected here: one record per real arc, ten in total.
+    #
+    # THE REACHERS ARE UNIT TESTS UNDER INVOCATION A, NOT INVOCATION B, and that is a property of
+    # the seam rather than of this host.  isBinderPreflightOk takes a BinderPreflightProbe, so
+    # DriverAidlPreflightTest drives the protocol-mismatch, context-manager and TRUE-positive
+    # arms with a synthetic probe on any host, with no binder driver and without touching a real
+    # node.  The remaining arms use a real path chosen by the test.  DriverAidlPreflightTest is
+    # back-end independent and runs under A, B and C.
+    "preflight.empty-path|ccec/src/DriverAidlImpl.cpp|2606|0|0|unit test, DriverAidlPreflightTest.DeclinesAnEmptyDriverPath, and the same arm inside .EveryPreflightArmReleasesExactlyTheDescriptorsItOpened (measured taken 2)|required||if (binderDriverPath.empty()) {"
+    "preflight.path-given|ccec/src/DriverAidlImpl.cpp|2606|0|1|every other preflight case, and every production initialization (measured taken 15)|required||if (binderDriverPath.empty()) {"
+    "preflight.node-unopenable|ccec/src/DriverAidlImpl.cpp|2614|0|0|unit test, DriverAidlPreflightTest.DeclinesANonexistentDriverPath -- still the ONE arc a missing node and an unopenable node share, because both decline the predicate and the verdict is what this gate maps. They no longer share the MESSAGE: a nested test on errno inside this arm reports ENOENT as a legacy-only platform and every other errno as a platform fault. That nested branch changes no verdict, so it is not a fifth negative arm and is deliberately not a record of its own; the ENOENT side is the one every case here drives (measured taken 7, which includes the driverless host's own production preflight)|required||if (driverFd < 0) {"
+    "preflight.node-opened|ccec/src/DriverAidlImpl.cpp|2614|0|1|unit tests, DriverAidlPreflightTest.DeclinesAPathThatOpensButIsNotABinderDriver and every synthetic-probe case (measured taken 8)|required||if (driverFd < 0) {"
+    "preflight.version-unreadable|ccec/src/DriverAidlImpl.cpp|2646|0|2|unit test, DriverAidlPreflightTest.DeclinesAPathThatOpensButIsNotABinderDriver: a real node that opens and answers no BINDER_VERSION ioctl (measured taken 2)|required||if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {"
+    "preflight.version-read|ccec/src/DriverAidlImpl.cpp|2646|0|3|every synthetic-probe case, which reports a version and so reaches the comparison (measured taken 6)|required||if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {"
+    "preflight.protocol-mismatch|ccec/src/DriverAidlImpl.cpp|2672|0|2|unit test, DriverAidlPreflightTest.DeclinesANodeWhoseProtocolVersionDiffersFromThisBuild, driving expected+1 through the synthetic probe (measured taken 2)|required||if (protocolVersion != expectedBinderProtocolVersion()) {"
+    "preflight.protocol-equal|ccec/src/DriverAidlImpl.cpp|2672|0|3|unit tests, DriverAidlPreflightTest.DeclinesAMatchingProtocolWhoseContextManagerNeverAnswers and .AcceptsANodeWhoseProtocolMatchesAndWhoseContextManagerAnswers (measured taken 4)|required||if (protocolVersion != expectedBinderProtocolVersion()) {"
+    "preflight.context-manager-answers|ccec/src/DriverAidlImpl.cpp|2698|0|0|unit test, DriverAidlPreflightTest.AcceptsANodeWhoseProtocolMatchesAndWhoseContextManagerAnswers -- the whole-predicate TRUE verdict (measured taken 2)|required||if (contextManagerReachable) {"
+    "preflight.context-manager-silent|ccec/src/DriverAidlImpl.cpp|2698|0|1|unit test, DriverAidlPreflightTest.DeclinesAMatchingProtocolWhoseContextManagerNeverAnswers, which also asserts the caller's deadline reached the probe (measured taken 2)|required||if (contextManagerReachable) {"
 
-    # ---- GROUP 4: the one-element address arrays, add and remove, all three outcomes each.
-    "addlogical.ok-true|ccec/src/DriverAidlImpl.cpp||||invocation B|required|addLogicalAddresses(one, &ok) succeeding"
-    "addlogical.ok-false|ccec/src/DriverAidlImpl.cpp||||invocation B|required|ok == false -> AddressNotAvailableException"
-    "addlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp||||invocation B|required|a non-ok binder Status -> IOException"
-    "removelogical.ok-true|ccec/src/DriverAidlImpl.cpp||||invocation B|required|removeLogicalAddresses(one, &ok) succeeding"
-    "removelogical.ok-false|ccec/src/DriverAidlImpl.cpp||||invocation B|required|ok == false -> logged at LOG_EXP and ignored"
-    "removelogical.status-not-ok|ccec/src/DriverAidlImpl.cpp||||invocation B|required|a non-ok binder Status -> logged and ignored"
+    # ---- GROUP 4: THE ONE-ELEMENT ADDRESS ARRAYS, add and remove, both arcs of both decisions.
+    # These are AIDL-path arms: they need the AIDL back-end resolved, so invocation B is their
+    # reacher and a driverless host reports them DEFERRED rather than passed or failed.  Both
+    # arcs of each decision are recorded, which is also what makes the TRUE/FALSE labels safe on
+    # a host that cannot execute the line: a label the wrong way round still gates both arms.
+    "addlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2118|0|0|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions: a non-ok binder Status -> IOException|required|B|if (!txn.isOk()) {"
+    "addlogical.status-ok|ccec/src/DriverAidlImpl.cpp|2118|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMarshalsExactlyOneElement|required|B|if (!txn.isOk()) {"
+    "addlogical.refused|ccec/src/DriverAidlImpl.cpp|2122|0|0|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions: added == false -> AddressNotAvailableException|required|B|else if (!added) {"
+    "addlogical.accepted|ccec/src/DriverAidlImpl.cpp|2122|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMarshalsExactlyOneElement: the address is appended to the local list|required|B|else if (!added) {"
+    "removelogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2051|0|0|invocation B, DriverAidlSessionTest.RemoveLogicalAddressIgnoresTransportFailureAndStillRemovesLocally|required|B|if (!txn.isOk()) {"
+    "removelogical.status-ok|ccec/src/DriverAidlImpl.cpp|2051|0|1|invocation B, DriverAidlSessionTest.RemoveLogicalAddressSucceedsMarshalsOneElementAndDropsItLocally|required|B|if (!txn.isOk()) {"
+    "removelogical.refused|ccec/src/DriverAidlImpl.cpp|2054|0|0|invocation B, DriverAidlSessionTest.RemoveLogicalAddressMarshalsOneElementAndIgnoresHalRefusal: removed == false is logged at LOG_EXP and ignored|required|B|else if (!removed) {"
+    "removelogical.accepted|ccec/src/DriverAidlImpl.cpp|2054|0|1|invocation B, DriverAidlSessionTest.RemoveLogicalAddressSucceedsMarshalsOneElementAndDropsItLocally|required|B|else if (!removed) {"
 
-    # ---- GROUP 5: getLogicalAddresses, every cardinality plus the failure.
-    "getlogical.empty|ccec/src/DriverAidlImpl.cpp||||invocation B|required|an empty vector -> return 0"
-    "getlogical.exactly-one|ccec/src/DriverAidlImpl.cpp||||invocation B|required|exactly one entry -> return vec[0]"
-    "getlogical.more-than-one|ccec/src/DriverAidlImpl.cpp||||invocation B|required|vec.size() > 1 -> log the count, return vec[0]"
-    "getlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp||||invocation B|required|a non-ok binder Status -> return 0"
+    # ---- GROUP 5: getLogicalAddresses, every cardinality plus the transport failure.
+    "getlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|1926|0|0|invocation B, DriverAidlSessionTest.GetLogicalAddressReportsZeroOnTransportFailureWithoutRaising|required|B|if (!txn.isOk()) {"
+    "getlogical.status-ok|ccec/src/DriverAidlImpl.cpp|1926|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|if (!txn.isOk()) {"
+    "getlogical.empty|ccec/src/DriverAidlImpl.cpp|1929|0|0|invocation B, DriverAidlSessionTest.EmptyAddressResultReportsZeroSoTheExistingCallerSignalSurvives|required|B|else if (halAddresses.empty()) {"
+    "getlogical.non-empty|ccec/src/DriverAidlImpl.cpp|1929|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|else if (halAddresses.empty()) {"
+    "getlogical.more-than-one|ccec/src/DriverAidlImpl.cpp|1933|0|0|invocation B, DriverAidlSessionTest.MultipleReturnedAddressesUseEntryZeroAndAreLogged|required|B|if (halAddresses.size() > 1) {"
+    "getlogical.exactly-one|ccec/src/DriverAidlImpl.cpp|1933|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|if (halAddresses.size() > 1) {"
 
     # ---- GROUP 6: the frame-length guard, both sides.  The over-length side is difference 1
     # of the authorized observable differences, so both arms are evidence rather than trivia.
-    "framelen.within-contract|ccec/src/DriverAidlImpl.cpp||||invocation B|required|a frame at or below the 16-byte sendMessage contract"
-    "framelen.over-contract|ccec/src/DriverAidlImpl.cpp||||invocation B|required|an over-length frame -> IOException, never truncated"
+    "framelen.over-contract|ccec/src/DriverAidlImpl.cpp|1818|0|0|invocation B, DriverAidlTransmitTest.FramesOverTheAidlLimitAreRefusedWithoutBeingSentOrTruncated|required|B|if (length > AIDL_MAX_MESSAGE_LENGTH) {"
+    "framelen.within-contract|ccec/src/DriverAidlImpl.cpp|1818|0|1|invocation B, every DriverAidlTransmitTest case that transmits, beginning with .DirectedFrameAcknowledgedByTheFollowerSucceeds|required|B|if (length > AIDL_MAX_MESSAGE_LENGTH) {"
+    # ---- GROUP 7: THE RECEIVE PATH'S TWO GUARDS.  Both were added because an out-of-process
+    # HAL can deliver what an in-process one never could.
+    #
+    # THE LENGTH GUARD IS NOT DEFENSIVE PROGRAMMING.  An empty std::vector<uint8_t> is a legal
+    # AIDL payload, and an empty CECFrame on the incoming queue is taken by the Bus reader,
+    # handed to printFrameDetails(), and decoded as Header(frame, 0) -- which reaches
+    # frame.at(0) and raises std::out_of_range.  printFrameDetails() catches Exception&, the
+    # CCEC base, which does not match it, and Bus::Reader::run() catches InvalidStateException&,
+    # which does not either, so the exception escapes the thread function and TERMINATES THE
+    # PROCESS on one malformed message from the HAL.  The bound is one byte and not two because
+    # a header-only frame is a legitimate CEC poll -- the very frame this back-end's own poll()
+    # transmits.
+    #
+    # THE OWNERSHIP ARM IS THE OTHER HALF.  offerReceivedFrame() reports whether the queue took
+    # the frame; on true the callback clears its pointer immediately and on false it releases
+    # the frame itself.  Both arcs are mapped because a change that always reported acceptance
+    # would leak one frame per event, and one that always reported refusal would double free.
+    #
+    # Both lines carry `-` on a driverless host: the listener is reached only through a live
+    # session, so these arms belong to invocation B and E and are declared as needing B.
+    "receive.message-too-short|ccec/src/DriverAidlImpl.cpp|1090|0|0|invocations B and E: the fake service delivers an empty payload and the callback discards it before allocating|required|B|if (message.size() < MIN_RECEIVED_MESSAGE_LENGTH) {"
+    "receive.message-acceptable|ccec/src/DriverAidlImpl.cpp|1090|0|1|invocations B and E: every ordinary received frame, including the one-byte poll|required|B|if (message.size() < MIN_RECEIVED_MESSAGE_LENGTH) {"
+    "receive.queue-accepted|ccec/src/DriverAidlImpl.cpp|1134|0|2|invocations B and E: the ordinary delivery, where the queue takes the frame and the callback drops its pointer|required|B|if (owner->offerReceivedFrame(frame)) {"
+    "receive.queue-refused|ccec/src/DriverAidlImpl.cpp|1134|0|3|invocations B and E with a stalled reader: the queue is at its receive limit and the callback releases the frame rather than leaking it|required|B|if (owner->offerReceivedFrame(frame)) {"
+
+    # ---- GROUP 8: THE QUEUE HANDOFF'S RESERVED SLOT.  Both arms are measured DRIVERLESS, which
+    # is what makes this group the enforced half of the receive-path work: DriverAidlLocalInstanceTest
+    # drives offerReceivedFrame() directly on a test-local subclass, so the arithmetic that keeps
+    # close()'s sentinel undroppable is held to account on any host.
+    #
+    # The refusal point is one BELOW the capacity on purpose.  A sentinel the queue swallowed
+    # would leave the Bus reader blocked in EventQueue::poll() with nothing coming to wake it,
+    # so the receive path stops one entry early.  Measured on this host: 10 refusals and 7876
+    # acceptances across the five F02 cases.
+    "offer.no-slot|ccec/src/DriverAidlImpl.cpp|2366|0|0|invocation A, DriverAidlLocalInstanceTest.ReceiveQueueReservesTheLastSlotForCloseSentinelAndRefusesTheFrameThatWouldTakeIt and .EveryFrameOfferedToAFullReceiveQueueHasExactlyOneOwner (measured taken 10)|required||if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {"
+    "offer.slot-available|ccec/src/DriverAidlImpl.cpp|2366|0|1|invocation A, every accepted offer in the five F02 cases (measured taken 7876)|required||if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {"
+
+    # ---- GROUP 9: THE CONTEXT-MANAGER TIMEOUT CEILING.  isBinderPreflightOk() takes its bound
+    # as an unsigned int, so a caller can name a figure larger than any plausible servicemanager
+    # start-up delay and every millisecond of it would be time LibCCEC::init() spends blocked.
+    # The clamp is measured driverlessly through the probe seam, which records the bound it was
+    # actually handed, so both arms are enforced here rather than deferred.
+    "preflight.timeout-clamped|ccec/src/DriverAidlImpl.cpp|2688|0|0|invocation A, DriverAidlPreflightTest.ClampsAContextManagerTimeoutAboveTheCeilingToTheCeiling (measured taken 1)|required||if (effectiveTimeoutMs > MAX_CONTEXT_MANAGER_TIMEOUT_MS) {"
+    "preflight.timeout-within-ceiling|ccec/src/DriverAidlImpl.cpp|2688|0|1|invocation A, every other preflight case including .PassesAContextManagerTimeoutAtTheCeilingThroughUnchanged (measured taken 5)|required||if (effectiveTimeoutMs > MAX_CONTEXT_MANAGER_TIMEOUT_MS) {"
+
+    # ---- GROUP 10: THE SLOW-HAL-CALL DIAGNOSTIC.  A THRESHOLD, NOT A TIMEOUT: crossing it
+    # abandons nothing and raises nothing, it only leaves a LOG_WARN line where a stall would
+    # otherwise be silent.  B4 records that the underlying unbounded synchronous call cannot be
+    # bounded on the pinned libbinder, so these arms measure the mitigation that IS in scope.
+    #
+    # All three carry `-` driverlessly, because no synchronous AIDL call is issued at all when
+    # the preflight declines: they belong to invocation B.  The clock-unreadable arm is mapped
+    # alongside the threshold because it decides whether a measurement is trusted, and a
+    # diagnostic computed from a fabricated origin would be worse than none.
+    "halcall.clock-unreadable|ccec/src/DriverAidlImpl.cpp|446|0|0|invocation B with an unreadable CLOCK_MONOTONIC: the measurement is skipped rather than computed from a fabricated origin|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
+    "halcall.clock-readable|ccec/src/DriverAidlImpl.cpp|446|0|1|invocation B: the ordinary case, where both clock reads succeeded and the elapsed time can be compared|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
+    "halcall.slow|ccec/src/DriverAidlImpl.cpp|452|0|0|invocation B against a deliberately delayed fake: one LOG_WARN line naming the operation and the elapsed time|required|B|if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {"
+    "halcall.within-threshold|ccec/src/DriverAidlImpl.cpp|452|0|1|invocation B: every healthy synchronous call, which must stay silent|required|B|if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {"
 )
 
 # Set by apply_branch_gate and folded into apply_gate's own failure count, so the script keeps
@@ -4592,7 +6861,56 @@ BRANCH_GATE_FAILURES=0
 # Reads the trace once per file rather than once per manifest entry: several entries share a
 # file, and re-walking a trace for each of thirty-odd arms would turn a gate into a cost.
 # ------------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# WAS THIS ARM MEASURABLE BY THIS RUN?  Prints the reason it was not, or nothing at all.
+#
+# Field 8 of a manifest record is a space-separated CONJUNCTION of requirement tokens, each
+# either an invocation letter or the literal `binder`.  Every token must have been satisfied for
+# the arm's `taken` count to mean anything: an arm belonging to invocation B on a host that
+# deferred B has a count of `-` for a reason that says nothing whatever about the test set.
+#
+# WHY A CONJUNCTION AND NOT A LIST OF ALTERNATIVES.  No arm in the manifest is reached by "B or
+# C"; the ones with several possible reachers all include invocation A, which always runs, and
+# their `needs` is therefore empty.  A disjunction would be machinery with no member, and the
+# conjunction is what models `preflight.positive` -- invocation B, which itself implies a binder
+# driver, so one token carries both requirements.
+#
+# THE `binder` TOKEN IS CURRENTLY CARRIED BY NO RECORD, and that is a property of the test set
+# rather than of this mechanism.  Its only two users were the preflight's protocol-mismatch and
+# handle-zero-timeout arms, which the L1 suite now drives from a FIFO and a scoped `ioctl`/`mmap`
+# interposition instead of a real node (see GROUP 3).  The token stays because it is the honest
+# answer for any arm that genuinely needs the driver and is named by a test that runs regardless
+# -- exactly the shape those two had -- and because deleting it would mean re-deriving it the
+# next time one appears.
+#
+# THE INVOCATION SIDE IS ANSWERED FROM WHAT ACTUALLY RAN, not from what this host could in
+# principle do: INVOCATIONS_RUN is built by the matrix as each invocation passes its four
+# checks, so an invocation that ran and failed never reaches this gate at all.
+# ------------------------------------------------------------------------------------
+branch_arm_unmet_requirement() { # $1 = the record's needs field
+    local needs="$1" token
+    [ -n "$needs" ] || return 0
+    for token in $needs; do
+        case "$token" in
+            binder)
+                binder_transport_present \
+                    || { printf 'a usable binder driver at %s' "$BINDER_DRIVER_NODE"; return 0; }
+                ;;
+            *)
+                # Matched against the ', '-joined list with delimiters on both sides, so "A"
+                # cannot match some future invocation named "AB".
+                case ", ${INVOCATIONS_RUN}, " in
+                    *", ${token}, "*) ;;
+                    *) printf 'invocation %s, which did not run' "$token"; return 0 ;;
+                esac
+                ;;
+        esac
+    done
+    return 0
+}
+
 branch_records_for_file() { # $1=trace  $2=SF path suffix
+    # shellcheck disable=SC2016  # the single quotes are the awk program's; $0/$2 are awk's
     "$AWK_BIN" -v want="$2" '
         /^SF:/ {
             path = substr($0, 4)
@@ -4622,7 +6940,7 @@ branch_records_for_file() { # $1=trace  $2=SF path suffix
 # IT RUNS AFTER THE SUITE RESULTS AND AFTER THE LINE GATE'S INPUT IS PREPARED, and it records
 # its failures rather than exiting on them, so that apply_gate remains the single place a
 # verdict is issued.  Coverage is subordinate to functional passes: by the time this runs, every
-# invocation has already been run and held to its three checks, and a red matrix never reaches
+# invocation has already been run and held to its four checks, and a red matrix never reaches
 # here at all.
 # ------------------------------------------------------------------------------------
 apply_branch_gate() {
@@ -4632,16 +6950,16 @@ apply_branch_gate() {
 
     [ -s "$RAW_TRACE" ] || die "the branch gate has no trace to read at $RAW_TRACE."
 
-    local record id file line block branch reacher status source
-    local required=0 unreachable=0 unpopulated=0 covered=0 zero_taken=0 absent=0 unexercisable=0
-    local -a zero_list=() absent_list=()
+    local record id file line block branch reacher status source needs
+    local required=0 unreachable=0 unpopulated=0 covered=0 zero_taken=0 absent=0 deferred=0
+    local -a zero_list=() absent_list=() deferred_list=()
 
     # One pass per distinct file, cached in a variable keyed by nothing more elaborate than the
     # file we last read -- the manifest is grouped by file, so this is a single read per group.
     local cached_file='' cached_records=''
 
     for record in "${BRANCH_MANIFEST[@]}"; do
-        IFS='|' read -r id file line block branch reacher status source <<< "$record"
+        IFS='|' read -r id file line block branch reacher status needs source <<< "$record"
 
         if [ "$status" = 'unreachable' ]; then
             unreachable=$((unreachable + 1))
@@ -4661,29 +6979,51 @@ apply_branch_gate() {
             cached_file="$file"
         fi
 
+        # BLOCK AND BRANCH ARE COMPARED AS STRINGS, never numerically, because lcov writes `e0`
+        # for the arcs gcov labels "(throw)" and that value appears in all three mapped files.
+        # An awk numeric comparison would coerce `e0` to 0 and match the wrong record -- a
+        # silent mis-identification rather than a visible error, which is the worst kind.
         local taken
+        # shellcheck disable=SC2016  # $1/$2/$3/$4 below are awk's fields, passed -v l/b/br
         taken="$(printf '%s\n' "$cached_records" \
                  | "$AWK_BIN" -v l="$line" -v b="$block" -v br="$branch" \
-                       '$1 == l && $2 == b && $3 == br { print $4; found = 1; exit }
+                       '$1 "" == l "" && $2 "" == b "" && $3 "" == br "" { print $4; found = 1; exit }
                         END { if (!found) print "ABSENT" }')"
 
+        # ABSENCE IS CHECKED BEFORE MEASURABILITY, and the order is deliberate.  An arm missing
+        # from the trace has moved or been deleted in the SOURCE, which is true regardless of
+        # which invocations ran -- and it is exactly the case a deferral must not excuse, because
+        # excusing it would let a refactor delete a mapped branch and make this gate greener.
+        if [ "$taken" = 'ABSENT' ]; then
+            absent=$((absent + 1))
+            # The quoted source line is carried into the report, not just held in the
+            # manifest: a reader told an arm has moved needs the line to look for, and
+            # making them go and read the manifest to find it is a step this can save.
+            absent_list+=("$id  ($file:$line block $block branch $branch)")
+            absent_list+=("    manifest source: $source")
+            continue
+        fi
+
+        # WAS THIS RUN IN A POSITION TO MEASURE THE ARM AT ALL?  If not, its count is reported
+        # as DEFERRED with the missing resource named -- never as a pass, and never as a failure
+        # of the test set, because neither would be true.
+        local unmet
+        unmet="$(branch_arm_unmet_requirement "$needs")"
+        if [ -n "$unmet" ]; then
+            deferred=$((deferred + 1))
+            deferred_list+=("$id  ($file:$line block $block branch $branch)  needs $unmet")
+            continue
+        fi
+
         case "$taken" in
-            ABSENT)
-                absent=$((absent + 1))
-                # The quoted source line is carried into the report, not just held in the
-                # manifest: a reader told an arm has moved needs the line to look for, and
-                # making them go and read the manifest to find it is a step this can save.
-                absent_list+=("$id  ($file:$line block $block branch $branch)")
-                absent_list+=("    manifest source: $source")
-                ;;
-            -)
-                # gcov's own judgement that the arc cannot be driven.  Recorded, not failed.
-                unexercisable=$((unexercisable + 1))
-                log "  UNEXERCISABLE  $id -- gcov reports '-' for this arc"
-                ;;
-            0)
+            -|0)
+                # BOTH VALUES ARE FAILURES HERE, and that they read differently in the trace is
+                # a detail of how much of the function ran rather than a difference in verdict:
+                # `0` is "the block was entered and this arc was not taken", `-` is "the block
+                # was never entered at all".  This arm was measurable by this run and was not
+                # measured, which is the same finding either way.
                 zero_taken=$((zero_taken + 1))
-                zero_list+=("$id  ($file:$line block $block branch $branch)")
+                zero_list+=("$id  ($file:$line block $block branch $branch)  taken: $taken")
                 zero_list+=("    should be reached by: $reacher")
                 zero_list+=("    manifest source:     $source")
                 ;;
@@ -4703,22 +7043,44 @@ apply_branch_gate() {
     if [ "$unpopulated" -gt 0 ]; then
         warn "  $unpopulated of $required required arm(s) have NO COORDINATES in the manifest, so"
         warn "  they were NOT checked.  This is not a pass and is not counted as one."
-        warn "  The coordinates come from a real unfiltered trace after a FULL five-invocation"
-        warn "  run, which a host with no binder driver cannot produce -- so they are shipped"
-        warn "  empty rather than guessed.  Populate them on the binder-capable job: run the"
-        warn "  whole matrix, then read $RAW_TRACE and fill in the line, block and branch"
-        warn "  fields of BRANCH_MANIFEST against the source line quoted in each entry."
-        note_advisory "the branch-arm gate did not run: $unpopulated of $required required arm(s) in
-       BRANCH_MANIFEST have no line/block/branch coordinates yet, so full branch coverage of the
-       selection and array-adaptation code is NOT established by this run.  The arm list and the
-       gate are in place; the coordinates are populated from a full five-invocation trace on a
-       binder-capable host."
+        warn "  EVERY ENTRY SHIPPED IN THIS SCRIPT IS POPULATED, so an empty one means an entry"
+        warn "  was added without its coordinates.  Fill them in the way the others were: run"
+        warn "  --build --run, then read the (line, block, branch) of the arm out of"
+        warn "    $RAW_TRACE"
+        warn "  matching it against the source line quoted in the entry, and cross-check the"
+        warn "  index with 'gcov -b -c -t' so the arm and the arc are known to be the same thing."
+        note_advisory "the branch-arm gate could not check $unpopulated of $required required arm(s) in
+       BRANCH_MANIFEST: they carry no line/block/branch coordinates, so nothing about them was
+       measured and nothing may be reported as though it had been.  Every entry shipped in this
+       script is populated, so this means an arm was added without measuring it -- the remedy is
+       to measure it, not to remove it."
     fi
 
-    if [ "$unexercisable" -gt 0 ]; then
-        log "  $unexercisable mapped arc(s) reported '-' by gcov and are recorded as unexercisable"
-        log "    rather than failed: that is the compiler's view of its own control-flow graph,"
-        log "    not a statement about the tests."
+    # ------------------------------------------------------------------------------------
+    # THE DEFERRED ARMS.  Present in the trace, coordinates verified, but nothing this run was
+    # able to do could have driven them -- so their counts are reported as unmeasured, with the
+    # missing invocation or resource named per arm, and folded into the SAME advisory mechanism
+    # that already stops a partial matrix producing an acceptance verdict.
+    #
+    # THIS IS NOT A PASS AND IS NOT COUNTED AS ONE.  It is also not a failure of the test set:
+    # the cases exist, are compiled into the binaries, and were not run.  Saying either of those
+    # instead would be a lie in one direction or the other, and the whole value of this gate is
+    # that it says which.
+    # ------------------------------------------------------------------------------------
+    if [ "$deferred" -gt 0 ]; then
+        warn "  $deferred of $required required arm(s) are DEFERRED -- present in the trace with"
+        warn "  their coordinates confirmed, but unmeasurable by this run:"
+        printf '%s\n' "${deferred_list[@]}" | sed 's/^/[run_coverage]      /' >&2
+        warn "  Each line names what was missing.  A deferred arm reports no branch evidence and"
+        warn "  contributes no pass; re-run the whole matrix on a binder-capable host to measure"
+        warn "  them.  Do NOT respond by removing an entry: the arm list is the requirement, and"
+        warn "  a shorter manifest measures less while looking better."
+        note_advisory "the branch-arm gate could not measure $deferred of $required required arm(s): the
+       invocation or the binder driver each one needs was not available on this host, so full
+       branch coverage of the selection and array-adaptation code is NOT established by this run.
+       The coordinates are populated and verified against the trace -- what is missing is the
+       execution that would drive them, which is the same deferral the invocation matrix reports
+       above and not a second finding."
     fi
 
     # ------------------------------------------------------------------------------------
@@ -4741,19 +7103,25 @@ apply_branch_gate() {
     # FAILURE CONDITION (a): a mapped arm present and never driven.
     # ------------------------------------------------------------------------------------
     if [ "$zero_taken" -gt 0 ]; then
-        warn "  $zero_taken mapped arm(s) were NEVER TAKEN:"
+        warn "  $zero_taken mapped arm(s) WERE MEASURABLE BY THIS RUN AND WERE NOT TAKEN:"
         printf '%s\n' "${zero_list[@]}" | sed 's/^/[run_coverage]      /' >&2
-        warn "  Each names the invocation or test that is supposed to drive it.  Where that"
-        warn "  invocation was DEFERRED on this host, the arm is unmeasured for that reason and"
-        warn "  the deferral is the finding.  Where it RAN, the arm is a genuine gap and the"
-        warn "  answer is a test -- never a smaller manifest."
+        warn "  Every arm listed here had everything it needs -- its reacher ran, and any binder"
+        warn "  driver it needs is present -- so this is a GENUINE GAP in the test set and not a"
+        warn "  consequence of a deferral.  Arms whose reacher could not run are reported"
+        warn "  separately above as DEFERRED and are not in this list."
+        warn "  A 'taken' of '-' here means the enclosing block was never entered, which is the"
+        warn "  same finding as 0 and not a milder one.  The answer is a test that drives the"
+        warn "  arm -- never a smaller manifest."
         BRANCH_GATE_FAILURES=$((BRANCH_GATE_FAILURES + zero_taken))
     fi
 
-    if [ "$BRANCH_GATE_FAILURES" -eq 0 ] && [ "$unpopulated" -eq 0 ]; then
+    if [ "$BRANCH_GATE_FAILURES" -eq 0 ] && [ "$unpopulated" -eq 0 ] && [ "$deferred" -eq 0 ]; then
         log "  every one of the $required required arm(s) is present and taken at least once"
+    elif [ "$BRANCH_GATE_FAILURES" -eq 0 ] && [ "$unpopulated" -eq 0 ]; then
+        log "  the $covered measurable arm(s) are all present and taken; $deferred could not be"
+        log "    measured here and are reported above rather than passed"
     fi
-    log "  checked: $covered taken, $zero_taken never taken, $absent absent, $unpopulated unchecked"
+    log "  checked: $covered taken, $zero_taken never taken, $absent absent, $deferred deferred, $unpopulated unchecked"
     return 0
 }
 
@@ -4812,14 +7180,15 @@ apply_gate() {
         # licence to pass: the code really is unmeasured, whatever the reason.  What changes is
         # only the ADVICE, because on a host that could not run the AIDL-selected invocations
         # the AIDL back-end's source is unmeasured BY CONSTRUCTION -- the cases that cover it
-        # are written, are in the binary, and were skipped for want of a binder driver.  Adding
-        # tests would not move those figures by a line.
+        # are written, are in the binary, and were never executed for want of a binder driver.
+        # They were not skipped: the invocations that select them never started.  Adding tests
+        # would not move those figures by a line.
         if [ -n "$INVOCATIONS_DEFERRED" ]; then
             warn "READ THE DEFERRALS BEFORE READING THESE FIGURES.  Invocation(s)"
             warn "  $INVOCATIONS_DEFERRED did not run on this host, so any target reached only by"
             warn "  them is unmeasured HERE for that reason and not for want of a test.  The AIDL"
             warn "  back-end and the selection helper are covered by cases that exist, are"
-            warn "  compiled into the binaries and were skipped -- so these numbers are a"
+            warn "  compiled into the binaries and were never executed -- so these numbers are a"
             warn "  property of this HOST, not of the test set."
             warn "  This still FAILS, and deliberately: unmeasured is unmeasured whatever the"
             warn "  cause, and a run that excused itself here would be the one place a real gap"
@@ -4902,7 +7271,7 @@ apply_gate() {
 #
 # THE SUITE RESULTS COME BEFORE ANY COVERAGE NUMBER, and that ordering is a requirement
 # rather than an accident of layout: a coverage figure never substitutes for a passing
-# suite.  Every invocation is run and held to its three checks BEFORE a single counter is
+# suite.  Every invocation is run and held to its four checks BEFORE a single counter is
 # captured, and the first one that fails ends the run with nothing captured at all -- so
 # there is no arrangement of these steps in which a coverage report can be produced from a
 # red or partial matrix.
@@ -4928,8 +7297,13 @@ main() {
         exit 0
     fi
 
+    # MINTED BEFORE THE BANNER so that every line this run prints can be tied back to the
+    # artifacts it produced.  Nothing is named after it -- see ONE GENERATION PER DIRECTORY.
+    mint_run_id
+
     rule
     log "HDMI-CEC middleware L1 coverage runner"
+    log "  run id         : $RUN_ID"
     log "  submodule root : $HDMICEC_ROOT"
     log "  workspace root : $WS"
     log "  line bar       : ${COVERAGE_MIN}%  (per-file gating: $( [ "$COVERAGE_PER_FILE_GATE" -eq 1 ] && echo on || echo off ))"
@@ -4947,6 +7321,17 @@ main() {
     # ahead of every lcov call also covers the counter zeroing inside do_run, which is an
     # lcov invocation like any other and used to run with a home configuration in effect.
     require_tools
+
+    # THE TREE LOCK IS TAKEN HERE: after tool resolution (it needs flock and stat) and before
+    # the first thing that touches the tree.  Every stage below it either writes to this tree
+    # or reads its .gcda counters, and each of them asserts the lock again on entry rather
+    # than assuming this line ran -- see THE TREE LOCK.
+    #
+    # Taken even when neither --build nor --run was given: a measure-only invocation still
+    # reads the counters, and a concurrent run that zeroes them mid-capture produces a trace
+    # of a tree nothing exercised.
+    acquire_tree_lock "$( [ "$DO_BUILD" -eq 1 ] && printf 'build, ' )$( [ "$DO_RUN" -eq 1 ] && printf 'run the invocation matrix, ' )capture and gate"
+
     make_private_lcov_home
     log_tool_versions
     prepare_output_dir
@@ -4971,7 +7356,7 @@ main() {
     per_file_report
     # The branch-arm gate runs BEFORE apply_gate and records rather than exits, so that
     # apply_gate remains the single place a verdict is issued.  By this point every invocation
-    # has already run and passed its three checks -- a red matrix never reaches either gate.
+    # has already run and passed its four checks -- a red matrix never reaches either gate.
     apply_branch_gate
     apply_gate
 }
