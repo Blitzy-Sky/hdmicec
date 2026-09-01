@@ -2422,37 +2422,36 @@ DriverAidlImpl::IncomingQueue & DriverAidlImpl::getIncomingQueue(void)
  * `osal/include/osal/EventQueue.hpp` is out of bounds for this migration, so the silent
  * discard it performs at capacity is worked around here rather than fixed there.
  *
- * REGISTERED OBSERVABLE DIFFERENCE FROM THE LEGACY BACK-END, AND NOT ONE OF THE THREE THE
- * PLAN AUTHORIZES. Both back-ends run a 32-entry incoming queue: the legacy one takes
- * `CCEC_OSAL::EventQueue`'s default, `EventQueue(size_t cap = 32)` in
- * `osal/include/osal/EventQueue.hpp`, and this one passes INCOMING_QUEUE_CAPACITY - the same
- * number - explicitly. What differs is what the receive path may do with those 32 slots.
- * DriverImpl's receive callback offers straight onto the queue and so fills all 32; this
- * method refuses at 31, because the thirty-second slot belongs to close()'s NULL sentinel.
- * A middleware caller can observe that. Under a sustained receive burst that outruns the Bus
- * reader, this back-end drops the frame that would have taken the last slot where the legacy
- * back-end still accepts it, so the burst depth at which the first frame is lost is 31
- * events here against 32 there. That condition is the whole of the reachability: while the
- * queue has a free slot the two back-ends behave identically, and the frame this method
- * refuses is never a frame the caller was told had been accepted - the return value reports
- * the refusal and leaves ownership with the caller, which is what the receive callback
- * releases it on.
+ * RECEIVE DEPTH IS AT PARITY WITH THE LEGACY BACK-END, AND THE RESERVED SLOT IS WHY IT TAKES
+ * READING. The legacy queue leaves `CCEC_OSAL::EventQueue`'s default in place -
+ * `EventQueue(size_t cap = 32)` in `osal/include/osal/EventQueue.hpp` - and DriverImpl's
+ * receive callback offers straight onto it, so received frames fill all 32 slots. This queue
+ * is constructed with INCOMING_QUEUE_CAPACITY, which is 33, and this method refuses at one
+ * below that. Received frames therefore fill @b 32 here as well: the same burst depth, the
+ * same frame accepted at every occupancy, no caller-observable difference to register. The
+ * thirty-third slot is not depth available to anyone - it exists so close()'s NULL sentinel
+ * has somewhere to land that a received frame can never have taken.
  *
- * THE RESERVE STAYS, and what removing it would cost is the reason. With all 32 slots
- * available to received frames, close()'s sentinel offer can land on a full queue, where
- * `EventQueue::offer()` discards it silently and reports nothing; the Bus reader then stays
- * blocked in `EventQueue::poll()` with nothing left to wake it, and it is the one thread in
- * the middleware whose death silently ends all CEC reception. One frame of receive depth
- * under burst is the smaller loss of the two, and it is bounded and reported where the lost
- * wakeup is neither.
+ * THE RESERVE IS NOT COSMETIC, and what its absence costs is why the queue is sized for it.
+ * `EventQueue::offer()` returns void and, at capacity, discards its argument in a branch
+ * whose body is an empty `/ * @TODO Throw Exception * /`. If the sentinel could meet a full
+ * queue it would be dropped silently and reported nowhere; the Bus reader would stay blocked
+ * in `EventQueue::poll()` with nothing left to wake it, and it is the one thread in the
+ * middleware whose death silently ends all CEC reception. DriverImpl is exposed to exactly
+ * that - it is an unfixed legacy liveness defect, not a behaviour this back-end is obliged to
+ * reproduce - and the one thing that must not happen while fixing it is to pay for the fix in
+ * receive depth, because that would trade a rare hang for a difference the caller meets under
+ * ordinary load. Sizing the queue one larger is what avoids the trade.
  *
- * AAP section 0.8.2.1 enumerates exactly three authorized observable differences - write()'s
- * 16-byte frame limit, writeAsync()'s OperationNotSupportedException and
- * addLogicalAddress()'s coarser failure category - and this is not among them. It is
- * recorded here in that section's terms rather than silently adopted: the delivered
- * behaviour is as described above, and whether the difference is admitted to that list or
- * met some other way is the specification owner's decision, taken with the liveness
- * argument in the preceding paragraph in front of them.
+ * SO NOTHING IS REGISTERED AGAINST AAP SECTION 0.8.2.1 HERE. That section enumerates exactly
+ * three authorized observable differences - write()'s 16-byte frame limit, writeAsync()'s
+ * OperationNotSupportedException and addLogicalAddress()'s coarser failure category - and
+ * closes the list. This method adds no fourth: at 33 slots with one reserved, the observable
+ * receive behaviour is the legacy behaviour. An earlier revision of this back-end sized the
+ * queue at 32 and reserved a slot out of it, which did add a fourth difference - first frame
+ * lost at a burst depth of 31 against legacy's 32 - and the note is kept here because the
+ * arithmetic is the only thing separating the two revisions, and a later change that lowers
+ * the constant to 32 without removing the reserve reintroduces that difference silently.
  *
  * @see DriverAidlImpl::close() - the other producer, serialized on the same lock
  * @see DriverAidlImpl::EventListener::onMessageReceived()
@@ -2481,7 +2480,11 @@ bool DriverAidlImpl::offerReceivedFrame(CECFrame *frame)
 		 * Bus reader, under this same lock; if the receive path were allowed to fill the
 		 * last slot, that offer would be silently discarded by EventQueue::offer() and the
 		 * reader would stay asleep with nothing left to wake it. Stopping one entry early
-		 * costs one frame of depth and makes the sentinel undroppable.
+		 * makes the sentinel undroppable, and it costs no receive depth: the capacity is
+		 * sized at 33 precisely so that one below it is 32, which is what the legacy
+		 * queue's OSAL default accepts. Lowering INCOMING_QUEUE_CAPACITY to 32 without
+		 * also removing this check would turn a free guarantee into a caller-observable
+		 * difference - see the constant's own note.
 		 */
 		const size_t occupancyBefore = queue.size();
 

@@ -156,21 +156,30 @@ CCEC_BEGIN_NAMESPACE
  * frame limit enforced by write(), the OperationNotSupportedException raised by
  * writeAsync(), and the coarser failure category reported by addLogicalAddress().
  *
- * Three further differences are DELIVERED AND REGISTERED WITHOUT BEING AUTHORIZED, which
- * is stated here so that the authorized list above is not read as the complete set. Each
- * is a defensive guard the AIDL transport makes necessary, each is documented in full on
- * the method that carries it, and each is registered for the specification owner rather
- * than silently adopted:
- * - offerReceivedFrame() reserves one of the incoming queue's 32 slots for close()'s NULL
- *   sentinel, so a sustained receive burst loses its first frame one event earlier than on
- *   the legacy path, which fills all 32;
+ * Two further differences are DELIVERED AND REGISTERED WITHOUT BEING AUTHORIZED, which is
+ * stated here so that the authorized list above is not read as the complete set. Each is a
+ * defensive guard the AIDL transport makes necessary, each is documented in full on the
+ * method that carries it, and each is registered for the specification owner rather than
+ * silently adopted:
  * - getLogicalAddress() reports no address when the HAL names one outside the AIDL
  *   contract range 0x0..0xE, where the legacy back-end returns whatever the HAL wrote;
  * - write() raises IOException on a `SendMessageStatus` value outside the three documented
  *   enumerators, where the legacy back-end treats an unrecognised status as success.
- * The last two are reachable only when the HAL violates its own contract. A fourth
- * registration, of a deliberate departure from the plan's byte-identical directive rather
- * than of a behaviour change, sits on read().
+ * NEITHER IS REACHABLE UNLESS THE HAL VIOLATES ITS OWN CONTRACT - one requires an address
+ * the interface forbids, the other an enumerator it does not define - and in both cases
+ * the alternative is to carry the malformed value onward: an out-of-contract logical
+ * address into the frame headers the middleware builds from it, or a transmit the HAL
+ * declined reported to the caller as delivered. A third registration, of a deliberate
+ * departure from the plan's byte-identical directive rather than of a behaviour change,
+ * sits on read().
+ *
+ * The incoming queue's reserved slot is deliberately NOT on that list, and the reason is
+ * arithmetic rather than argument: the queue is constructed at 33 entries and
+ * offerReceivedFrame() refuses at one below, so received frames fill 32 - exactly what the
+ * legacy queue's OSAL default accepts. The reserve buys the sentinel a slot that no
+ * received frame can occupy without costing any receive depth, so there is no observable
+ * difference to register. See INCOMING_QUEUE_CAPACITY, where the arithmetic and the
+ * consequence of lowering it are stated together.
  *
  * Any observable difference that is neither authorized above nor registered on its method
  * is a defect.
@@ -380,13 +389,26 @@ public:
 	 * offerReceivedFrame().@n
 	 * The last of these slots is reserved for close()'s NULL sentinel: the receive path
 	 * refuses at one below this number, so the wake-the-reader offer can never be the one
-	 * the queue swallows. The effective depth available to received frames is therefore
-	 * this value minus one.
+	 * the queue swallows. The depth available to received frames is therefore this value
+	 * minus one, which is 32 - the same number the legacy queue's OSAL default accepts.
+	 *
+	 * @note THIS IS WHY THE VALUE IS 33 AND NOT 32, AND THE ARITHMETIC IS THE WHOLE POINT.
+	 *       DriverImpl leaves its own queue on the OSAL default of 32 and lets received
+	 *       frames fill all 32, which is why its close() sentinel can be the offer
+	 *       `EventQueue::offer()` silently discards - an unfixed legacy liveness defect
+	 *       this back-end does not reproduce. Reserving a slot out of 32 would have fixed
+	 *       that defect at the cost of a caller-observable difference: received frames
+	 *       would fill 31 where legacy fills 32, so a sustained receive burst would drop
+	 *       one event earlier on this back-end than on the legacy one. Sizing the queue
+	 *       one larger instead buys the reserve without paying for it. Received frames
+	 *       fill @b 32 - exactly what legacy accepts - and the sentinel still has a slot
+	 *       nothing else can take. There is no observable difference to register, and the
+	 *       cost is one pointer-sized slot that only ever holds the sentinel.
 	 *
 	 * @see offerReceivedFrame()
 	 * @see IncomingQueue
 	 */
-	static constexpr size_t INCOMING_QUEUE_CAPACITY = 32;
+	static constexpr size_t INCOMING_QUEUE_CAPACITY = 33;
 
 	/**
 	 * @brief Constructs the AIDL back-end without touching binder
