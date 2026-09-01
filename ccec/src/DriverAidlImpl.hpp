@@ -968,6 +968,21 @@ public:
 	 * @pre open() has completed successfully.
 	 * @post The one-byte frame was handed to write(), so the poll travels over whichever
 	 *       transport the enclosing back-end uses.
+	 * @warning HARD PLATFORM PREREQUISITE - BOUNDED HAL RESPONSE, INHERITED THROUGH write().
+	 *          This method issues no AIDL call of its own, and that is exactly why the
+	 *          prerequisite is restated rather than left to be inferred: the transmit it
+	 *          delegates to is a SYNCHRONOUS binder transaction with NO client-side
+	 *          deadline, so a HAL that does not answer blocks this call for as long as it
+	 *          chooses, and a caller reading only the @throws list above would take the
+	 *          three exceptions for the complete set of outcomes. The elapsed time is
+	 *          measured and a stall past the threshold is reported naming
+	 *          `IHdmiCecController::sendMessage`, not this method, so a log reader
+	 *          diagnosing a wedged poll should look for that label. Because write() holds
+	 *          the instance mutex across the transmit to preserve legacy `HdmiCecTx`
+	 *          serialization, a stalled poll also holds off every other operation on this
+	 *          back-end. The prerequisite, the reason the pinned libbinder admits no
+	 *          in-middleware bound, and each mechanism that was ruled out are recorded
+	 *          once on isServiceAvailable().
 	 *
 	 * @see write()
 	 * @see DriverImpl::poll()
@@ -1088,6 +1103,22 @@ public:
 	 *          apply restrictive ownership and mode to the Binder node so that an
 	 *          unprivileged process cannot reach the driver at all. A platform that does
 	 *          neither is not made safe by anything in this middleware.@n
+	 *          THIS PREREQUISITE IS NOT MET BY THE PINNED BINDER SDK ON ITS OWN, and an
+	 *          integrator must not assume otherwise from the presence of `servicemanager`.
+	 *          In `linux_binder_idl` 2.6.0 the daemon's authorization hooks are compiled
+	 *          out on a non-Android build: `cmds/servicemanager/Access.cpp` guards its
+	 *          `selinux_check_access()` call with `#ifdef __ANDROID__` and takes `#else
+	 *          return true;`, so on a Linux port `canAdd()`, `canFind()` and `canList()`
+	 *          allow everything, and any process able to open the Binder node may register
+	 *          `"HdmiCec"`. Supplying the authorization is therefore platform-image work -
+	 *          an SELinux-enabled daemon build with a policy that labels this service, or
+	 *          an equivalent restriction on who may reach the Binder context at all - and
+	 *          it cannot be moved into this middleware, which is a client. Do not reach for
+	 *          `IServiceManager::isDeclared()` as a stand-in either: on the same pin
+	 *          `cmds/servicemanager/ServiceManager.cpp` answers it from `isVintfDeclared()`
+	 *          only under `#ifdef __ANDROID__` and otherwise reports false unconditionally,
+	 *          so a declaration check here would decline every service on every conformant
+	 *          platform using this pin - a fallback that is wrong rather than safe.@n
 	 *          THE CONSEQUENCE, PLAINLY. This predicate identifies a service by the
 	 *          generated service name plus the interface hash and version the frozen AIDL
 	 *          snapshot compiles in. Every one of those three values is PUBLICLY
@@ -1111,7 +1142,18 @@ public:
 	 *          driver and that the peer speaks this exact interface revision. NONE of them
 	 *          is authentication of the peer, and none can be: the middleware is a client
 	 *          and the pinned libbinder C++ backend gives a client no credential of the
-	 *          service it resolved.@n
+	 *          service it resolved. `BpBinder` - the proxy type this lookup yields - exposes
+	 *          transact, liveness, death linkage and object attachment and no peer identity
+	 *          whatsoever, and `IPCThreadState::getCallingUid()`/`getCallingPid()`/
+	 *          `getCallingSid()` describe an INBOUND transaction being served, which a
+	 *          client performing a lookup does not have. The nearest thing the pin offers is
+	 *          `IServiceManager::getServiceDebugInfo()`, which reports the daemon's record of
+	 *          the pid that registered a name; that is EVIDENCE FOR A LOG AND NOT A GATE -
+	 *          it is the registrar's unauthenticated bookkeeping, it says nothing about
+	 *          whether that pid was entitled to register, and it is only reachable after
+	 *          `defaultServiceManager()` has already opened the driver. Treating it as an
+	 *          authorization check would substitute a weaker mechanism for the platform
+	 *          obligation stated above.@n
 	 *          WHAT WAS DELIBERATELY NOT ADDED, and must not be added later in the name of
 	 *          fixing this: no HAL method (the AIDL surface is consumed as it exists), no
 	 *          public middleware selector or override (the public API does not change), and
@@ -1156,7 +1198,7 @@ public:
 	 * @brief Reports why the last isServiceAvailable() declined, without asking again
 	 *
 	 * The decision is preserved rather than reconstructed, and that is the whole point of
-	 * this accessor. isServiceAvailable() already establishes which of its three ordered
+	 * this accessor. isServiceAvailable() already establishes which of its four ordered
 	 * stages declined; the selection helper in `ccec/src/Driver.cpp` needs that same
 	 * answer in order to name the platform condition in its fallback line, and it reads
 	 * the record rather than asking a second question. Asking again would be wrong in two
@@ -1204,8 +1246,11 @@ public:
 	 * abort - a time-of-check-to-time-of-use window with the worst possible consequence.
 	 *
 	 * Carrying the validated node's identity out of the check and comparing it again
-	 * immediately before the use is what removes the window, and ALL FIVE ATTRIBUTES
-	 * CAPTURED HERE ARE COMPARED. `device` and `inode` together identify one filesystem
+	 * immediately before the use is what NARROWS THAT WINDOW TO ITS STRUCTURAL MINIMUM -
+	 * narrows, and not closes, and the difference is a residual an integrator must be told
+	 * about rather than a shortcoming of this comparison. What remains is stated under
+	 * WHAT IS NOT CLOSED below. ALL FIVE ATTRIBUTES CAPTURED HERE ARE COMPARED.
+	 * `device` and `inode` together identify one filesystem
 	 * object uniquely, and `rdev` is the driver's major/minor pair, so a replacement node -
 	 * created, bind-mounted, or reached through a re-pointed symlink - differs in at least
 	 * one of the three. The preflight additionally HOLDS THE VALIDATED DESCRIPTOR OPEN
@@ -1227,6 +1272,38 @@ public:
 	 * correct at any platform baseline: a restrictive node (0600) and a broadly accessible
 	 * one (0666, which AOSP-derived layouts publish deliberately because every binder client
 	 * must be able to open the node) both pass unchanged.
+	 *
+	 * WHAT IS NOT CLOSED, stated plainly so nothing here reads as a stronger guarantee than
+	 * it is. This comparison is the LAST statement before the lookup, so the interval it
+	 * cannot cover is the shortest the code can make it - but libbinder still resolves the
+	 * pathname INDEPENDENTLY inside that lookup, and it cannot be handed the descriptor this
+	 * struct's identity was taken from. The pin admits no other arrangement: in
+	 * `linux_binder_idl` 2.6.0 the only driver entry points are `ProcessState::self()` and
+	 * `ProcessState::initWithDriver(const char*)`, both of which take a PATHNAME; the fd
+	 * itself is `ProcessState::mDriverFD`, a private member with no accessor and no
+	 * injector; `libs/binder/ProcessState.cpp` `open_driver(const char* driver)` performs
+	 * `open(driver, O_RDWR | O_CLOEXEC)` on that pathname; and `ProcessState::init()` adds a
+	 * THIRD resolution of its own - an `access(driver, R_OK)` probe that silently substitutes
+	 * `/dev/binder` when it fails. So a substitution performed by a process privileged enough
+	 * to replace a node under `/dev` in the interval AFTER this comparison and BEFORE
+	 * libbinder's open is not detectable here, and on the pinned stack a bad open is a
+	 * `LOG_ALWAYS_FATAL_IF` abort rather than a decline.
+	 *
+	 * Re-checking AFTER the lookup was considered and is deliberately not done, because it
+	 * would make things worse rather than better: `gProcess` is a `[[clang::no_destroy]]`
+	 * static created under a `std::call_once` and `~ProcessState()` is private, so once the
+	 * lookup has run the process is bound to whatever libbinder opened FOR ITS WHOLE
+	 * LIFETIME and no verdict taken afterwards can undo that binding. A post-lookup decline
+	 * would therefore select the legacy back-end while leaving the process permanently
+	 * attached to the substituted driver, which is a worse outcome than the abort it was
+	 * meant to avoid.
+	 *
+	 * The residual is consequently the platform's, and it is the ordinary custody assumption
+	 * every Binder client on this stack already makes: `/dev` must be writable only by the
+	 * privileged platform image, so that no unprivileged process can substitute the node at
+	 * all. What this struct buys against that backdrop is that a substitution, a `chmod` or
+	 * a `chown` occurring in the far larger interval BEFORE the comparison is caught and
+	 * declined instead of being carried into libbinder's fatal open.
 	 *
 	 * EVERY MEMBER IS A PLAIN INTEGER, AND THAT IS REQUIRED RATHER THAN TIDY. This struct
 	 * mentions no binder kernel type and no `<sys/stat.h>` type, for the same reason

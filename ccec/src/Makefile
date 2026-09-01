@@ -17,7 +17,39 @@
 # limitations under the License.
 ##########################################################################
 RM          := rm -rf 
-CFLAGS      := -g -fPIC -D_REENTRANT -Wall -std=c++17
+# RELEASE HARDENING OF THE SHIPPING LIBRARY.  -O2 and _FORTIFY_SOURCE are here and
+# not in ccec/src/Makefile.am, and that asymmetry is deliberate and load-bearing.
+#
+# QA finding P5-05 measured both shipping artefacts and found neither carried any
+# DT_FLAGS or DT_FLAGS_1 entry - so no BIND_NOW, partial RELRO only - and found this
+# one carrying no FORTIFY reference at all beyond the stack canary.  The three flags
+# added for it are:
+#
+#   -O2                      FORTIFY IS INERT WITHOUT IT.  _FORTIFY_SOURCE needs the
+#                            optimiser's constant folding to know an object's size
+#                            at a call site; at -O0 glibc's headers define it away
+#                            and the __*_chk entry points are never referenced.  So
+#                            -O2 is a prerequisite of the line below rather than a
+#                            performance change, and this file previously requested
+#                            no optimisation level at all.
+#   -U_FORTIFY_SOURCE        BEFORE the -D, so a value already in the environment's
+#                            CFLAGS - or a distribution toolchain that predefines
+#                            _FORTIFY_SOURCE=3, as Ubuntu's gcc-13 does when
+#                            optimising - cannot collide with the -D and turn a
+#                            hardening request into a "redefined" warning or, worse,
+#                            leave the inherited value in force unexamined.
+#                            Undefining first makes the value this file asks for the
+#                            value it gets, on every toolchain.
+#   -D_FORTIFY_SOURCE=2      Level 2 rather than 3: 2 is supported by every glibc
+#                            and every GCC an RDK SOC toolchain is likely to carry,
+#                            whereas 3 needs GCC 12 or newer with
+#                            __builtin_dynamic_object_size.  A SOC toolchain that
+#                            cannot honour the requested level would silently give
+#                            back less protection than the log claims.
+#
+# -g is retained: it emits DWARF and does not affect code generation, and the RDK
+# packaging step strips shipped objects separately.
+CFLAGS      := -g -O2 -fPIC -D_REENTRANT -Wall -std=c++17 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
 LIBNAME     := RCEC
 LIBNAMEFULL := lib$(LIBNAME).so
 
@@ -32,11 +64,14 @@ OBJS:= CECFrame.o \
 	OpCode.o \
 	Util.o \
 
+# THE ORCHESTRATOR CONTRACT OF THIS FILE, IN FULL.  Every path this build needs
+# from outside its own source tree is derived from one of the variables below,
+# and each is exported by the RDK build orchestrator exactly as it already
+# exports OPENSOURCE_BASE, GLIB_LIBRARY_PATH and GLIBS further down.
+#
 # The AIDL/Binder back-end is built into libRCEC unconditionally, for every SOC
 # vendor, so its include roots and link edges are not conditional on anything.
-# Both are derived from the same two staging prefixes configure takes, which the
-# RDK build orchestrator exports exactly as it already exports OPENSOURCE_BASE,
-# GLIB_LIBRARY_PATH and GLIBS below:
+# Both are derived from the same two staging prefixes configure takes:
 #
 #   HALIF_PREFIX             root of the staged rdk-halif-aidl tree
 #   BINDER_SDK_DIR           root of the staged linux_binder_idl Binder SDK
@@ -50,10 +85,33 @@ OBJS:= CECFrame.o \
 #                            libraries outside the rdk-halif-aidl tree
 #   BINDER_LIB_DIR           optional override, likewise for libbinder/libutils
 #
+# The LEGACY back-end and the telemetry call sites need two further staging roots,
+# and they are named here for the same reason the Binder roots are: this is the
+# build every SOC vendor actually runs through rdk_build.sh, and a header it
+# cannot name is a header it cannot be certified against.
+#
+#   TELEMETRY_PREFIX         root of the staged RDK telemetry tree, which
+#                            supplies <telemetry_busmessage_sender.h> to
+#                            Bus.cpp, LibCCEC.cpp and MessageDecoder.cpp
+#   TELEMETRY_INCLUDE_DIR    optional override, naming that header's own
+#                            directory when no candidate layout below describes
+#                            the staging tree
+#   LEGACY_HAL_PREFIX        root of the staged legacy HDMI CEC HAL headers,
+#                            which supply "ccec/drivers/hdmi_cec_driver.h" to
+#                            DriverImpl.cpp.  The subpath is part of the
+#                            contract: DriverImpl.cpp reaches the header as
+#                            ccec/drivers/hdmi_cec_driver.h, so a prefix that
+#                            presents it flat - as the upstream
+#                            rdk-halif-hdmi_cec repository lays it out, at
+#                            include/hdmi_cec_driver.h - has to be staged into
+#                            that subpath rather than named as it stands
+#   LEGACY_HAL_INCLUDE_DIR   optional override, likewise
+#
 # A deployment that does not export them fails at compile time on a missing
-# generated header, or - for the Binder headers, which are probed below - with
-# the named error this file raises, which is the intended outcome: the
-# alternative is silently shipping a library that carries only one back-end.
+# generated header, or - for the Binder headers and the two production header
+# roots, all of which are probed below - with the named error this file raises,
+# which is the intended outcome: the alternative is silently shipping a library
+# that carries only one back-end, or one certified against test-scope headers.
 HALIF_LIB_DIR ?= $(HALIF_PREFIX)/lib/halif
 
 # THE BINDER LIBRARY DIRECTORY IS PROBED, FOR THE SAME REASON THE HEADER ROOT
@@ -168,6 +226,227 @@ $(error $(BINDER_LIB_NOT_FOUND))
 endif
 endif
 
+# ---------------------------------------------------------------------------
+# THE TWO PRODUCTION HEADER ROOTS, PROBED THE SAME WAY THE BINDER ROOT IS.
+#
+# Three of this library's translation units include <telemetry_busmessage_sender.h>
+# - Bus.cpp, LibCCEC.cpp and MessageDecoder.cpp - and DriverImpl.cpp includes
+# "ccec/drivers/hdmi_cec_driver.h".  Until this block existed, NO variable in this
+# file named either root: the only -I that could have carried the second was
+# -I../drivers/include, and ../drivers does not exist in this source tree at all.
+#
+# The measured consequence is the whole of QA finding P3-HAND.  With only the
+# documented AIDL staging prefixes exported, this makefile stopped at
+# "telemetry_busmessage_sender.h: No such file or directory", and the only way to
+# reach install/lib/libRCEC.so was to add -I../../mocks -I../../stubs - which
+# builds the SHIPPING library against ../../mocks/telemetry_busmessage_sender.h,
+# whose t2_init and t2_event_s are empty macros, and against
+# ../../stubs/ccec/drivers/hdmi_cec_driver.h, a symlink to the GoogleMock HAL
+# header.  Both compile, both link, and the result is a certified artefact whose
+# telemetry silently does nothing.
+#
+# So the fix is not another -I.  It is the same shape the Binder header root uses,
+# for the same reason: name the root, PROBE it for the exact header it has to
+# supply, and stop with a named error rather than guess.  What is added on top of
+# that shape is a REFUSAL, below, which is what makes the guarantee structural
+# instead of a convention a later engineer can quietly step around.
+#
+# THE CANDIDATE LISTS FOLLOW THE BINDER PATTERN EXACTLY, and every element is
+# wrapped in $(if $(strip ...)) for the reason stated above BINDER_INCLUDE_CANDIDATES:
+# an unset prefix would otherwise expand to the absolute /include, and on a host
+# that happens to have such a directory the probe would resolve to headers nobody
+# staged.  Each candidate is probed by the header it must supply rather than by
+# the bare directory, because $(wildcard) does not distinguish a directory from a
+# file and a directory that lacks the header cannot satisfy the #include anyway.
+# $(wildcard) preserves argument order and $(firstword) takes the first survivor,
+# so precedence is exactly the order written.
+#
+# ONE DELIBERATE DIFFERENCE FROM THE BINDER_LIB_DIR PRECEDENT ABOVE: that variable
+# skips its probe entirely when it was set from the environment, whereas a
+# TELEMETRY_INCLUDE_DIR or LEGACY_HAL_INCLUDE_DIR supplied from outside is entered
+# as the FIRST CANDIDATE and probed like any other.  An override that does not
+# actually carry the header then lands in the named error below, naming the header
+# and the value, instead of being trusted into a compile failure three files
+# later.  Being a candidate rather than an escape hatch is also what keeps an
+# override subject to the refusal, which is the point of the refusal.
+TELEMETRY_INCLUDE_CANDIDATES := \
+	$(if $(strip $(TELEMETRY_INCLUDE_DIR)),$(TELEMETRY_INCLUDE_DIR)) \
+	$(if $(strip $(TELEMETRY_PREFIX)),$(TELEMETRY_PREFIX)/include) \
+	$(if $(strip $(TELEMETRY_PREFIX)),$(TELEMETRY_PREFIX)/usr/include) \
+	$(if $(strip $(TELEMETRY_PREFIX)),$(TELEMETRY_PREFIX)) \
+	$(if $(strip $(OPENSOURCE_BASE)),$(OPENSOURCE_BASE)/include) \
+	$(if $(strip $(OPENSOURCE_BASE)),$(OPENSOURCE_BASE)/usr/include)
+
+TELEMETRY_INCLUDE_DIR := $(firstword \
+	$(patsubst %/telemetry_busmessage_sender.h,%, \
+		$(wildcard $(addsuffix /telemetry_busmessage_sender.h,$(TELEMETRY_INCLUDE_CANDIDATES)))))
+
+# OPENSOURCE_BASE is in the telemetry list and not in the HAL list, and that
+# asymmetry is deliberate.  Telemetry is an RDK opensource component and this file
+# already consumes $(OPENSOURCE_BASE)/lib in LDFLAGS below, so a correctly staged
+# RDK build resolves the telemetry root with no new variable exported at all; the
+# legacy CEC HAL header is a HAL, staged by the sdk/devicesettings components
+# rdk_env.xml already declares, and inventing an opensource candidate for it would
+# only widen the search without describing any real layout.
+#
+# ../drivers/include IS RETAINED, LAST.  It is the only header root this file named
+# before P3-HAND, so a tree that does populate it must keep resolving; it is last
+# because a root the orchestrator staged deliberately should outrank one that
+# happens to be in the source tree.  It is no longer an unconditional -I, and that
+# move is the substance rather than tidying: as a candidate it is probed for the
+# header and then subjected to the refusal, so an in-tree directory carrying a
+# test-scope header is caught rather than silently compiled against.
+LEGACY_HAL_INCLUDE_CANDIDATES := \
+	$(if $(strip $(LEGACY_HAL_INCLUDE_DIR)),$(LEGACY_HAL_INCLUDE_DIR)) \
+	$(if $(strip $(LEGACY_HAL_PREFIX)),$(LEGACY_HAL_PREFIX)/include) \
+	$(if $(strip $(LEGACY_HAL_PREFIX)),$(LEGACY_HAL_PREFIX)/usr/include) \
+	$(if $(strip $(LEGACY_HAL_PREFIX)),$(LEGACY_HAL_PREFIX)) \
+	../drivers/include
+
+LEGACY_HAL_INCLUDE_DIR := $(firstword \
+	$(patsubst %/ccec/drivers/hdmi_cec_driver.h,%, \
+		$(wildcard $(addsuffix /ccec/drivers/hdmi_cec_driver.h,$(LEGACY_HAL_INCLUDE_CANDIDATES)))))
+
+# THE REFUSAL.  This makefile is the SHIPPING build - rdk_build.sh invokes it with
+# a bare `make` for every SOC branch - so it cannot be certified against the
+# repository's own test-scope headers, and P3-HAND is exactly the case of that
+# happening and passing.  A CI grep for "mocks" would express the same rule as a
+# convention; expressing it here makes it a property of the build.
+#
+# The match is on CANONICAL paths, from $(realpath), rather than on the text of the
+# variable, because the workaround's own spellings - -I../../mocks and
+# -I../../stubs - are relative, an orchestrator would supply absolute ones, and
+# ./../../mocks/, ../../mocks/. and a symlink to any of them all name the same
+# directory.  Canonicalising both sides reduces every spelling to one string, so
+# the check does not depend on guessing which one was used.
+#
+# BOTH THE ROOT AND THE HEADER IT SUPPLIES ARE CANONICALISED, and the second test
+# is the one that closes the gap this tree already demonstrates:
+# stubs/ccec/drivers/hdmi_cec_driver.h is a SYMLINK into mocks/, so a root outside
+# both trees can still serve a test header through a link.  Resolving the header
+# file itself catches that, whichever tree it points into.
+CCEC_TEST_HEADER_TREES := $(realpath ../../mocks) $(realpath ../../stubs)
+
+# $(1) resolved include root, $(2) the header path beneath it that was probed.
+# Expands to the offending tree when either canonical form is that tree or sits
+# under it, and to nothing otherwise.  An empty root expands to nothing rather
+# than to /$(2), which would otherwise be probed against the host's filesystem
+# root; an unresolved root is the named not-found error's business, not this one.
+ccec_test_tree_hit = $(strip $(if $(strip $(1)),$(foreach ccec_tree,$(CCEC_TEST_HEADER_TREES), \
+	$(if $(filter $(ccec_tree) $(ccec_tree)/%,$(realpath $(1)) $(realpath $(1)/$(2))),$(ccec_tree)))))
+
+TELEMETRY_TEST_TREE_HIT := $(call ccec_test_tree_hit,$(TELEMETRY_INCLUDE_DIR),telemetry_busmessage_sender.h)
+LEGACY_HAL_TEST_TREE_HIT := $(call ccec_test_tree_hit,$(LEGACY_HAL_INCLUDE_DIR),ccec/drivers/hdmi_cec_driver.h)
+
+define TELEMETRY_INCLUDE_NOT_FOUND
+no staged telemetry header root resolved, so libRCEC cannot be built: Bus.cpp,
+LibCCEC.cpp and MessageDecoder.cpp all include <telemetry_busmessage_sender.h>
+and none of the candidate layouts below carries it.  Export TELEMETRY_PREFIX to
+the staged RDK telemetry tree, or set TELEMETRY_INCLUDE_DIR to that header's own
+directory, exactly as the RDK build orchestrator already exports OPENSOURCE_BASE
+and GLIB_LIBRARY_PATH.  Tried, in order, each skipped when its variable is unset
+and each probed for telemetry_busmessage_sender.h directly beneath it:
+  1  $$(TELEMETRY_INCLUDE_DIR)   as supplied
+  2  $$(TELEMETRY_PREFIX)/include
+  3  $$(TELEMETRY_PREFIX)/usr/include
+  4  $$(TELEMETRY_PREFIX)
+  5  $$(OPENSOURCE_BASE)/include
+  6  $$(OPENSOURCE_BASE)/usr/include
+with TELEMETRY_INCLUDE_DIR=[$(TELEMETRY_INCLUDE_DIR)], TELEMETRY_PREFIX=[$(TELEMETRY_PREFIX)]
+and OPENSOURCE_BASE=[$(OPENSOURCE_BASE)], which left these candidates to probe:
+[$(strip $(TELEMETRY_INCLUDE_CANDIDATES))].
+The repository's own mocks/telemetry_busmessage_sender.h is NOT an answer here: it
+defines t2_init and t2_event_s as empty macros for the L1 suite, and this build is
+the shipping one.  See QA finding P3-HAND.
+endef
+
+define LEGACY_HAL_INCLUDE_NOT_FOUND
+no staged legacy HDMI CEC HAL header root resolved, so libRCEC cannot be built:
+DriverImpl.cpp includes "ccec/drivers/hdmi_cec_driver.h" and none of the candidate
+layouts below carries it.  Export LEGACY_HAL_PREFIX to the staged legacy HAL tree,
+or set LEGACY_HAL_INCLUDE_DIR to the include root that carries it.  THE SUBPATH IS
+PART OF THE CONTRACT: the header must sit at ccec/drivers/hdmi_cec_driver.h beneath
+the root, because that is how DriverImpl.cpp reaches it, so an upstream
+rdk-halif-hdmi_cec checkout - which lays the header out flat, at
+include/hdmi_cec_driver.h - has to be staged into that subpath rather than named
+where it stands.  Tried, in order, each skipped when its variable is unset and each
+probed for ccec/drivers/hdmi_cec_driver.h beneath it:
+  1  $$(LEGACY_HAL_INCLUDE_DIR)   as supplied
+  2  $$(LEGACY_HAL_PREFIX)/include
+  3  $$(LEGACY_HAL_PREFIX)/usr/include
+  4  $$(LEGACY_HAL_PREFIX)
+  5  ../drivers/include            the in-tree layout, retained
+with LEGACY_HAL_INCLUDE_DIR=[$(LEGACY_HAL_INCLUDE_DIR)] and LEGACY_HAL_PREFIX=[$(LEGACY_HAL_PREFIX)],
+which left these candidates to probe: [$(strip $(LEGACY_HAL_INCLUDE_CANDIDATES))].
+The repository's own stubs/ccec/drivers/hdmi_cec_driver.h is NOT an answer here: it
+is a symlink to the GoogleMock HAL header, and this build is the shipping one.
+See QA finding P3-HAND.
+endef
+
+define PRODUCTION_HEADER_ROOT_IS_TEST_TREE
+$(CCEC_REFUSED_VAR) resolved to [$(CCEC_REFUSED_ROOT)] and is REFUSED, because it -
+or the $(CCEC_REFUSED_HEADER) it supplies, which resolves to
+[$(CCEC_REFUSED_PATH)] - is inside this repository's test-scope header tree(s)
+[$(CCEC_REFUSED_TREE)].  Either match is disqualifying on its own: a root outside
+mocks/ and stubs/ that reaches a header inside one through a symlink compiles the
+same test-scope declaration as a root named there directly.
+This makefile is the SHIPPING build of libRCEC - rdk_build.sh invokes it with a
+bare `make` on every SOC branch - and mocks/ and stubs/ exist for the L1 and L2
+suites: mocks/telemetry_busmessage_sender.h makes t2_init and t2_event_s empty
+macros, and stubs/ccec/drivers/hdmi_cec_driver.h is a symlink to the GoogleMock
+HAL header.  A library certified against either reports success while sending no
+telemetry and while never having compiled against the real HAL declaration, which
+is precisely QA finding P3-HAND: the acceptance artefact was producible only with
+-I../../mocks -I../../stubs.  This refusal is what stops that workaround being
+reused, so it is not to be relaxed or worked around - resolve it by staging the
+real headers.
+Set $(CCEC_REFUSED_PREFIX_VAR), or $(CCEC_REFUSED_VAR) directly, to a production
+staging root outside this repository.  Both are documented in the orchestrator
+contract at the top of this file.  Note that the match is on canonical paths, from
+$$(realpath), and covers the header file as well as the root, so a root outside
+mocks/ and stubs/ that serves the header through a symlink into either is refused
+here too.
+endef
+
+# All three checks are guarded by BINDER_HEADER_GOALS - the same variable the Binder
+# header and library checks above use, and the same condition rather than a similar
+# one: it is empty exactly when the only goal is `clean`.  Removing objects has to
+# stay possible on a host that staged nothing, and every other goal compiles or
+# links and cannot honestly be attempted without these headers.  The variable's
+# name predates this block; the condition is shared deliberately, so that one
+# change to what "a build that needs headers" means moves all of them together.
+ifneq ($(strip $(BINDER_HEADER_GOALS)),)
+ifeq ($(strip $(TELEMETRY_INCLUDE_DIR)),)
+$(error $(TELEMETRY_INCLUDE_NOT_FOUND))
+endif
+ifeq ($(strip $(LEGACY_HAL_INCLUDE_DIR)),)
+$(error $(LEGACY_HAL_INCLUDE_NOT_FOUND))
+endif
+# The refusal runs after both roots resolved, so its message can name the value it
+# is rejecting.  The six CCEC_REFUSED_* variables carry that value into the message
+# above, which is recursively expanded and therefore reads them at $(error) time;
+# both checks share one message rather than duplicating it per root.
+ifneq ($(strip $(TELEMETRY_TEST_TREE_HIT)),)
+CCEC_REFUSED_VAR := TELEMETRY_INCLUDE_DIR
+CCEC_REFUSED_PREFIX_VAR := TELEMETRY_PREFIX
+CCEC_REFUSED_ROOT := $(TELEMETRY_INCLUDE_DIR)
+CCEC_REFUSED_HEADER := telemetry_busmessage_sender.h
+CCEC_REFUSED_PATH := $(realpath $(TELEMETRY_INCLUDE_DIR)/telemetry_busmessage_sender.h)
+CCEC_REFUSED_TREE := $(TELEMETRY_TEST_TREE_HIT)
+$(error $(PRODUCTION_HEADER_ROOT_IS_TEST_TREE))
+endif
+ifneq ($(strip $(LEGACY_HAL_TEST_TREE_HIT)),)
+CCEC_REFUSED_VAR := LEGACY_HAL_INCLUDE_DIR
+CCEC_REFUSED_PREFIX_VAR := LEGACY_HAL_PREFIX
+CCEC_REFUSED_ROOT := $(LEGACY_HAL_INCLUDE_DIR)
+CCEC_REFUSED_HEADER := ccec/drivers/hdmi_cec_driver.h
+CCEC_REFUSED_PATH := $(realpath $(LEGACY_HAL_INCLUDE_DIR)/ccec/drivers/hdmi_cec_driver.h)
+CCEC_REFUSED_TREE := $(LEGACY_HAL_TEST_TREE_HIT)
+$(error $(PRODUCTION_HEADER_ROOT_IS_TEST_TREE))
+endif
+endif
+# ---------------------------------------------------------------------------
+
 AIDL_INCLUDE = -I$(HALIF_PREFIX)/hdmicec/0.1.0.0/include	\
 	-I$(HALIF_PREFIX)/common/0.2.0.0/include	\
 	-I$(HALIF_PREFIX)/common/current	\
@@ -205,10 +484,23 @@ AIDL_LIBS = -Wl,--no-as-needed -lhdmicec-v0.1.0.0-cpp -lcommon-v0.2.0.0-cpp -lbi
 # flag well-formed on any path that does not.
 AIDL_LDFLAGS = -L$(HALIF_LIB_DIR) $(addprefix -L,$(strip $(BINDER_LIB_DIR)))
 
+# -I../drivers/include is deliberately absent from this list now: it is the last
+# candidate of LEGACY_HAL_INCLUDE_CANDIDATES above instead, so the in-tree layout
+# still resolves if it is ever populated but does so through the probe, and is
+# therefore subject to the test-tree refusal.  An unconditional -I here would be
+# outside both.
+#
+# $(addprefix -I,$(strip ...)) rather than a bare -I on each resolved root, for the
+# same reason AIDL_LDFLAGS above uses it: an empty value would emit a lone -I,
+# which the compiler driver reads as taking the NEXT token as its directory, so a
+# missing root would fail naming the wrong thing.  On any goal that compiles, the
+# named errors above have already fired for an empty value; this keeps the flag
+# well-formed on `clean`, which is the goal those errors deliberately skip.
 INCLUDE = -I.\
 	-I../include	\
 	-I../../osal/include	\
-	-I../drivers/include	\
+	$(addprefix -I,$(strip $(TELEMETRY_INCLUDE_DIR)))	\
+	$(addprefix -I,$(strip $(LEGACY_HAL_INCLUDE_DIR)))	\
 	$(AIDL_INCLUDE)
 
 
@@ -366,6 +658,16 @@ CFLAGS+= $(AIDL_ABI_CFLAGS)
 
 $(info libRCEC Binder wire ABI: BINDER_IPC_32BIT=$(strip $(BINDER_IPC_32BIT)), protocol $(BINDER_ABI_PROTOCOL), from $(BINDER_ABI_SOURCE))
 
+# The two production header roots are announced beside the wire ABI so that a
+# BUILD LOG RECORDS WHICH HEADERS THE ARTEFACT WAS CERTIFIED AGAINST.  P3-HAND was
+# reported against an artefact that built cleanly; what the log did not say was
+# that the telemetry header it compiled was a no-op macro file.  These two lines
+# are what makes that answerable after the fact, from the log alone, without
+# re-deriving the include path.  Values are printed even on a bare `clean`, where
+# they can legitimately be empty, because the resolution errors are skipped there.
+$(info libRCEC telemetry header root: [$(strip $(TELEMETRY_INCLUDE_DIR))])
+$(info libRCEC legacy HDMI CEC HAL header root: [$(strip $(LEGACY_HAL_INCLUDE_DIR))])
+
 # The Binder kernel UAPI is a HARD PREREQUISITE of libRCEC, not an optional
 # extra.  DriverAidlImpl's transport preflight marshals struct binder_write_read
 # and struct binder_version and compares BINDER_CURRENT_PROTOCOL_VERSION, so a
@@ -401,13 +703,36 @@ LDFLAGS+=-L$(GLIB_LIBRARY_PATH)/
 LDFLAGS+=$(GLIBS)
 LDFLAGS += -L. -lpthread
 
+# FULL RELRO, the link half of QA finding P5-05.
+#
+# Measured on the artefact this file produced before the change: `readelf -d
+# install/lib/libRCEC.so` listed 30 dynamic entries and NEITHER DT_FLAGS NOR
+# DT_FLAGS_1 was among them, so BIND_NOW was absent and the GNU_RELRO segment the
+# linker emits by default only covered the ordinary relro region - partial RELRO,
+# with a writable PLT/GOT for the whole life of the process.
+#
+#   -z relro   is already the default in these toolchains and is named anyway, so
+#              that a toolchain configured with --disable-relro or an inherited
+#              -z norelro does not quietly drop it.  Naming it costs nothing and
+#              makes the request explicit at the point the artefact is produced.
+#   -z now     is what was actually missing.  It sets DF_BIND_NOW/DF_1_NOW, which
+#              makes the loader resolve every relocation at load time so the
+#              GOT can be mapped read-only afterwards - full RELRO.  Without it
+#              the GOT stays writable and remains an overwrite target.
+#
+# It is a variable rather than a literal on the link line so that it is greppable
+# from CI and reads as a stated policy; it is expanded on the link command below,
+# where the ELF is produced.  Position on the link line is immaterial for these
+# two options, so nothing else about this link changes.
+HARDENING_LDFLAGS = -Wl,-z,relro,-z,now
+
 all: clean library
 	@echo "Build Finished...."
 
 library: $(OBJS)
 	@echo "Building $(LIBNAMEFULL) ...."
 	mkdir -p install/lib
-	$(CXX) $(OBJS) $(CFLAGS) -shared -o install/lib/$(LIBNAMEFULL) $(LDFLAGS) $(AIDL_LDFLAGS) $(AIDL_LIBS)
+	$(CXX) $(OBJS) $(CFLAGS) -shared -o install/lib/$(LIBNAMEFULL) $(HARDENING_LDFLAGS) $(LDFLAGS) $(AIDL_LDFLAGS) $(AIDL_LIBS)
 
 %.o: %.cpp
 	@echo "Building $@ ...."

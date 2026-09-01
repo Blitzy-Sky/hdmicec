@@ -349,6 +349,91 @@ warn() { printf '[%s] WARNING: %s\n' "$SCRIPT_NAME" "$*" >&2; }
 die()  { printf '[%s] ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2; exit 1; }
 
 # ------------------------------------------------------------------------------------
+# RENDERING AN UNTRUSTED VALUE INTO A DIAGNOSTIC.  CWE-117, closed by construction.
+#
+# THE DEFECT THIS REMOVES.  Every diagnostic in this file used to interpolate caller-supplied
+# text verbatim.  A value carrying a newline therefore did not appear inside a message -- it
+# ENDED that message and began a new line of its own, and a line beginning "::error::" is a
+# GitHub Actions workflow command.  Measured before the fix: a newline-bearing value produced a
+# standalone forged "::error::" annotation in the job log, and a five-thousand-character value
+# produced more than ten kilobytes of diagnostics, burying the real failure.
+#
+# THE CONTRACT, in the order the steps are applied, because the order is what makes the
+# escaping unambiguous and reversible:
+#
+#   (a) a literal backslash becomes \\ FIRST, so that every escape introduced below is
+#       distinguishable from the same characters occurring literally in the value;
+#   (b) 0x0A becomes \n, 0x0D becomes \r, 0x09 becomes \t, and EVERY OTHER byte outside
+#       printable ASCII 0x20..0x7E becomes \xNN in lower-case hex.  The classification is by
+#       byte value under LC_ALL=C, so no locale can reinterpret a byte as printable and no
+#       multi-byte sequence can hide a control character inside itself;
+#   (c) the rendering is truncated at 200 characters and "...[truncated, N bytes total]" is
+#       appended when it truncates, N being the value's own length in bytes.  A caller cannot
+#       drown a log, and the message still says how much was withheld;
+#   (d) it is applied to the VALUE and never to the surrounding message, and the result is
+#       always returned delimited -- [ ... ] here -- so an empty value is visible as [] rather
+#       than as a gap in a sentence;
+#   (e) it never begins a diagnostic line.  Every message keeps this script's own "[name]"
+#       prefix in front of it, and the rendering itself begins with '['.  Together with (b),
+#       which leaves no raw newline anywhere in the output, that makes a forged standalone
+#       ::error::, ::warning:: or ::notice:: line UNREACHABLE BY CONSTRUCTION rather than
+#       unlikely.
+#
+# THIS IS ONE OF FIVE COPIES OF ONE CONTRACT.  The five must not diverge; a change to any of
+# them is a change to all five.  The others are:
+#
+#   * hdmicec/tests/L1Tests/run_coverage.sh                      -- render_untrusted()
+#   * hdmicec/.github/workflows/aidl-path-tests-rootfs.sh        -- render_untrusted()
+#   * hdmicec/tests/L1Tests/test_main.cpp                        -- renderUntrustedValue()
+#   * hdmicec/tests/L2Tests/test_main.cpp                        -- renderUntrustedValue()
+#   * hdmicec/mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp  -- renderUntrustedValue()
+#
+# They are five file-local copies rather than one shared helper deliberately: two are shell
+# and three are C++, they live in three build targets and one non-built script, and a shared
+# header would add a build-system edge for a twenty-line function.  The cost of the choice is
+# this cross-reference, which is why every copy carries it.
+#
+# NO EXTERNAL COMMAND IS RUN.  Everything below is a bash builtin, so this is usable from any
+# diagnostic including ones that fire before the tooling pre-flight has established that
+# anything external exists.
+# ------------------------------------------------------------------------------------
+render_untrusted() { # $1=the untrusted value -> prints [escaped, bounded] on stdout
+    # LC_ALL and LC_CTYPE are local, and bash re-reads the locale when either is assigned, so
+    # for the duration of this function ${#value} counts BYTES and ${value:i:1} yields ONE
+    # byte.  Both revert on return.
+    local LC_ALL=C LC_CTYPE=C
+    local value="${1-}"
+    local total=${#value}
+    local limit=200
+    local out='' rendered=0 index=0 byte piece ord
+
+    while [ "$index" -lt "$total" ]; do
+        byte="${value:index:1}"
+        # The numeric value of the byte, via printf's "'c" form.  Under LC_ALL=C this is the
+        # byte itself, and it is obtained before any classification so that the decision below
+        # is made on the number and never on a pattern match that a locale could influence.
+        printf -v ord '%d' "'$byte"
+        if   [ "$ord" -eq 92 ]; then piece='\\'
+        elif [ "$ord" -eq 10 ]; then piece='\n'
+        elif [ "$ord" -eq 13 ]; then piece='\r'
+        elif [ "$ord" -eq  9 ]; then piece='\t'
+        elif [ "$ord" -ge 32 ] && [ "$ord" -le 126 ]; then piece="$byte"
+        else printf -v piece '\\x%02x' "$ord"
+        fi
+
+        if [ $(( rendered + ${#piece} )) -gt "$limit" ]; then
+            printf '[%s...[truncated, %d bytes total]]' "$out" "$total"
+            return 0
+        fi
+        out="${out}${piece}"
+        rendered=$(( rendered + ${#piece} ))
+        index=$(( index + 1 ))
+    done
+
+    printf '[%s]' "$out"
+}
+
+# ------------------------------------------------------------------------------------
 # FIXED GUEST LAYOUT.  These are constants rather than options on purpose: the init this
 # script writes, the manifest the workflow reads and the environment run_coverage.sh is
 # handed all have to agree about them, and a knob for each would be four more ways for
@@ -1132,12 +1217,108 @@ EXPECTED_ELF_CLASS=''
 EXPECTED_ELF_MACHINE=''
 DEBIAN_ARCH=''
 
+# ------------------------------------------------------------------------------------
+# THE HELP TEXT IS DATA, NOT CODE, AND IT IS RENDERED THROUGH A TEMPLATE FOR THAT REASON.
+#
+# THE DEFECT THIS SHAPE REMOVES.  usage() used to be `cat <<USAGE_TEXT` -- an UNQUOTED
+# heredoc delimiter -- so bash performed the full set of expansions on the body while
+# rendering it, COMMAND SUBSTITUTION INCLUDED.  The body is two hundred lines of English
+# prose about a build that documents `gcov`, and one sentence quoted that name in
+# backticks.  Rendering the help therefore EXECUTED whatever `gcov` the caller's PATH
+# resolved to, at the caller's identity -- and this script's own documentation tells the
+# reader to invoke it under sudo.  Measured before the fix: `PATH=<attacker>:$PATH
+# aidl-path-tests-rootfs.sh --help` exited 0, ran an attacker binary as uid 0, and pasted
+# its standard output into the help text.
+#
+# WHY THE DELIMITER COULD NOT SIMPLY BE QUOTED ON ITS OWN.  The body legitimately
+# interpolates thirteen of this script's own constants, so `<<'USAGE_TEXT'` alone would
+# have printed "$GUEST_PAYLOAD_DIR" where a reader needs the path.  The delimiter IS now
+# quoted -- which is what makes a substitution impossible -- and the interpolation is done
+# afterwards by this function, from a CLOSED TABLE OF NAMES, using bash string replacement.
+# Two properties follow, and together they are the whole point:
+#
+#   * the heredoc body is inert text.  A backtick, a `$(...)`, a `${...}` or a `$VAR` added
+#     to it in future renders as the characters typed and executes nothing.  There is no
+#     shell evaluation of the body at any point, before or after the substitution;
+#   * a value is substituted for a placeholder and never re-scanned.  Bash's
+#     ${text//pat/$value} does not re-expand the replacement, so even a value containing
+#     `$(id)` would appear literally.
+#
+# THE PLACEHOLDER SPELLING is @NAME@, chosen because it cannot occur by accident in the
+# body's prose: the two `@` characters that do appear there are in "user:pass@host", where
+# the character after the `@` is lower case.  An unsubstituted @UPPER_CASE@ token is
+# therefore a template error, and the guard below makes it FATAL rather than shipping a
+# help text with a hole in it -- which is what catches the next person who adds a
+# placeholder to the body and forgets to add its name to the table.
+#
+# A SECOND, INDEPENDENT GUARD lives in the self-test: assert_no_expanding_heredocs() reads
+# this file's own source, finds every heredoc with an unquoted delimiter, and fails if any
+# of their bodies could command-substitute.  This function protects the help text; that case
+# protects every other heredoc in the file, including ones added later.
+# ------------------------------------------------------------------------------------
+
+# The closed table.  Every name here must be a variable this script has already assigned by
+# the time usage() runs, and every @NAME@ in the body must appear here.  Nothing else is
+# substituted, so this list is the complete interface between the help text and the script.
+USAGE_PLACEHOLDER_NAMES=(
+    SCRIPT_NAME
+    SCRIPT_PATH
+    GUEST_PAYLOAD_DIR
+    GUEST_SDK_DIR
+    GUEST_GTEST_PREFIX
+    GUEST_SINK_CALLER_SOURCE
+    GUEST_PACKAGE_RECORD
+    DEFAULT_IMAGE_SIZE_MIB
+    DEFAULT_READINESS_TIMEOUT_SECONDS
+    CLEANUP_LEAK_EXIT_STATUS
+    GUEST_INIT_PATH
+    GUEST_ARTIFACT_DIR
+    GUEST_STATUS_FILE
+)
+
+# Reads the inert help template on stdin, substitutes the table above, and prints the result.
+# No `eval`, no command substitution on the text, and no shell evaluation of any kind: the
+# only operation applied to the body is bash parameter-expansion string replacement.
+#
+# NO EXTERNAL COMMAND IS RUN, and that is deliberate rather than incidental.  `read -d ''`
+# and `printf` are bash builtins, so rendering the help resolves nothing through PATH --
+# not even the `cat` the old form used.  A caller with a hostile PATH therefore cannot
+# influence the help text at all, which is the property self_test_help_rendering() asserts.
+render_usage_text() {
+    local text='' name value
+    # -d '' makes the delimiter NUL, which the template does not contain, so this reads the
+    # whole of stdin -- trailing newline included -- and returns non-zero at end of file
+    # having stored everything.  IFS= and -r keep the bytes exactly as they arrived.
+    IFS= read -r -d '' text || true
+    for name in "${USAGE_PLACEHOLDER_NAMES[@]}"; do
+        # Indirect expansion with a default, so a name in the table that this script has not
+        # assigned yet substitutes empty and is caught by review rather than aborting under
+        # `set -u` inside the one code path a confused caller is most likely to reach.
+        value="${!name-}"
+        text="${text//@${name}@/$value}"
+    done
+    # THE TEMPLATE-ERROR GUARD.  An @UPPER_CASE@ token still present means the body names a
+    # placeholder the table does not, so the help text would ship with a hole in it.  That is
+    # a defect in this script rather than in the caller's invocation, and it is fatal.
+    if [[ "$text" =~ (@[A-Z][A-Z0-9_]*@) ]]; then
+        printf '[%s] ERROR: the help template carries the placeholder %s, which is not in\n' \
+            "$SCRIPT_NAME" "${BASH_REMATCH[1]}" >&2
+        printf '       USAGE_PLACEHOLDER_NAMES, so it cannot be rendered.  Add the name to that\n' >&2
+        printf '       table (it must be a variable this script assigns before usage() runs), or\n' >&2
+        printf '       remove the placeholder from the help text.\n' >&2
+        return 1
+    fi
+    # No trailing newline is added: `read -d ''` preserved the template's own, so the rendered
+    # bytes are identical to what the previous `cat <<USAGE_TEXT` produced.
+    printf '%s' "$text"
+}
+
 usage() {
-    cat <<USAGE_TEXT
-$SCRIPT_NAME -- build the QEMU root filesystem image for the binder-capable AIDL-path job.
+    render_usage_text <<'USAGE_TEXT'
+@SCRIPT_NAME@ -- build the QEMU root filesystem image for the binder-capable AIDL-path job.
 
 USAGE
-  sudo $SCRIPT_PATH --output IMAGE --payload DIR --sdk-dir DIR \\
+  sudo @SCRIPT_PATH@ --output IMAGE --payload DIR --sdk-dir DIR \
        --base-tarball FILE --base-sha256 HEX [options]
 
 REQUIRED
@@ -1156,10 +1337,10 @@ REQUIRED
                            behind deliberately; removing it while holding it would let two
                            builders lock different inodes and both proceed.
   -p, --payload DIR        The hdmicec checkout, and any binaries already built, to make
-                           available to the guest.  Copied to $GUEST_PAYLOAD_DIR.
+                           available to the guest.  Copied to @GUEST_PAYLOAD_DIR@.
                            Must contain configure.ac and tests/L1Tests/run_coverage.sh.
   -s, --sdk-dir DIR        The staged rdk-halif-aidl tree: the Binder SDK and the AIDL
-                           client stub snapshots.  Copied to $GUEST_SDK_DIR.  The four
+                           client stub snapshots.  Copied to @GUEST_SDK_DIR@.  The four
                            staging prefixes are derived from it, not asked for separately.
       --base-tarball FILE  Base root filesystem tarball for the target architecture.
       --base-url URL       Alternative to --base-tarball: fetched ON THE BUILD HOST.  The
@@ -1216,7 +1397,7 @@ OPTIONAL
                            unless a sidecar <tarball>.sha256 is present.
       --gtest-prefix DIR   A prebuilt GoogleTest/GoogleMock prefix for the TARGET
                            architecture, whose lib/pkgconfig holds gtest.pc.  Copied to
-                           $GUEST_GTEST_PREFIX and exported as GTEST_PREFIX by the init.
+                           @GUEST_GTEST_PREFIX@ and exported as GTEST_PREFIX by the init.
                            Omit it only when the image's own packaging provides gtest.pc.
       --sink-caller-source FILE
                            The REAL entservices-hdmicecsink plugin source
@@ -1224,7 +1405,7 @@ OPTIONAL
                            the reviewed commit.  Staged into the image BESIDE THE PAYLOAD,
                            reproducing the superproject layout, and exported to the guest as
                            CEC_SINK_CALLER_SOURCE by the init.  Destination:
-                             $GUEST_SINK_CALLER_SOURCE
+                             @GUEST_SINK_CALLER_SOURCE@
                            A REQUIRED ACCEPTANCE INPUT, not an optional diagnostic.
                            DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatch
                            TheRealSinkSource reads it and asserts the structural facts that
@@ -1268,7 +1449,7 @@ OPTIONAL
                            with it is stripped, the strip is reported by file and line number,
                            and anything still present afterwards is fatal.
                            The exact package set that results is recorded inside the image at
-                           $GUEST_PACKAGE_RECORD, and counted, digested and accounted against
+                           @GUEST_PACKAGE_RECORD@, and counted, digested and accounted against
                            the required set in the manifest.  That record is a PRECONDITION of
                            publication: if the resolved package/version/architecture set cannot
                            be read back out of the image, or a required package is not in it,
@@ -1291,11 +1472,11 @@ OPTIONAL
                            the descriptor, and no unsafe directory above it -- and any of
                            those failing is fatal.  Its CONTENT is never logged, never
                            digested into the manifest and never echoed.
-      --size MIB           Image size in MiB (default $DEFAULT_IMAGE_SIZE_MIB).  It holds the
+      --size MIB           Image size in MiB (default @DEFAULT_IMAGE_SIZE_MIB@).  It holds the
                            toolchain, the payload, the staged SDK, a full build tree and the
                            coverage artifacts, so it is not a place to economise.
       --readiness-timeout S  Seconds the in-guest init waits for servicemanager to ANSWER
-                           (default $DEFAULT_READINESS_TIMEOUT_SECONDS).  The wait is a bounded
+                           (default @DEFAULT_READINESS_TIMEOUT_SECONDS@).  The wait is a bounded
                            poll on a real binder transaction, never a sleep.
       --toolchain-gcc-major N  The GCC MAJOR the caller pins for the acceptance measurement --
                            13 for this project, whose single definition point is
@@ -1345,7 +1526,7 @@ EXIT STATUS
   0                        The image and its manifest were built, validated, published as a
                            pair, and every mount, loop device and temporary directory this
                            run created was verifiably released.
-  $CLEANUP_LEAK_EXIT_STATUS                       The build itself succeeded but the teardown could NOT release
+  @CLEANUP_LEAK_EXIT_STATUS@                       The build itself succeeded but the teardown could NOT release
                            something it took: a mount still in the tree, a loop device still
                            attached, our backing file still attached to some loop device, or
                            a temporary directory that could not be removed.  Each is named
@@ -1357,7 +1538,7 @@ EXIT STATUS
 
 WHAT THIS PRODUCES
   IMAGE                    A bootable ext4 root filesystem.  Boot it with the guest kernel
-                           and init=$GUEST_INIT_PATH.
+                           and init=@GUEST_INIT_PATH@.
   IMAGE.manifest           KEY=VALUE lines the workflow reads instead of hard-coding paths:
                            the architecture, the init path, the artifact directory, the
                            status file and the expected kernel options.
@@ -1367,8 +1548,8 @@ INSIDE THE GUEST
   kernel configuration, the SDK build flags and the resulting protocol version together in
   one block, starts servicemanager and waits for it to answer, exports the build and
   loader environment, then runs
-      $GUEST_PAYLOAD_DIR/tests/L1Tests/run_coverage.sh --build --run --output-dir $GUEST_ARTIFACT_DIR
-  writes that command's EXACT exit status to $GUEST_STATUS_FILE, and powers the guest down
+      @GUEST_PAYLOAD_DIR@/tests/L1Tests/run_coverage.sh --build --run --output-dir @GUEST_ARTIFACT_DIR@
+  writes that command's EXACT exit status to @GUEST_STATUS_FILE@, and powers the guest down
   from a trap that runs on every path.  It never sets CEC_TEST_AIDL_MODE: run_coverage.sh
   owns that per invocation across the A-E matrix.
 
@@ -1377,7 +1558,9 @@ USAGE_TEXT
 }
 
 require_option_value() { # $1=option name  $2=remaining argument count
-    [ "$2" -ge 2 ] || die "$1 requires a value.  Run '$SCRIPT_PATH --help' for the option list."
+    # The option name is argv, so it is rendered rather than interpolated.  See render_untrusted().
+    [ "$2" -ge 2 ] || die "the option $(render_untrusted "$1") requires a value.  Run
+       '$SCRIPT_PATH --help' for the option list."
 }
 
 parse_args() {
@@ -1424,12 +1607,13 @@ parse_args() {
             # An unknown option is REFUSED rather than ignored.  Silently accepting one
             # means a workflow that passes a mistyped flag builds an image that is not the
             # one it asked for, and finds out several QEMU cycles later.
-            -*)                   die "unknown option '$1'. Run '$SCRIPT_PATH --help' for the option list." ;;
-            *)                    die "unexpected argument '$1'. This script takes options only; run --help." ;;
+            -*)                   die "unknown option $(render_untrusted "$1"). Run '$SCRIPT_PATH --help' for the option list." ;;
+            *)                    die "unexpected argument $(render_untrusted "$1"). This script takes options only; run --help." ;;
         esac
         shift
     done
-    [ $# -eq 0 ] || die "unexpected trailing arguments: $*.  This script takes options only; run --help."
+    [ $# -eq 0 ] || die "unexpected trailing argument $(render_untrusted "$1") and $(( $# - 1 )) more.
+       This script takes options only; run --help."
 }
 
 # ------------------------------------------------------------------------------------
@@ -1466,12 +1650,12 @@ assert_path_plausible() { # $1=canonical absolute path  $2=how it was chosen
         /)  die "$origin must not be the filesystem root.  This script creates, mounts and
        overwrites whole filesystem images; '/' is not a place to do that." ;;
         /*) : ;;
-        *)  die "internal error: assert_path_plausible needs an absolute path; got '$path' ($origin)." ;;
+        *)  die "internal error: assert_path_plausible needs an absolute path; got $(render_untrusted "$path") ($origin)." ;;
     esac
 
     # Four characters or fewer cannot be anything but a near-root path.  The same refusal,
     # and the same wording, as the coverage runner's.
-    [ "${#path}" -gt 4 ] || die "$origin is implausibly short: '$path'.  A near-root path is
+    [ "${#path}" -gt 4 ] || die "$origin is implausibly short: $(render_untrusted "$path").  A near-root path is
        refused because this script writes and mounts filesystem images.  Give a path that is
        unmistakably yours, for example \"\${TMPDIR:-/tmp}/cec-l2-rootfs.ext4\"."
 
@@ -1485,7 +1669,7 @@ assert_path_plausible() { # $1=canonical absolute path  $2=how it was chosen
         case "$path" in
             "$root"|"$root"/*)
                 die "refusing to use
-           $path
+           $(render_untrusted "$path")
        for $origin, because it is $root or lies underneath it -- a tree the operating system
        owns.  A value that reaches one is nearly always a '..' that collapsed out of the
        intended path or a mistyped root.  Use \"\${TMPDIR:-/tmp}/...\" or a directory inside
@@ -1502,6 +1686,25 @@ absolutise_and_check() { # $1=path  $2=how it was chosen -> canonical path on st
     local path="$1" origin="$2"
     [ -n "$path" ] || die "$origin was given as an empty value.  An empty path cannot be
        validated, so it is refused rather than resolved to the working directory."
+
+    # A CONTROL CHARACTER IN ANY CALLER-SUPPLIED PATH IS REFUSED HERE, at the one funnel every
+    # one of them passes through, and that position is the point.  assert_path_embeddable()
+    # refuses the same class, but it is applied to only four of the eleven path options -- the
+    # four whose values are embedded in the generated in-guest configuration -- so the other
+    # seven reached their diagnostics unchecked.  --base-url-file's is the clearest: it is named
+    # verbatim in "base URL read from the private file $BASE_URL_FILE", so a newline in it ended
+    # that line and began one of its own, and a line beginning "::error::" is a GitHub Actions
+    # workflow command.  Refusing the class here is what lets every diagnostic downstream of
+    # this funnel keep interpolating a path directly.  Refused rather than stripped: a path this
+    # script silently renamed would not be the one the caller named.  See render_untrusted().
+    case "$path" in
+        *[[:cntrl:]]*)
+            die "$origin contains a control character: $(render_untrusted "$path")
+       A newline, a carriage return or an escape sequence in a path is reproduced in every
+       diagnostic, artifact name and generated file that mentions it -- forging or hiding output
+       rather than naming a file.  Give a path made of printable characters." ;;
+    esac
+
     case "$path" in
         /*) : ;;
         *)  path="$PWD/$path" ;;
@@ -1518,11 +1721,22 @@ absolutise_and_check() { # $1=path  $2=how it was chosen -> canonical path on st
 # where silently mangling it would not be.
 assert_path_embeddable() { # $1=path  $2=how it was chosen
     case "$1" in
-        *"'"*)   die "$2 contains a single quote: '$1'.  This script embeds these paths in the
-       generated in-guest configuration, and a quote there cannot be represented safely.
-       Choose a path without one." ;;
-        *[$'\n\t']*) die "$2 contains a newline or a tab.  Refused for the same reason as a
-       quote: it cannot be embedded in the generated in-guest configuration safely." ;;
+        *"'"*)   die "$2 contains a single quote: $(render_untrusted "$1").  This script embeds
+       these paths in the generated in-guest configuration, and a quote there cannot be
+       represented safely.  Choose a path without one." ;;
+        # EVERY CONTROL CHARACTER, not only newline and tab.  This arm used to name exactly
+        # those two, which let a path carrying a CARRIAGE RETURN through -- and a CR is
+        # invisible in a log while still ending a line on a terminal, so such a path reached
+        # both the generated in-guest configuration and every downstream diagnostic that names
+        # it.  Refusing the whole class here is what lets those downstream diagnostics keep
+        # interpolating the path directly: by the time any of them runs, the value is proven
+        # free of control characters.  The value itself is still RENDERED in this message,
+        # because this is the diagnostic that reports the offending value.
+        *[[:cntrl:]]*) die "$2 contains a control character: $(render_untrusted "$1").
+       Refused for the same reason as a quote -- it cannot be embedded in the generated
+       in-guest configuration safely, and a carriage return or an escape sequence in a path
+       also forges or hides output in every log that names it.  It is refused rather than
+       stripped, because a path this script silently altered would not be the path you typed." ;;
     esac
 }
 
@@ -1542,10 +1756,12 @@ require_existing_file() { # $1=path  $2=what it is
 }
 
 require_positive_integer() { # $1=value  $2=what it is
+    # $1 is a caller-supplied option value and reaches a diagnostic on both arms, so it is
+    # rendered rather than interpolated.  See render_untrusted().
     case "$1" in
-        ''|*[!0-9]*) die "$2 must be a plain positive integer, got '$1'." ;;
+        ''|*[!0-9]*) die "$2 must be a plain positive integer, got $(render_untrusted "$1")." ;;
     esac
-    [ "$1" -gt 0 ] || die "$2 must be greater than zero, got '$1'."
+    [ "$1" -gt 0 ] || die "$2 must be greater than zero, got $(render_untrusted "$1")."
 }
 
 require_sha256_hex() { # $1=value  $2=what it is
@@ -1970,7 +2186,7 @@ resolve_arch() {
             DEBIAN_ARCH='armhf'
             ;;
         *)
-            die "unsupported --arch '$ARCH'.  The guest userspace is 32-bit throughout -- a
+            die "unsupported --arch $(render_untrusted "$ARCH").  The guest userspace is 32-bit throughout -- a
        process is a single ELF class, so a 64-bit staged library could not be loaded into any
        process the guest starts -- and the accepted values are therefore the 32-bit ones:
        i386 (the default, and the straightforward choice for QEMU on an x86_64 host) or armhf
@@ -6672,6 +6888,23 @@ resolve_temp_parent() {
        and this script will not silently substitute /tmp for it: unset TMPDIR to use /tmp, or
        set it to an absolute path to a root-owned private directory."
 
+    # A CONTROL CHARACTER IN TMPDIR IS REFUSED AT THIS ONE BOUNDARY, which is what lets the dozen
+    # diagnostics below -- and every later message that names the scratch tree beneath it -- keep
+    # interpolating the path directly.  TMPDIR is environment-supplied, so it is as untrusted as
+    # argv; a newline in it would end the line of any of those diagnostics and begin one of its
+    # own, and a line beginning "::error::" is a GitHub Actions workflow command.  It is refused
+    # rather than stripped, because a scratch parent this script silently renamed would not be the
+    # one the caller named.  The value IS rendered here, because this is the message that has to
+    # report it, and rendering keeps it inside the line.  See render_untrusted().
+    case "$candidate" in
+        *[[:cntrl:]]*)
+            die "TMPDIR contains a control character: $(render_untrusted "$candidate")
+       A newline, a carriage return or an escape sequence in this path would be reproduced in
+       every diagnostic and artifact name that mentions the scratch tree -- forging or hiding
+       output rather than naming a directory.  Set TMPDIR to an absolute path made of printable
+       characters, or unset it to use /tmp." ;;
+    esac
+
     case "$candidate" in
         /*) : ;;
         *)  die "TMPDIR is relative: '$candidate'.  Refused rather than resolved against the
@@ -8524,6 +8757,307 @@ self_test_confined_wrappers() {
     return 0
 }
 
+# ------------------------------------------------------------------------------------
+# THE STRUCTURAL GUARD ON EVERY HEREDOC IN THIS FILE.
+#
+# render_usage_text() makes the HELP text inert.  This makes every OTHER heredoc auditable,
+# including ones added after today, and it is the half that survives a future edit: a
+# reviewer cannot be relied upon to notice that a sentence added to a two-hundred-line
+# heredoc happened to quote a command name in backticks, but this scan notices it in
+# milliseconds and the self-test fails the revision.
+#
+# WHAT IT DOES.  It reads this script's own source, tracks heredoc state line by line, and
+# for every heredoc whose delimiter is UNQUOTED -- the only kind bash expands -- reports any
+# body line containing a backtick or a `$(`.  Both are command substitution; both execute.
+#
+# WHAT IT DELIBERATELY DOES NOT DO.  It does not object to `$VAR` in an unquoted body.  Three
+# heredocs in this file interpolate their own values on purpose, a variable's VALUE is never
+# re-scanned for substitutions, and a check that refused them would be turned off rather than
+# obeyed.  The hazard is executable syntax in the TEXT, and that is what is refused.
+#
+# HOW THE STATE TRACKING AVOIDS FALSE POSITIVES, each case measured against this file:
+#
+#   * a herestring (`read -r -a fields <<< "$value"`) is not an opener -- after `<<` comes a
+#     third `<`, and the delimiter pattern requires a letter or underscore;
+#   * an arithmetic left shift inside an embedded program (`os.read(handle, 1 << 16)`) is not
+#     an opener for the same reason: `16` does not begin with a letter or underscore.  Those
+#     lines sit inside quoted heredocs in any case, and body lines are never re-examined for
+#     openers;
+#   * a COMMENT that discusses a heredoc -- the block above this function does -- is skipped,
+#     because a line whose first non-blank character is `#` cannot open a heredoc;
+#   * `<<-` is honoured: the delimiter line may be indented, so the comparison strips leading
+#     blanks for exactly those heredocs and for no others;
+#   * an unterminated heredoc is reported rather than passing silently, since a scan that ran
+#     off the end of the file would have examined nothing after the opener.
+#
+# Prints one line per offending body line and nothing at all when the file is clean, so the
+# caller's assertion is "produced no output".
+# ------------------------------------------------------------------------------------
+scan_expanding_heredocs() { # $1=file to scan
+    local file="$1"
+    local line probe delim='' dashed=0 expanding=0 in_body=0 opener=0 number=0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        number=$(( number + 1 ))
+
+        if [ "$in_body" -eq 1 ]; then
+            probe="$line"
+            if [ "$dashed" -eq 1 ]; then
+                probe="${line#"${line%%[! 	]*}"}"
+            fi
+            if [ "$probe" = "$delim" ]; then
+                in_body=0
+                continue
+            fi
+            if [ "$expanding" -eq 1 ]; then
+                case "$line" in
+                    *'`'*|*'$('*)
+                        printf '%s:%d: command substitution inside the EXPANDED heredoc %s opened at line %d: %s\n' \
+                            "$file" "$number" "$delim" "$opener" "$line"
+                        ;;
+                esac
+            fi
+            continue
+        fi
+
+        # A shell comment cannot open a heredoc, and the comments in this file discuss them.
+        case "${line#"${line%%[! 	]*}"}" in
+            '#'*|'') continue ;;
+        esac
+
+        if [[ "$line" =~ \<\<(-?)[[:space:]]*(\'|\"|\\)?([A-Za-z_][A-Za-z0-9_]*) ]]; then
+            dashed=0
+            [ "${BASH_REMATCH[1]}" != '-' ] || dashed=1
+            expanding=1
+            [ -z "${BASH_REMATCH[2]}" ] || expanding=0
+            delim="${BASH_REMATCH[3]}"
+            opener=$number
+            in_body=1
+        fi
+    done < "$file"
+
+    if [ "$in_body" -eq 1 ]; then
+        printf '%s: the heredoc %s opened at line %d is never terminated, so everything after it was not scanned\n' \
+            "$file" "$delim" "$opener"
+    fi
+}
+
+# ------------------------------------------------------------------------------------
+# THE HELP-TEXT CASES.  Three properties, each the direct negative of a measured defect:
+#
+#   1. no heredoc in this file can command-substitute (the structural guard above);
+#   2. rendering the help with a HOSTILE PATH and a hostile marker environment executes
+#      nothing and prints nothing the environment supplied.  Before the fix this exact
+#      arrangement ran an attacker's binary as uid 0 and pasted its output into the help;
+#   3. every @NAME@ placeholder resolves, so the template and its table cannot drift apart.
+#
+# NO ROOT, NO MOUNT, NO NETWORK, exactly like every other case in this mode.  The decoys are
+# ordinary shell scripts in a mktemp directory registered with the same TEMP_DIRS list the
+# EXIT trap drains, so nothing is left behind on a pass or a failure.
+# ------------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# THE UNTRUSTED-VALUE RENDERER, EXERCISED AGAINST A TABLE OF THE EXACT RENDERINGS IT MUST
+# PRODUCE.  Every diagnostic in this script that names a value the caller supplied - an
+# unknown option, a bad --size, an unsupported --arch, a path that failed validation,
+# TMPDIR - goes through render_untrusted(), so a change that weakened any clause of its
+# contract would reopen CWE-117 across all of them at once.  It fails here instead.
+#
+# The rows are the ways the defect presented itself in the finding: a NEWLINE followed by a
+# forged "::error::" workflow command; a CARRIAGE RETURN with an erase-line escape, which
+# redraws a line rather than ending it and so HIDES output instead of forging it; an ANSI
+# colour escape; a literal backslash beside a tab, which is what clause (a) exists for; an
+# EMPTY value; a value that is ITSELF nothing but a forged annotation; a non-ASCII UTF-8
+# sequence; a high byte that is not valid UTF-8 at all; and a five-thousand-byte value.
+#
+# Three properties are asserted for EVERY row on top of the exact match, because they are
+# what the contract promises and an exact-match table alone would let a rewrite satisfy by
+# accident: the rendering is ONE LINE, it BEGINS with '[' so it can never itself be a
+# workflow command, and it is BOUNDED whatever the input length.
+#
+# Needs no root, no mount, no loop device and no network: a pure function fed a table.
+# ------------------------------------------------------------------------------------
+self_test_render_untrusted_case() { # $1=case name  $2=value  $3=expected rendering
+    local name="$1" value="$2" expected="$3" rendered
+    rendered="$(render_untrusted "$value")"
+
+    if [ "$rendered" != "$expected" ]; then
+        self_test_report not-ok render_untrusted "$name" \
+            "rendered ${#rendered} chars, not the expected rendering"
+        return 0
+    fi
+    case "$rendered" in
+        '['*) : ;;
+        *)  self_test_report not-ok render_untrusted "$name" \
+                "does not begin with '[', so it could begin a line"
+            return 0 ;;
+    esac
+    # $'\n' and $'\r' rather than "$(printf '\n')": command substitution STRIPS trailing
+    # newlines, so the printf form would expand to the empty string and the pattern would
+    # match every value - a check that always passes, which is worse than no check.
+    case "$rendered" in
+        *$'\n'*|*$'\r'*)
+            self_test_report not-ok render_untrusted "$name" \
+                'still contains a line terminator'
+            return 0 ;;
+    esac
+    if [ "${#rendered}" -gt 240 ]; then
+        self_test_report not-ok render_untrusted "$name" \
+            "rendered ${#rendered} characters, which is unbounded"
+        return 0
+    fi
+    self_test_report ok render_untrusted "$name" "-> ${#rendered} chars, escaped and one line"
+}
+
+self_test_render_untrusted() {
+    local long_value='' long_expected='['
+
+    self_test_render_untrusted_case 'a newline and a forged ::error:: annotation' \
+        "$(printf 'bogus\n::error::FORGED')" '[bogus\n::error::FORGED]'
+    self_test_render_untrusted_case 'a carriage return and an erase-line escape' \
+        "$(printf 'ok\r\033[2Khidden')" '[ok\r\x1b[2Khidden]'
+    self_test_render_untrusted_case 'an ANSI colour escape sequence' \
+        "$(printf '\033[31mred\033[0m')" '[\x1b[31mred\x1b[0m]'
+    self_test_render_untrusted_case 'a tab beside a literal backslash-n' \
+        "$(printf 'a\tb\\nc')" '[a\tb\\nc]'
+    self_test_render_untrusted_case 'an empty value' '' '[]'
+    self_test_render_untrusted_case 'a value that is itself only a forged annotation' \
+        '::error::WHOLE_VALUE' '[::error::WHOLE_VALUE]'
+    self_test_render_untrusted_case 'a non-ASCII UTF-8 sequence' \
+        "$(printf '\303\251')" '[\xc3\xa9]'
+    self_test_render_untrusted_case 'a high byte that is not valid UTF-8' \
+        "$(printf '\377')" '[\xff]'
+
+    # Built in the shell: this case must not depend on seq or tr being present.
+    while [ "${#long_value}" -lt 5000 ]; do
+        long_value+='XXXXXXXXXXXXXXXXXXXX'
+    done
+    while [ "${#long_expected}" -lt 201 ]; do
+        long_expected+='XXXXXXXXXXXXXXXXXXXX'
+    done
+    long_expected+='...[truncated, 5000 bytes total]]'
+    self_test_render_untrusted_case 'a five-thousand-byte value is bounded at 200' \
+        "$long_value" "$long_expected"
+
+    # THE PROPERTY THE WHOLE CONTRACT EXISTS FOR, asserted end to end rather than only per
+    # row: a rendered value placed in a real diagnostic cannot produce a line that BEGINS
+    # with a GitHub Actions workflow command.  The message keeps this script's own prefix
+    # in front of it - clause (e) - and the rendering carries no line terminator - clause
+    # (b) - so there is no second line for a forged command to be the start of.
+    local composed forged_lines
+    composed="$(printf '[%s] ERROR: unknown option %s.\n' "$SCRIPT_NAME" \
+        "$(render_untrusted "$(printf -- '--bogus\n::error::FORGED_ROOTFS')")")"
+    forged_lines="$(printf '%s\n' "$composed" | grep -c '^::' || true)"
+    if [ "$forged_lines" = '0' ]; then
+        self_test_report ok render_untrusted \
+            'a composed diagnostic starts no ::error:: line' 'grep -c "^::" -> 0'
+    else
+        self_test_report not-ok render_untrusted \
+            'a composed diagnostic starts no ::error:: line' \
+            "grep -c \"^::\" -> $forged_lines"
+    fi
+}
+
+self_test_help_rendering() {
+    local scratch offenders rendered decoy marker status=0
+
+    offenders="$(scan_expanding_heredocs "$SCRIPT_PATH")" || offenders='the scan itself failed'
+    if [ -z "$offenders" ]; then
+        self_test_report ok 'help-text' 'no expanded heredoc can substitute' \
+            'every unquoted heredoc body is free of ` and $('
+    else
+        self_test_report not-ok 'help-text' 'no expanded heredoc can substitute' \
+            "$(printf '%s' "$offenders" | head -3 | tr '\n' ' ')"
+    fi
+
+    scratch="$(mktemp -d)" || {
+        self_test_report not-ok 'help-text' 'a scratch directory could be created' 'mktemp -d failed'
+        return 0
+    }
+    register_tempdir "$scratch"
+    chmod 0700 -- "$scratch" 2>/dev/null || true
+
+    marker="$scratch/executed"
+
+    # The decoys are named for the commands the help text MENTIONS, plus the two builtins the
+    # renderer uses, so a regression that reintroduced any external resolution is caught by
+    # whichever name it reached for.  Each records that it ran and prints a sentinel.
+    for decoy in gcov cat lcov curl wget dpkg-query chroot id date; do
+        {
+            printf '#!/bin/sh\n'
+            printf 'printf "%%s\\n" "SELFTEST_DECOY_EXECUTED $0" >> "%s"\n' "$marker"
+            printf 'printf "%%s\\n" "SELFTEST_DECOY_OUTPUT"\n'
+        } > "$scratch/$decoy"
+        chmod 0755 -- "$scratch/$decoy" 2>/dev/null || true
+    done
+
+    # Rendered in a subshell so the hostile PATH and the hostile variables cannot outlive the
+    # case.  HOSTILE_MARKER is the shape the original report used; it is set here so that a
+    # decoy which read it would still write inside this scratch directory and nowhere else.
+    rendered="$( PATH="$scratch:$PATH" HOSTILE_MARKER="$marker" usage 2>&1 )" || status=$?
+
+    if [ "$status" -eq 0 ]; then
+        self_test_report ok 'help-text' 'help renders with a hostile PATH' "status $status"
+    else
+        self_test_report not-ok 'help-text' 'help renders with a hostile PATH' \
+            "status $status, expected 0"
+    fi
+
+    if [ -e "$marker" ]; then
+        self_test_report not-ok 'help-text' 'rendering the help executes nothing' \
+            "a decoy on PATH RAN: $(head -1 "$marker")"
+    else
+        self_test_report ok 'help-text' 'rendering the help executes nothing' \
+            'no decoy on PATH was executed'
+    fi
+
+    case "$rendered" in
+        *SELFTEST_DECOY_OUTPUT*)
+            self_test_report not-ok 'help-text' 'no environment output reaches the help' \
+                'a decoy sentinel was substituted into the rendered text' ;;
+        *)
+            self_test_report ok 'help-text' 'no environment output reaches the help' \
+                'the rendered text contains nothing the environment supplied' ;;
+    esac
+
+    # The one sentence that used to be executed must now appear verbatim, backticks included.
+    case "$rendered" in
+        *'resolves a bare `gcov`'*)
+            self_test_report ok 'help-text' 'backticked prose renders literally' \
+                'the gcov sentence keeps its backticks' ;;
+        *)
+            self_test_report not-ok 'help-text' 'backticked prose renders literally' \
+                'the gcov sentence is missing or altered' ;;
+    esac
+
+    if [[ "$rendered" =~ (@[A-Z][A-Z0-9_]*@) ]]; then
+        self_test_report not-ok 'help-text' 'every placeholder resolves' \
+            "${BASH_REMATCH[1]} was not substituted"
+    else
+        self_test_report ok 'help-text' 'every placeholder resolves' \
+            "${#USAGE_PLACEHOLDER_NAMES[@]} names in the table, no @NAME@ left in the output"
+    fi
+
+    # And the table has no entry the template does not use, which is the other half of drift:
+    # a name left in the table after its placeholder was removed substitutes nothing and hides
+    # the fact that the two are no longer describing the same document.
+    local unused='' name
+    for name in "${USAGE_PLACEHOLDER_NAMES[@]}"; do
+        case "$rendered" in
+            *"${!name-}"*) ;;
+            *) unused="${unused}${unused:+, }$name" ;;
+        esac
+    done
+    if [ -z "$unused" ]; then
+        self_test_report ok 'help-text' 'no table entry is unused' \
+            'every name in the table appears in the rendered text'
+    else
+        self_test_report not-ok 'help-text' 'no table entry is unused' \
+            "$unused substituted nothing visible"
+    fi
+
+    return 0
+}
+
 run_self_test() {
     local installed='build-essential 12.9 i386 install ok installed'
     local provider_ok='pkgconf 1.8.1 i386 install ok installed :: pkg-config (= 1.8.1)'
@@ -8617,6 +9151,12 @@ $provider_ok" 'an installed provider beside a purged one'
 
     # ---- the descriptor-consuming custody chain the seven mount/chroot sites use -----
     self_test_pinned_op
+
+    # ---- the help text: inert heredocs, a hostile PATH, and no placeholder drift -----
+    self_test_help_rendering
+
+    # ---- render_untrusted ------------------------------------------------------------
+    self_test_render_untrusted
 
     printf '\n%d case(s), %d failure(s)\n' "$SELF_TEST_CASES" "$SELF_TEST_FAILURES"
     if [ "$SELF_TEST_FAILURES" -gt 0 ]; then
@@ -11115,12 +11655,40 @@ CEC_L2_INIT_EOF
 #       the fake service host it launches itself.
 #   anything that would start a binder threadpool -- there is no environment variable for
 #       that, and this note exists so nobody adds one.
+#   any DIRECT-OBJECT LOADER VARIABLE -- LD_PRELOAD, LD_AUDIT, LD_PROFILE, LD_DYNAMIC_WEAK
+#       and LD_ORIGIN_PATH.  Not merely unset: REMOVED below, explicitly.  See the block
+#       there for why the guarantee is stated rather than assumed.
 # ------------------------------------------------------------------------------------
 export_build_environment() {
     export HOME='/root'
     export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     export LC_ALL='C'
     export TMPDIR='/tmp'
+
+    # DIRECT-OBJECT LOADER VARIABLES ARE REMOVED HERE, before the coverage runner is invoked
+    # and before anything is compiled.
+    #
+    # These name objects for the loader to LOAD, or change how symbols bind, so the
+    # LD_LIBRARY_PATH exported below - a SEARCH path - has no bearing on them at all.  A
+    # preloaded object would run in every child of the guest run: gcc, make, lcov, gcov, the
+    # L1 and L2 test binaries and the fake service host, which is to say in every process that
+    # produces a coverage figure.  Measured on the build host before the runner grew its own
+    # guard: a marker object ran 384 times during `run_coverage.sh --help` alone.
+    #
+    # THIS IS BELT AND BRACES, AND IT IS STILL WORTH THE FOUR LINES.  This init is PID 1, so
+    # its environment is whatever the kernel handed it - which carries none of these - and
+    # run_coverage.sh refuses to run at all if one is present, at load time, before it spawns
+    # a child.  So there are already two reasons this cannot happen.  What the removal adds is
+    # that the guarantee is made HERE, in the file that composes the guest's environment,
+    # rather than inferred from two facts elsewhere: a future edit that exported one of them,
+    # or a kernel command line that carried one, would otherwise be caught only by the
+    # runner's refusal, which reads as a mysterious failure at that point rather than as a
+    # thing this init prevented.
+    #
+    # `unset -v` rather than assigning empty: glibc's loader activates LD_DYNAMIC_WEAK on the
+    # PRESENCE of the variable and ignores its value, so an empty assignment would leave it
+    # active.  Removal is the only spelling that holds for the whole set.
+    unset -v LD_PRELOAD LD_AUDIT LD_PROFILE LD_DYNAMIC_WEAK LD_ORIGIN_PATH
 
     # EXPORTED ONLY WHEN NON-EMPTY, and that distinction is load-bearing rather than tidy.
     # These four reach configure as precious variables, and 'BINDER_SDK_DIR=' asserts that
@@ -11193,6 +11761,7 @@ export_build_environment() {
     log "  CEC_FAKE_AIDL_HOST_PATH=$CEC_FAKE_AIDL_HOST_PATH"
     log "  CEC_SINK_CALLER_SOURCE=$CEC_SINK_CALLER_SOURCE"
     log "  CEC_TEST_AIDL_MODE is deliberately NOT set: the coverage runner owns it per invocation"
+    log "  LD_PRELOAD, LD_AUDIT, LD_PROFILE, LD_DYNAMIC_WEAK, LD_ORIGIN_PATH: removed, not set"
 }
 
 # ------------------------------------------------------------------------------------
@@ -12760,7 +13329,28 @@ write_manifest() {
         printf 'BINDER_PROTOCOL_AUTHORITY=the three-way cross-check performed at run time, not this file: (1) the running kernel configuration the guest reads back, (2) the SDK build flags recorded in the staging tree, (3) the BINDER_VERSION ioctl on /dev/binder, which is what libbinder compares for equality; disagreement between any of them is FATAL to the run\n'
         printf 'BINDER_PROTOCOL_VERIFIED_IN_GUEST=the init reads /dev/binder with the BINDER_VERSION ioctl, cross-checks it against the running kernel configuration and the recorded SDK value, and fails naming whichever disagrees; read the BINDER PROTOCOL AGREEMENT block in the console log for the authoritative outcome\n'
         printf 'GUEST_INIT=%s\n' "$GUEST_INIT_PATH"
-        printf 'GUEST_KERNEL_APPEND_HINT=root=/dev/vda rw init=%s console=ttyS0\n' "$GUEST_INIT_PATH"
+        # THE ROOT DEVICE IS /dev/sda, NOT /dev/vda, AND THE REASON IS A SECURITY DECISION
+        # RATHER THAN A PREFERENCE.  The boot step in .github/workflows/aidl-path-tests.yml
+        # deliberately does NOT instantiate QEMU's virtio-blk device model: CVE-2024-8612 is a
+        # virtio-blk bounce-buffer disclosure of QEMU HOST process memory to the guest and the
+        # exact host package is listed affected, and CVE-2026-48914 is a privileged-guest
+        # out-of-bounds write in the QEMU host heap with no fixed release through 11.0.1.  A
+        # guest that runs repository-controlled payloads is precisely the threat those two
+        # describe, so the root disk is attached through the emulated AHCI controller
+        # (-drive if=none + -device ahci + -device ide-hd) and CONFIG_VIRTIO_BLK is asserted
+        # ABSENT from the guest kernel, which makes the vulnerable device model unreachable
+        # instead of merely unused.
+        #
+        # THIS FIELD IS A HINT AND NOTHING READS IT -- grep the two workflows for
+        # GUEST_KERNEL_APPEND_HINT and there are no consumers; the authoritative -append is
+        # built by the boot step, which also ASSERTS on the console that the kernel command
+        # line carried root=/dev/sda and that the kernel mounted root on device 8:0, the
+        # SCSI_DISK0_MAJOR that virtio_blk's dynamically allocated major can never be.  It is
+        # kept accurate all the same, because a manifest field that contradicts the image it
+        # describes is worse than an absent one: its only reader is a human reproducing the
+        # boot by hand, and root=/dev/vda would send them to a device the kernel has no driver
+        # for and no obvious reason why.
+        printf 'GUEST_KERNEL_APPEND_HINT=root=/dev/sda rw init=%s console=ttyS0\n' "$GUEST_INIT_PATH"
         printf 'ARTIFACT_DIR=%s\n' "$GUEST_ARTIFACT_DIR"
         printf 'STATUS_FILE=%s\n' "$GUEST_STATUS_FILE"
         printf 'STATUS_FILE_FORMAT=one line holding the exact exit status of run_coverage.sh; 0 means measured and passing, 3 is ADVISORY and is NOT a pass, anything else is a failure\n'

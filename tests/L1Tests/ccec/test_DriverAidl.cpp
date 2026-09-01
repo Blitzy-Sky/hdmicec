@@ -353,17 +353,17 @@ namespace halcompat = ::com::rdk::hal::halcompat;
  *   Fixture                       Cases  Invocation  CEC_TEST_AIDL_MODE  Binder driver
  *   ---------------------------------------------------------------------------------
  *   DriverAidlCompatibilityTest      23  A, B, C     any                 no
- *   DriverAidlPreflightTest          27  A, B, C     any                 no
+ *   DriverAidlPreflightTest          28  A, B, C     any                 no
  *   DriverAidlSelectionTest           4  A           absent              no
  *   DriverAidlLocalInstanceTest      25  A, B, C     any                 no
  *   DriverAidlLegacyArmTest           5  A           absent              no
- *   DriverAidlSessionTest            23  B           compatible          yes
+ *   DriverAidlSessionTest            26  B           compatible          yes
  *   DriverAidlTransmitTest           12  B           compatible          yes
  *   ---------------------------------------------------------------------------------
- *                                   119  of which 84 run under invocation A
+ *                                   123  of which 85 run under invocation A
  *
- * The 84 are the first five fixtures, 23 + 27 + 4 + 25 + 5. The two that invocation A
- * excludes are DriverAidlSessionTest, 23 cases, and DriverAidlTransmitTest, 12 - the 35 in
+ * The 85 are the first five fixtures, 23 + 28 + 4 + 25 + 5. The two that invocation A
+ * excludes are DriverAidlSessionTest, 26 cases, and DriverAidlTransmitTest, 12 - the 38 in
  * the excluded column below - because both require the AIDL back-end to be the resolved one.
  *
  * The counts the runner will see. Its per-invocation gate reconciles selected plus excluded
@@ -371,11 +371,11 @@ namespace halcompat = ::com::rdk::hal::halcompat;
  *
  *   invocation   registered   selected   excluded
  *   ------------------------------------------------
- *   A                   602        567         35
- *   B                   602        418        184
- *   C                   602        383        219
+ *   A                   606        568         38
+ *   B                   606        422        184
+ *   C                   606        384        222
  *
- * Registered is 602 = 483 pre-existing + the 119 above. Every figure in that table is measured
+ * Registered is 606 = 483 pre-existing + the 123 above. Every figure in that table is measured
  * on this host, with the runner's own filters, by
  *
  *   ./run_L1Tests --gtest_list_tests --gtest_filter=<filter> | grep -cE '^  [A-Za-z]'
@@ -387,7 +387,7 @@ namespace halcompat = ::com::rdk::hal::halcompat;
  * left unclassified.
  *
  * What is not measured here is the pass/fail outcome of invocations B and C. Only invocation A
- * has been executed on this host: 567 selected, 567 passed, exit 0. A binder-capable runner must
+ * has been executed on this host: 568 selected, 568 passed, exit 0. A binder-capable runner must
  * produce B's and C's outcomes; the counts above tell it what to expect, and a mismatch there
  * means a filter or a classification has drifted rather than that a test failed.
  *
@@ -2433,8 +2433,12 @@ std::string lowercaseHexOf(const std::vector<uint8_t> &bytes) {
  * before all three, and an absent path reaches the open arm before that, so no amount of
  * filesystem arrangement gets past decision point 3.
  *
- * DriverAidlImpl::isBinderPreflightOk() therefore takes its four syscalls as a
- * BinderPreflightProbe of plain function pointers, defaulted to defaultBinderProbe().
+ * DriverAidlImpl::isBinderPreflightOk() therefore takes its six kernel-facing operations -
+ * openNode, identifyDescriptor, identifyPath, readProtocolVersion, pingContextManager and
+ * closeNode - as a BinderPreflightProbe of plain function pointers, defaulted to
+ * defaultBinderProbe(). The same probe serves the pre-lookup custody re-verification, which
+ * is why identifyPath is among them: the re-verification resolves the NAME again, where the
+ * preflight asks its questions of the DESCRIPTOR it already holds.
  * Substituting them here is what makes every arm reachable on this host, deterministically
  * and without a binder driver - and it is also what lets the cases assert descriptor
  * hygiene, which no black-box test of the predicate could observe at all.
@@ -6112,10 +6116,12 @@ TEST_F(DriverAidlPreflightTest, TheServiceQueryDeclinesWhenThePathCannotBeResolv
 // THE STAGE-ONE DECLINE, WHICH IS A DIFFERENT ARM FROM EVERY CASE ABOVE and until now had no
 // case of its own on a host that has a working binder driver.
 //
-// isServiceAvailable() declines in three ordered stages, and its two later ones are what the
-// cases above drive: they let the preflight PASS and then break the re-identification or the
-// liveness re-check, so they reach the transport reason by the second assignment inside the
-// function rather than the first. The arm this case drives is the FIRST one - the preflight
+// isServiceAvailable() declines in four ordered stages - preflight, custody re-verification,
+// service lookup, compatibility - and the two the cases above drive are the first two: they let
+// the preflight PASS and then break the re-identification or the liveness re-check, so they
+// reach the transport reason by the second assignment inside the function rather than the
+// first. The two later stages need a binder driver and cannot be reached from this host at
+// all. The arm this case drives is the FIRST one - the preflight
 // itself refusing - and the distinction is not cosmetic, because that arm is the one every
 // legacy-only SOC takes on every boot. It is the single most-travelled path in this file on real
 // hardware and the one whose failure would abort LibCCEC::init() instead of falling back.
@@ -6315,6 +6321,44 @@ TEST_F(DriverAidlPreflightTest, TheServiceQueryDeclinesWhenTheContextManagerStop
         << "both descriptors were expected to be released and " << g_syntheticProbe.closeCalls
         << " release(s) were made; the reopened descriptor is opened inside the check and must "
            "not outlive it";
+
+    // CUSTODY IS HELD ACROSS THE WINDOW, ASSERTED THROUGH THE RELEASE ORDER, and this is the
+    // one property on which the whole identity comparison rests rather than an ordering detail.
+    //
+    // An open descriptor pins an inode. That is the ONLY reason comparing `inode` across the
+    // check-to-use window means anything: without a descriptor held open on the validated node,
+    // the kernel is free to recycle that inode number for a replacement created at the same
+    // path, and the comparison would report "unchanged" for a node that had in fact been
+    // substituted. So the retained descriptor must still be open while the re-verification runs.
+    //
+    // Nothing else in this suite can see that. `closeCalls == 2` counts the releases but not
+    // when they happened; `lastPingFd` proves the ping used the fresh descriptor but not that
+    // the retained one was still alive at the time. A "simplification" that released the
+    // retained descriptor as soon as the preflight returned - which reads as tidier, since the
+    // re-verification opens its own - would keep both of those assertions green and silently
+    // delete the pinning guarantee. The release ORDER is what distinguishes the two: the fresh
+    // descriptor is released inside the re-verification, and the retained one only when
+    // isServiceAvailable() returns, so the fresh one must be released FIRST.
+    //
+    // This is also the assertion that pins the residual recorded on BinderNodeIdentity: the
+    // window is narrowed to its structural minimum and not closed, and the narrowing is worth
+    // exactly as much as the custody that backs it.
+    ASSERT_EQ(g_syntheticProbe.closedFds.size(), 2u)
+        << "the release sequence was not recorded as two entries, so the custody order cannot be "
+           "checked at all";
+    EXPECT_EQ(g_syntheticProbe.closedFds[0], kSyntheticSecondBinderFd)
+        << "the first descriptor released was " << g_syntheticProbe.closedFds[0]
+        << " where the descriptor reopened for the pre-lookup liveness check ("
+        << kSyntheticSecondBinderFd
+        << ") was expected. Releasing the RETAINED descriptor first means custody ended before "
+           "the re-verification finished, which unpins the validated inode and lets a "
+           "substitution at the same path be recycled onto the same inode number - the identity "
+           "comparison would then report 'unchanged' for a node that had been replaced";
+    EXPECT_EQ(g_syntheticProbe.closedFds[1], kSyntheticBinderFd)
+        << "the descriptor released last was " << g_syntheticProbe.closedFds[1]
+        << " where the retained, validated descriptor (" << kSyntheticBinderFd
+        << ") was expected. It must outlive the entire re-verification and be released only when "
+           "the query returns";
 }
 
 // THE SAME INODE, RE-PERMISSIONED between the check and the use: declined.

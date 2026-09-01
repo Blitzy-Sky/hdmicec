@@ -175,12 +175,14 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -201,6 +203,30 @@ static HdmiCecDriverMock* g_driverMock = nullptr;
  * that distinction is exercised on every failing run and not merely in theory.
  */
 static pid_t g_hostPid = -1;
+
+/*
+ * The process group the launched host leads, or -1 when this invocation launched no host or
+ * could not confirm that the one it launched had left this process's group.
+ *
+ * WHY A SECOND GLOBAL WHEN IT HOLDS THE SAME NUMBER AS g_hostPid. It is the same number - the
+ * child makes itself a group leader, so its group id is its pid - but it is not the same
+ * FACT, and teardown has to be able to tell the two apart. g_hostPid says "there is one child
+ * to reap". This says "that child's descendants are collected under a group id this harness
+ * owns, so a signal to its negation reaches every one of them and reaches nothing else".
+ *
+ * WHY IT IS -1 UNTIL CONFIRMED, which is the part that matters. Every process starts in its
+ * parent's process group, so before the child calls setpgid() its group is the RUNNER'S: a
+ * kill() to the negation of an unconfirmed number would signal this runner, the whole
+ * GoogleTest process and every sibling process sharing its group. So this is set only after
+ * the parent has read the child's group back with getpgid() and found it both equal to the
+ * child's pid and different from this process's own group, and it is left at -1 whenever that
+ * confirmation does not hold - in which case teardown signals the single pid, exactly as it
+ * did before, rather than a group it cannot vouch for.
+ *
+ * @see startFakeServiceHost(), terminateAndReapFakeServiceHost(),
+ *      terminateAndReapChildProcess()
+ */
+static pid_t g_hostProcessGroupId = -1;
 
 /*
  * Read end of the readiness pipe, held open for the lifetime of the host rather than
@@ -269,6 +295,164 @@ static struct sigaction g_previousSigpipeAction;
 static bool g_sigpipeDispositionReplaced = false;
 
 namespace {
+
+/*
+ * RENDERING AN UNTRUSTED VALUE INTO A DIAGNOSTIC.  CWE-117, closed by construction.
+ *
+ * THE DEFECT THIS REMOVES.  Diagnostics in this file used to stream caller-supplied text
+ * verbatim.  A value carrying a newline therefore did not appear inside a message - it ENDED
+ * that message and began a line of its own, and a line beginning "::error::" is a GitHub
+ * Actions workflow command.  Measured before the fix:
+ * CEC_TEST_AIDL_MODE=$'bogus\n::error::FORGED_L1_ANNOTATION' produced a standalone forged
+ * "::error::" annotation in the run log, and a five-thousand-character value produced more
+ * than ten kilobytes of diagnostics, burying the real failure.
+ *
+ * THE CONTRACT, in the order the steps are applied, because the order is what makes the
+ * escaping unambiguous and reversible:
+ *
+ *   (a) a literal backslash becomes \\ FIRST, so that every escape introduced below is
+ *       distinguishable from the same characters occurring literally in the value;
+ *   (b) 0x0A becomes \n, 0x0D becomes \r, 0x09 becomes \t, and EVERY OTHER byte outside
+ *       printable ASCII 0x20..0x7E becomes \xNN in lower-case hex.  The classification is by
+ *       byte value on unsigned char and calls no locale-sensitive function - no isprint, no
+ *       iswprint, no ctype table - so it behaves as it would under LC_ALL=C whatever locale
+ *       the process is in, and no multi-byte sequence can hide a control character inside
+ *       itself;
+ *   (c) the rendering is truncated at RENDER_LIMIT characters and
+ *       "...[truncated, N bytes total]" is appended when it truncates, N being the value's own
+ *       length in bytes.  A caller cannot drown a log, and the message still says how much
+ *       was withheld;
+ *   (d) it is applied to the VALUE and never to the surrounding message, and the result is
+ *       always returned delimited - "..." here - so an empty value is visible as "" rather
+ *       than as a gap in a sentence;
+ *   (e) it never begins a diagnostic line.  Every message keeps its own prefix in front of it,
+ *       and the rendering itself begins with '"'.  Together with (b), which leaves no raw
+ *       newline anywhere in the output, that makes a forged standalone ::error::, ::warning::
+ *       or ::notice:: line UNREACHABLE BY CONSTRUCTION rather than unlikely.
+ *
+ * THIS IS ONE OF FIVE COPIES OF ONE CONTRACT.  The five must not diverge; a change to any of
+ * them is a change to all five.  The others are:
+ *
+ *   - hdmicec/tests/L1Tests/run_coverage.sh                      -- render_untrusted()
+ *   - hdmicec/.github/workflows/aidl-path-tests-rootfs.sh        -- render_untrusted()
+ *   - hdmicec/tests/L1Tests/test_main.cpp                        -- renderUntrustedValue()
+ *   - hdmicec/tests/L2Tests/test_main.cpp                        -- renderUntrustedValue()
+ *   - hdmicec/mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp  -- renderUntrustedValue()
+ *
+ * The two convenience overloads are `inline` so that a copy which happens not to need one of
+ * them in its own file is not a -Wunused-function warning: the five copies are identical by
+ * construction, and which overloads a given file calls is a property of that file's callers.
+ *
+ * They are five file-local copies rather than one shared helper deliberately: two are shell
+ * and three are C++, they live in three build targets and one non-built script, and a shared
+ * header would add a build-system edge for a twenty-line function.  The cost of the choice is
+ * this cross-reference, which is why every copy carries it.
+ */
+
+/** @brief How many rendered characters a diagnostic will carry before it is truncated. */
+const std::size_t RENDER_LIMIT = 200;
+
+/**
+ * @brief Renders an untrusted byte string as one bounded, escaped, quoted token.
+ *
+ * The five-clause contract above, implemented once. Every diagnostic in this file that names
+ * a value the environment, the command line or another process supplied goes through it.
+ *
+ * @param [in] value  - The bytes to render. Any content at all is acceptable, including
+ *                      embedded newlines, carriage returns, ANSI escape sequences, invalid
+ *                      UTF-8 and multi-kilobyte payloads
+ *
+ * @return std::string  - The rendering, always surrounded by double quotes, always one line,
+ *                        never longer than RENDER_LIMIT characters plus the truncation note
+ *                        and the two quotes
+ *
+ * @post The result contains no byte below 0x20 and no byte above 0x7E, so it cannot terminate
+ *       the line it sits on and cannot begin a new one.
+ *
+ * @warning Apply it to the VALUE only. Rendering a whole message would escape the message's
+ *          own punctuation and destroy the prefix that clause (e) depends on.
+ */
+std::string renderUntrustedValue(const char *value, std::size_t length)
+{
+    static const char HEX_DIGITS[] = "0123456789abcdef";
+
+    std::string rendered;
+    rendered.reserve(RENDER_LIMIT + 40);
+    rendered.push_back('"');
+
+    std::size_t used = 0;
+    bool truncated = false;
+
+    for (std::size_t index = 0; index < length; ++index) {
+        const unsigned char byte = static_cast<unsigned char>(value[index]);
+        char escape[5];
+        std::size_t escapeLength = 0;
+
+        /*
+         * The backslash arm is FIRST, and that ordering is the whole of clause (a): escaping it
+         * before anything else is introduced is what makes a rendered "\n" unambiguously the
+         * two characters the value contained or unambiguously a newline it contained, never
+         * either.
+         */
+        if (byte == '\\') {
+            escape[0] = '\\'; escape[1] = '\\'; escapeLength = 2;
+        } else if (byte == '\n') {
+            escape[0] = '\\'; escape[1] = 'n';  escapeLength = 2;
+        } else if (byte == '\r') {
+            escape[0] = '\\'; escape[1] = 'r';  escapeLength = 2;
+        } else if (byte == '\t') {
+            escape[0] = '\\'; escape[1] = 't';  escapeLength = 2;
+        } else if (byte >= 0x20u && byte <= 0x7Eu) {
+            escape[0] = static_cast<char>(byte); escapeLength = 1;
+        } else {
+            escape[0] = '\\';
+            escape[1] = 'x';
+            escape[2] = HEX_DIGITS[(byte >> 4) & 0x0Fu];
+            escape[3] = HEX_DIGITS[byte & 0x0Fu];
+            escapeLength = 4;
+        }
+
+        if (used + escapeLength > RENDER_LIMIT) {
+            truncated = true;
+            break;
+        }
+
+        rendered.append(escape, escapeLength);
+        used += escapeLength;
+    }
+
+    if (truncated) {
+        rendered.append("...[truncated, ");
+        rendered.append(std::to_string(static_cast<unsigned long long>(length)));
+        rendered.append(" bytes total]");
+    }
+
+    rendered.push_back('"');
+    return rendered;
+}
+
+/** @brief renderUntrustedValue() for a std::string. @see renderUntrustedValue(const char *, std::size_t) */
+inline std::string renderUntrustedValue(const std::string &value)
+{
+    return renderUntrustedValue(value.data(), value.size());
+}
+
+/**
+ * @brief renderUntrustedValue() for a C string that may be null.
+ *
+ * A null pointer renders as the four characters <unset>, undelimited, because "unset" and
+ * "set to the empty string" are different facts and a diagnostic that showed both as "" would
+ * be describing the wrong one.
+ *
+ * @see renderUntrustedValue(const char *, std::size_t)
+ */
+inline std::string renderUntrustedValue(const char *value)
+{
+    if (value == nullptr) {
+        return std::string("<unset>");
+    }
+    return renderUntrustedValue(value, std::strlen(value));
+}
 
 /*
  * The harness variable and its four values, spelled exactly once each. These spellings
@@ -476,6 +660,153 @@ void writeRawFully(int fd, const char *data, std::size_t length)
 
         written += static_cast<std::size_t>(result);
     }
+}
+
+/*
+ * How far the fallback descriptor sweep counts when close_range() is not available.
+ *
+ * The primary mechanism is close_range(), which closes a whole span in one syscall and needs no
+ * bound at all. The fallback is a close() loop, and a loop cannot use the descriptor limit as
+ * its bound unmodified: measured on this host RLIMIT_NOFILE is 1048576, so an uncapped loop
+ * would issue a million syscalls between fork() and execve(). The cap makes the fallback
+ * bounded; its cost is that on a platform with no close_range() a descriptor numbered above the
+ * cap would survive into the host. That is stated rather than hidden, and it is not the path
+ * this project takes: glibc has provided close_range() since 2.34 and the kernel since 5.9,
+ * both of which this build requires by other means already.
+ */
+const unsigned int DESCRIPTOR_SWEEP_FALLBACK_CAP = 65536U;
+
+/**
+ * @brief Closes an inclusive span of descriptor numbers, whether or not any of them is open.
+ *
+ * Post-fork safe in the sense this file uses throughout: it calls close_range(), getrlimit()
+ * and close(), all of which are syscalls, and it allocates nothing and takes no lock. That is
+ * the constraint that applies between fork() and execve() in a process that may have a binder
+ * threadpool running, because a fork copies a lock's state as it stood and a child that took
+ * one could block on a lock no thread of its own will ever release.
+ *
+ * Errors are deliberately ignored. Closing a descriptor that was never open fails with EBADF,
+ * which is the expected result for most of the span and carries no information; and there is
+ * nothing a failure could usefully be reported to, since the caller's next act is execve().
+ *
+ * @param [in] low                        - First descriptor number to close
+ * @param [in] high                       - Last descriptor number to close, inclusive. May be
+ *                                          ~0U to mean "every number there could be"
+ *
+ * @return None
+ *
+ * @see closeInheritedDescriptorsExcept(), DESCRIPTOR_SWEEP_FALLBACK_CAP
+ */
+void closeDescriptorRange(unsigned int low, unsigned int high)
+{
+    if (low > high) {
+        return;
+    }
+
+#if defined(__GLIBC__) && ((__GLIBC__ > 2) || ((__GLIBC__ == 2) && (__GLIBC_MINOR__ >= 34)))
+    if (::close_range(low, high, 0) == 0) {
+        return;
+    }
+    /* ENOSYS on a kernel older than 5.9; fall through to the loop below. */
+#endif
+
+    unsigned int last = high;
+
+    if (last > DESCRIPTOR_SWEEP_FALLBACK_CAP) {
+        last = DESCRIPTOR_SWEEP_FALLBACK_CAP;
+
+        struct rlimit descriptorLimit;
+
+        if ((::getrlimit(RLIMIT_NOFILE, &descriptorLimit) == 0) &&
+            (descriptorLimit.rlim_cur != RLIM_INFINITY) &&
+            (descriptorLimit.rlim_cur < static_cast<rlim_t>(DESCRIPTOR_SWEEP_FALLBACK_CAP))) {
+            last = static_cast<unsigned int>(descriptorLimit.rlim_cur);
+        }
+    }
+
+    for (unsigned int fd = low; fd <= last; ++fd) {
+        ::close(static_cast<int>(fd));
+    }
+}
+
+/**
+ * @brief Closes every descriptor above the standard streams except the three named.
+ *
+ * WHAT THIS IS FOR. A fork duplicates every descriptor the parent held, and this runner holds
+ * more than the four it created for the host: GoogleTest's own output file when one is
+ * requested, the binder driver node on an invocation that resolved the AIDL back-end, and
+ * whatever earlier probes left open at the moment of the fork. None of them is the host's
+ * business, and each one it inherits is a descriptor the host - and every process the host
+ * goes on to start - holds open for as long as it lives. That is how a leak becomes durable:
+ * a descendant holding a copy of a pipe's write end keeps the pipe from ever reporting end of
+ * file, so the very death channel this harness uses to observe an exit never fires.
+ *
+ * WHAT IT MUST NOT CLOSE, and why the three are parameters rather than a constant here. The
+ * host is TOLD three descriptor numbers in its environment and its whole contract depends on
+ * them surviving the exec, which is why the caller clears O_CLOEXEC on exactly those three
+ * immediately before this call. Standard input, output and error are kept as well: the host
+ * writes its trace to them and this runner's log is where that trace has to land, so the sweep
+ * starts one above STDERR_FILENO rather than at zero.
+ *
+ * Post-fork safe: a fixed three-element sort over locals plus closeDescriptorRange(). No
+ * allocation, no lock, no library call that could take either.
+ *
+ * @param [in] keepFirst                  - A descriptor the child must keep, or negative for
+ *                                          none
+ * @param [in] keepSecond                 - A second such descriptor, or negative for none
+ * @param [in] keepThird                  - A third such descriptor, or negative for none
+ *
+ * @return None
+ *
+ * @post In the calling process no descriptor above STDERR_FILENO other than the ones named is
+ *       open, so the three named are the only ones an exec can carry into the host.
+ *
+ * @warning Call this only in a child between fork() and execve(). Called in the parent it
+ *          would close the very descriptors the parent uses to talk to the host.
+ *
+ * @see closeDescriptorRange(), startFakeServiceHost()
+ */
+void closeInheritedDescriptorsExcept(int keepFirst, int keepSecond, int keepThird)
+{
+    int keep[3] = { keepFirst, keepSecond, keepThird };
+
+    /*
+     * A three-element sort, spelled out: no allocation, no comparator object and no library
+     * call, because this runs after a fork. Sorting is what lets the sweep be expressed as the
+     * gaps between the kept numbers, which is what makes close_range() usable at all.
+     */
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int index = 0; index < (2 - pass); ++index) {
+            if (keep[index] > keep[index + 1]) {
+                const int swapped   = keep[index];
+                keep[index]         = keep[index + 1];
+                keep[index + 1]     = swapped;
+            }
+        }
+    }
+
+    unsigned int low = static_cast<unsigned int>(STDERR_FILENO) + 1U;
+
+    for (int index = 0; index < 3; ++index) {
+        if (keep[index] < 0) {
+            continue;
+        }
+
+        const unsigned int kept = static_cast<unsigned int>(keep[index]);
+
+        if (kept < low) {
+            /*
+             * Either a duplicate of a number already passed, or one at or below the standard
+             * streams - which the sweep never reaches in any case.
+             */
+            continue;
+        }
+
+        closeDescriptorRange(low, kept - 1U);
+        low = kept + 1U;
+    }
+
+    closeDescriptorRange(low, ~0U);
 }
 
 /**
@@ -761,7 +1092,22 @@ bool restoreBrokenPipeSignalDisposition(std::string &failureDetail)
  * is the descriptor the host writes its token to. The parent closes its own copy of the
  * write end immediately after the fork, which is what makes end of file on the read end
  * mean "the host closed its write end" rather than "the parent is still holding one open".
- * Getting that one close wrong turns a dead host into a hang.
+ * Getting that one close wrong turns a dead host into a hang.@n
+ * AND EVERYTHING ELSE IS SWEPT, which is the other half of the same subject. Clearing
+ * O_CLOEXEC on three descriptors says what the host MAY have; it says nothing about what a
+ * fork already gave it. The child therefore closes every descriptor above the standard
+ * streams other than those three immediately before the exec, so that the host - and
+ * anything the host starts - inherits the three it was told about and nothing else. A
+ * descendant holding an unswept copy of a pipe's write end is what stops that pipe ever
+ * reporting end of file, which is how the death channel above stops reporting death.
+ *
+ * @par The child leads its own process group
+ * The child calls setpgid() before anything else, and the parent repeats the call and then
+ * reads the group back with getpgid(). That is what makes it possible to end a host that
+ * forked: waitpid() collects one process, so a process the HOST started is beyond it, and
+ * the only instrument that reaches such a process is a signal to the group. The read-back
+ * is not ceremony - a process inherits its parent's group, so an unconfirmed group id is
+ * this runner's own and signalling it would end the runner. See g_hostProcessGroupId.
  *
  * @param [in] hostPath                   - Filesystem path of the host binary, taken from
  *                                          CEC_FAKE_AIDL_HOST_PATH
@@ -769,12 +1115,15 @@ bool restoreBrokenPipeSignalDisposition(std::string &failureDetail)
  *                                          Untouched on success
  *
  * @return bool                                   - Whether the host was launched
- * @retval true                                   - Forked and exec'd; g_hostPid and
- *                                                  g_hostReadinessReadFd are set
+ * @retval true                                   - Forked and exec'd; g_hostPid,
+ *                                                  g_hostReadinessReadFd and, where it could
+ *                                                  be confirmed, g_hostProcessGroupId are set
  * @retval false                                  - The binary is unusable, or the pipe or
  *                                                  the fork failed; nothing was left open
  *
  * @post On success a child exists and must be reaped, whether or not it ever reports ready.
+ * @post On success the child holds the three descriptors named in its environment, the standard
+ *       streams, and no other descriptor of this process's.
  *
  * @warning A successful return means the child was started, not that the service was
  *          published. Only the readiness token establishes that, which is why
@@ -793,7 +1142,7 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
      * test harness that pretends otherwise would be wrong in the one case that matters.
      */
     if (::access(hostPath.c_str(), X_OK) != 0) {
-        failureDetail = "\"" + hostPath + "\", named by " + HOST_PATH_VARIABLE +
+        failureDetail = renderUntrustedValue(hostPath) + ", named by " + HOST_PATH_VARIABLE +
                         ", is not an executable file (" + std::strerror(errno) +
                         "). The build sets this variable to the fake_hdmi_cec_aidl_host "
                         "binary it built alongside this runner; a stale, unbuilt or "
@@ -944,6 +1293,44 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
         ::close(controlParentWriteFd);
         ::close(observeParentReadFd);
 
+        /*
+         * THE CHILD MAKES ITSELF A PROCESS GROUP LEADER, and this is the single change that
+         * lets teardown reach anything the host goes on to start.
+         *
+         * Without it the host runs in THIS RUNNER'S process group, because that is what a fork
+         * inherits. Teardown could then only ever signal the one pid it forked, so a host that
+         * forked - or a host path that is a shell script, which forks by its nature - left its
+         * own children running after the runner had reaped it and reported success: real
+         * processes, holding real copies of this harness's pipes, with the readiness pipe's
+         * write end among them, which is precisely the descriptor whose closure teardown reads
+         * as "the host has gone". And the group-wide signal that would have collected them was
+         * unavailable in the strongest possible sense: with the child in the runner's own
+         * group, kill() to the negation of that group id would have killed the runner.
+         *
+         * BOTH SIDES CALL setpgid(), here and in the parent immediately after the fork, which
+         * is the standard idiom and not redundancy. Whichever runs first establishes the group;
+         * the other finds the work done and fails harmlessly - the parent with EACCES once the
+         * child has exec'd, this call never, since a process may always create its own group.
+         * One side alone leaves a window: only the parent, and the child could exec first and
+         * be signalled in the runner's group; only the child, and the parent could reach
+         * teardown before the child had run at all.
+         *
+         * A FAILURE HERE REFUSES THE LAUNCH rather than continuing without a group. Carrying on
+         * would leave the host in the runner's group with g_hostProcessGroupId unconfirmed, so
+         * teardown would silently drop back to signalling one pid - the exact behaviour this
+         * exists to end, arrived at without a word. setpgid() is on POSIX's list of functions
+         * safe to call after a fork, and it allocates nothing, so it belongs in this window.
+         */
+        if (::setpgid(0, 0) != 0) {
+            static const char groupMessage[] =
+                "[FakeHdmiCecAidlHost:child] the child could not be made a process group leader; "
+                "its descendants would have been unreachable at teardown while the only "
+                "group-wide signal available addressed the runner itself, so the launch is "
+                "refused instead\n";
+            writeRawFully(STDERR_FILENO, groupMessage, sizeof(groupMessage) - 1);
+            ::_exit(CHILD_EXIT_PRE_EXEC_FAILED);
+        }
+
         if (::fcntl(writeFd, F_SETFD, 0) != 0) {
             static const char preExecMessage[] =
                 "[FakeHdmiCecAidlHost:child] the readiness descriptor could not be made "
@@ -978,6 +1365,25 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
             ::_exit(CHILD_EXIT_PRE_EXEC_FAILED);
         }
 
+        /*
+         * AND EVERYTHING ELSE THIS PROCESS HAD OPEN GOES, so that the three descriptors named
+         * in the child's environment are the only ones the exec carries in.
+         *
+         * The three explicit closes above deal with the ends of this launch's own pipes that
+         * belong to the parent. They are not the whole inheritance: a fork duplicates every
+         * descriptor, and this runner holds others - GoogleTest's output file when one was
+         * requested, the binder driver node on an invocation that resolved the AIDL back-end,
+         * and any descriptor an earlier probe still held at the moment of the fork. Each one
+         * the host inherits it keeps for its lifetime and passes to anything it starts, and a
+         * copy of a pipe's write end held by a process nobody is watching is how a death
+         * channel stops reporting death.
+         *
+         * It runs AFTER the three F_SETFD calls above, deliberately: the sweep's keep-set and
+         * the set whose O_CLOEXEC was just cleared are the same three descriptors, and keeping
+         * the two adjacent is what makes a future edit to one obviously an edit to the other.
+         */
+        closeInheritedDescriptorsExcept(writeFd, controlChildReadFd, observeChildWriteFd);
+
         ::execve(childArgv[0], childArgv, childEnvironment.data());
 
         /*
@@ -991,6 +1397,56 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
             "executed; the path named by CEC_FAKE_AIDL_HOST_PATH is not runnable\n";
         writeRawFully(STDERR_FILENO, execMessage, sizeof(execMessage) - 1);
         ::_exit(CHILD_EXIT_EXEC_FAILED);
+    }
+
+    /*
+     * THE PARENT'S HALF OF THE BOTH-SIDES setpgid() IDIOM, and it is the first thing the parent
+     * does so that the window in which the child could be signalled in the runner's group is as
+     * short as the kernel allows.
+     *
+     * Two failures are expected and neither is an error. EACCES means the child has already
+     * exec'd, which can only happen after its own setpgid() succeeded - the group exists, and
+     * this call had nothing left to do. ESRCH means the child has already exited, in which case
+     * there is no group to create and nothing to signal. Anything else is worth a trace,
+     * because it would mean the group is in a state neither side established.
+     */
+    if (::setpgid(child, child) != 0) {
+        const int setpgidError = errno;
+
+        if ((setpgidError != EACCES) && (setpgidError != ESRCH)) {
+            std::cout << TRACE_PREFIX << "The parent's setpgid() for pid "
+                      << static_cast<long>(child) << " failed with an unexpected error ("
+                      << std::strerror(setpgidError)
+                      << "); the child's own call is checked below and teardown falls back to "
+                         "signalling the single pid if it did not take effect" << std::endl;
+        }
+    }
+
+    /*
+     * AND THE GROUP IS READ BACK RATHER THAN ASSUMED, which is what makes a group-wide signal
+     * safe to send later. Two things must hold before this harness will ever signal a group:
+     * the child's group id must equal its pid, so the group contains the child and its
+     * descendants and nothing else; and it must differ from this process's own group, because
+     * the group a fork inherits is the runner's and signalling that would kill the runner. When
+     * either fails - including when getpgid() itself fails, which it does with ESRCH for a
+     * child that has already exited and been collected - the group id stays -1 and teardown
+     * signals one pid, exactly as it did before this was introduced.
+     */
+    const pid_t observedGroup = ::getpgid(child);
+    const pid_t runnerGroup   = ::getpgrp();
+
+    if ((observedGroup == child) && (observedGroup != runnerGroup)) {
+        g_hostProcessGroupId = observedGroup;
+    } else {
+        g_hostProcessGroupId = -1;
+
+        std::cout << TRACE_PREFIX << "The launched host's process group could not be confirmed "
+                     "(getpgid(" << static_cast<long>(child) << ") reported "
+                  << static_cast<long>(observedGroup) << ", this runner's group is "
+                  << static_cast<long>(runnerGroup)
+                  << "); teardown will signal the single pid rather than a group it cannot "
+                     "vouch for, so a process the host starts could outlive this run"
+                  << std::endl;
     }
 
     /*
@@ -1015,8 +1471,9 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
     g_hostControlWriteFd   = controlParentWriteFd;
     g_hostObserveReadFd    = observeParentReadFd;
 
-    std::cout << TRACE_PREFIX << "Launched the out-of-process fake HDMI CEC AIDL service host \""
-              << hostPath << "\" as pid " << static_cast<long>(child) << ", signalling readiness on "
+    std::cout << TRACE_PREFIX << "Launched the out-of-process fake HDMI CEC AIDL service host "
+              << renderUntrustedValue(hostPath) << " as pid " << static_cast<long>(child)
+              << ", signalling readiness on "
               << HOST_READY_FD_VARIABLE << "=" << writeFd << ", reading commands from "
               << HOST_CONTROL_FD_VARIABLE << "=" << controlChildReadFd << " and replying on "
               << HOST_OBSERVE_FD_VARIABLE << "=" << observeChildWriteFd << std::endl;
@@ -1024,35 +1481,17 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
 }
 
 
-/**
- * @brief Renders received bytes as a single short, printable phrase for a diagnostic.
- *
- * Whatever arrived on the readiness pipe when the expected token did not is reported back
- * to whoever has to fix it, and it is reported as one bounded line: the trailing newline
- * is dropped so the surrounding sentence stays intact, and an over-long value is elided
- * rather than pasted whole into a CI log.
- *
- * @param [in] received                   - Bytes observed on the readiness pipe
- *
- * @return std::string                            - A single-line, length-bounded rendering
- *
- * @see awaitHostReadiness()
+/*
+ * renderForDiagnostic() USED TO LIVE HERE, and it was deleted rather than kept beside
+ * renderUntrustedValue(). It dropped a TRAILING newline and truncated at 120 characters,
+ * which reads like the same job but is not: a newline anywhere other than at the very end
+ * survived it untouched, so bytes arriving from the host process - another process, whose
+ * output this harness does not control - still ended the diagnostic and began a line of
+ * their own. Every one of its ten call sites now uses renderUntrustedValue() above, and the
+ * manual \"...\" each of them wrapped it in is gone with it, because that helper delimits its
+ * own output. Two renderers with different guarantees is exactly the divergence the
+ * five-copy contract exists to prevent, so there is one.
  */
-std::string renderForDiagnostic(const std::string &received)
-{
-    std::string rendered = received;
-
-    while (!rendered.empty() && (rendered.back() == '\n' || rendered.back() == '\r')) {
-        rendered.pop_back();
-    }
-
-    const std::size_t limit = 120;
-    if (rendered.size() > limit) {
-        rendered = rendered.substr(0, limit) + "... (truncated)";
-    }
-
-    return rendered;
-}
 
 /**
  * @brief Blocks until the host reports ready, or the bound expires.
@@ -1372,9 +1811,10 @@ bool readControlReply(const std::string &command,
 
         if (received.size() >= HOST_CONTROL_MAX_REPLY_BYTES) {
             failureDetail = "the host sent " + std::to_string(received.size()) +
-                            " bytes with no line terminator in reply to \"" + command +
-                            "\", so the observation descriptor is not carrying this protocol's "
-                            "replies. First bytes: \"" + renderForDiagnostic(received) + "\"";
+                            " bytes with no line terminator in reply to " +
+                            renderUntrustedValue(command) +
+                            ", so the observation descriptor is not carrying this protocol's "
+                            "replies. First bytes: " + renderUntrustedValue(received);
             return false;
         }
 
@@ -1383,13 +1823,13 @@ bool readControlReply(const std::string &command,
                 deadline - std::chrono::steady_clock::now());
 
         if (remaining.count() <= 0) {
-            failureDetail = "the host did not answer \"" + command + "\" within " +
+            failureDetail = "the host did not answer " + renderUntrustedValue(command) + " within " +
                             std::to_string(HOST_CONTROL_REPLY_TIMEOUT_MS) +
                             " ms. It is still holding the observation pipe open, so it is alive and "
                             "not answering rather than gone" +
                             (received.empty() ? std::string()
-                                              : (". Partial reply received: \"" +
-                                                 renderForDiagnostic(received) + "\""));
+                                              : (". Partial reply received: " +
+                                                 renderUntrustedValue(received)));
             return false;
         }
 
@@ -1426,13 +1866,14 @@ bool readControlReply(const std::string &command,
         }
 
         if (got == 0) {
-            failureDetail = "the host closed the observation pipe without answering \"" + command +
-                            "\", so it has exited. Its own trace on standard output, prefixed "
+            failureDetail = "the host closed the observation pipe without answering " +
+                            renderUntrustedValue(command) +
+                            ", so it has exited. Its own trace on standard output, prefixed "
                             "[FakeHdmiCecAidlHost], names the step it reached, and its exit status "
                             "is reported by this harness's teardown" +
                             (received.empty() ? std::string()
-                                              : (". Partial reply received: \"" +
-                                                 renderForDiagnostic(received) + "\""));
+                                              : (". Partial reply received: " +
+                                                 renderUntrustedValue(received)));
             return false;
         }
 
@@ -1467,8 +1908,9 @@ bool performHostControlRequest(const std::string &command, std::string &reply,
     std::lock_guard<std::mutex> guard(controlRequestMutex);
 
     if ((g_hostControlWriteFd < 0) || (g_hostObserveReadFd < 0)) {
-        failureDetail = "no control and observation channel is open, so the command \"" + command +
-                        "\" cannot be sent. The channel exists only where this harness launched the "
+        failureDetail = "no control and observation channel is open, so the command " +
+                        renderUntrustedValue(command) +
+                        " cannot be sent. The channel exists only where this harness launched the "
                         "out-of-process fake service host, which is CEC_TEST_AIDL_MODE=remote alone; "
                         "on the legacy invocation there is no host and nothing to ask";
         return false;
@@ -1491,13 +1933,14 @@ bool performHostControlRequest(const std::string &command, std::string &reply,
     }
 
     if (command.find_first_not_of(" \t") == std::string::npos) {
-        failureDetail = "the control command \"" + command + "\" is whitespace only; the host treats "
-                        "such a line as \"not a command\" and sends no reply";
+        failureDetail = "the control command " + renderUntrustedValue(command) +
+                        " is whitespace only; the host treats such a line as \"not a command\" "
+                        "and sends no reply";
         return false;
     }
 
     if (command.find('\n') != std::string::npos || command.find('\r') != std::string::npos) {
-        failureDetail = "the control command \"" + renderForDiagnostic(command) + "\" contains a line "
+        failureDetail = "the control command " + renderUntrustedValue(command) + " contains a line "
                         "terminator. One request is one line: an embedded terminator would send two "
                         "commands and read one reply, and every later request would return the "
                         "previous one's answer";
@@ -1529,8 +1972,9 @@ bool performHostControlRequest(const std::string &command, std::string &reply,
      * like a well-formed refusal.
      */
     if (reply.compare(0, 3, "OK ") != 0 && reply.compare(0, 4, "ERR ") != 0) {
-        failureDetail = "the host answered \"" + command + "\" with \"" + renderForDiagnostic(reply) +
-                        "\", which begins with neither \"OK \" nor \"ERR \". Every reply in the "
+        failureDetail = "the host answered " + renderUntrustedValue(command) + " with " +
+                        renderUntrustedValue(reply) +
+                        ", which begins with neither \"OK \" nor \"ERR \". Every reply in the "
                         "protocol does, so the observation descriptor is out of step with the "
                         "commands being sent";
         return false;
@@ -1822,6 +2266,173 @@ PolledChildExit waitForChildExitByPolling(pid_t childPid, int timeoutMs,
     }
 }
 
+/*
+ * How long a process group is given to empty out after the direct child has been reaped, before
+ * the whole group is sent SIGKILL.
+ *
+ * It is short because by this point every member has already had SIGTERM and the group's leader
+ * has been collected: what is left is either a descendant still finishing its own shutdown or
+ * one that is not going to. A few tens of milliseconds distinguishes those two on any machine
+ * this runs on, and the cost of guessing low is only that a well-behaved descendant is killed a
+ * moment before it would have exited - which is not a correctness difference, because SIGKILL is
+ * where this path was always going to end.
+ */
+const int PROCESS_GROUP_SETTLE_MS = 200;
+
+/*
+ * And how long it is given to empty out after SIGKILL, which is a different question.
+ *
+ * SIGKILL cannot be caught, blocked or ignored, so this is not a grace period: it is how long
+ * the harness will wait for the KERNEL to finish, which after the signal means the time for each
+ * member to be torn down and for its parent - init, or whatever subreaper adopted it - to
+ * collect it. Descendants are not this process's children, so waitpid() cannot collect them and
+ * cannot be used to observe them going; the group probe is the only observation available, and a
+ * group entry persists while any member is still a process, a zombie included. Two seconds is
+ * far beyond what that takes and is a bound rather than a wait: a group still populated at the
+ * end of it is reported as a leak with its state named, which is the honest outcome.
+ */
+const int PROCESS_GROUP_DRAIN_TIMEOUT_MS = 2000;
+
+/**
+ * @brief What a probe of a process group found.
+ *
+ * @see probeProcessGroup(), awaitProcessGroupEmpty()
+ */
+enum class ProcessGroupState {
+    Empty,        /**< @brief No process is in the group: every member has gone and been reaped. */
+    Populated,    /**< @brief At least one member remains, alive or a zombie.                    */
+    NotPermitted  /**< @brief Members remain that this process is not allowed to signal.         */
+};
+
+/**
+ * @brief Renders a process group state as a phrase for a diagnostic.
+ *
+ * @param [in] state                      - State to describe
+ *
+ * @return std::string                            - The phrase, without leading capital or
+ *                                                  trailing punctuation, for embedding
+ *
+ * @see probeProcessGroup()
+ */
+std::string describeProcessGroupState(ProcessGroupState state)
+{
+    switch (state) {
+    case ProcessGroupState::Empty:
+        return "the group is empty";
+
+    case ProcessGroupState::Populated:
+        return "at least one member is still present, alive or unreaped";
+
+    case ProcessGroupState::NotPermitted:
+        return "members remain that this process is not permitted to signal, so they cannot be "
+               "ended from here";
+    }
+
+    return "the group is in a state this harness does not recognise";
+}
+
+/**
+ * @brief Asks whether any process is still in a group, without signalling anything.
+ *
+ * The null signal is the whole mechanism: kill() with a signal number of zero performs every
+ * check a real signal would - including that the target exists - and delivers nothing. Applied
+ * to the negation of a group id it therefore answers "does this group still have a member",
+ * which is the only question available about processes that are not this process's children.
+ * waitpid() cannot answer it: a grandchild is not a child, so there is nothing for this process
+ * to wait on, and its exit is reported to whoever adopted it instead.
+ *
+ * An unrecognised errno is reported as Populated rather than Empty, deliberately. Every use of
+ * this treats Empty as "the guarantee holds", so a state this function does not understand must
+ * not be able to produce that answer.
+ *
+ * @param [in] groupId                    - Process group id, positive. Negated internally, so
+ *                                          callers pass the group id itself
+ *
+ * @return ProcessGroupState                      - What the probe found
+ *
+ * @warning Pass the group id, not its negation. A caller that negated it first would be asking
+ *          about a group whose id is a negative number, which cannot exist, and would get
+ *          Empty for every group.
+ *
+ * @see awaitProcessGroupEmpty(), describeProcessGroupState()
+ */
+ProcessGroupState probeProcessGroup(pid_t groupId)
+{
+    if (groupId <= 0) {
+        /*
+         * Not a group this harness ever owns. Reported as NotPermitted rather than Empty for the
+         * same reason an unrecognised errno is: only a real, confirmed, empty group may produce
+         * the answer callers act on.
+         */
+        return ProcessGroupState::NotPermitted;
+    }
+
+    if (::kill(-groupId, 0) == 0) {
+        return ProcessGroupState::Populated;
+    }
+
+    if (errno == ESRCH) {
+        return ProcessGroupState::Empty;
+    }
+
+    if (errno == EPERM) {
+        return ProcessGroupState::NotPermitted;
+    }
+
+    return ProcessGroupState::Populated;
+}
+
+/**
+ * @brief Waits, within a bound, for a process group to have no members left.
+ *
+ * Polls probeProcessGroup() on the same interval and against the same monotonic deadline as
+ * waitForChildExitByPolling(), and for the same reason: the deadline is re-read from the clock
+ * rather than counted in iterations, so a sleep the kernel cut short or ran long cannot stretch
+ * or shrink the bound. poll() with no descriptors is this file's sleep.
+ *
+ * @param [in]  groupId                   - Process group id to watch, positive
+ * @param [in]  boundMs                   - How long to wait, in milliseconds
+ * @param [out] finalState                - Receives the last state observed, so a caller
+ *                                          reporting a failure can name what it found
+ *
+ * @return bool                                   - Whether the group is empty
+ * @retval true                                   - It is: every member has gone and been
+ *                                                  collected
+ * @retval false                                  - The bound expired with members still there,
+ *                                                  or with members this process may not signal;
+ *                                                  finalState says which
+ *
+ * @see probeProcessGroup(), CHILD_EXIT_POLL_INTERVAL_MS
+ */
+bool awaitProcessGroupEmpty(pid_t groupId, int boundMs, ProcessGroupState &finalState)
+{
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(boundMs);
+
+    for (;;) {
+        finalState = probeProcessGroup(groupId);
+
+        if (finalState == ProcessGroupState::Empty) {
+            return true;
+        }
+
+        const std::chrono::milliseconds remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+
+        if (remaining.count() <= 0) {
+            return false;
+        }
+
+        const long long remainingMs = static_cast<long long>(remaining.count());
+        const int sleepMs           = (remainingMs < CHILD_EXIT_POLL_INTERVAL_MS)
+                                          ? static_cast<int>(remainingMs)
+                                          : CHILD_EXIT_POLL_INTERVAL_MS;
+
+        ::poll(nullptr, 0, sleepMs);
+    }
+}
+
 /**
  * @brief Signals a child, waits for it within a bound, escalates if it stays, and reaps it.
  *
@@ -1859,6 +2470,26 @@ PolledChildExit waitForChildExitByPolling(pid_t childPid, int timeoutMs,
  * bounded whether or not it was given a death channel, and no caller has to know that to be
  * safe.
  *
+ * @par The group, and why reaping the child was never the whole guarantee
+ * waitpid() collects one process, and the one it collects is the only one a caller knew about.
+ * A child that forked - or one whose path is a shell script, which forks by its nature - leaves
+ * processes this harness never created and cannot wait on: they are reparented to init, keep
+ * running, and keep every descriptor they inherited, copies of the pipes this runner uses to
+ * observe an exit among them. The signal is the only instrument that reaches them, and it
+ * reaches them only through the process group, which is why startFakeServiceHost() makes its
+ * child a group leader and why this function takes the group id as a parameter.@n
+ * So the sequence is group-wide from end to end where a group was supplied: SIGTERM to the
+ * group, the bounded wait for the direct child, SIGKILL where it did not go, the reap of the
+ * direct child, and then a probe of the group that must find it empty. The probe is what makes
+ * "no descendant outlived this run" a checked fact rather than an intention: a grandchild is not
+ * a child, so no wait can confirm it is gone, and kill() to the group failing with ESRCH is the
+ * one observation available that says the group has no members left. A group still populated
+ * after SIGKILL is reported as a failure with its state named.@n
+ * WHERE NO GROUP IS SUPPLIED nothing about the old behaviour changes: one pid is signalled, one
+ * pid is waited for, one pid is reaped, and no group is probed. That is the correct treatment
+ * for a child the caller created itself and did not put in a group - the broken-pipe probe's
+ * child is one, and it neither forks nor execs, so it can have no descendants to collect.
+ *
  * @param [in]  childPid                  - Pid of the child to end. Must be positive
  * @param [in]  description               - How to name the child in traces and in the outcome,
  *                                          e.g. "the fake HDMI CEC AIDL service host"
@@ -1870,18 +2501,29 @@ PolledChildExit waitForChildExitByPolling(pid_t childPid, int timeoutMs,
  *                                          skipped
  * @param [in]  gracePeriodMs             - How long the child has to exit after SIGTERM before
  *                                          SIGKILL is sent. Applied on both paths
+ * @param [in]  childProcessGroupId       - Process group the child leads, where the caller
+ *                                          established one and read it back. Signals then go to
+ *                                          the whole group and the group is required to be empty
+ *                                          at the end. Pass a non-positive value when the child
+ *                                          leads no group of its own, and one pid is signalled,
+ *                                          waited for and reaped exactly as before
  * @param [out] outcome                   - Receives how the child ended, or why it could not
  *                                          be collected, in both cases as a phrase
  *
- * @return bool                                   - Whether the child was collected
+ * @return bool                                   - Whether the child was collected AND its
+ *                                                  group, where one was given, is empty
  * @retval true                                   - Reaped, by the polling wait or by the
- *                                                  blocking reap; outcome names how it ended
+ *                                                  blocking reap; outcome names how it ended,
+ *                                                  and no member of its group remains
  * @retval false                                  - childPid was not a usable pid, or waitpid()
- *                                                  refused; outcome says which
+ *                                                  refused, or the group still had members after
+ *                                                  SIGKILL; outcome says which
  *
  * @post No child exists for childPid, so nothing this call was given can become a zombie -
  *       except where waitpid() itself refused the pid, which is reported as false because no
  *       signal can remedy it.
+ * @post Where a group was supplied and this returned true, kill() to that group fails with
+ *       ESRCH, so no process the child started - at any depth - is still present.
  *
  * @warning The caller owns the descriptors. This function closes none of them, because the two
  *          callers hold different ones for different lifetimes and a close here would be
@@ -1890,11 +2532,20 @@ PolledChildExit waitForChildExitByPolling(pid_t childPid, int timeoutMs,
  *          waitpid() on a reaped pid fails with ECHILD, which would report a child that was in
  *          fact collected as one this harness lost. The blocking reap below is therefore
  *          skipped on exactly that path, and on no other.
+ * @warning childProcessGroupId must be a group the CALLER established and read back, never one
+ *          it assumed. Every process starts in its parent's group, so an unconfirmed group id is
+ *          this runner's own, and a signal to it would end the runner, GoogleTest and every
+ *          sibling process sharing the group. This function refuses that case rather than
+ *          trusting the caller - it compares the id against getpgrp() and drops to signalling the
+ *          single pid where they match - but a caller that passes an unconfirmed value is relying
+ *          on a guard instead of on a fact.
  *
- * @see reapChildBlocking(), waitForChildExitViaPipeEof(), waitForChildExitByPolling()
+ * @see reapChildBlocking(), waitForChildExitViaPipeEof(), waitForChildExitByPolling(),
+ *      awaitProcessGroupEmpty(), probeProcessGroup()
  */
 bool terminateAndReapChildProcess(pid_t childPid, const std::string &description,
-                                  int exitObservationFd, int gracePeriodMs, std::string &outcome)
+                                  int exitObservationFd, int gracePeriodMs,
+                                  pid_t childProcessGroupId, std::string &outcome)
 {
     if (childPid <= 0) {
         /*
@@ -1911,8 +2562,56 @@ bool terminateAndReapChildProcess(pid_t childPid, const std::string &description
 
     const long pidForTrace = static_cast<long>(childPid);
 
-    std::cout << TRACE_PREFIX << "Terminating " << description << " pid " << pidForTrace
-              << " with SIGTERM" << std::endl;
+    /*
+     * Whether this call may address a process group: decided here, once, from the caller's value
+     * AND from this process's own group rather than from the caller's word alone.
+     *
+     * The refusal arm is the one that earns its place. A group id equal to this process's group
+     * is what an UNCONFIRMED value looks like - a fork inherits its parent's group, so a caller
+     * that took the child's pid and called it a group id without reading the group back would
+     * pass exactly this - and a signal to it would end this runner and every process sharing its
+     * group. Dropping to the single pid is strictly less than the caller asked for and is said
+     * out loud, because it means a descendant could survive; killing the runner is not a degraded
+     * outcome but a catastrophic one.
+     */
+    const pid_t runnerProcessGroup = ::getpgrp();
+    const long groupForTrace       = static_cast<long>(childProcessGroupId);
+    bool groupMode                 = false;
+
+    if (childProcessGroupId > 0) {
+        if (childProcessGroupId == runnerProcessGroup) {
+            std::cout << TRACE_PREFIX << "Refusing to signal process group " << groupForTrace
+                      << " for " << description
+                      << ": it is this runner's own process group, so a group-wide signal would "
+                         "end this process. Signalling the single pid instead, which means a "
+                         "process the child started could outlive this run" << std::endl;
+        } else {
+            groupMode = true;
+        }
+    }
+
+    if (groupMode) {
+        std::cout << TRACE_PREFIX << "Terminating " << description << " pid " << pidForTrace
+                  << " and every other member of its process group " << groupForTrace
+                  << " with SIGTERM" << std::endl;
+
+        /*
+         * The group first, then the pid below. The child leads the group, so the group signal
+         * already reaches it; the second signal is deliberate belt and braces for the one case
+         * the group signal would miss - a child that left its group after this harness confirmed
+         * it, by calling setsid() or setpgid() again. A handler that runs twice is harmless, the
+         * host's own shutdown being idempotent, and a child that has gone yields ESRCH, which is
+         * tolerated in both places.
+         */
+        if ((::kill(-childProcessGroupId, SIGTERM) != 0) && (errno != ESRCH)) {
+            std::cout << TRACE_PREFIX << "SIGTERM could not be delivered to process group "
+                      << groupForTrace << " (" << std::strerror(errno)
+                      << "); the direct child is signalled below regardless" << std::endl;
+        }
+    } else {
+        std::cout << TRACE_PREFIX << "Terminating " << description << " pid " << pidForTrace
+                  << " with SIGTERM" << std::endl;
+    }
 
     if (::kill(childPid, SIGTERM) != 0) {
         /*
@@ -1971,6 +2670,11 @@ bool terminateAndReapChildProcess(pid_t childPid, const std::string &description
             std::cout << TRACE_PREFIX << "Pid " << pidForTrace << " had not exited "
                       << gracePeriodMs << " ms after SIGTERM; escalating to SIGKILL so it cannot "
                       "outlive this run" << std::endl;
+
+            if (groupMode) {
+                ::kill(-childProcessGroupId, SIGKILL);
+            }
+
             ::kill(childPid, SIGKILL);
         }
 
@@ -1988,10 +2692,53 @@ bool terminateAndReapChildProcess(pid_t childPid, const std::string &description
         }
     }
 
+    /*
+     * AND THE PART waitpid() COULD NEVER ESTABLISH: that nothing the child started is still
+     * running. It is checked rather than argued for, and only where a group was supplied and the
+     * wait above did not refuse the pid.
+     *
+     * The refused-wait exclusion follows the reasoning that skips SIGKILL on that same path: a
+     * waitpid() that disowned the pid means this process does not own the child, so its group is
+     * not this harness's to signal and the number may have been reused. Probing it would report
+     * on processes this call has no relationship with, and the return value is false there
+     * already.
+     */
+    bool groupDrained = true;
+
+    if (groupMode && !waitRefused) {
+        ProcessGroupState groupState = ProcessGroupState::Populated;
+
+        if (!awaitProcessGroupEmpty(childProcessGroupId, PROCESS_GROUP_SETTLE_MS, groupState)) {
+            std::cout << TRACE_PREFIX << "Process group " << groupForTrace << " still had members "
+                      << PROCESS_GROUP_SETTLE_MS << " ms after " << description
+                      << " was reaped (" << describeProcessGroupState(groupState)
+                      << "); escalating to SIGKILL for the whole group, because a process the "
+                         "child started is not one waitpid() can collect" << std::endl;
+
+            ::kill(-childProcessGroupId, SIGKILL);
+
+            if (!awaitProcessGroupEmpty(childProcessGroupId, PROCESS_GROUP_DRAIN_TIMEOUT_MS,
+                                        groupState)) {
+                groupDrained = false;
+
+                outcome += ", but its process group " + std::to_string(groupForTrace) +
+                           " still had members " +
+                           std::to_string(PROCESS_GROUP_DRAIN_TIMEOUT_MS) +
+                           " ms after SIGKILL (" + describeProcessGroupState(groupState) +
+                           "), so a process it started has outlived this run holding whatever "
+                           "descriptors it inherited";
+            } else {
+                std::cout << TRACE_PREFIX << "Process group " << groupForTrace
+                          << " is empty after the group SIGKILL, so nothing " << description
+                          << " started is still present" << std::endl;
+            }
+        }
+    }
+
     std::cout << TRACE_PREFIX << description << " pid " << pidForTrace << " " << outcome
               << std::endl;
 
-    return reaped;
+    return reaped && groupDrained;
 }
 
 /**
@@ -2014,8 +2761,11 @@ bool terminateAndReapChildProcess(pid_t childPid, const std::string &description
  *                                                  building a diagnostic. Empty when no host
  *                                                  was ever launched
  *
- * @post g_hostPid is -1 and g_hostReadinessReadFd is closed, so no descriptor and no child
- *       outlive this call.
+ * @post g_hostPid is -1, g_hostProcessGroupId is -1 and g_hostReadinessReadFd is closed, so no
+ *       descriptor and no child outlive this call - and, where the launch confirmed the host's
+ *       process group, no process the host itself started outlives it either, which
+ *       terminateAndReapChildProcess() establishes by probing the group rather than by waiting on
+ *       processes it never forked.
  *
  * @see terminateAndReapChildProcess(), waitForChildExitViaPipeEof()
  */
@@ -2057,8 +2807,8 @@ std::string terminateAndReapFakeServiceHost()
 
         if (performHostControlRequest("shutdown", reply, failureDetail)) {
             std::cout << TRACE_PREFIX << "Asked the fake HDMI CEC AIDL service host pid " << hostPid
-                      << " to shut down over the control channel; it answered \"" << reply << "\""
-                      << std::endl;
+                      << " to shut down over the control channel; it answered "
+                      << renderUntrustedValue(reply) << std::endl;
         } else {
             std::cout << TRACE_PREFIX << "The polite shutdown request to pid " << hostPid
                       << " did not complete (" << failureDetail
@@ -2083,9 +2833,18 @@ std::string terminateAndReapFakeServiceHost()
     std::string outcome;
     const bool reaped =
         terminateAndReapChildProcess(g_hostPid, "the fake HDMI CEC AIDL service host",
-                                     g_hostReadinessReadFd, HOST_SHUTDOWN_TIMEOUT_MS, outcome);
+                                     g_hostReadinessReadFd, HOST_SHUTDOWN_TIMEOUT_MS,
+                                     g_hostProcessGroupId, outcome);
 
     g_hostPid = -1;
+
+    /*
+     * Cleared with the pid and for the same reason: both are the identity of a child that no
+     * longer exists, and a group id left behind would let a second call signal a group whose
+     * number the operating system is free to have reused. It is -1 already when the launch could
+     * not confirm the group, so this is not conditional on how the launch went.
+     */
+    g_hostProcessGroupId = -1;
 
     if (g_hostReadinessReadFd >= 0) {
         ::close(g_hostReadinessReadFd);
@@ -2546,6 +3305,17 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
         ::close(probe.handshakeReadFd);
 
         /*
+         * NO setpgid() HERE, deliberately, and step 9 passes -1 as the group id to match. The
+         * host's child is made a group leader because it EXECS a binary this harness does not
+         * control, which may fork; this child execs nothing and forks nothing - the whole of its
+         * remaining life is the write below and pause() - so it can have no descendants, and a
+         * group would be a mechanism whose guarantee this child does not need. Keeping it out of
+         * one has a second value: the single-pid path through terminateAndReapChildProcess()
+         * stays exercised on every run of this tier, so the branch a caller without a group takes
+         * is covered rather than merely present.
+         */
+
+        /*
          * SIGTERM is made fatal to this child explicitly, so that step 9's terminate-and-reap does
          * not depend on what disposition the child happened to inherit. The parent ignores SIGPIPE
          * and nothing in this binary touches SIGTERM, so the inherited disposition is already the
@@ -2673,7 +3443,8 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     std::string outcome;
     const bool reaped =
         terminateAndReapChildProcess(probe.childPid, "the broken-pipe probe child",
-                                     probe.handshakeReadFd, EPIPE_PROBE_TIMEOUT_MS, outcome);
+                                     probe.handshakeReadFd, EPIPE_PROBE_TIMEOUT_MS,
+                                     /* childProcessGroupId */ -1, outcome);
 
     if (!reaped) {
         /*
@@ -2701,6 +3472,557 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
                  "reader-less descriptor and it reported: " << observedDiagnostic
               << ". Its child " << outcome << ", collected by the same terminate-and-reap a "
                  "teardown uses" << std::endl;
+
+    return true;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * The process-group probe: teardown's reach past the child it forked, driven rather than argued.
+ *
+ * WHAT IT ESTABLISHES, and why neither half is observable from the ordinary invocations. The fake
+ * service host does not fork, so on every ordinary run the group teardown addresses a group of one
+ * and behaves indistinguishably from signalling a pid. The two properties that only matter when a
+ * host DOES fork - and a host path that is a shell script forks by its nature - therefore have
+ * nothing to exercise them:
+ *
+ *   Descendants do not outlive the run. A process the host started is not this runner's child, so
+ *   waitpid() cannot collect it and cannot observe it going. Before the launch put its child in a
+ *   process group of its own there was no instrument that reached such a process at all, and the
+ *   only group-wide signal available addressed the runner itself. This probe creates exactly that
+ *   shape - a child, and a grandchild the runner never forked - and requires the grandchild to be
+ *   gone at the end.
+ *
+ *   The child inherits three descriptors and no others. A fork duplicates everything the parent
+ *   held, and a descendant holding a copy of a pipe's write end keeps that pipe from ever
+ *   reporting end of file, which is precisely how a death channel stops reporting death. The
+ *   sweep that closes the rest is invisible from inside the child, so this probe observes it from
+ *   outside: the parent hands the child a WITNESS pipe it never names to it, closes its own copy
+ *   of the write end, and requires end of file - which can only arrive once the child's inherited
+ *   copy has been closed by the sweep.
+ *
+ * WHY A GRANDCHILD THAT IGNORES SIGTERM. A grandchild at the default disposition would die on the
+ * group's SIGTERM, and the run would then prove that the first signal reaches a group - worth
+ * having, but it would leave the escalation untested and would pass just as well against a
+ * teardown that only ever sent SIGTERM. Ignoring SIGTERM forces the path that matters: the direct
+ * child exits, is reaped, the group is found to still have a member, and the whole group is sent
+ * SIGKILL, which nothing can ignore.
+ *
+ * WHAT IT NEEDS FROM THE PLATFORM: nothing. No fake host, no /dev/binder, no service manager and
+ * no back-end. fork(), setpgid(), a pipe and a signal are all of it, so it behaves identically on
+ * a host with no binder support - where it ordinarily runs, under invocation D - and on the
+ * binder-capable guest under E.
+ *
+ * WHAT IT LEAVES BEHIND: nothing, on any path. The resources guard below kills the whole group and
+ * reaps the child from its destructor, so a probe that fails halfway leaves no more behind than one
+ * that succeeds.
+ * --------------------------------------------------------------------------------------------- */
+
+/**
+ * @brief Exit status of a probe child that could not create its own process group.
+ *
+ * Distinct from the other two so that a failure names the step it happened at. The parent
+ * reports the status verbatim rather than translating it, which is the same treatment the
+ * host's own codes get.
+ */
+const int GROUP_PROBE_CHILD_EXIT_SETPGID_FAILED = 123;
+
+/** @brief Exit status of a probe child whose own fork of the grandchild failed. */
+const int GROUP_PROBE_CHILD_EXIT_FORK_FAILED = 124;
+
+/** @brief Exit status of a probe grandchild that could not make SIGTERM harmless to itself. */
+const int GROUP_PROBE_CHILD_EXIT_SIGNAL_SETUP_FAILED = 125;
+
+/**
+ * @brief How long the probe waits for its child's "I am set up" byte.
+ *
+ * The same order of magnitude as the broken-pipe probe's handshake bound and for the same
+ * reason: it covers a fork, a setpgid(), a descriptor sweep and a second fork on a loaded
+ * machine, and expiring means the probe cannot proceed rather than that the property failed.
+ */
+const int GROUP_PROBE_HANDSHAKE_TIMEOUT_MS = 5000;
+
+/**
+ * @brief The window in which a pipe that should already be at end of file must report it.
+ *
+ * Used twice, both times for a closure that has ALREADY happened by the time it is checked: the
+ * witness pipe, whose write end the child's sweep closed before it wrote its handshake byte, and
+ * the liveness pipe, checked for the opposite outcome - a grandchild still alive means no end of
+ * file within this window. It is a short bound deliberately, because a longer one would only make
+ * a failing case slower, not more accurate.
+ */
+const int GROUP_PROBE_CLOSURE_WINDOW_MS = 250;
+
+/** @brief Grace period the probe child gets after SIGTERM before the escalation. */
+const int GROUP_PROBE_GRACE_MS = 2000;
+
+/**
+ * @brief Owns the process-group probe's descriptors, child and group, and releases what is left.
+ *
+ * A scope guard for the same reason EpipeProbeResources is one: the probe has several steps, any
+ * of them can report a failure and return, and cleanup written at the end would run only on the
+ * path where it does not matter. Every release is idempotent, so the successful path - which ends
+ * the child through terminateAndReapChildProcess() and clears the pid - leaves this destructor
+ * with nothing to do.
+ *
+ * @warning Non-copyable deliberately: a copy would duplicate descriptor numbers, a pid and a
+ *          group id, and the second destructor would close and signal what the first released.
+ */
+class ProcessGroupProbeResources {
+public:
+    /** @brief Read end of the handshake pipe; also the child's death channel. */
+    int handshakeReadFd = -1;
+    /** @brief Write end of the handshake pipe; the child keeps it, the parent closes its copy. */
+    int handshakeWriteFd = -1;
+    /** @brief Read end of the liveness pipe; end of file on it means the grandchild has gone. */
+    int livenessReadFd = -1;
+    /** @brief Write end of the liveness pipe; only the grandchild holds it. */
+    int livenessWriteFd = -1;
+    /** @brief Read end of the witness pipe; end of file on it means the child's sweep ran. */
+    int witnessReadFd = -1;
+    /** @brief Write end of the witness pipe, never named to the child, which must close it. */
+    int witnessWriteFd = -1;
+    /** @brief The probe's child, or -1 once reaped or never forked. */
+    pid_t childPid = -1;
+    /** @brief The group the child leads, or -1 when it was never confirmed. */
+    pid_t childGroupId = -1;
+
+    ProcessGroupProbeResources() = default;
+    ProcessGroupProbeResources(const ProcessGroupProbeResources &) = delete;
+    ProcessGroupProbeResources &operator=(const ProcessGroupProbeResources &) = delete;
+
+    /**
+     * @brief Releases every descriptor, then ends the whole group and reaps the child.
+     *
+     * SIGKILL to the GROUP rather than to the pid, because this path is reached only where the
+     * probe gave up partway through and the thing most likely to be left behind is the very
+     * grandchild the probe created to be hard to kill. The group is checked for emptiness
+     * afterwards and a leak is traced, because a destructor cannot fail a case and a silent
+     * leak here would be a process outliving the suite with nothing said about it.
+     *
+     * @return None
+     *
+     * @post No descriptor, no child and no member of the child's group outlives the guard.
+     *
+     * @warning Does not raise, and nothing that could raise may be added to it: a destructor is
+     *          implicitly noexcept, so an exception escaping while the stack unwound from a
+     *          failed step would terminate the process instead of failing one case.
+     */
+    ~ProcessGroupProbeResources()
+    {
+        closeIfOpen(handshakeReadFd);
+        closeIfOpen(handshakeWriteFd);
+        closeIfOpen(livenessReadFd);
+        closeIfOpen(livenessWriteFd);
+        closeIfOpen(witnessReadFd);
+        closeIfOpen(witnessWriteFd);
+
+        if (childGroupId > 0) {
+            ::kill(-childGroupId, SIGKILL);
+        }
+
+        if (childPid > 0) {
+            const long pidForTrace = static_cast<long>(childPid);
+
+            ::kill(childPid, SIGKILL);
+
+            std::string outcome;
+            const bool reaped = reapChildBlocking(childPid, outcome);
+            childPid          = -1;
+
+            std::cout << TRACE_PREFIX << "The process-group probe's guard killed and collected "
+                         "child pid " << pidForTrace << ": " << outcome
+                      << (reaped ? "" : " - it may outlive this run") << std::endl;
+        }
+
+        if (childGroupId > 0) {
+            ProcessGroupState state = ProcessGroupState::Populated;
+
+            if (!awaitProcessGroupEmpty(childGroupId, PROCESS_GROUP_DRAIN_TIMEOUT_MS, state)) {
+                std::cout << TRACE_PREFIX << "The process-group probe's guard could not empty group "
+                          << static_cast<long>(childGroupId) << " ("
+                          << describeProcessGroupState(state)
+                          << "); a process it created has outlived this run" << std::endl;
+            }
+
+            childGroupId = -1;
+        }
+    }
+};
+
+/**
+ * @brief Waits, bounded, for one byte on a descriptor.
+ *
+ * A real wait on the real event rather than a sleep: poll() is given what is left of one
+ * monotonic deadline and returns the moment the byte is there. End of file is reported
+ * separately from the bound expiring, because it means the writer exited before reporting and
+ * that is a fault in the probe rather than in the property under test.
+ *
+ * @param [in]  readFd                    - Descriptor to read from
+ * @param [in]  timeoutMs                 - How long to wait, in milliseconds
+ * @param [out] failureDetail             - Receives a diagnostic naming what went wrong.
+ *                                          Untouched on success
+ *
+ * @return bool                                   - Whether a byte arrived within the bound
+ * @retval true                                   - It did
+ * @retval false                                  - The bound expired, the writer exited first,
+ *                                                  or the descriptor failed
+ *
+ * @see proveHostProcessGroupTeardown()
+ */
+bool awaitOneByte(int readFd, int timeoutMs, std::string &failureDetail)
+{
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+
+    for (;;) {
+        const std::chrono::milliseconds remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+
+        if (remaining.count() <= 0) {
+            failureDetail = "no byte arrived within " + std::to_string(timeoutMs) + " ms";
+            return false;
+        }
+
+        struct pollfd watched;
+        watched.fd      = readFd;
+        watched.events  = POLLIN;
+        watched.revents = 0;
+
+        const int ready = ::poll(&watched, 1, static_cast<int>(remaining.count()));
+
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            failureDetail = std::string("poll() failed: ") + std::strerror(errno);
+            return false;
+        }
+
+        if (ready == 0) {
+            continue; /* Re-checked against the deadline at the top of the loop. */
+        }
+
+        char received = 0;
+        const ssize_t got = ::read(readFd, &received, sizeof(received));
+
+        if (got > 0) {
+            return true;
+        }
+
+        if (got == 0) {
+            failureDetail = "the writer closed its end without sending anything, so it exited "
+                            "before it finished setting itself up";
+            return false;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        failureDetail = std::string("read() failed: ") + std::strerror(errno);
+        return false;
+    }
+}
+
+/**
+ * @brief Drives the group-wide teardown against a child that forked, and the child's own sweep.
+ *
+ * Ten steps, and the two facts it ends on are the ones nothing else in this tier can produce: a
+ * grandchild this runner never forked is gone, and a descriptor the child was never told about was
+ * closed before it could carry into anything it started. Both are observed - end of file on a pipe
+ * whose only remaining writer was the process in question, and kill() to the group failing with
+ * ESRCH - rather than inferred from a return value.
+ *
+ * It drives the REAL functions: startFakeServiceHost()'s child does exactly what this child's
+ * first two acts do, in the same order, and step 8 calls the same terminateAndReapChildProcess()
+ * that teardown calls, with a group id confirmed the same way. A copy of either would prove
+ * nothing about the path a teardown takes.
+ *
+ * @param [out] failureDetail             - Receives the step and the reason on failure.
+ *                                          Untouched on success
+ *
+ * @return bool                                   - Whether every step held
+ * @retval true                                   - The child led its own group, its sweep closed
+ *                                                  the witness descriptor, its grandchild
+ *                                                  survived SIGTERM and did not survive the
+ *                                                  teardown, and the group is empty
+ * @retval false                                  - A step failed; failureDetail names which
+ *
+ * @post No descriptor, no child and no member of the child's group outlives this call, on either
+ *       outcome - the resources guard sees to the failing paths.
+ *
+ * @warning The child's post-fork code is held to the same rule as every other fork in this file:
+ *          only setpgid(), close(), close_range(), getrlimit(), fork(), sigaction(), a raw
+ *          write(), pause() and _exit(). This process may have a binder threadpool running when
+ *          the fork happens, and a fork copies a lock's state as it stood.
+ *
+ * @see terminateAndReapChildProcess(), closeInheritedDescriptorsExcept(),
+ *      awaitProcessGroupEmpty(), startFakeServiceHost()
+ */
+bool proveHostProcessGroupTeardown(std::string &failureDetail)
+{
+    ProcessGroupProbeResources probe;
+
+    /*
+     * Step 1. Three pipes, all O_CLOEXEC, which matters for none of them here - nothing execs -
+     * and is kept anyway so that the shape matches the launch this probe stands in for.
+     */
+    int handshakePipe[2] = { -1, -1 };
+    int livenessPipe[2]  = { -1, -1 };
+    int witnessPipe[2]   = { -1, -1 };
+
+    if (::pipe2(handshakePipe, O_CLOEXEC) != 0) {
+        failureDetail = std::string("step 1, the handshake pipe could not be created: ") +
+                        std::strerror(errno);
+        return false;
+    }
+
+    probe.handshakeReadFd  = handshakePipe[0];
+    probe.handshakeWriteFd = handshakePipe[1];
+
+    if (::pipe2(livenessPipe, O_CLOEXEC) != 0) {
+        failureDetail = std::string("step 1, the liveness pipe could not be created: ") +
+                        std::strerror(errno);
+        return false;
+    }
+
+    probe.livenessReadFd  = livenessPipe[0];
+    probe.livenessWriteFd = livenessPipe[1];
+
+    if (::pipe2(witnessPipe, O_CLOEXEC) != 0) {
+        failureDetail = std::string("step 1, the witness pipe could not be created: ") +
+                        std::strerror(errno);
+        return false;
+    }
+
+    probe.witnessReadFd  = witnessPipe[0];
+    probe.witnessWriteFd = witnessPipe[1];
+
+    const pid_t runnerGroupBefore = ::getpgrp();
+
+    /*
+     * Step 2. The fork, and the child's whole life is four calls and a wait.
+     */
+    const pid_t child = ::fork();
+
+    if (child < 0) {
+        failureDetail = std::string("step 2, the probe child could not be forked: ") +
+                        std::strerror(errno);
+        return false;
+    }
+
+    if (child == 0) {
+        /*
+         * The child. Exactly what startFakeServiceHost()'s child does, in the same order and for
+         * the same reasons: its own process group first, then the descriptor sweep, then the work.
+         */
+        if (::setpgid(0, 0) != 0) {
+            ::_exit(GROUP_PROBE_CHILD_EXIT_SETPGID_FAILED);
+        }
+
+        /*
+         * The sweep, keeping the two descriptors this child was told about. It is what closes the
+         * witness pipe's write end - a descriptor nobody named to this child - and the parent's
+         * observation of that closure is the only evidence the sweep ran that exists outside this
+         * process.
+         */
+        closeInheritedDescriptorsExcept(probe.handshakeWriteFd, probe.livenessWriteFd, -1);
+
+        const pid_t grandchild = ::fork();
+
+        if (grandchild < 0) {
+            ::_exit(GROUP_PROBE_CHILD_EXIT_FORK_FAILED);
+        }
+
+        if (grandchild == 0) {
+            /*
+             * The grandchild: the process this harness never created and cannot wait on. It keeps
+             * the liveness pipe's write end and nothing else, so end of file on the parent's read
+             * end means this process and only this process has gone.
+             */
+            ::close(probe.handshakeWriteFd);
+
+            /*
+             * And it ignores SIGTERM, so that the group's first signal cannot end it and the
+             * escalation to SIGKILL is what must.
+             */
+            struct sigaction ignoreTerminate;
+            std::memset(&ignoreTerminate, 0, sizeof(ignoreTerminate));
+            ignoreTerminate.sa_handler = SIG_IGN;
+            ::sigemptyset(&ignoreTerminate.sa_mask);
+            ignoreTerminate.sa_flags = 0;
+
+            if (::sigaction(SIGTERM, &ignoreTerminate, nullptr) != 0) {
+                ::_exit(GROUP_PROBE_CHILD_EXIT_SIGNAL_SETUP_FAILED);
+            }
+
+            for (;;) {
+                ::pause();
+            }
+        }
+
+        /*
+         * Back in the child. Its copy of the liveness write end goes, so that the grandchild is
+         * the only writer and end of file on the parent's read end is a statement about the
+         * grandchild alone. Only then the handshake byte, whose whole meaning is "everything above
+         * has happened".
+         */
+        ::close(probe.livenessWriteFd);
+
+        static const char readyMarker[] = "G";
+        writeRawFully(probe.handshakeWriteFd, readyMarker, sizeof(readyMarker) - 1);
+
+        for (;;) {
+            ::pause();
+        }
+    }
+
+    /* The parent from here on. */
+    probe.childPid = child;
+
+    /*
+     * Step 3. The parent's copies of the three write ends go. Each one is what makes an end of
+     * file on the matching read end mean something: while this process holds a write end open, no
+     * closure by any other process can produce one.
+     */
+    closeIfOpen(probe.handshakeWriteFd);
+    closeIfOpen(probe.livenessWriteFd);
+    closeIfOpen(probe.witnessWriteFd);
+
+    /*
+     * Step 4. The child's report, waited for rather than assumed, so that every check below is
+     * made against a child that has finished setting itself up.
+     */
+    std::string handshakeFailure;
+
+    if (!awaitOneByte(probe.handshakeReadFd, GROUP_PROBE_HANDSHAKE_TIMEOUT_MS, handshakeFailure)) {
+        failureDetail = "step 4, the probe child did not report that it was ready: " +
+                        handshakeFailure;
+        return false;
+    }
+
+    /*
+     * Step 5. The group, read back exactly as the launch reads it back, because a group id that is
+     * merely assumed is this runner's own and everything below would then be addressed at the
+     * runner.
+     */
+    const pid_t observedGroup = ::getpgid(child);
+
+    if (observedGroup != child) {
+        failureDetail = "step 5, the probe child's process group is " +
+                        std::to_string(static_cast<long>(observedGroup)) + " rather than its own "
+                        "pid " + std::to_string(static_cast<long>(child)) +
+                        ", so it did not become a group leader";
+        return false;
+    }
+
+    if (observedGroup == runnerGroupBefore) {
+        failureDetail = "step 5, the probe child's process group is this runner's own group " +
+                        std::to_string(static_cast<long>(runnerGroupBefore)) +
+                        ", so a group-wide signal would have ended this runner";
+        return false;
+    }
+
+    probe.childGroupId = observedGroup;
+
+    /*
+     * Step 6. The descriptor sweep, observed from outside. The witness pipe's write end was held
+     * by this process and by the child and by nobody else; this process closed its copy in step 3
+     * and never told the child the number, so end of file here can only mean the child's sweep
+     * closed it - and it must already have happened, because the sweep precedes the handshake byte
+     * step 4 waited for.
+     */
+    if (!waitForChildExitViaPipeEof(probe.witnessReadFd, GROUP_PROBE_CLOSURE_WINDOW_MS)) {
+        failureDetail = "step 6, the witness descriptor was still open in the probe child " +
+                        std::to_string(GROUP_PROBE_CLOSURE_WINDOW_MS) +
+                        " ms after it reported ready, so the pre-exec sweep did not close the "
+                        "descriptors the child was never told about - a host would inherit them "
+                        "and pass them to everything it starts";
+        return false;
+    }
+
+    /*
+     * Step 7. And the grandchild is alive, which is what makes step 9 a measurement rather than a
+     * tautology: no end of file within the window means the only holder of the liveness pipe's
+     * write end is still running.
+     */
+    if (waitForChildExitViaPipeEof(probe.livenessReadFd, GROUP_PROBE_CLOSURE_WINDOW_MS)) {
+        failureDetail = "step 7, the probe grandchild had already gone before the teardown ran, so "
+                        "nothing below would have been evidence that the teardown ended it";
+        return false;
+    }
+
+    const ProcessGroupState populatedState = probeProcessGroup(probe.childGroupId);
+
+    if (populatedState != ProcessGroupState::Populated) {
+        failureDetail = "step 7, the probe child's group reported " +
+                        describeProcessGroupState(populatedState) +
+                        " while both the child and the grandchild were still running, so the group "
+                        "probe cannot be relied on to detect a leak";
+        return false;
+    }
+
+    /*
+     * Step 8. The real teardown, with the group id it confirmed: the same call, the same
+     * parameters and the same bounded escalation terminateAndReapFakeServiceHost() makes.
+     */
+    std::string outcome;
+    const bool reaped =
+        terminateAndReapChildProcess(probe.childPid, "the process-group probe child",
+                                     probe.handshakeReadFd, GROUP_PROBE_GRACE_MS,
+                                     probe.childGroupId, outcome);
+
+    if (!reaped) {
+        /*
+         * The pid and the group are deliberately left set, so the guard's destructor still tries
+         * to end what this step could not.
+         */
+        failureDetail = "step 8, the terminate-and-reap did not complete: " + outcome;
+        return false;
+    }
+
+    probe.childPid = -1;
+
+    /*
+     * Step 9. The fact waitpid() could never have produced. The grandchild ignored SIGTERM, so it
+     * can only have gone by way of the group's SIGKILL, and end of file on a pipe whose only
+     * writer it was is the observation that says so.
+     */
+    if (!waitForChildExitViaPipeEof(probe.livenessReadFd, PROCESS_GROUP_DRAIN_TIMEOUT_MS)) {
+        failureDetail = "step 9, the probe grandchild was still holding the liveness descriptor " +
+                        std::to_string(PROCESS_GROUP_DRAIN_TIMEOUT_MS) +
+                        " ms after the teardown reported success, so a process this run started "
+                        "has outlived it";
+        return false;
+    }
+
+    /*
+     * Step 10. And the group itself is empty, which covers a descendant that held no descriptor of
+     * this harness's at all and would therefore have been invisible to step 9.
+     */
+    const ProcessGroupState finalState = probeProcessGroup(probe.childGroupId);
+
+    if (finalState != ProcessGroupState::Empty) {
+        failureDetail = "step 10, after the teardown reported success the probe child's group "
+                        "still reported " + describeProcessGroupState(finalState);
+        return false;
+    }
+
+    probe.childGroupId = -1;
+
+    if (::getpgrp() != runnerGroupBefore) {
+        failureDetail = "step 10, this runner's own process group changed from " +
+                        std::to_string(static_cast<long>(runnerGroupBefore)) + " to " +
+                        std::to_string(static_cast<long>(::getpgrp())) +
+                        " during the probe, which no part of it should be able to do";
+        return false;
+    }
+
+    std::cout << TRACE_PREFIX << "The process-group probe's child led group "
+              << static_cast<long>(observedGroup) << ", its pre-exec sweep closed the descriptor it "
+                 "was never told about, and its SIGTERM-ignoring grandchild did not outlive the "
+                 "teardown: " << outcome << std::endl;
 
     return true;
 }
@@ -2777,8 +4099,8 @@ void launchHostAndWaitUntilReady()
 
         if (reply != "OK pong") {
             const std::string hostEnd = terminateAndReapFakeServiceHost();
-            FAIL() << "the fake HDMI CEC AIDL service host answered a control-channel ping with \""
-                   << renderForDiagnostic(reply) << "\" where \"OK pong\" was expected. The reply is "
+            FAIL() << "the fake HDMI CEC AIDL service host answered a control-channel ping with "
+                   << renderUntrustedValue(reply) << " where \"OK pong\" was expected. The reply is "
                       "matched verbatim because the protocol is fixed: anything else means the "
                       "descriptor pair is crossed, or the binary at " << HOST_PATH_VARIABLE
                    << " implements a different protocol from the one this harness speaks. It "
@@ -2810,8 +4132,8 @@ void launchHostAndWaitUntilReady()
                   "registration - and traces the step it reached to standard output, prefixed "
                   "[FakeHdmiCecAidlHost]; that trace names the cause"
                << (observed.empty() ? std::string()
-                                    : (". Partial output before it closed: \"" +
-                                       renderForDiagnostic(observed) + "\""));
+                                    : (". Partial output before it closed: " +
+                                       renderUntrustedValue(observed)));
         return;
     }
 
@@ -2824,14 +4146,14 @@ void launchHostAndWaitUntilReady()
                   "wait therefore has to. A running servicemanager is an unconditional runtime "
                   "prerequisite wherever a binder driver is present"
                << (observed.empty() ? std::string()
-                                    : (". Partial output received: \"" +
-                                       renderForDiagnostic(observed) + "\""));
+                                    : (". Partial output received: " +
+                                       renderUntrustedValue(observed)));
         return;
     }
 
     if (outcome == ReadinessOutcome::TokenMismatch) {
-        FAIL() << "the readiness pipe delivered \"" << renderForDiagnostic(observed)
-               << "\" where the fake HDMI CEC AIDL service host's readiness token was expected. "
+        FAIL() << "the readiness pipe delivered " << renderUntrustedValue(observed)
+               << " where the fake HDMI CEC AIDL service host's readiness token was expected. "
                   "The token is matched verbatim on purpose, so this is not a near miss to be "
                   "accepted: either the descriptor named by " << HOST_READY_FD_VARIABLE
                << " is not the pipe this harness created, or the binary at " << HOST_PATH_VARIABLE
@@ -2840,7 +4162,8 @@ void launchHostAndWaitUntilReady()
     }
 
     FAIL() << "the readiness pipe could not be read, so whether the fake HDMI CEC AIDL service "
-              "host became ready cannot be established: " << observed << ". It " << hostEnd;
+              "host became ready cannot be established: " << renderUntrustedValue(observed)
+           << ". It " << hostEnd;
 }
 
 /**
@@ -2896,8 +4219,16 @@ void applyAidlModeBeforeInit()
         return;
     }
 
-    FAIL() << AIDL_MODE_VARIABLE << " is set to \"" << mode << "\", which is not a recognised "
-              "mode. run_L2Tests implements " << AIDL_MODE_ABSENT << " and " << AIDL_MODE_REMOTE
+    /*
+     * THE VALUE IS RENDERED, NOT STREAMED. Every arm above matched a known spelling, so this
+     * is the one diagnostic in this binary that names a value nothing has validated - the
+     * boundary the log-injection contract applies at. Streamed raw, a mode of
+     * $'bogus\n::error::FORGED' ended this message and began a standalone GitHub workflow
+     * command on the next line.
+     */
+    FAIL() << AIDL_MODE_VARIABLE << " is set to " << renderUntrustedValue(mode)
+           << ", which is not a recognised mode. run_L2Tests implements " << AIDL_MODE_ABSENT
+           << " and " << AIDL_MODE_REMOTE
            << "; " << AIDL_MODE_COMPATIBLE << " and " << AIDL_MODE_INCOMPATIBLE << " belong to "
               "run_L1Tests. Refusing to fall back to " << AIDL_MODE_ABSENT << ", because a typo "
               "must not quietly downgrade the run to the legacy back-end and report it as a pass";
@@ -3085,6 +4416,53 @@ bool cecL2ProveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
                                               std::string &failureDetail)
 {
     return proveEpipeDiagnosticAndChildReaping(observedDiagnostic, failureDetail);
+}
+
+/**
+ * @brief Proves teardown ends every process the launched host started, and inherits no more than
+ *        the three descriptors it is told about.
+ *
+ * WHY THIS CASE LIVES IN THE HARNESS'S OWN TRANSLATION UNIT rather than with the tier's flow
+ * cases. Everything it drives is here - the launch's process-group creation, its pre-exec
+ * descriptor sweep and terminate-and-reap's group-wide escalation - and all three are internal to
+ * this file. A case in another unit could only reach them through a bridge written for it, and a
+ * bridge is a second surface to keep in step for no gain when the case has no reason to be
+ * elsewhere.
+ *
+ * WHY IT IS A CASE AND NOT A CHECK INSIDE SetUp. A check in SetUp runs before the suite, reports
+ * against whatever assertion happens to be in scope, and cannot be named, filtered or seen in the
+ * results. This is a property with a name, and it belongs in the results as one - not least because
+ * it is the ONLY case in either tier that fails if the group teardown regresses.
+ *
+ * THE DualPath PREFIX IS DELIBERATE. This tier's runner is driven by one filter per invocation and
+ * that filter is the DualPath glob, so a fixture named anything else would be registered, selected
+ * by nothing, and excluded by nothing - which the runner's own selected-plus-excluded-equals-
+ * registered reconciliation is built to catch and would rightly fail on.
+ *
+ * WHAT IT ASSERTS, and neither half is reachable from the ordinary invocations, where the fake host
+ * neither forks nor is told about any descriptor it does not use:
+ *
+ *   A grandchild this runner never forked, which ignores SIGTERM, does not outlive the teardown.
+ *   waitpid() cannot collect such a process and cannot observe it going, so the evidence is end of
+ *   file on a pipe it was the last writer of, plus kill() to the group failing with ESRCH.
+ *
+ *   A descriptor the child was never told about is closed before it could reach anything the child
+ *   starts. Observed from outside the child, as end of file on a pipe whose write end this process
+ *   handed over silently and then released.
+ *
+ * It needs no fake host, no binder driver, no service manager and no back-end, so it runs and means
+ * the same thing under every invocation of this tier.
+ *
+ * @see proveHostProcessGroupTeardown(), startFakeServiceHost(), terminateAndReapChildProcess()
+ */
+TEST(DualPathHostLifecycleTest, TeardownEndsTheWholeProcessGroupAndInheritsOnlyNamedDescriptors)
+{
+    std::string failureDetail;
+
+    ASSERT_TRUE(proveHostProcessGroupTeardown(failureDetail))
+        << "the harness's child-process lifecycle did not hold, so a process or a descriptor this "
+           "run created can outlive it: "
+        << failureDetail;
 }
 
 

@@ -560,6 +560,181 @@ set -euo pipefail
 umask 077
 
 # ------------------------------------------------------------------------------------
+# DIRECT-OBJECT LOADER VARIABLES ARE REFUSED, NOT FILTERED.
+#
+# build_trusted_library_path below rebuilds the loader's SEARCH PATH from roots this run
+# resolved and proved safe.  That closes the "which directory answers for libbinder.so"
+# question and nothing else: the variables in the set below do not name directories to
+# search, they name OBJECTS TO LOAD, or they change how symbols bind, so a rebuilt search
+# path has no effect on any of them whatsoever.
+#
+# MEASURED, on this host, before this guard existed: a marker DSO whose constructor appends
+# to a file, exported through LD_PRELOAD, ran 384 times during `run_coverage.sh --help` and
+# 758 times during `--selftest`.  Every child this script launches -- lcov, genhtml, gcov,
+# awk, git, make, the L1 and L2 test binaries and the out-of-process fake service host --
+# loads and runs the named object first.  For a COVERAGE runner that is not only a code
+# execution surface, it is an evidence-integrity failure: the figures, the per-invocation
+# pass counts and the gate verdict would all be produced by processes an object nobody
+# reviewed had already modified, and the run would report them as measurements.
+#
+# THE SET, and why each member is in it:
+#
+#   LD_PRELOAD        loads the named objects before every other, so their constructors run
+#                     in every child and their symbols interpose on every library.
+#   LD_AUDIT          loads audit objects into the link namespace; their la_* callbacks see
+#                     and can redirect every symbol binding in the process.
+#   LD_PROFILE        makes the loader profile the named object and write a profiling file,
+#                     which both changes the loaded object set and writes into a directory
+#                     this run did not choose.
+#   LD_DYNAMIC_WEAK   makes weak definitions overridable, which is symbol interposition
+#                     without naming an object at all.
+#   LD_ORIGIN_PATH    changes what $ORIGIN expands to, redirecting resolution of any
+#                     RPATH/RUNPATH entry.  Included because it is the one search-path
+#                     mechanism the rebuild below cannot reach: the rebuild owns
+#                     LD_LIBRARY_PATH, not the RUNPATH stored inside a binary.
+#
+# REFUSED RATHER THAN SCRUBBED AT THE TOP, and the distinction matters.  Scrubbing silently
+# would run the measurement in an environment the caller did not get, and the caller would
+# read a green result without ever learning that what they configured was discarded.  A
+# refusal names the variable, states the remedy, and costs the caller one `env -u`.
+#
+# WHY THIS BLOCK SITS HERE, ABOVE EVERYTHING, AND RUNS AT LOAD TIME RATHER THAN FROM main().
+# "Refuse before anything is launched" is only true if nothing has been launched yet, and
+# measurement decides where "yet" is.  Only `set -euo pipefail` and `umask` precede this
+# point, so this script has spawned NO child process when it runs.  Placed at the first
+# statement of main() instead it would follow the four dirname/basename calls that resolve
+# this script's own path, the timeout(1) capability probe and the `id -u` read -- measured:
+# nine loads of the preloaded object instead of two.  The residual two are `/usr/bin/env` and
+# `bash` themselves, which load LD_PRELOAD before this file's first line is parsed and which
+# no in-script measure can reach; that is the floor, and it is stated rather than glossed.
+#
+# THE PRICE OF THE POSITION, paid deliberately: log(), warn(), die() and render_untrusted()
+# are all defined below this point, so this block cannot call any of them.  It therefore
+# spells its own two-line output inline -- and it DOES NOT ECHO THE VALUE.  That is not a
+# limitation dressed up as a decision: the value is a caller-supplied object path, echoing it
+# would be a CWE-117 surface at the one place in this file that has no renderer available,
+# and the variable NAME is the whole of what a caller needs in order to unset it.  Nothing
+# downstream reads these variables, so nothing later needs the value either.
+#
+# EMPTY IS NOT THE SAME AS ABSENT, and one member of the set makes that load-bearing:
+# glibc's loader activates LD_DYNAMIC_WEAK on the PRESENCE of the variable and ignores its
+# value, so `LD_DYNAMIC_WEAK=` is active while `LD_PRELOAD=` is inert.  A present-but-empty
+# variable is therefore removed outright and the removal is reported -- it cannot be a
+# deliberate instruction, because for every member of the set the empty value either means
+# nothing or means something the caller cannot have intended.
+#
+# THE REFUSAL APPLIES TO EVERY INVOCATION, INCLUDING --help, --selftest AND --restore --
+# necessarily so, now that it runs at load time, and that is the intended answer rather than
+# a consequence tolerated.  The reason differs per action:
+#   * --selftest MUST be subject to it.  Its green result is used as evidence that this
+#     script's own decision functions are sound, and it launches external tools (bash -n,
+#     the lcov/gcov version probes in require_tools).  A self-test that passed under an
+#     interposed loader would be evidence produced by the very contamination the finding is
+#     about -- 758 marker executions, measured.
+#   * --restore MUST be subject to it.  It WRITES into the source tree, restoring six
+#     git-tracked Makefiles.  A run that modifies a checkout is the last place to make an
+#     exception.
+#   * --help is subject to it because one refusal at one point is the whole of the
+#     mechanism.  A per-action exemption would be a second code path to keep correct, and
+#     the reproduction for this finding is `--help` itself, so exempting it would leave the
+#     reproduction green.  The cost is one line of output naming the remedy.
+# Every action remains usable in the sense that matters: unchanged in any environment that
+# does not carry one of these variables, and refusing with an actionable message in one that
+# does.
+# ------------------------------------------------------------------------------------
+LOADER_DIRECT_OBJECT_VARIABLES=(LD_PRELOAD LD_AUDIT LD_PROFILE LD_DYNAMIC_WEAK LD_ORIGIN_PATH)
+
+# One variable's state, as a word.  Split out from the refusal so it can be exercised
+# directly by the self-test: a function that dies cannot be table-tested.
+#
+#   unset  -- not in the environment at all.  Nothing to do.
+#   empty  -- present with an empty value.  Removed, because presence alone is enough for
+#             LD_DYNAMIC_WEAK and an empty value is meaningless for the rest.
+#   set    -- present and non-empty.  Fatal.
+LOADER_OBJECT_VARIABLE_STATE=''
+loader_object_variable_state() { # $1=variable name -> sets LOADER_OBJECT_VARIABLE_STATE
+    # ${!1+set} is the only spelling that distinguishes "unset" from "set to empty" while
+    # `set -u` is in force; ${!1:-} would collapse the two into one answer.
+    if [ -z "${!1+set}" ]; then
+        LOADER_OBJECT_VARIABLE_STATE='unset'
+    elif [ -n "${!1}" ]; then
+        LOADER_OBJECT_VARIABLE_STATE='set'
+    else
+        LOADER_OBJECT_VARIABLE_STATE='empty'
+    fi
+}
+
+# Refuse the run if any member of the set is present and non-empty; remove any that is
+# present and empty.  Called at LOAD TIME, immediately below, before this script has spawned
+# a single child process of its own.
+assert_no_loader_object_variables() {
+    local name state
+    local -a offenders=()
+
+    for name in "${LOADER_DIRECT_OBJECT_VARIABLES[@]}"; do
+        # A function call, not a command substitution: $( ) forks a subshell, and a fork here
+        # would be one more process with the object loaded - in the one function whose whole
+        # purpose is that there are none.  loader_object_variable_state() is kept as a
+        # separate, table-testable predicate and read through a variable instead.
+        loader_object_variable_state "$name"
+        state="$LOADER_OBJECT_VARIABLE_STATE"
+        case "$state" in
+            unset) ;;
+            empty)
+                unset -v "$name"
+                printf '[run_coverage] WARNING: %s was present with an empty value and has been removed.\n' \
+                    "$name" >&2
+                printf '[run_coverage] WARNING:   glibc activates LD_DYNAMIC_WEAK on presence alone and ignores the\n' >&2
+                printf '[run_coverage] WARNING:   value, so an empty member of this set is not reliably inert.  Nothing\n' >&2
+                printf '[run_coverage] WARNING:   was refused: an empty value cannot be a deliberate instruction here.\n' >&2 ;;
+            set)   offenders+=("$name") ;;
+        esac
+    done
+
+    if [ "${#offenders[@]}" -gt 0 ]; then
+        printf '[run_coverage] ERROR: refusing to run with %d direct-object loader variable(s) set: %s\n' \
+            "${#offenders[@]}" "${offenders[*]}" >&2
+        printf '[run_coverage] ERROR:   These do not name directories to search -- they name objects to LOAD, or\n' >&2
+        printf '[run_coverage] ERROR:   they change how symbols bind -- so this script'"'"'s loader-path rebuild has no\n' >&2
+        printf '[run_coverage] ERROR:   effect on them.  Every child of this run (lcov, genhtml, gcov, awk, git, make,\n' >&2
+        printf '[run_coverage] ERROR:   the L1 and L2 test binaries and the fake service host) would load and run the\n' >&2
+        printf '[run_coverage] ERROR:   named object first, so the coverage figures, the per-invocation pass counts\n' >&2
+        printf '[run_coverage] ERROR:   and the gate verdict would be produced by processes an object nobody reviewed\n' >&2
+        printf '[run_coverage] ERROR:   had already modified.  Refused rather than scrubbed silently, so that a\n' >&2
+        printf '[run_coverage] ERROR:   measurement is never taken in an environment the caller did not get.\n' >&2
+        printf '[run_coverage] ERROR:   The values are deliberately NOT reproduced here: the name is what you unset,\n' >&2
+        printf '[run_coverage] ERROR:   and this is the one point in this file that runs before the diagnostic\n' >&2
+        printf '[run_coverage] ERROR:   renderer exists.\n' >&2
+        printf '[run_coverage] ERROR:   REMEDY: env -u %s %s <options>\n' \
+            "${offenders[0]}" "${BASH_SOURCE[0]}" >&2
+        printf '[run_coverage] ERROR:   If an object genuinely must be interposed, do it in a separate diagnostic\n' >&2
+        printf '[run_coverage] ERROR:   run and do not present its output as a measurement.\n' >&2
+        exit 1
+    fi
+}
+
+# Remove every member of the set from the environment of a launch, in the subshell that
+# performs it.  This is defence in depth: assert_no_loader_object_variables has already
+# refused the run if the caller supplied one, so the only way a member can be present here
+# is that something INSIDE this script set it -- a helper, or a future edit -- and the
+# launched binary must not inherit it in that case either.
+#
+# `unset -v` rather than an empty command-prefix assignment, and that is not a stylistic
+# choice: LD_DYNAMIC_WEAK is activated by presence, so `LD_DYNAMIC_WEAK= cmd` would leave it
+# active in the child.  Removal is the only spelling that holds for the whole set.  It runs
+# in the launch's own subshell, so it extends the existing "compose the child's environment
+# explicitly at the launch" mechanism rather than replacing it, and the parent shell's
+# environment is untouched.
+scrub_loader_object_variables() {
+    unset -v "${LOADER_DIRECT_OBJECT_VARIABLES[@]}"
+}
+
+# CALLED HERE, AT LOAD TIME.  Two statements have run before it -- `set -euo pipefail` and
+# `umask` -- and neither spawns a process, so no child of this script has been created yet.
+assert_no_loader_object_variables
+
+
+# ------------------------------------------------------------------------------------
 # Path resolution.  Everything is derived from this script's own location so that the
 # caller's working directory is irrelevant: the CI recipe captures over the submodule
 # root while this file lives two levels below it, and `-d hdmicec` in the workflow is
@@ -1092,6 +1267,91 @@ log()  { printf '[run_coverage] %s\n' "$*"; }
 warn() { printf '[run_coverage] WARNING: %s\n' "$*" >&2; }
 die()  { printf '[run_coverage] ERROR: %s\n' "$*" >&2; exit 1; }
 rule() { printf '%s\n' '--------------------------------------------------------------------------------'; }
+
+# ------------------------------------------------------------------------------------
+# RENDERING AN UNTRUSTED VALUE INTO A DIAGNOSTIC.  CWE-117, closed by construction.
+#
+# THE DEFECT THIS REMOVES.  Every diagnostic in this file used to interpolate caller-supplied
+# text verbatim.  A value carrying a newline therefore did not appear inside a message -- it
+# ENDED that message and began a new line of its own, and a line beginning "::error::" is a
+# GitHub Actions workflow command.  Measured before the fix: a newline-bearing value produced a
+# standalone forged "::error::" annotation in the job log, and a five-thousand-character value
+# produced more than ten kilobytes of diagnostics, burying the real failure.
+#
+# THE CONTRACT, in the order the steps are applied, because the order is what makes the
+# escaping unambiguous and reversible:
+#
+#   (a) a literal backslash becomes \\ FIRST, so that every escape introduced below is
+#       distinguishable from the same characters occurring literally in the value;
+#   (b) 0x0A becomes \n, 0x0D becomes \r, 0x09 becomes \t, and EVERY OTHER byte outside
+#       printable ASCII 0x20..0x7E becomes \xNN in lower-case hex.  The classification is by
+#       byte value under LC_ALL=C, so no locale can reinterpret a byte as printable and no
+#       multi-byte sequence can hide a control character inside itself;
+#   (c) the rendering is truncated at 200 characters and "...[truncated, N bytes total]" is
+#       appended when it truncates, N being the value's own length in bytes.  A caller cannot
+#       drown a log, and the message still says how much was withheld;
+#   (d) it is applied to the VALUE and never to the surrounding message, and the result is
+#       always returned delimited -- [ ... ] here -- so an empty value is visible as [] rather
+#       than as a gap in a sentence;
+#   (e) it never begins a diagnostic line.  Every message keeps this script's own "[name]"
+#       prefix in front of it, and the rendering itself begins with '['.  Together with (b),
+#       which leaves no raw newline anywhere in the output, that makes a forged standalone
+#       ::error::, ::warning:: or ::notice:: line UNREACHABLE BY CONSTRUCTION rather than
+#       unlikely.
+#
+# THIS IS ONE OF FIVE COPIES OF ONE CONTRACT.  The five must not diverge; a change to any of
+# them is a change to all five.  The others are:
+#
+#   * hdmicec/tests/L1Tests/run_coverage.sh                      -- render_untrusted()
+#   * hdmicec/.github/workflows/aidl-path-tests-rootfs.sh        -- render_untrusted()
+#   * hdmicec/tests/L1Tests/test_main.cpp                        -- renderUntrustedValue()
+#   * hdmicec/tests/L2Tests/test_main.cpp                        -- renderUntrustedValue()
+#   * hdmicec/mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp  -- renderUntrustedValue()
+#
+# They are five file-local copies rather than one shared helper deliberately: two are shell
+# and three are C++, they live in three build targets and one non-built script, and a shared
+# header would add a build-system edge for a twenty-line function.  The cost of the choice is
+# this cross-reference, which is why every copy carries it.
+#
+# NO EXTERNAL COMMAND IS RUN.  Everything below is a bash builtin, so this is usable from any
+# diagnostic including ones that fire before the tooling pre-flight has established that
+# anything external exists.
+# ------------------------------------------------------------------------------------
+render_untrusted() { # $1=the untrusted value -> prints [escaped, bounded] on stdout
+    # LC_ALL and LC_CTYPE are local, and bash re-reads the locale when either is assigned, so
+    # for the duration of this function ${#value} counts BYTES and ${value:i:1} yields ONE
+    # byte.  Both revert on return.
+    local LC_ALL=C LC_CTYPE=C
+    local value="${1-}"
+    local total=${#value}
+    local limit=200
+    local out='' rendered=0 index=0 byte piece ord
+
+    while [ "$index" -lt "$total" ]; do
+        byte="${value:index:1}"
+        # The numeric value of the byte, via printf's "'c" form.  Under LC_ALL=C this is the
+        # byte itself, and it is obtained before any classification so that the decision below
+        # is made on the number and never on a pattern match that a locale could influence.
+        printf -v ord '%d' "'$byte"
+        if   [ "$ord" -eq 92 ]; then piece='\\'
+        elif [ "$ord" -eq 10 ]; then piece='\n'
+        elif [ "$ord" -eq 13 ]; then piece='\r'
+        elif [ "$ord" -eq  9 ]; then piece='\t'
+        elif [ "$ord" -ge 32 ] && [ "$ord" -le 126 ]; then piece="$byte"
+        else printf -v piece '\\x%02x' "$ord"
+        fi
+
+        if [ $(( rendered + ${#piece} )) -gt "$limit" ]; then
+            printf '[%s...[truncated, %d bytes total]]' "$out" "$total"
+            return 0
+        fi
+        out="${out}${piece}"
+        rendered=$(( rendered + ${#piece} ))
+        index=$(( index + 1 ))
+    done
+
+    printf '[%s]' "$out"
+}
 
 # ------------------------------------------------------------------------------------
 # PATH SAFETY -- the ancestry of every path this script writes to.
@@ -2449,6 +2709,20 @@ SUITE_SIGNAL=''                # name of the signal that cancelled this run, if 
 # How long a signalled process group is given to exit before it is killed outright.  Bounded
 # because the point of the exercise is that a cancellation completes.
 SUITE_STOP_GRACE_SECONDS="${SUITE_STOP_GRACE_SECONDS:-10}"
+# CHECKED AT THE DECLARATION rather than in parse_args, and that position is deliberate: the
+# signal handler that prints this value can fire from the moment the trap is installed, which is
+# before any argument has been parsed, so a check in parse_args would leave a window in which a
+# newline-bearing value reached a diagnostic.  die() and render_untrusted() are both defined
+# above this line, which is what makes checking here possible at all.  Zero is ACCEPTED here,
+# unlike SUITE_TIMEOUT: "give the group no grace at all, kill it immediately" is a coherent
+# choice, and await_process_exit() implements it as one.
+case "$SUITE_STOP_GRACE_SECONDS" in
+    ''|*[!0-9]*)
+        die "SUITE_STOP_GRACE_SECONDS must be a plain non-negative integer number of seconds, got
+       $(render_untrusted "$SUITE_STOP_GRACE_SECONDS").  It bounds how long a signalled suite is
+       given to exit and is named in the diagnostic that reports the kill, so a value that cannot
+       be read exactly is refused rather than coerced." ;;
+esac
 readonly SUITE_STOP_GRACE_SECONDS
 
 # Wait up to $2 seconds for kill-target $1 (a pid, or -pgid) to disappear.  0 when it is gone.
@@ -3028,21 +3302,250 @@ reference_audit() {
     return 0
 }
 
+# ------------------------------------------------------------------------------------
+# THE RENDERER'S OWN SELF-TEST.  A table of values and the exact rendering each must
+# produce, so that a change to render_untrusted() that weakened any clause of the
+# contract fails here rather than in a log nobody reads.
+#
+# The cases are the ways the defect presented itself in the finding: a value carrying a
+# NEWLINE followed by a forged "::error::" workflow command, a value carrying a CARRIAGE
+# RETURN (which redraws a line rather than ending it, so it HIDES output instead of
+# forging it), a value carrying an ANSI ESCAPE SEQUENCE, an EMPTY value, a value that is
+# ITSELF nothing but a forged annotation, and a value long enough to drown the log.  Each
+# expected string is spelled out in full rather than recomputed with the code under test.
+#
+# Three properties are asserted for EVERY row, on top of the exact match, because they are
+# what the contract actually promises and an exact-match table alone would let a rewrite
+# satisfy by accident:
+#
+#   * the rendering is ONE LINE - it contains no 0x0A and no 0x0D, so it cannot end the
+#     diagnostic it sits in and cannot begin a line of its own;
+#   * it BEGINS with '[' - so even a value that is entirely "::error::something" appears
+#     as [::error::something], which is not a workflow command;
+#   * it is BOUNDED - never longer than the limit plus the truncation note and the two
+#     delimiters, whatever the input length.
+#
+# No suite is run, nothing is captured and nothing is written: this is a pure function fed
+# a table.  It runs before require_tools, so it uses no external command.
+# ------------------------------------------------------------------------------------
+render_untrusted_selftest() {
+    local failures=0 rendered expected value name rest record
+    local long_value long_expected
+
+    long_value=''
+    while [ "${#long_value}" -lt 5000 ]; do
+        long_value+='XXXXXXXXXXXXXXXXXXXX'
+    done
+    long_expected='['
+    while [ "${#long_expected}" -lt 201 ]; do
+        long_expected+='XXXXXXXXXXXXXXXXXXXX'
+    done
+    long_expected+='...[truncated, 5000 bytes total]]'
+
+    # name | value | expected rendering
+    local -a render_cases=(
+        "newline-and-forged-annotation|$(printf 'bogus\n::error::FORGED')|[bogus\\n::error::FORGED]"
+        "carriage-return-erase-line|$(printf 'ok\r\033[2Khidden')|[ok\\r\\x1b[2Khidden]"
+        "ansi-colour-escape|$(printf '\033[31mred\033[0m')|[\\x1b[31mred\\x1b[0m]"
+        "tab-and-literal-backslash|$(printf 'a\tb\\nc')|[a\\tb\\\\nc]"
+        "empty-value||[]"
+        "leading-forged-annotation|::error::WHOLE_VALUE|[::error::WHOLE_VALUE]"
+        "non-ascii-utf8|$(printf '\303\251')|[\\xc3\\xa9]"
+        "high-byte|$(printf '\377')|[\\xff]"
+    )
+
+    for record in "${render_cases[@]}"; do
+        name="${record%%|*}"
+        rest="${record#*|}"
+        value="${rest%|*}"
+        expected="${rest##*|}"
+
+        rendered="$(render_untrusted "$value")"
+
+        if [ "$rendered" != "$expected" ]; then
+            warn "renderer self-test: $name rendered as '$rendered', expected '$expected'."
+            failures=$((failures + 1))
+        fi
+        case "$rendered" in
+            '['*) : ;;
+            *)  warn "renderer self-test: $name does not begin with '[', so it could begin a line."
+                failures=$((failures + 1)) ;;
+        esac
+        case "$rendered" in
+            *$'\n'*|*$'\r'*)
+                warn "renderer self-test: $name still contains a line terminator."
+                failures=$((failures + 1)) ;;
+        esac
+        if [ "${#rendered}" -gt 240 ]; then
+            warn "renderer self-test: $name rendered ${#rendered} characters, which is unbounded."
+            failures=$((failures + 1))
+        fi
+    done
+
+    rendered="$(render_untrusted "$long_value")"
+    if [ "$rendered" != "$long_expected" ]; then
+        warn "renderer self-test: a 5000-byte value rendered ${#rendered} characters, and not the"
+        warn "  expected 200 plus the truncation note."
+        failures=$((failures + 1))
+    fi
+
+    [ "$failures" -eq 0 ] || die "the untrusted-value renderer failed $failures check(s).
+       Every diagnostic in this script that names a value the caller supplied goes through
+       render_untrusted(), and the five-clause contract documented on it is what makes a forged
+       standalone ::error:: line unreachable and a diagnostic bounded.  A renderer that does not
+       hold that contract must not be shipped: fix render_untrusted() rather than this table.
+       The same contract is implemented in four other files -- see the cross-reference on
+       render_untrusted() -- and a change here belongs in all five."
+}
+
+# ------------------------------------------------------------------------------------
+# THE LOADER GUARD'S OWN SELF-TEST.  Five things are checked, and the fourth is the one that
+# matters: the guard is exercised END TO END, by re-invoking this script with a direct-object
+# loader variable set and asserting that it refuses.  A unit test of the predicate would
+# prove the predicate; only a re-invocation proves that the refusal is actually WIRED, and
+# wiring is what the finding was about -- the variables were documented as out of scope and
+# nothing acted on them.
+#
+# The re-invocation uses --help, so it is bounded, writes nothing, creates no artifact
+# directory and cannot recurse.
+# ------------------------------------------------------------------------------------
+loader_guard_selftest() {
+    local failures=0 name state rc out err
+
+    # 1. THE SET IS NOT EMPTY AND NAMES THE TWO THE FINDING NAMED.  A future edit that
+    #    emptied the array would otherwise leave every check below passing vacuously.
+    case " ${LOADER_DIRECT_OBJECT_VARIABLES[*]} " in
+        *' LD_PRELOAD '*) ;;
+        *)  warn "loader guard self-test: LD_PRELOAD is not in LOADER_DIRECT_OBJECT_VARIABLES."
+            failures=$((failures + 1)) ;;
+    esac
+    case " ${LOADER_DIRECT_OBJECT_VARIABLES[*]} " in
+        *' LD_AUDIT '*) ;;
+        *)  warn "loader guard self-test: LD_AUDIT is not in LOADER_DIRECT_OBJECT_VARIABLES."
+            failures=$((failures + 1)) ;;
+    esac
+
+    # 2. THE STATE PREDICATE DISTINGUISHES THE THREE CASES, including the one `set -u` makes
+    #    easy to get wrong: present-but-empty is neither "unset" nor "set".  Exercised on a
+    #    variable of its own so that nothing in this process is disturbed.
+    #
+    #    THE TWO `shellcheck disable=SC2034` DIRECTIVES BELOW ARE NOT A SUPPRESSED DEFECT.
+    #    CEC_LOADER_SELFTEST_PROBE is read three times -- on the next line after each
+    #    assignment, and once more after the `unset -v` -- but every read goes through
+    #    `loader_object_variable_state`, which takes the variable's NAME as its argument and
+    #    dereferences it by INDIRECT EXPANSION (${!name+set} / ${!name}).  shellcheck cannot
+    #    follow a name through indirection, so it reports the assignments as unused.  Passing
+    #    the name rather than the value is the whole point: the predicate's contract is to
+    #    distinguish unset from present-but-empty, and a value-passing signature could not
+    #    express the difference at all.  Each directive is scoped to the one assignment below
+    #    it rather than to the whole function, so a genuinely unused variable added to this
+    #    self-test later is still reported.  This matters beyond tidiness: §9.5
+    #    of the project guide runs `shellcheck -S warning` over this runner and documents
+    #    "no findings" as the pass, so an accepted false positive here would either falsify
+    #    that step or force it to be weakened.
+    # shellcheck disable=SC2034
+    CEC_LOADER_SELFTEST_PROBE='x'
+    loader_object_variable_state CEC_LOADER_SELFTEST_PROBE
+    state="$LOADER_OBJECT_VARIABLE_STATE"
+    if [ "$state" != 'set' ]; then
+        warn "loader guard self-test: a non-empty variable classified as '$state', not 'set'."
+        failures=$((failures + 1))
+    fi
+    # shellcheck disable=SC2034
+    CEC_LOADER_SELFTEST_PROBE=''
+    loader_object_variable_state CEC_LOADER_SELFTEST_PROBE
+    state="$LOADER_OBJECT_VARIABLE_STATE"
+    if [ "$state" != 'empty' ]; then
+        warn "loader guard self-test: an empty variable classified as '$state', not 'empty'."
+        failures=$((failures + 1))
+    fi
+    unset -v CEC_LOADER_SELFTEST_PROBE
+    loader_object_variable_state CEC_LOADER_SELFTEST_PROBE
+    state="$LOADER_OBJECT_VARIABLE_STATE"
+    if [ "$state" != 'unset' ]; then
+        warn "loader guard self-test: an absent variable classified as '$state', not 'unset'."
+        failures=$((failures + 1))
+    fi
+
+    # 3. THE SCRUB REMOVES RATHER THAN EMPTIES.  Emptying would leave LD_DYNAMIC_WEAK active,
+    #    because glibc activates it on presence and ignores the value, so this asserts the
+    #    state is 'unset' and not merely 'empty'.  Run in a subshell: the assignments must not
+    #    survive into the rest of this run.
+    if ! (
+        export LD_PRELOAD='/nonexistent/selftest.so'
+        export LD_DYNAMIC_WEAK='1'
+        scrub_loader_object_variables
+        for name in "${LOADER_DIRECT_OBJECT_VARIABLES[@]}"; do
+            loader_object_variable_state "$name"
+            [ "$LOADER_OBJECT_VARIABLE_STATE" = 'unset' ] || exit 1
+        done
+        exit 0
+    ); then
+        warn "loader guard self-test: scrub_loader_object_variables left a member of the set"
+        warn "  present.  An emptied variable is not a removed one: LD_DYNAMIC_WEAK is active"
+        warn "  on presence alone."
+        failures=$((failures + 1))
+    fi
+
+    # 4. END TO END: THE REFUSAL IS WIRED.  --help is the cheapest complete invocation and is
+    #    the reproduction the finding used, so this is that reproduction as a test.  stdout
+    #    must be EMPTY: refusing and then printing the help text anyway would be a warning
+    #    dressed as a refusal.
+    out="$(LD_PRELOAD='/nonexistent/selftest.so' "$SCRIPT_PATH" --help 2>/dev/null)" && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        warn "loader guard self-test: '--help' succeeded with LD_PRELOAD set; it must refuse."
+        failures=$((failures + 1))
+    fi
+    if [ -n "$out" ]; then
+        warn "loader guard self-test: the refused invocation still wrote ${#out} bytes to stdout."
+        failures=$((failures + 1))
+    fi
+    err="$(LD_AUDIT='/nonexistent/selftest.so' "$SCRIPT_PATH" --help 2>&1 >/dev/null)" || true
+    case "$err" in
+        *'refusing to run with'*'LD_AUDIT'*) ;;
+        *)  warn "loader guard self-test: LD_AUDIT did not produce the refusal diagnostic."
+            failures=$((failures + 1)) ;;
+    esac
+
+    # 5. A PRESENT-BUT-EMPTY MEMBER IS REMOVED RATHER THAN REFUSED, because refusing it would
+    #    break a caller who exported it empty by accident and would gain nothing.
+    if ! LD_PRELOAD='' "$SCRIPT_PATH" --help >/dev/null 2>&1; then
+        warn "loader guard self-test: an EMPTY LD_PRELOAD was refused; it must be removed and"
+        warn "  the run allowed to continue."
+        failures=$((failures + 1))
+    fi
+
+    [ "$failures" -eq 0 ] || die "the direct-object loader guard failed $failures check(s).
+       LD_PRELOAD, LD_AUDIT, LD_PROFILE, LD_DYNAMIC_WEAK and LD_ORIGIN_PATH name objects to
+       load or change how symbols bind, so the loader-path rebuild cannot cover them; the
+       guard is the only thing that does.  Measured before it existed: a preloaded object ran
+       384 times during --help and 758 times during --selftest, in every process that produced
+       a coverage figure.  A run whose guard does not hold cannot present its output as a
+       measurement."
+}
+
 selftest() {
     rule
     log "SELF-TEST: no suite is run, no counters are zeroed, nothing is captured and no"
     log "  artifact directory is created."
     rule
-    log "1/4 re-parsing this script"
+    log "1/6 re-parsing this script"
     bash -n -- "$SCRIPT_PATH" || die "this script does not parse: $SCRIPT_PATH"
     log "    parses cleanly"
-    log "2/4 auditing every internal function and variable reference"
+    log "2/6 auditing every internal function and variable reference"
     reference_audit
     log "    every reference resolves"
-    log "3/4 threshold range guard, at both ends of the shell's integer range"
+    log "3/6 threshold range guard, at both ends of the shell's integer range"
     threshold_selftest
     log "    every boundary value is classified correctly"
-    log "4/4 measurement tooling pre-flight"
+    log "4/6 untrusted-value renderer: CR, LF, ANSI, a forged ::error:: and an over-long value"
+    render_untrusted_selftest
+    log "    every value is escaped, bounded, single-line and cannot begin a line"
+    log "5/6 direct-object loader guard, end to end"
+    loader_guard_selftest
+    log "    a run carrying LD_PRELOAD or LD_AUDIT is refused, and the scrub removes rather"
+    log "      than empties"
+    log "6/6 measurement tooling pre-flight"
     require_tools
     log "    tooling present and usable"
     rule
@@ -3064,6 +3567,29 @@ usage() {
             "$label" "$tier" "$mode" "$back_end" "$synopsis")
 "
     done
+
+    # THE BINDER-NODE NOTE IS COMPUTED HERE RATHER THAN INSIDE THE HEREDOC, and the reason is
+    # the same finding that reworked usage() in .github/workflows/aidl-path-tests-rootfs.sh.
+    # That script's help text held a backtick-quoted word inside an UNQUOTED heredoc, so bash
+    # performed COMMAND SUBSTITUTION while rendering help and executed a PATH-resolved `gcov`
+    # -- measured, as root, with the attacker's stdout substituted into the help output.  The
+    # heredoc below is unquoted for the same reason that one was: it interpolates a dozen
+    # ${VARIABLE} values that a reader needs resolved.  It used to carry ONE substitution,
+    # $( binder_transport_present && printf ... ), directly in its body.
+    #
+    # That particular one was NOT exploitable -- binder_transport_present uses only the `[`
+    # and `printf` builtins, so no PATH lookup happens while help is rendered -- but leaving a
+    # construct of the same shape in place after fixing the exploitable one is how the next
+    # edit reintroduces the vulnerability: whoever adds a sentence beside it has a working
+    # example of substitution-inside-help to copy.  So the body now contains NO substitution of
+    # any kind, and the precedent it follows is the matrix_summary loop directly above, which
+    # is computed here for a related reason of its own.
+    local binder_node_note
+    if binder_transport_present; then
+        binder_node_note='   (present and usable: every invocation can run)'
+    else
+        binder_node_note='   (ABSENT or unusable: the AIDL-selected invocations will be DEFERRED)'
+    fi
 
     cat <<USAGE
 Usage: run_coverage.sh [OPTIONS]
@@ -3298,7 +3824,7 @@ RESOLVED PATHS FOR THIS INVOCATION
   L1 runner       ${HDMICEC_ROOT}/${TEST_BINARY_REL}
   L2 runner       ${HDMICEC_ROOT}/${L2_TEST_BINARY_REL}
   fake host       ${HDMICEC_ROOT}/${FAKE_HOST_BINARY_REL}   (launched by the L2 harness, never by this script)
-  binder node     ${BINDER_DRIVER_NODE}$( binder_transport_present && printf '   (present and usable: every invocation can run)' || printf '   (ABSENT or unusable: the AIDL-selected invocations will be DEFERRED)' )
+  binder node     ${BINDER_DRIVER_NODE}${binder_node_note}
 
 THE INVOCATION MATRIX
 ${matrix_summary}
@@ -3396,12 +3922,12 @@ parse_args() {
                 OUTPUT_DIR="$2"; OUTPUT_DIR_EXPLICIT=1; shift ;;
             --output-dir=*)      OUTPUT_DIR="${1#*=}"; OUTPUT_DIR_EXPLICIT=1 ;;
             --)                  shift; break ;;
-            -*)                  die "unknown option '$1'. Run '$SCRIPT_PATH --help' for the option list." ;;
-            *)                   die "unexpected argument '$1'. This script takes options only; run --help." ;;
+            -*)                  die "unknown option $(render_untrusted "$1"). Run '$SCRIPT_PATH --help' for the option list." ;;
+            *)                   die "unexpected argument $(render_untrusted "$1"). This script takes options only; run --help." ;;
         esac
         shift
     done
-    [ $# -eq 0 ] || die "unexpected trailing arguments: $*"
+    [ $# -eq 0 ] || die "unexpected trailing argument $(render_untrusted "$1") and $(( $# - 1 )) more"
 
     # THRESHOLD SHAPE AND RANGE.  The accepted spelling is deliberately the same as the two
     # plugin runners': digits, or digits.digits.  Keep the three in step -- a bar that is a
@@ -3416,7 +3942,7 @@ parse_args() {
     case "$COVERAGE_MIN" in
         ''|*[!0-9.]*|*.*.*|.*|*.)
             die "threshold must be a number spelled as digits or digits.digits -- for example
-       80, 0, 100 or 80.5 -- and between 0 and 100 (got '$COVERAGE_MIN').  A threshold that
+       80, 0, 100 or 80.5 -- and between 0 and 100 (got $(render_untrusted "$COVERAGE_MIN")).  A threshold that
        cannot be read exactly is refused rather than rounded: a coerced bar would produce a
        gate verdict for a percentage nobody asked for." ;;
     esac
@@ -3426,7 +3952,7 @@ parse_args() {
     # -- deliberately, so that a bad threshold is refused before anything else happens -- so
     # an absent awk would surface as a threshold error, which would be a lie.
     if threshold_out_of_range "$COVERAGE_MIN"; then
-        die "threshold must be between 0 and 100 (got '$COVERAGE_MIN').  A bar above 100% can
+        die "threshold must be between 0 and 100 (got $(render_untrusted "$COVERAGE_MIN")).  A bar above 100% can
        never be met, so the gate could only ever fail and would say nothing about the tests."
     fi
     local min_int min_frac=""
@@ -3458,7 +3984,7 @@ parse_args() {
        COVERAGE_PER_FILE_GATE=0).  Directive 4 states the bar PER TARGET, so a run without the
        per-file half cannot produce an acceptance verdict however good the aggregate is." ;;
         1) ;;
-        *)   die "COVERAGE_PER_FILE_GATE must be 0 or 1, got '$COVERAGE_PER_FILE_GATE'" ;;
+        *)   die "COVERAGE_PER_FILE_GATE must be 0 or 1, got $(render_untrusted "$COVERAGE_PER_FILE_GATE")" ;;
     esac
 
     # An exemption list suppresses a per-file vote, which is exactly the shape of weakening the
@@ -3468,7 +3994,7 @@ parse_args() {
     if [ -n "$COVERAGE_GATE_EXEMPT_FILES" ]; then
         note_advisory "COVERAGE_GATE_EXEMPT_FILES is set, so at least one target's per-file vote
        was suppressed.  Directive 4 admits no exemption, so this run's verdict is diagnostic:
-       $(printf '%s' "$COVERAGE_GATE_EXEMPT_FILES" | tr '\n' ' ')"
+       $(render_untrusted "$COVERAGE_GATE_EXEMPT_FILES")"
     fi
 
     # An empty value here means two very different things depending on how it got there.
@@ -3481,6 +4007,50 @@ parse_args() {
        would resolve to this run's working directory; leave it unset to have an unpredictable
        mode-0700 root minted under a parent it has proved safe instead, or give a real
        directory."
+    fi
+
+    # A CONTROL CHARACTER IN THE ARTIFACT ROOT IS REFUSED AT THIS ONE BOUNDARY, which is what
+    # lets the two dozen downstream diagnostics that name the path keep interpolating it
+    # directly.  This path reaches the ancestry walk, the lock diagnostics, the per-invocation
+    # log and JSON names, the cleanup listing and the final summary; rendering it at each of
+    # those would be twenty-four places to keep in step, whereas refusing the class here means
+    # that by the time any of them runs the value is proven free of control characters.  It is
+    # refused rather than stripped, because a directory this script silently renamed would not
+    # be the one the caller named.  The value IS rendered in this message, because this is the
+    # diagnostic that has to report it.
+    case "$OUTPUT_DIR" in
+        *[[:cntrl:]]*)
+            die "--output-dir (or COVERAGE_OUTPUT_DIR) contains a control character:
+       $(render_untrusted "$OUTPUT_DIR")
+       A newline, a carriage return or an escape sequence in this path would be reproduced in
+       every log line, lock diagnostic and artifact name that mentions it -- forging or hiding
+       output rather than naming a directory.  Give a path made of printable characters." ;;
+    esac
+
+    # SUITE_TIMEOUT IS SHAPE-CHECKED HERE, for the same reason and with the same consequence as
+    # OUTPUT_DIR above: it is named by the run banner, by the hang diagnostic and by the
+    # SUITE_TIMEOUT=<seconds> remedy that diagnostic prints, and proving its shape at this one
+    # boundary is what lets those three keep interpolating it directly.  It cannot be checked at
+    # its declaration near the top of this file, because die() and render_untrusted() are defined
+    # below that point; this is the first place both exist.
+    #
+    # Zero is refused, which the declaration has always said and nothing implemented until now:
+    # timeout(1) reads 0 as "no limit", so SUITE_TIMEOUT=0 silently restored the unbounded run
+    # this bound exists to prevent -- a deadlocked suite would then block for ever with no exit
+    # status and no gate verdict, which is exactly the outcome the bound was introduced to make
+    # impossible.
+    case "$SUITE_TIMEOUT" in
+        ''|*[!0-9]*)
+            die "SUITE_TIMEOUT must be a plain positive integer number of seconds, got
+       $(render_untrusted "$SUITE_TIMEOUT").  It is passed to timeout(1) and printed in this run's
+       banner and in the hang diagnostic, so a value that cannot be read exactly is refused
+       rather than coerced." ;;
+    esac
+    if [ -z "${SUITE_TIMEOUT//0/}" ]; then
+        die "SUITE_TIMEOUT must not be zero (got $(render_untrusted "$SUITE_TIMEOUT")).  timeout(1)
+       reads 0 as \"no limit\", so this would restore the unbounded run the bound exists to
+       prevent: a deadlocked suite would block for ever with no exit status and no gate verdict.
+       Give a positive number of seconds, or leave it unset for the 600s default."
     fi
 }
 
@@ -4172,9 +4742,18 @@ readonly L2_SUITES='DualPath*'
 # that does not match is fatal WITH ITS NAME.  The mandatory count is then MEASURED from the
 # binary as "the selection minus the permitted set", never written down, so adding a case to a
 # fixture needs no edit here -- and the numbers it derives on this host are the settled contract:
-# D has 10 mandatory (14 selected less the 4 permitted DualPathAidlFlowTest cases) and E has 8
-# (14 less the 6 permitted DualPathLegacyFlowTest cases), which is exactly the four
-# DualPathSelectionTest cases plus all four DualPathAidlFlowTest cases.
+# D has 11 mandatory (15 selected less the 4 permitted DualPathAidlFlowTest cases) and E has 9
+# (15 less the 6 permitted DualPathLegacyFlowTest cases).  Read off the built binary with
+# --gtest_list_tests, the tier registers 15: DualPathSelectionTest 4, DualPathLegacyFlowTest 6,
+# DualPathAidlFlowTest 4 and DualPathHostLifecycleTest 1.  So D's eleven are the four selection
+# cases, the six legacy-flow cases and the one lifecycle case, and E's nine are the four
+# selection cases, the four AIDL-flow cases and the same one lifecycle case -- which is the
+# fixture that regression-pins the group-wide bounded teardown and is back-end independent, so
+# it is mandatory under BOTH.
+#
+# These figures moved from 14/10/8 when that lifecycle fixture was added, and the fact that
+# only this COMMENT had to move is the property being described: the mandatory count is
+# measured, so the mechanism needed no edit at all.
 #
 # THE TWO L2 INVOCATIONS ARE MIRROR IMAGES, which is the point of naming rather than counting:
 # the AIDL-flow fixture is PERMITTED to skip under D (legacy is resolved, so it cannot run) and
@@ -4237,7 +4816,24 @@ readonly INVOCATION_MATRIX=(
 # What this probe answers is narrower and is all it claims: "is there any point attempting an
 # AIDL-selected invocation on this host".
 # ------------------------------------------------------------------------------------
-readonly BINDER_DRIVER_NODE="${BINDER_DRIVER_NODE:-/dev/binder}"
+BINDER_DRIVER_NODE="${BINDER_DRIVER_NODE:-/dev/binder}"
+# A CONTROL CHARACTER IN THE PROBED NODE PATH IS REFUSED AT THIS ONE BOUNDARY, which is what lets
+# the three transport diagnostics that name it keep interpolating it directly.  Empty is refused
+# too: `[ -e "" ]` is false, so an empty value would present itself as "the binder driver is
+# absent" and defer every AIDL-selected invocation for a reason that was never true.
+case "$BINDER_DRIVER_NODE" in
+    '')
+        die "BINDER_DRIVER_NODE was given as an empty value.  An empty path tests as absent, so
+       every AIDL-selected invocation would be deferred with a reason that is not the real one.
+       Leave it unset for /dev/binder, or name a real node." ;;
+    *[[:cntrl:]]*)
+        die "BINDER_DRIVER_NODE contains a control character:
+       $(render_untrusted "$BINDER_DRIVER_NODE")
+       This path is reproduced in the transport diagnostics that report whether the AIDL
+       invocations can run, so a newline or an escape sequence in it would forge or hide output
+       rather than name a node.  Give a path made of printable characters." ;;
+esac
+readonly BINDER_DRIVER_NODE
 
 binder_transport_present() {
     [ -e "$BINDER_DRIVER_NODE" ] || return 1
@@ -4321,9 +4917,29 @@ binder_transport_present() {
 # on the normal arrangement gets deleted rather than obeyed.  What is searched is the candidate
 # itself, so the candidate itself is what is held to the rules.
 #
-# THE SCOPE OF THE CLAIM.  This governs the loader's SEARCH PATH.  LD_PRELOAD and LD_AUDIT are a
-# different mechanism -- they name objects directly rather than directories to search -- and are
-# outside this finding; they are not filtered here and this block does not pretend to.
+# THE SCOPE OF THE CLAIM, stated as what is and is not guaranteed.  This block governs the
+# loader's SEARCH PATH: which directories a child may search for a soname, and nothing else.
+#
+# WHAT IS GUARANTEED, and by which mechanism:
+#   * the search path a child inherits contains only roots this run resolved from its own
+#     configuration and then held to the admission rules above -- this block;
+#   * no direct-object loader variable is in force anywhere in the run.  LD_PRELOAD, LD_AUDIT,
+#     LD_PROFILE, LD_DYNAMIC_WEAK and LD_ORIGIN_PATH name objects to load or change how symbols
+#     bind, so this block could never have covered them; they are REFUSED at load time by
+#     assert_no_loader_object_variables -- before this script spawns any child of its own --
+#     and removed again from the environment of each launch by scrub_loader_object_variables.
+#     That is a different mechanism for a different attack, and both are needed.
+#
+# WHAT IS NOT GUARANTEED, said plainly rather than implied:
+#   * a DT_RPATH or DT_RUNPATH compiled into a binary or a library is searched before
+#     LD_LIBRARY_PATH and is not reachable from any environment variable this script controls.
+#     The refusal of LD_ORIGIN_PATH removes the one way an inherited variable could redirect an
+#     $ORIGIN-relative RUNPATH entry; a literal RUNPATH remains a property of the artifact, and
+#     the measured artifacts here carry none;
+#   * /etc/ld.so.conf, /etc/ld.so.preload and the loader cache are system configuration, owned
+#     by the host and outside anything a test runner can assert;
+#   * a library that is genuinely inside an admitted root is loaded.  The rules above are about
+#     WHO CAN PUT A FILE THERE, not about what the file contains.
 #
 # NOTHING IS DROPPED SILENTLY, in either direction.  A candidate that fails a SECURITY property
 # is fatal, because admitting it would import the exposure while quietly skipping it would
@@ -4574,8 +5190,15 @@ invocation_needs_binder() { # $1 = invocation letter
 # cost everything.
 readonly EXPECTED_SUITE_PATTERN='"(classname|name)"[[:space:]]*:[[:space:]]*"(CECFrameTest|ConnectionTest|BusTest|DriverTest|LibCCECTest|OpCodeTest|MessageDecoderTest|MessageEncoderTest|OperandsTest|DriverAidlCompatibilityTest|DriverAidlPreflightTest|DriverAidlLocalInstanceTest)'
 
-# The L2 tier's three fixtures.  All of them, not a subset: there are only three and they are
-# the whole tier, so naming them all is the stable choice here rather than the fragile one.
+# The L2 tier's THREE INTEGRATION FIXTURES, and deliberately not every fixture the runner
+# registers.  The tier also carries DualPathHostLifecycleTest, which proves the harness ends every
+# process it started and inherits no descriptor it was not given; it is left OUT of this pattern on
+# purpose, because a results file naming only that fixture would be a run that exercised the
+# harness and no back-end at all, and this check exists to reject exactly that.  The three named
+# here are the selection arm and the two flow arms, so a file matching one of them did run this
+# tier's integration cases.  Adding a fourth name would widen the check for no gain; the
+# selected-plus-excluded-equals-registered reconciliation below is what notices a fixture that
+# went unrun, and it counts every fixture including the lifecycle one.
 readonly L2_EXPECTED_SUITE_PATTERN='"(classname|name)"[[:space:]]*:[[:space:]]*"(DualPathSelectionTest|DualPathLegacyFlowTest|DualPathAidlFlowTest)'
 
 # Number of test cases a runner has REGISTERED, read from the binary itself.
@@ -4629,7 +5252,11 @@ registered_test_count() { # $1=directory  $2=binary name  $3=rebuilt loader path
        the object tree the capture reads.  do_run creates the sink before the matrix; a caller
        that reaches this function from anywhere else must do the same."
 
+    # scrub_loader_object_variables runs inside this command substitution's subshell, so the
+    # removal applies to this launch and to nothing else.  See its own comment for why it is
+    # an unset and not an empty command-prefix assignment.
     listing="$(cd "$dir" \
+        && scrub_loader_object_variables \
         && LD_LIBRARY_PATH="$ld_path" \
            GCOV_PREFIX="$LISTING_GCOV_DIR" \
            GCOV_PREFIX_STRIP="$LISTING_GCOV_PREFIX_STRIP" \
@@ -4825,7 +5452,7 @@ verify_results() { # $1=results JSON  $2=label  $3=fixture pattern  $4=expected 
         local override_note=''
         if [ -n "${GTEST_EXTRA_ARGS:-}" ]; then
             override_note="
-           GTEST_EXTRA_ARGS      : set to [$GTEST_EXTRA_ARGS], which narrows the matrix's filter"
+           GTEST_EXTRA_ARGS      : set to $(render_untrusted "$GTEST_EXTRA_ARGS"), which narrows the matrix's filter"
         fi
         die "invocation $label executed a different set from the one it declared.
            declared by the filter : $expected case(s)
@@ -5213,7 +5840,7 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     log "  log               : $run_log"
     log "  time limit        : ${SUITE_TIMEOUT}s (SUITE_TIMEOUT)"
     if [ -n "$GTEST_EXTRA_ARGS" ]; then
-        log "  extra gtest args  : $GTEST_EXTRA_ARGS"
+        log "  extra gtest args  : $(render_untrusted "$GTEST_EXTRA_ARGS")"
         # ANY caller-supplied gtest argument makes this run diagnostic, not acceptance.
         #
         # A filter is the obvious case - `--gtest_filter=-KnownFailingSuite.*` leaves a
@@ -5233,7 +5860,7 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
         # disagree and it dies with both numbers named.  Diagnostic flags remain useful here;
         # re-filtering does not, because a re-filtered invocation is a different invocation and
         # this script will not report one as the other.
-        note_advisory "GTEST_EXTRA_ARGS was set to '$GTEST_EXTRA_ARGS', so the suite was NOT run
+        note_advisory "GTEST_EXTRA_ARGS was set to $(render_untrusted "$GTEST_EXTRA_ARGS"), so the suite was NOT run
        the way an acceptance run runs it.  Custom arguments can change which cases execute, in
        what order and how often, so this run's figures are diagnostic."
     fi
@@ -5337,6 +5964,10 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     (
         trap - INT TERM HUP
         cd "$binary_dir"
+        # In this subshell only, and before the exec: the suite binary and the fake service
+        # host it launches must not inherit a direct-object loader variable from anywhere,
+        # including from this script itself.  See scrub_loader_object_variables.
+        scrub_loader_object_variables
         CEC_TEST_AIDL_MODE="$mode" \
         CEC_FAKE_AIDL_HOST_PATH="$HDMICEC_ROOT/$FAKE_HOST_BINARY_REL" \
         LD_LIBRARY_PATH="$ld_path" \
@@ -8499,7 +9130,13 @@ apply_gate() {
 # mistaken for part of a measurement run.
 # ------------------------------------------------------------------------------------
 main() {
-    # THE REFERENCE AUDIT RUNS FIRST, before parsing, before validation and before any
+    # THE LOADER GUARD HAS ALREADY RUN, at load time, above this file's first function
+    # definition -- see DIRECT-OBJECT LOADER VARIABLES ARE REFUSED, NOT FILTERED.  It is not
+    # called from here on purpose: by the time main() is entered this script has resolved its
+    # own path and probed timeout(1), which is nine loads of a preloaded object rather than
+    # two, and a second call here would only repeat a check that has already passed.
+    #
+    # THE REFERENCE AUDIT RUNS FIRST OF THE THINGS main() DOES, before parsing, before any
     # filesystem write.  A script that cannot resolve one of its own function or variable
     # names must say so and stop, not discover it mid-run after the banner has printed.
     reference_audit

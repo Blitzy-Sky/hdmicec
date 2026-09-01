@@ -510,14 +510,14 @@ can never overwrite an earlier one's artifact:
 | A | `run_L1Tests` | `absent` | Legacy | Everything in the binary except the two AIDL-only contract fixtures — the whole pre-existing 483 plus 85 contract cases, **measured green at 568 from 23 suites** |
 | B | `run_L1Tests` | `compatible` | AIDL (local interface) | The contract suite less its legacy-only fixtures (114 cases), plus the 308 back-end-neutral cases — **measured green at 422 from 15 suites** |
 | C | `run_L1Tests` | `incompatible` | Legacy, rejection logged | The three back-end-independent contract fixtures (76 cases), plus the same 308 — **measured green at 384 from 13 suites** |
-| D | `run_L2Tests` | `absent` | Legacy | The `DualPath*` tier, end to end through the legacy in-process mock — **measured green: 14 registered, 10 passed, 4 skipped, exit `0`** |
-| E | `run_L2Tests` | `remote` | AIDL (remote proxy) | The same `DualPath*` tier over real Binder IPC, inbound delivery included.  Authored and compiled; **never executed on this host or on the committed CI target**, though it has run green in a purpose-built Binder-capable guest that is neither — **14 registered, 8 passed, 6 skipped, exit `0`**, the six skips being the legacy-arm cases that skip when the resolved back-end is not theirs.  See [What invocation E does and does not yet evidence](#what-invocation-e-does-and-does-not-yet-evidence) |
+| D | `run_L2Tests` | `absent` | Legacy | The `DualPath*` tier, end to end through the legacy in-process mock — **measured green: 15 registered, 11 passed, 4 skipped, exit `0`** |
+| E | `run_L2Tests` | `remote` | AIDL (remote proxy) | The same `DualPath*` tier over real Binder IPC, inbound delivery included.  Authored and compiled; **never executed on this host or on the committed CI target**, though it has run green in a purpose-built Binder-capable guest that is neither — **14 registered, 8 passed, 6 skipped, exit `0`**, the six skips being the legacy-arm cases that skip when the resolved back-end is not theirs.  Those figures were recorded **before `DualPathHostLifecycleTest` was added**, so a re-run registers 15; that case is back-end-independent and mandatory under E as under D, so 9 passed and 6 skipped is what a re-run should report — stated as the expectation it is, because no E run has been performed since.  See [What invocation E does and does not yet evidence](#what-invocation-e-does-and-does-not-yet-evidence) |
 
 **A run total appears above only where a run produced it.**  Invocation A's is a green run of
 exactly that filter — `568 tests from 23 test suites ran`, `568 passed`, exit `0` — cross-read
 against `./run_L1Tests --gtest_list_tests` and the FIXTURE MANIFEST in `ccec/test_DriverAidl.cpp`.
-Invocation D's is a green run of the L2 tier on this host: `14 tests from 3 test suites ran`,
-`10 passed`, `4 skipped`, exit `0`, the four skips being the AIDL-arm cases that skip rather than fail
+Invocation D's is a green run of the L2 tier on this host: `15 tests from 4 test suites ran`,
+`11 passed`, `4 skipped`, exit `0`, the four skips being the AIDL-arm cases that skip rather than fail
 when the resolved back-end is not theirs.  **B, C and E now carry run totals too, and they were
 produced on a Binder-capable guest rather than projected.**  On 2026-09-01 all five invocations ran
 in one instrumented i386 guest under the QEMU provisioning that
@@ -596,7 +596,7 @@ catch.  The two groups below were read out of the built binary with `--gtest_lis
 308 + 175 = 483 and 10 + 8 = 18, which is the same inventory the
 [Test Structure](#test-structure) counts describe.  **D and E are not in this arithmetic at all**:
 they are the L2 tier's invocations, they run a different binary (`run_L2Tests`), and they have their
-own 14 cases in 3 fixtures — no case in this directory is registered in them.  So "runs under both
+own 15 cases in 4 fixtures — no case in this directory is registered in them.  So "runs under both
 selections" is a claim about A, B and C, and the L2 tier makes its own end-to-end claim separately;
 see [The L2 tier](#the-l2-tier-two-programs-two-processes).
 
@@ -652,8 +652,29 @@ Three rules go with it, and each exists to stop a green run that proves nothing:
 - **The harness does not start the Binder client threadpool.**  `DriverAidlImpl::open()` owns that,
   and it runs inside `init`.  Starting one here would duplicate an ownership production code
   already holds.
+- **An unrecognised value is reported back ESCAPED, BOUNDED and never at the start of a line.**  The
+  diagnostic renders the value rather than echoing it: a literal backslash becomes `\\`, a newline
+  `\n`, a carriage return `\r`, a tab `\t`, and any other byte outside printable ASCII `\xNN`,
+  with the whole thing cut to 200 rendered characters and `...[truncated, N bytes total]` appended.
+  So `CEC_TEST_AIDL_MODE=$'bogus\n::error::FORGED'` produces one line naming
+  `"bogus\n::error::FORGED"` inside the harness's own message instead of a standalone
+  `::error::` line a CI log would read as an annotation of its own, and a 5000-byte value costs
+  about 230 bytes of log rather than 5000.  The same renderer is applied to
+  `CEC_FAKE_AIDL_HOST_PATH`, to the fake host's three descriptor variables, and to the equivalent
+  values in `run_coverage.sh` and the rootfs image builder.
 
 ### The L2 tier: two programs, two processes
+
+`tests/L2Tests` registers **four** fixtures.  Three are the tier's integration arms —
+`DualPathSelectionTest`, `DualPathLegacyFlowTest` and `DualPathAidlFlowTest`.  The fourth,
+**`DualPathHostLifecycleTest`**, exercises the harness itself rather than a back-end: it forks a
+child that leads its own process group, gives it a grandchild that **ignores `SIGTERM`**, and
+requires the harness's own terminate-and-reap to end the whole group and to have swept every
+descriptor the child was never told about.  It needs no Binder driver, no service manager and no
+host, so it runs and means the same thing under every invocation.  It carries the `DualPath` prefix
+because `run_coverage.sh` drives this tier with the single filter `DualPath*` and reconciles
+`selected + excluded == registered`; a fixture named anything else would be registered, selected by
+nothing and excluded by nothing, and would fail that reconciliation.
 
 `tests/L2Tests` builds two `noinst_PROGRAMS`, and they must be separate processes:
 
@@ -1019,6 +1040,30 @@ Two files in this directory carry the coverage setup:
   `.github/workflows/L1-tests.yml` — including that workflow's exclusion globs verbatim, which is
   what keeps the coverage denominator production-source-only — and adds the two things the
   workflow lacks: branch data and a numeric gate.
+**`run_coverage.sh` REFUSES TO RUN when a direct-object loader variable is set**, and that
+includes `--help`, `--selftest` and `--restore`.  The named set is `LD_PRELOAD`, `LD_AUDIT`,
+`LD_PROFILE`, `LD_DYNAMIC_WEAK` and `LD_ORIGIN_PATH`; the check runs at load time, before the script
+resolves its own path, so nothing it launches can have loaded an object first.  The reason it is a
+refusal and not a scrub: these do not name directories to search, so the runner's careful rebuild of
+the loader search path has no effect on them, and every child of a coverage run — `lcov`, `genhtml`,
+`gcov`, `awk`, `git`, `make`, both test binaries and the fake service host — would load and run the
+named object before its own `main`.  The figures, the per-invocation pass counts and the gate verdict
+would then have been produced by processes something unreviewed had already modified.  `--selftest`
+is refused for the same reason its result is quoted as evidence, and `--restore` because it writes
+six git-tracked Makefiles.  The remedy is printed with the refusal:
+
+```bash
+env -u LD_PRELOAD ./run_coverage.sh --build --run     # or -u LD_AUDIT, etc.
+```
+
+Note that **empty is not absent** for all of them: glibc activates `LD_DYNAMIC_WEAK` on presence and
+ignores its value, so the guard treats a set-but-empty variable as a warning and `unset`s it rather
+than accepting it as harmless.  The same five are `unset` from every child environment as well, at
+each launch site, so a future helper that sets one cannot reach a launched binary.  What this does
+**not** cover, stated so it is not assumed: a literal `DT_RPATH`/`DT_RUNPATH` inside an artifact,
+`/etc/ld.so.conf`, `/etc/ld.so.preload` and the loader cache, and the contents of a file that
+legitimately sits inside an admitted library root.
+
 - **`.lcovrc_l1`** — the LCOV configuration for this suite, with `lcov_branch_coverage = 1` and
   `lcov_function_coverage = 1`.  Stated plainly: **CI does not read this file.**  The workflow
   passes neither `--config-file` nor `--rc`, so the CI coverage step inherits the system default

@@ -144,7 +144,48 @@ libRCEC_la_SOURCES = CECFrame.cpp \
 # twice and emits one DT_NEEDED per library.  The literal names here must
 # therefore track AIDL_LIBS in configure.ac - a divergence fails the link on a
 # library it cannot find, by name, rather than quietly dropping an edge.
+#
+# -Wl,-z,relro,-z,now IS THE WHOLE OF THIS FILE'S SHARE OF QA FINDING P5-05, AND
+# THE ABSENCE OF -O2 AND -D_FORTIFY_SOURCE FROM AM_CXXFLAGS ABOVE IS DELIBERATE.
+#
+# The link half.  P5-05 measured the installed Autotools library and found no
+# DT_FLAGS and no DT_FLAGS_1 entry at all, so BIND_NOW was absent and the default
+# GNU_RELRO segment left the GOT writable for the life of the process - partial
+# RELRO.  -z now sets DF_BIND_NOW/DF_1_NOW, which resolves every relocation at load
+# time so the GOT can be mapped read-only; -z relro is already the default here and
+# is named alongside it so that a toolchain configured with --disable-relro, or an
+# inherited -z norelro, cannot silently drop it.  It is spelled as one comma-joined
+# -Wl group for the same libtool reason the forcing group below relies on.
+#
+# The compile half is NOT here, and putting it here would be a measurable
+# regression rather than a style choice.  tests/L1Tests/run_coverage.sh configures
+# the instrumented build with CXXFLAGS="-fprofile-arcs -ftest-coverage" and no -O
+# flag, so the coverage build is implicitly -O0.  Automake emits
+#     $(AM_CXXFLAGS) $(CXXFLAGS)
+# in that order, so CXXFLAGS wins a conflict but an -O2 HERE would not conflict with
+# anything the coverage configuration passes - it would simply take effect.  An
+# optimised coverage build renumbers, merges and elides basic-block arcs, which
+# invalidates the 92-record branch-arm coverage manifest keyed to the unoptimised
+# arc layout: the gate reads (file, line, block, branch) coordinates, and every one
+# of them moves.  The failure would present as a coverage regression with no source
+# change behind it.
+#
+# So on the Autotools path, optimisation and fortification are the packager's
+# CXXFLAGS, per the Autotools convention that a package sets AM_CXXFLAGS for flags
+# its own source requires and leaves -O and -D_FORTIFY_SOURCE to whoever builds it -
+# which is also why configure's own default of "-g -O2" already yields the FORTIFY
+# __*_chk references this library's release builds carry.  Link flags are not
+# subject to that convention: -z now describes how the ARTEFACT must be loaded, no
+# build of this package has a reason to want lazy binding, and there is no
+# instrumented-build equivalent of the arc-layout problem for it.
+#
+# The hand-written ccec/src/Makefile carries -O2 and -U_FORTIFY_SOURCE
+# -D_FORTIFY_SOURCE=2 itself, and that is the same rule rather than an exception to
+# it: that file has no configure step and no packager CXXFLAGS to defer to, it is
+# never instrumented for coverage, and it is the artefact P5-05 found carrying no
+# FORTIFY reference at all.
 libRCEC_la_LDFLAGS = -lpthread \
+                     -Wl,-z,relro,-z,now \
                      -Wl,--no-as-needed,-lhdmicec-v0.1.0.0-cpp,-lcommon-v0.2.0.0-cpp,-lbinder,-lutils,--as-needed
 # The four direct AIDL/Binder link edges, in dependency order, follow the OSAL
 # edge.  They are required whether or not a given platform has an AIDL HAL: the

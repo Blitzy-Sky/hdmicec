@@ -138,6 +138,25 @@ jobs:
     # not depend on which default an image happens to carry, and the gate step proves what was
     # selected either way.
     runs-on: ubuntu-24.04
+
+    # LEAST PRIVILEGE, DECLARED AT THE JOB RATHER THAN LEFT TO INHERITANCE.
+    #
+    # This file already declares `permissions: contents: read` at the workflow level, and that
+    # is inherited - but only for as long as nothing above overrides it. Declaring it HERE fixes
+    # the scope of the token THIS job's steps receive. It matters because of what runs with that
+    # token: five actions/checkout invocations and two actions/upload-artifact invocations, each
+    # executing a pre-bundled dependency tree that the PIN AUDIT RECORD below records a residual
+    # against, and then a tree handed to autoreconf, ./configure, three makes, a coverage run
+    # and two build scripts from another repository.
+    #
+    # `contents: read` IS SUFFICIENT AND NOTHING MORE IS. This job checks out, builds, tests and
+    # uploads artifacts. It opens no issue, writes no check, publishes no package, requests no
+    # id-token and pushes nothing, and artifact upload is served by the Actions artifact service
+    # rather than by a `permissions:` scope. That matters especially here because this workflow
+    # runs on `pull_request`, so its steps see contributor-authored source.
+    permissions:
+      contents: read
+
     strategy:
       matrix:
         # THE `compiler` DIMENSION IS GONE, AND ITS REMOVAL IS A CORRECTION RATHER THAN A
@@ -470,8 +489,63 @@ jobs:
     # `git ls-remote`. Both are LIGHTWEIGHT tags, so the value the tag resolves to IS a
     # commit SHA rather than a tag object:
     #
-    #   actions/checkout            11bd71901bbe5b1630ceea73d27597364c9af683   = v4 = v4.2.2
-    #   actions/upload-artifact     ea165f8d65b6e75b540449e92b4886f43607fa02   = v4 = v4.6.2
+    #   actions/checkout            3d3c42e5aac5ba805825da76410c181273ba90b1   = v7 = v7.0.1
+    #   actions/upload-artifact     043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   = v7 = v7.0.1
+    #
+    # ---------------------------------------------------------------------------------------
+    # PIN AUDIT RECORD. READ THIS BEFORE TREATING EITHER PIN AS CLEAN.
+    #
+    # A COMMIT PIN BUYS IMMUTABILITY, NOT SAFETY. It fixes WHICH bytes run; it says nothing
+    # about whether those bytes contain known-vulnerable dependencies. Both of these actions
+    # ship their dependencies pre-bundled in a committed dist/ directory, so the vulnerable code
+    # travels inside the pin rather than being resolved at run time - and it executes with this
+    # job's token and repository context, in a workflow that runs on `pull_request`. That is why
+    # the residual is RECORDED AND DATED here rather than left implicit: a residual a reviewer
+    # can see and re-date is reviewable, and an unrecorded one is indistinguishable from a clean
+    # pin.
+    #
+    # METHOD. For each pinned commit, the action's OWN package.json and package-lock.json were
+    # fetched at that commit and audited with `npm audit --omit=dev --package-lock-only`
+    # (production dependencies only - dev dependencies are not bundled into dist/).
+    #
+    #   audit tooling  : npm 11.18.0 on Node v22.23.2
+    #   audit date     : 2026-09-01 (UTC)
+    #
+    #   actions/checkout @ 3d3c42e5aac5ba805825da76410c181273ba90b1  (release v7.0.1)
+    #     action runtime : node24   (read from action.yml at that commit)
+    #     audit exit     : 1
+    #     RESIDUAL       : 1 vulnerable node - 0 critical, 0 high, 1 MODERATE, 0 low
+    #                      undici (<=6.27.0): GHSA-8xcm-r25x-g524, GHSA-m8rv-5g2x-5cg5,
+    #                      GHSA-v3r7-h72x-cjcm
+    #
+    #   actions/upload-artifact @ 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  (release v7.0.1)
+    #     action runtime : node24   (read from action.yml at that commit)
+    #     audit exit     : 1
+    #     RESIDUAL       : 5 vulnerable nodes - 0 critical, 5 HIGH, 0 moderate, 0 low
+    #                      brace-expansion, fast-xml-builder, fast-xml-parser, lodash, undici
+    #
+    # WHY THESE PINS ANYWAY, given neither audits clean. v7.0.1 is the NEWEST release either
+    # publisher has issued, so no clean release exists to move to - the residual is upstream's
+    # to close, not this file's. What the move DID close is measured rather than asserted, by
+    # running the same audit against the pins this file used to carry:
+    #
+    #   checkout        v4.2.2 -> v7.0.1 : 8 vulnerable nodes (1 high + 7 moderate) -> 1 (1 moderate)
+    #   upload-artifact v4.6.2 -> v7.0.1 : 17 vulnerable nodes (1 CRITICAL form-data
+    #                                      + 6 high + 10 moderate) -> 5 (5 high)
+    #
+    # and the retired action runtime. Both old pins declared `runs.using: node20`, which GitHub
+    # retired on 30 April 2026, so every step using them ran on an end-of-life runtime that
+    # receives no security fixes at all. Both new pins declare node24.
+    #
+    # WHO OWNS THE RESIDUAL AND WHAT CLOSES IT. The bundled-dependency advisories above belong
+    # to actions/checkout and actions/upload-artifact upstream; nothing in this repository can
+    # patch a committed dist/ bundle without forking the action, which would replace a reviewed
+    # publisher pin with an unreviewed local one. The action to take is to RE-RUN THE AUDIT
+    # ABOVE at each pin review, move to the first release whose audit is clean or whose residual
+    # is smaller, and re-date this block in the same edit. A block whose audit date is old is
+    # itself the finding. aidl-path-tests.yml carries this record over the same two pins; the
+    # two are moved together, so they are re-audited together.
+    # ---------------------------------------------------------------------------------------
     #
     # There used to be a third, jwlawson/actions-setup-cmake, and it is gone rather than
     # re-pinned: a digest can only be checked by whoever holds the file, and that action
@@ -489,24 +563,34 @@ jobs:
     # actions to the same two SHAs deliberately; move them together or the two jobs stop
     # being comparable.
     #
-    # RUNTIME LINEAGE IS PART OF THE PIN, AND IT IS WHY THE actions/checkout SHA ABOVE IS THE
-    # ONE IT IS. The pin this file used to carry was actions/checkout 3.7.0, on the v3 lineage,
-    # which runs on the Node 16 action runtime - a runtime GitHub has deprecated, and one that
-    # makes an action still running on it emit a deprecation warning in every job that uses it.
-    # v4.2.2 runs on Node 20, which is the lineage actions/upload-artifact is already pinned to
-    # at v4.6.2, so the two actions in this file now share one runtime generation instead of
-    # straddling a deprecated one and a current one. The retired release is named here in prose
-    # and nowhere as a pin, which is the state a pin audit expects: grepping this file for the
-    # old digest, or for the old release as the `# vN (vN.N.N)` comment spelled it, comes back
-    # empty.
+    # RUNTIME LINEAGE IS PART OF THE PIN, AND IT IS WHY BOTH SHAs ABOVE ARE ON THE v7 LINEAGE.
+    # An action's `runs.using` names the Node runtime GitHub executes its bundle under, and a
+    # retired runtime receives no security fixes however current the pin's digest looks. This
+    # file has now been through that once in each direction: it carried actions/checkout 3.7.0
+    # on the Node 16 runtime, moved to v4.2.2 on Node 20, and Node 20 itself reached end of life
+    # on 30 April 2026 - so v4.2.2 and v4.6.2 were BOTH on a retired runtime by the time the
+    # pins above were reviewed. v7.0.1 declares node24 for both actions, read from each
+    # action.yml at the pinned commit rather than inferred from the release number. Every
+    # retired release is named here in prose and nowhere as a pin, which is the state a pin audit
+    # expects: grepping this file for either old digest, or for either old release as the
+    # `# vN (vN.N.N)` comment spelled it, comes back empty.
     #
-    # THAT MAKES A RE-PIN TWO CHECKS RATHER THAN ONE. A committed digest is valid for exactly
-    # ONE release, which is why the SHA and its trailing version comment always move together
-    # - that part is the update policy above. The runtime the new release runs on is the
-    # second check and does not follow from the first: when GitHub retires Node 20, this same
-    # move is needed again, and nothing in this file will say so, because a pin can be
-    # perfectly current as a digest and stale as a runtime while reading identically either
-    # way. Re-check the lineage when the pin is next reviewed, not only the digest.
+    # THAT MAKES A RE-PIN THREE CHECKS RATHER THAN ONE, and the third is the one this file used
+    # to omit:
+    #
+    #   1. THE DIGEST. A committed SHA is valid for exactly one release, which is why the SHA
+    #      and its trailing version comment always move together - that part is the update
+    #      policy above.
+    #   2. THE RUNTIME. Read `runs.using` out of the new release's own action.yml. It does not
+    #      follow from the digest: a pin can be perfectly current as a digest and stale as a
+    #      runtime while reading identically either way. When GitHub retires Node 24, this same
+    #      move is needed again and nothing in this file will say so on its own.
+    #   3. THE PRODUCTION AUDIT. Run `npm audit --omit=dev --package-lock-only` against the new
+    #      release's own package-lock.json at the pinned commit and update the PIN AUDIT RECORD
+    #      above with the date and the exact residual counts. This is the check that
+    #      distinguishes "immutable" from "safe", and it is the reason that record exists: both
+    #      pins above still carry a residual, and a residual that is written down and dated can
+    #      be reviewed while an assumed-clean pin cannot.
     steps:
       # THE JOB-WIDE CMAKE, FETCHED HERE AND VERIFIED BEFORE IT IS UNPACKED.
       #
@@ -779,7 +863,7 @@ jobs:
           echo "the pinned toolchain reaches this step by resolved name as well as by absolute path"
 
       - name: Checkout hdmicec
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           path: hdmicec
           # NO ACTIONS CREDENTIAL IS LEFT IN ANY CHECKOUT IN THIS JOB.
@@ -800,7 +884,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout googletest
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           repository: google/googletest
           path: googletest
@@ -835,7 +919,7 @@ jobs:
       # still need a token supplied by the platform owner, passed as a `token:` input rather
       # than persisted into the tree.
       - name: Checkout rdk-halif-aidl
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           repository: Blitzy-Sky/rdk-halif-aidl
           path: rdk-halif-aidl
@@ -876,7 +960,7 @@ jobs:
       # layout, so the guard's own relative candidate resolves even if the exported variable is
       # ever lost.
       - name: Checkout the Sink caller source for the L1 drift guard
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           repository: ${{ env.SINK_REPOSITORY }}
           path: entservices-hdmicecsink
@@ -900,7 +984,7 @@ jobs:
       #
       # persist-credentials: false for the same reason as every other checkout in this job.
       - name: Checkout the Binder SDK source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           repository: ${{ env.BINDER_SDK_REPOSITORY }}
           path: rdk-halif-aidl/build-tools/linux_binder_idl
@@ -2120,7 +2204,7 @@ jobs:
       # there.
       - name: Upload selected back-end log
         if: ${{ always() && !env.ACT && steps.verify_back_end.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 (v4.6.2)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (v7.0.1)
         with:
           name: selected-back-end-L1-hdmicec-${{ matrix.coverage }}
           path: selected_back_end_invocation_A.log
@@ -2360,7 +2444,7 @@ jobs:
       # if-no-files-found: error instead of being appended to the path list below.
       - name: Upload artifacts
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 (v4.6.2)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (v7.0.1)
         with:
           name: artifacts-L1-hdmicec-${{ matrix.coverage }}
           path: |

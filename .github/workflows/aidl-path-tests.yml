@@ -568,32 +568,61 @@ env:
   LCOV_SHA256: '1857bb18e27abe8bcec701a907d5c47e01db4d4c512fc098d1a6acd29267bf46'
   LCOV_SHA256_FOR_VERSION: '2.0'
 
-  # The guest kernel. 5.15.148 is not a guess: it is an entry in upstream linux_binder_idl's
-  # own default QEMU matrix at tag 2.6.0 (tests/qemu/build-kernels.sh:45), it sits inside the
-  # documented supported range whose floor is 4.9 (BUILD.md:441), it is at or below 5.17 so
-  # CONFIG_ASHMEM still exists - it was removed in 5.18 - and it is at or above 5.0 so
-  # CONFIG_ANDROID_BINDERFS exists. The other clean 5.x entry in that matrix, 5.16.20, is
-  # explicitly flagged in BUILD.md:487 for SELinux context issues with binder, so it is not
-  # used here.
+  # The guest kernel. THE SERIES IS 5.15 FOR THREE STRUCTURAL REASONS AND THE POINT RELEASE IS
+  # THE CURRENT ONE FOR A SECURITY REASON; the two halves of the pin are chosen differently and
+  # are kept apart here on purpose.
   #
-  # THE PIN DOES NOT MOVE FOR THE SAKE OF PROTOCOL 7. This job is a protocol-7 job (AAP
+  # WHY THE 5.15 SERIES. It is the series upstream linux_binder_idl's own default QEMU matrix
+  # uses at tag 2.6.0 (tests/qemu/build-kernels.sh:45), it sits inside the documented supported
+  # range whose floor is 4.9 (BUILD.md:441), it is at or below 5.17 so CONFIG_ASHMEM still
+  # exists - it was removed in 5.18 - and it is at or above 5.0 so CONFIG_ANDROID_BINDERFS
+  # exists. The other clean 5.x entry in that matrix, 5.16.20, is explicitly flagged in
+  # BUILD.md:487 for SELinux context issues with binder, so it is not used here.
+  #
+  # WHY THE POINT RELEASE IS THE CURRENT LONGTERM AND NOT THE MATRIX'S OWN. This value used to
+  # be 5.15.148, which is the literal entry in that upstream matrix. A point release is not a
+  # structural choice, though - it is a security choice, and an old one is a stale one. An OSV
+  # query by the commit v5.15.148 resolves to returns 561 advisories (36 CRITICAL, 239 HIGH,
+  # 24 MEDIUM, 1 LOW, 261 without CVSS); the same query for v5.15.219 returns none. TWO of the
+  # 561 are in the binder driver itself - CVE-2024-26926 and CVE-2024-46740, both 7.8, fixed in
+  # 5.15.157 and 5.15.167 respectively - so the stale pin carried known defects in THE EXACT
+  # SUBSYSTEM THIS JOB EXISTS TO VALIDATE. A compromised or crashing validation guest falsifies
+  # the evidence this job publishes, which is why this is treated as a supply-chain pin and not
+  # as a detail of a test fixture.
+  #
+  # 5.15.219 IS THE CURRENT 5.15 LONGTERM RELEASE, verified against kernel.org's own
+  # releases.json ("longterm", 5.15.219, released 2026-08-28) and as the highest linux-5.15.*
+  # entry in the signed digest list named below. Moving it again is a two-value edit plus a
+  # re-verification of the patch: see the next block and the restoration step.
+  #
+  # THE PIN DOES NOT MOVE SERIES FOR THE SAKE OF PROTOCOL 7. This job is a protocol-7 job (AAP
   # 0.6.6.4, 0.9.5.1) and mainline carries CONFIG_ANDROID_BINDER_IPC_32BIT only up to 4.17,
   # which is far below the binderfs floor the in-guest init needs. Dropping to a 4.x kernel to
   # get the option would give up binderfs, which the plan requires as an always-required
   # option; so the option is RESTORED on this pin by a minimal patch the workflow carries
-  # inline. The restoration hunks are written against THIS version's
-  # drivers/android/{Kconfig,binder.c,Makefile}: if this pin moves, the patch step's dry run
-  # fails by name and the hunks must be re-derived rather than forced.
-  GUEST_KERNEL_VERSION: '5.15.148'
+  # inline. The restoration hunks are held to THE PINNED VERSION's own
+  # drivers/android/{Kconfig,binder.c,Makefile} by a dry run that fails by name; they were
+  # RE-VERIFIED against linux-5.15.219 when this pin moved, rather than assumed to survive it -
+  # `patch -p1 --dry-run --forward` returned 0 with no fuzz and no offset on all three files,
+  # and the three preconditions in that step were re-checked against the same tree. If this pin
+  # moves again, do that again; the hunks must be re-derived rather than forced.
+  GUEST_KERNEL_VERSION: '5.15.219'
 
-  # The digest of linux-5.15.148.tar.xz. Source: kernel.org's PGP-SIGNED sha256sums.asc under
+  # The digest of linux-5.15.219.tar.xz. Source: kernel.org's PGP-SIGNED sha256sums.asc under
   # pub/linux/kernel/v5.x/, which is the release directory's own signed digest list. Committing
   # it closes the gap that fetching sha256sums.asc from the same origin as the tarball leaves
   # open on its own - one origin serving both halves can serve a matching pair. The fetch step
   # keeps that comparison as well, so the tarball has to satisfy the value reviewed with this
   # file AND the list published beside it.
-  GUEST_KERNEL_SHA256: 'c48575c97fd9f4767cbe50a13b1b2b40ee42830aba3182fabd35a03259a6e5d8'
-  GUEST_KERNEL_SHA256_FOR_VERSION: '5.15.148'
+  #
+  # THIS VALUE WAS RE-DERIVED FROM THE SIGNED LIST WHEN THE PIN MOVED, NOT COPIED FROM A
+  # SUGGESTION, and the signature on the list was checked rather than assumed: `gpg --verify`
+  # on sha256sums.asc reports a good signature from "Kernel.org checksum autosigner
+  # <autosigner@kernel.org>", RSA key B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1, made
+  # 2026-08-28. The 126,879,692-byte tarball was then downloaded and its measured sha256
+  # matched the signed entry exactly.
+  GUEST_KERNEL_SHA256: 'd04a4f798cc26f81170b5ecb27a3d8c8b4838f3aaf2a431b577043e2ead05ca4'
+  GUEST_KERNEL_SHA256_FOR_VERSION: '5.15.219'
 
   # Debian bookworm i386. bookworm rather than an older suite is a REQUIREMENT, not a
   # preference: the staged i386 libraries are compiled on this runner and then loaded inside
@@ -646,16 +675,48 @@ env:
   # - is recorded INSIDE the image and named in the manifest, so what was installed is
   # verifiable after the fact rather than asserted before it.
   #
-  # THIS TIMESTAMP IS NOT VERIFIED FROM THE DEVELOPMENT HOST, and saying so matters: it is a
-  # pin chosen to sit after bookworm's release, and the job verifies at run time that the
-  # snapshot exists and serves the suite before it uses it, failing by name if it does not.
-  # Move it deliberately, with the workflow_dispatch input above or by editing this value, and
-  # expect the base digest to change when you do.
+  # IMMUTABLE IS NOT THE SAME AS SAFE, AND THE TIMESTAMP IS A SECURITY PIN AS WELL AS A
+  # REPRODUCIBILITY ONE. An immutable archive freezes the package set - including every defect
+  # that was unfixed on that date. The pin used to be 20240701T000000Z, which serves bookworm
+  # 12.6 (Release dated 29 Jun 2024): a dependency scan of the resulting guest package set
+  # returned 141 vulnerable records, 33 of which are removed simply by updates that are already
+  # in Bookworm and that a later snapshot therefore serves. Holding a two-year-old snapshot for
+  # reproducibility bought nothing that a current snapshot does not also buy, because any
+  # snapshot timestamp is equally immutable; what it cost was those 33 records.
+  #
+  # THIS TIMESTAMP IS VERIFIED, AND HERE IS THE VERIFICATION. Fetched directly from
+  # snapshot.debian.org while this pin was chosen:
+  #   .../archive/debian/20260801T000000Z/dists/bookworm/Release  ->  HTTP 200
+  #     Origin: Debian   Suite: oldstable   Version: 12.15   Codename: bookworm
+  #     Date: Sat, 11 Jul 2026 10:16:37 UTC   Architectures: ... i386 ...
+  #   .../main/binary-i386/Packages.gz  ->  HTTP 200, 11927458 bytes,
+  #     Last-Modified: Sat, 11 Jul 2026 10:39:07 GMT
+  # The i386 binary index is checked as well as the Release file because GUEST_ARCH is i386 and
+  # a snapshot that served the suite but not the architecture would fail inside debootstrap.
+  # Comparing the two binary-i386 indices package by package confirms the security effect
+  # rather than assuming it: git 1:2.39.2-1.1 -> 1:2.39.5-0+deb12u3, libglib2.0-0
+  # 2.74.6-2+deb12u3 -> 2.74.6-2+deb12u9, perl 5.36.0-7+deb12u1 -> 5.36.0-7+deb12u3, gcc-12
+  # 12.2.0-14 -> 12.2.0-14+deb12u1.
+  #
+  # WHAT THE REPIN DOES NOT CHANGE. gcc-13 is absent from the bookworm binary-i386 index at BOTH
+  # timestamps, so the guest's compiler is still gate-and-record rather than pinned to the
+  # acceptance major, exactly as it was; the repin neither creates nor removes that limitation.
+  # And no digest committed in this file is derived from the snapshot: the only digest comparison
+  # in the base path is base_expected_sha256, which is a workflow_dispatch input with no
+  # committed default because debootstrap output is not reproducible. So there is nothing here
+  # to re-derive, and nothing stale left behind.
+  #
+  # The job STILL verifies at run time that the snapshot exists and serves the suite before it
+  # commits an hour of work to it, failing by name if it does not, and it prints the archive's
+  # own Release metadata so the recorded evidence comes from the archive rather than from this
+  # comment. Move it deliberately - with the workflow_dispatch input above or by editing this
+  # value - re-verify the Release file and the i386 index as above, and expect the base digest
+  # to change when you do.
   # ONE SOURCE OF TRUTH FOR THE TIMESTAMP. The archive URL is composed from these two values
   # in the step below and exported for the later steps, rather than written out with the
   # timestamp embedded a second time: two copies of a pin are a pin that can disagree with
   # itself, which is the class of defect this whole file is being corrected for.
-  GUEST_DEBIAN_SNAPSHOT: '20240701T000000Z'
+  GUEST_DEBIAN_SNAPSHOT: '20260801T000000Z'
   GUEST_DEBIAN_SNAPSHOT_ARCHIVE: 'https://snapshot.debian.org/archive/debian'
 
   # Larger than the image builder's own default because the guest does a full autoreconf,
@@ -666,6 +727,65 @@ env:
   # The guest's bounded wait for servicemanager to answer a real binder transaction. It is a
   # poll on a transaction, never a sleep.
   GUEST_READINESS_TIMEOUT_SECONDS: '300'
+
+  # THE VIRTUALIZATION BOUNDARY IS A DEPENDENCY, NOT A UTILITY, AND IT IS PINNED LIKE ONE.
+  #
+  # WHAT THE BOUNDARY ACTUALLY IS. This job boots a guest that runs REPOSITORY-CONTROLLED code
+  # as root, and the only thing between that guest and the runner's own process memory is the
+  # qemu-system-i386 process. So qemu is not "the tool that runs the test", it is the trust
+  # boundary the test's evidence depends on - and it was, until these two values existed, the
+  # one input in this job installed from apt with no version recorded and no floor enforced.
+  #
+  # WHY A FLOOR RATHER THAN AN EXACT PIN. Ubuntu serves one qemu per pocket and this job takes
+  # it from the runner's archive, so an exact pin would fail the job on every security revision
+  # Canonical publishes - the opposite of what is wanted. A FLOOR can only ever be crossed
+  # downwards, and downwards is precisely the direction that matters: it refuses a runner image,
+  # a stale mirror or a self-hosted host that offers an OLDER qemu than the one this pin was
+  # reviewed against, by name, instead of accepting it silently.
+  #
+  # TWO VALUES BECAUSE THERE ARE TWO VERSIONS AND THEY MOVE INDEPENDENTLY. The upstream release
+  # (what `qemu-system-i386 --version` prints) fixes which QEMU codebase is emulating; the
+  # Ubuntu package revision fixes which of Canonical's security patches are in it. A run on
+  # 8.2.2 built from 1:8.2.2+ds-0ubuntu1 rather than ...1.18 is missing published fixes while
+  # reporting an identical program version, so checking only the first would miss exactly the
+  # class of staleness this pin exists to catch. Both were read from Launchpad's published
+  # binaries for noble/amd64: Release 1:8.2.2+ds-0ubuntu1, noble-updates 1:8.2.2+ds-0ubuntu1.18,
+  # noble-security 1:8.2.2+ds-0ubuntu1.16 - so the floor below is the newest AVAILABLE revision
+  # and is installable on this runner label.
+  #
+  # WHAT THE FLOOR DOES NOT FIX, STATED HERE SO IT IS NOT READ AS A CLEAN BILL OF HEALTH.
+  # CVE-2026-48914 - a malformed virtio-blk request producing an out-of-bounds write in the
+  # QEMU host heap - affects QEMU THROUGH 11.0.1, so NO version satisfies it and no floor can.
+  # CVE-2024-8612 - uninitialized bounce-buffer contents disclosed to the guest through
+  # virtio-blk/virtio-scsi/virtio-crypto - is likewise unfixed in the affected package list.
+  # Both are virtio-specific, which is why this job's answer is not a version bump: the root
+  # disk is attached to an emulated AHCI controller and CONFIG_VIRTIO_BLK is asserted ABSENT
+  # from the guest kernel, so the vulnerable device model is never instantiated. The boot step
+  # additionally confines the qemu process itself with a seccomp sandbox. The floor's job is
+  # the residual: everything else in an 8.2.2 that a newer revision has already fixed.
+  QEMU_MIN_PROGRAM_VERSION: '8.2.2'
+  QEMU_MIN_PACKAGE_VERSION: '1:8.2.2+ds-0ubuntu1.18'
+
+  # THE SECCOMP CONFINEMENT APPLIED TO THE QEMU PROCESS ITSELF, IN ONE PLACE, so the probe that
+  # proves the binary supports it and the boot that relies on it cannot disagree about the key
+  # set. All four denials are safe for THIS invocation specifically, and each is safe for a
+  # reason rather than by default:
+  #
+  #   obsolete=deny           blocks the obsolete syscall group. Nothing here uses them.
+  #   elevateprivileges=deny  blocks the setuid/setgid family. This job does not pass -runas
+  #                           and does not run qemu under sudo, so qemu never needs to drop
+  #                           privilege - which is the one thing this denial would break.
+  #   spawn=deny              blocks fork/exec. This invocation has no -netdev helper, no
+  #                           bridge helper, no migration exec target, no smbd and no
+  #                           chardev/backend that spawns a process, so qemu spawns nothing.
+  #   resourcecontrol=deny    blocks the scheduler/priority calls. No -overcommit, no
+  #                           realtime priority request and no CPU affinity request is made.
+  #
+  # This is what BOUNDS CVE-2026-48914's host-side impact: a heap corruption inside a process
+  # that cannot exec, cannot regain privilege and cannot reschedule is a far smaller primitive
+  # than the same corruption in an unconfined one. It is a bound, not a fix - the fix is not
+  # instantiating virtio-blk at all, above.
+  QEMU_SANDBOX_OPTIONS: 'on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny'
 
   # A backstop only: the guest powers itself down when the run finishes. Hosted runners have
   # no /dev/kvm, so the guest runs under TCG emulation and is slow; this allowance is sized
@@ -692,6 +812,25 @@ jobs:
     # depend on which default an image happens to carry, and the gate step proves what was
     # selected either way.
     runs-on: ubuntu-24.04
+
+    # LEAST PRIVILEGE, DECLARED AT THE JOB RATHER THAN LEFT TO INHERITANCE.
+    #
+    # This file already declares `permissions: contents: read` at the workflow level, and that
+    # is inherited - but only for as long as nothing above overrides it. Declaring it HERE fixes
+    # the scope of the token THIS job's steps receive, which matters because of what those steps
+    # do rather than as a formality: eight actions/checkout invocations and three
+    # actions/upload-artifact invocations run with it, each executing a pre-bundled dependency
+    # tree that the PIN AUDIT RECORD below records a residual against, on the same filesystem as
+    # the guest root image this job publishes as an artifact. A token that can only read
+    # repository contents bounds what a defect in any of that code can reach.
+    #
+    # `contents: read` IS SUFFICIENT AND NOTHING MORE IS. This job checks out five repositories,
+    # builds, boots a guest and uploads artifacts. It opens no issue, writes no check, publishes
+    # no package, requests no id-token and pushes nothing, and artifact upload is served by the
+    # Actions artifact service rather than by a `permissions:` scope. Anything added here would
+    # be privilege this job has no use for.
+    permissions:
+      contents: read
 
     # A hosted runner's ceiling is 360 minutes. This is set just below it, and it is an honest
     # allowance rather than a promise: under TCG emulation the in-guest build plus five
@@ -816,8 +955,62 @@ jobs:
     # `git ls-remote`. Both are LIGHTWEIGHT tags, so the value the tag resolves to IS a
     # commit SHA rather than a tag object:
     #
-    #   actions/checkout            11bd71901bbe5b1630ceea73d27597364c9af683   = v4 = v4.2.2
-    #   actions/upload-artifact     ea165f8d65b6e75b540449e92b4886f43607fa02   = v4 = v4.6.2
+    #   actions/checkout            3d3c42e5aac5ba805825da76410c181273ba90b1   = v7 = v7.0.1
+    #   actions/upload-artifact     043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   = v7 = v7.0.1
+    #
+    # ---------------------------------------------------------------------------------------
+    # PIN AUDIT RECORD. READ THIS BEFORE TREATING EITHER PIN AS CLEAN.
+    #
+    # A COMMIT PIN BUYS IMMUTABILITY, NOT SAFETY. It fixes WHICH bytes run; it says nothing
+    # about whether those bytes contain known-vulnerable dependencies. Both of these actions
+    # ship their dependencies pre-bundled in a committed dist/ directory, so the vulnerable
+    # code travels inside the pin rather than being resolved at run time - and it executes with
+    # this job's token and repository context, on the same filesystem as the guest root image
+    # this job publishes. That is why the residual is RECORDED AND DATED here rather than left
+    # implicit: a residual a reviewer can see and re-date is reviewable, and an unrecorded one
+    # is indistinguishable from a clean pin.
+    #
+    # METHOD. For each pinned commit, the action's OWN package.json and package-lock.json were
+    # fetched at that commit and audited with `npm audit --omit=dev --package-lock-only`
+    # (production dependencies only - dev dependencies are not bundled into dist/).
+    #
+    #   audit tooling  : npm 11.18.0 on Node v22.23.2
+    #   audit date     : 2026-09-01 (UTC)
+    #
+    #   actions/checkout @ 3d3c42e5aac5ba805825da76410c181273ba90b1  (release v7.0.1)
+    #     action runtime : node24   (read from action.yml at that commit)
+    #     audit exit     : 1
+    #     RESIDUAL       : 1 vulnerable node - 0 critical, 0 high, 1 MODERATE, 0 low
+    #                      undici (<=6.27.0): GHSA-8xcm-r25x-g524, GHSA-m8rv-5g2x-5cg5,
+    #                      GHSA-v3r7-h72x-cjcm
+    #
+    #   actions/upload-artifact @ 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  (release v7.0.1)
+    #     action runtime : node24   (read from action.yml at that commit)
+    #     audit exit     : 1
+    #     RESIDUAL       : 5 vulnerable nodes - 0 critical, 5 HIGH, 0 moderate, 0 low
+    #                      brace-expansion, fast-xml-builder, fast-xml-parser, lodash, undici
+    #
+    # WHY THESE PINS ANYWAY, given neither audits clean. v7.0.1 is the NEWEST release either
+    # publisher has issued, so no clean release exists to move to - the residual is upstream's
+    # to close, not this file's. What the move DID close is measured rather than asserted, by
+    # running the same audit against the pins this file used to carry:
+    #
+    #   checkout        v4.2.2 -> v7.0.1 : 8 vulnerable nodes (1 high + 7 moderate) -> 1 (1 moderate)
+    #   upload-artifact v4.6.2 -> v7.0.1 : 17 vulnerable nodes (1 CRITICAL form-data
+    #                                      + 6 high + 10 moderate) -> 5 (5 high)
+    #
+    # and the retired action runtime. Both old pins declared `runs.using: node20`, which GitHub
+    # retired on 30 April 2026, so every step using them ran on an end-of-life runtime that
+    # receives no security fixes at all. Both new pins declare node24.
+    #
+    # WHO OWNS THE RESIDUAL AND WHAT CLOSES IT. The bundled-dependency advisories above belong
+    # to actions/checkout and actions/upload-artifact upstream; nothing in this repository can
+    # patch a committed dist/ bundle without forking the action, which would replace a reviewed
+    # publisher pin with an unreviewed local one. The action to take is to RE-RUN THE AUDIT
+    # ABOVE at each pin review, move to the first release whose audit is clean or whose residual
+    # is smaller, and re-date this block in the same edit. A block whose audit date is old is
+    # itself the finding.
+    # ---------------------------------------------------------------------------------------
     #
     # There used to be a third, jwlawson/actions-setup-cmake, and it is gone rather than
     # re-pinned: a digest can only be checked by whoever holds the file, and that action
@@ -828,10 +1021,21 @@ jobs:
     # image. Do not re-introduce the action to "simplify" that step.
     #
     # PINNING CHANGED NO STEP'S INPUTS, and one of those inputs must survive every future
-    # edit: `persist-credentials: false` appears on ALL SEVEN checkouts below and the step
-    # "Verify no Actions credential is persisted in any checkout" fails the job if any of them
-    # loses it. A re-pin that rewrote a checkout step wholesale and dropped that line would
-    # reintroduce a token into a tree this job copies towards an uploaded image.
+    # edit: `persist-credentials: false` appears on ALL EIGHT checkouts below - hdmicec, the
+    # hdmicec payload, googletest, the two rdk-halif-aidl stagings, the Sink caller source and
+    # the two Binder SDK source trees - and the step "Verify no Actions credential is persisted
+    # in any checkout" fails the job if any of them loses it, over that same list of eight. A
+    # re-pin that rewrote a checkout step wholesale and dropped that line would reintroduce a
+    # token into a tree this job copies towards an uploaded image. The v4 -> v7 re-pin above
+    # deliberately rewrote ONLY the `uses:` line of each step, leaving every `with:` input
+    # byte-identical, for exactly that reason.
+    #
+    # THE JOB ALSO DECLARES ITS OWN `permissions:`, and that is not a duplicate of the
+    # workflow-level block. A workflow-level `permissions: contents: read` is inherited only
+    # while nothing overrides it; a job-level declaration is what makes THIS job's token
+    # least-privilege regardless of what a later edit does to the file's top. Every action
+    # invoked below runs with that token, so its scope is part of each pin's blast radius
+    # rather than a separate concern.
     #
     # UPDATE POLICY. The trailing comment on each `uses:` names the release the SHA belongs
     # to. To move one: read the new tag's SHA from the publisher (`git ls-remote --tags
@@ -841,30 +1045,42 @@ jobs:
     # the same two SHAs deliberately; move them together, or the two jobs stop being
     # comparable and the shared build contract between them stops meaning anything.
     #
-    # RUNTIME LINEAGE IS PART OF THE PIN, AND IT IS WHY THE actions/checkout SHA ABOVE IS THE
-    # ONE IT IS. The pin both files used to carry was actions/checkout 3.7.0, on the v3 lineage,
-    # which runs on the Node 16 action runtime - a runtime GitHub has deprecated, and one that
-    # makes an action still running on it emit a deprecation warning in every job that uses it.
-    # v4.2.2 runs on Node 20, which is the lineage actions/upload-artifact is already pinned to
-    # at v4.6.2, so the two actions in this file now share one runtime generation instead of
-    # straddling a deprecated one and a current one. It is worth being explicit about why that
-    # matters HERE and not only as hygiene: seven of the eleven checkout steps across the two
-    # files are in this one, every one of them runs before the step that asserts no credential
-    # was persisted, and every one of them runs on the same filesystem as the payload tree and
-    # the guest image this job publishes - so the runtime an action's own code executes under is
-    # not an incidental detail of this job. The retired release is named above in prose and
-    # nowhere as a pin, which is the state a pin audit expects: grepping this file for the old
-    # digest, or for the old release as the `# vN (vN.N.N)` comment spelled it, comes back
-    # empty.
+    # RUNTIME LINEAGE IS PART OF THE PIN, AND IT IS WHY BOTH SHAs ABOVE ARE ON THE v7 LINEAGE.
+    # An action's `runs.using` names the Node runtime GitHub executes its bundle under, and a
+    # retired runtime receives no security fixes however current the pin's digest looks. This
+    # file has now been through that once in each direction: it carried actions/checkout 3.7.0
+    # on the Node 16 runtime, moved to v4.2.2 on Node 20, and Node 20 itself reached end of
+    # life on 30 April 2026 - so v4.2.2 and v4.6.2 were BOTH on a retired runtime by the time
+    # the pins above were reviewed. v7.0.1 declares node24 for both actions, read from each
+    # action.yml at the pinned commit rather than inferred from the release number.
     #
-    # THAT MAKES A RE-PIN TWO CHECKS RATHER THAN ONE. A committed digest is valid for exactly
-    # ONE release, which is why the SHA and its trailing version comment always move together
-    # - that part is the update policy above. The runtime the new release runs on is the
-    # second check and does not follow from the first: when GitHub retires Node 20, this same
-    # move is needed again, and nothing in this file will say so, because a pin can be
-    # perfectly current as a digest and stale as a runtime while reading identically either
-    # way. Re-check the lineage when the pin is next reviewed, not only the digest, and re-pin
-    # both files in the same edit for the reason the paragraph above gives.
+    # It is worth being explicit about why that matters HERE and not only as hygiene: eight of
+    # the thirteen checkout steps across the two files are in this one, every one of them runs
+    # before the step that asserts no credential was persisted, and every one of them runs on
+    # the same filesystem as the payload tree and the guest image this job publishes - so the
+    # runtime an action's own code executes under is not an incidental detail of this job. Every
+    # retired release is named above in prose and nowhere as a pin, which is the state a pin
+    # audit expects: grepping this file for either old digest, or for either old release as the
+    # `# vN (vN.N.N)` comment spelled it, comes back empty.
+    #
+    # THAT MAKES A RE-PIN THREE CHECKS RATHER THAN ONE, and the third is the one this file used
+    # to omit:
+    #
+    #   1. THE DIGEST. A committed SHA is valid for exactly one release, which is why the SHA
+    #      and its trailing version comment always move together - that part is the update
+    #      policy above.
+    #   2. THE RUNTIME. Read `runs.using` out of the new release's own action.yml. It does not
+    #      follow from the digest: a pin can be perfectly current as a digest and stale as a
+    #      runtime while reading identically either way. When GitHub retires Node 24, this same
+    #      move is needed again and nothing in this file will say so on its own.
+    #   3. THE PRODUCTION AUDIT. Run `npm audit --omit=dev --package-lock-only` against the new
+    #      release's own package-lock.json at the pinned commit and update the PIN AUDIT RECORD
+    #      above with the date and the exact residual counts. This is the check that
+    #      distinguishes "immutable" from "safe", and it is the reason that record exists: both
+    #      pins above still carry a residual, and a residual that is written down and dated can
+    #      be reviewed while an assumed-clean pin cannot.
+    #
+    # Re-pin both files in the same edit for the reason the update policy gives.
     steps:
       # THE JOB-WIDE CMAKE, FETCHED HERE AND VERIFIED BEFORE IT IS UNPACKED.
       #
@@ -951,8 +1167,25 @@ jobs:
       # clang included.
       #
       # debootstrap, e2fsprogs, util-linux and qemu-system-x86 provision and boot the guest.
-      # bc, bison, flex, libelf-dev, libssl-dev, cpio and rsync are the guest kernel's build
+      # bc, bison, flex, libelf-dev, libssl-dev and cpio are the guest kernel's build
       # prerequisites. The perl modules are lcov 2.x's.
+      #
+      # rsync IS DELIBERATELY NOT IN THIS LIST, AND ITS ABSENCE IS A SUPPLY-CHAIN DECISION.
+      # It used to be here, described as a guest-kernel build prerequisite, and it was not one:
+      # the ONLY rsync reference anywhere in the 5.15 kernel build system is in
+      # scripts/Makefile.headersinst via the headers_install target, and this job builds
+      # i386_defconfig, olddefconfig and bzImage - none of which reaches it. Its real use was the
+      # payload staging copy below, which now uses tar for the reasons stated there. Since the
+      # distribution's rsync carries published defects that upstream fixed in 3.5.0 and the
+      # packaged revision does not, the honest response to "it is not needed" is to stop
+      # installing it rather than to leave it on the runner unused. Verified before removal:
+      # rsync appears nowhere in aidl-path-tests-rootfs.sh, nowhere in L1-tests.yml and nowhere
+      # in tests/L1Tests/run_coverage.sh, so nothing else in this job's chain invokes it.
+      #
+      # THE FULL RESOLVED PACKAGE SET IS RECORDED, not just this request line. The step below
+      # writes tools/apt-packages.txt from dpkg-query, which is what makes the toolchain a run
+      # actually used auditable afterwards: this line names what was ASKED for, and dpkg names
+      # what arrived, including every dependency apt pulled in that is not written here.
       #
       # The distribution's own lcov package is deliberately NOT installed on the runner: this
       # job needs 2.x, the archive ships 1.x, and a 1.x binary on PATH beside the one built
@@ -968,7 +1201,292 @@ jobs:
         run: >
           sudo apt-get update
           &&
-          sudo apt-get install -y --no-install-recommends autoconf automake libtool pkg-config libdbus-1-dev libglib2.0-dev build-essential "gcc-$CEC_TOOLCHAIN_GCC_MAJOR" "g++-$CEC_TOOLCHAIN_GCC_MAJOR" gcc-multilib g++-multilib "gcc-$CEC_TOOLCHAIN_GCC_MAJOR-multilib" "g++-$CEC_TOOLCHAIN_GCC_MAJOR-multilib" cmake ninja-build flex bison valgrind clang file binutils curl ca-certificates xz-utils debootstrap e2fsprogs util-linux qemu-system-x86 bc libelf-dev libssl-dev cpio rsync perl libcapture-tiny-perl libdatetime-perl libjson-xs-perl libperlio-gzip-perl libtimedate-perl
+          sudo apt-get install -y --no-install-recommends autoconf automake libtool pkg-config libdbus-1-dev libglib2.0-dev build-essential "gcc-$CEC_TOOLCHAIN_GCC_MAJOR" "g++-$CEC_TOOLCHAIN_GCC_MAJOR" gcc-multilib g++-multilib "gcc-$CEC_TOOLCHAIN_GCC_MAJOR-multilib" "g++-$CEC_TOOLCHAIN_GCC_MAJOR-multilib" cmake ninja-build flex bison valgrind clang file binutils curl ca-certificates xz-utils debootstrap e2fsprogs util-linux qemu-system-x86 bc libelf-dev libssl-dev cpio perl libcapture-tiny-perl libdatetime-perl libjson-xs-perl libperlio-gzip-perl libtimedate-perl
+
+      # THE RUNNER'S PACKAGE SET IS RECORDED IN FULL AND FLOOR-GATED WHERE A FIX EXISTS.
+      #
+      # WHAT WAS WRONG. The install line above is unpinned - it names packages and takes
+      # whatever the archive serves - and the job then emitted no record of what arrived. Both
+      # halves matter. Unpinned means a run can silently use a revision older than the last
+      # security update, because a pre-baked runner image or a lagging mirror serves the release
+      # pocket rather than the updates pocket. No record means that after the fact nobody can
+      # say which toolchain produced a given coverage number or a given green matrix, so a
+      # vulnerability disclosed later cannot be matched against the runs it affected.
+      #
+      # WHY A FLOOR AND NOT AN EXACT PIN. Pinning `pkg=version` on a hosted runner is brittle in
+      # a way that costs more than it buys: the archive removes superseded revisions, so an exact
+      # pin turns every security update into a broken job, and the usual response to a broken job
+      # is to relax the pin - which is worse than never having had one. A floor accepts anything
+      # at or above the newest published revision and REFUSES anything below it, so a stale image
+      # is a named failure while a fresh security update is simply accepted.
+      #
+      # WHERE THE FLOORS COME FROM. Each is the newest revision Launchpad publishes for this
+      # runner's series in any pocket, read from the Launchpad API rather than from a
+      # vulnerability report's suggestion. They are the packages a dependency scan flagged with a
+      # fix available: binutils, GLib, Perl, elfutils (libelf) and cpio, plus the fetch, image and
+      # archive tools this job's guest provisioning depends on. Comparison is dpkg's own, so
+      # epochs and the "ubuntu1.18 is newer than ubuntu1.2" ordering are correct.
+      #
+      # THE FLOORS ARE SERIES-SPECIFIC, so the series is asserted rather than assumed. A change of
+      # runs-on invalidates every value below, and the failure that would produce - a floor from
+      # one series compared against a version from another - is exactly the kind that reads as a
+      # mysterious refusal. The check names it instead.
+      #
+      # WHAT IS RECORDED RATHER THAN GATED, and why that is the honest answer. bison, flex, cmake,
+      # ninja-build, valgrind and clang were each flagged too, and for each one this series
+      # publishes NO revision newer than the one in the release pocket - there is nothing to
+      # require. Inventing a floor for a version that does not exist would produce a job that can
+      # never pass, and silently dropping them would lose the finding. So the observed version is
+      # written into the record with the residual stated beside it, which is reviewable: a reader
+      # can compare the recorded version against the archive on any later date and see whether a
+      # fix has appeared. qemu-system-x86 is gated in the step after this one, with its own floor
+      # and its own named error, because the emulator is the guest's trust boundary rather than a
+      # build tool and belongs with the rest of that boundary's record.
+      - name: Record and gate the runner package set
+        run: |
+          set -euo pipefail
+          record="$GITHUB_WORKSPACE/tools/apt-packages.txt"
+          mkdir -p -- "$(dirname -- "$record")"
+          rc=0
+
+          # The series these floors were derived against. Read from the runner rather than
+          # restated, so a runs-on change cannot pass this silently. The file is PARSED and not
+          # sourced: it is a system file this step has no reason to execute, and the one field
+          # wanted is a plain assignment.
+          floor_series='noble'
+          codename=''
+          if [ -r /etc/os-release ]; then
+            codename="$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release | tr -d '\42\47' | head -n 1)"
+          fi
+          if [ "$codename" != "$floor_series" ]; then
+            echo "::error::the minimum-version floors in this step were derived from the '$floor_series' archive, but this runner reports VERSION_CODENAME='${codename:-<unreadable>}'. Comparing a floor from one series against a version from another is meaningless in both directions, so the comparison is refused rather than performed. If runs-on changed deliberately, re-derive every floor below from the new series' published revisions and record the date; do not delete the check."
+            exit 1
+          fi
+
+          # THE FULL MANIFEST FIRST, because it is evidence and must exist even if a floor fails.
+          # source:Version is empty when it equals the binary version, which is dpkg's own
+          # convention and not a gap in the record.
+          {
+            echo "# The resolved package set for this run of .github/workflows/aidl-path-tests.yml"
+            echo "# series: $codename    recorded by: dpkg-query -W"
+            echo "# columns: binary-package<TAB>binary-version<TAB>source-package<TAB>source-version"
+            echo "# (an empty source-version means it is identical to the binary version)"
+            dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' \
+              | LC_ALL=C sort
+          } > "$record"
+          package_count="$(dpkg-query -W -f='.\n' | wc -l | tr -d ' ')"
+          echo "recorded $package_count installed packages in $record"
+
+          # THE FLOORS. One package per line, "name  minimum-version", derived from Launchpad's
+          # published revisions for this series. Comparison is dpkg --compare-versions ge.
+          echo "" >> "$record"
+          echo "# MINIMUM-VERSION GATE (floor = newest revision published for $codename)" >> "$record"
+          echo "================ RUNNER PACKAGE FLOORS ================"
+          while read -r pkg floor; do
+            case "$pkg" in ''|'#'*) continue ;; esac
+            installed="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || true)"
+            if [ -z "$installed" ]; then
+              echo "::error::$pkg is not installed, but it is named in the install list above and carries a minimum-version requirement. A missing package cannot be gated, and the job would fail later in a place that says nothing about why."
+              printf '%s\tMISSING\tfloor %s\tFAIL\n' "$pkg" "$floor" >> "$record"
+              rc=1
+            elif dpkg --compare-versions "$installed" ge "$floor"; then
+              printf '  %-18s %-34s >= %s  OK\n' "$pkg" "$installed" "$floor"
+              printf '%s\t%s\tfloor %s\tOK\n' "$pkg" "$installed" "$floor" >> "$record"
+            else
+              echo "::error::$pkg is installed at $installed but this job requires at least $floor, which is the newest revision the $codename archive publishes. A lower revision means this runner is serving the release pocket or a stale mirror, so the run would be built with a package that has a published fix available and not applied. Re-run apt-get update, or establish why this archive is behind - do not lower the floor."
+              printf '%s\t%s\tfloor %s\tFAIL\n' "$pkg" "$installed" "$floor" >> "$record"
+              rc=1
+            fi
+          done <<'FLOORS'
+          binutils        2.42-4ubuntu2.10
+          libglib2.0-dev  2.80.0-6ubuntu3.8
+          libglib2.0-0t64 2.80.0-6ubuntu3.8
+          perl            5.38.2-3.2ubuntu0.4
+          libelf-dev      0.190-1.1ubuntu0.1
+          libelf1t64      0.190-1.1ubuntu0.1
+          cpio            2.15+dfsg-1ubuntu2.1
+          libssl-dev      3.0.13-0ubuntu3.15
+          util-linux      2.39.3-9ubuntu6.6
+          xz-utils        5.6.1+really5.4.5-1ubuntu0.3
+          curl            8.5.0-2ubuntu10.13
+          e2fsprogs       1.47.0-2.4~exp1ubuntu4.1
+          debootstrap     1.0.134ubuntu2
+          FLOORS
+
+          # THE RESIDUALS. Flagged by a dependency scan, no newer revision published for this
+          # series, therefore recorded with the version observed rather than gated. This is not a
+          # pass and it is not a failure: it is a dated measurement a reviewer can act on.
+          echo "" >> "$record"
+          echo "# RECORDED RESIDUALS (flagged, no revision newer than the release pocket in $codename)" >> "$record"
+          echo "================ RUNNER PACKAGE RESIDUALS ================"
+          while read -r pkg; do
+            case "$pkg" in ''|'#'*) continue ;; esac
+            installed="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || true)"
+            printf '  %-14s %s  RESIDUAL - no fixed revision published for %s\n' \
+              "$pkg" "${installed:-<not installed>}" "$codename"
+            printf '%s\t%s\tno fixed revision published for %s\tRESIDUAL\n' \
+              "$pkg" "${installed:-<not installed>}" "$codename" >> "$record"
+          done <<'RESIDUALS'
+          bison
+          flex
+          cmake
+          ninja-build
+          valgrind
+          clang
+          RESIDUALS
+          echo "  ^ these are RECORDED, not accepted as clean. Each was flagged by a dependency"
+          echo "    scan and this series publishes nothing newer, so there is no floor to require."
+          echo "    The remedy is upstream's or the distribution's; what this job owes is a dated"
+          echo "    record of exactly which revision a run used, which is in $record."
+          echo "================ END RUNNER PACKAGE SET ================"
+          [ "$rc" -eq 0 ] || exit 1
+
+      # THE VIRTUALIZATION BOUNDARY, RECORDED AND GATED BEFORE ANYTHING RELIES ON IT.
+      #
+      # WHAT WAS WRONG. qemu was apt-installed and then used, and nothing in between recorded
+      # which qemu it was or refused an older one. That is a real gap rather than an untidiness:
+      # this job boots a guest running repository-controlled code as root, and the qemu process
+      # IS the boundary between that guest and the runner's own memory. A run on a qemu missing
+      # published security revisions would produce evidence indistinguishable from a run on a
+      # current one, because nothing said which was which.
+      #
+      # WHAT THIS STEP ESTABLISHES, in order, and each on its own account:
+      #
+      #   1. THE PROGRAM VERSION, measured from the binary this job will actually invoke and
+      #      held to QEMU_MIN_PROGRAM_VERSION. Catches a runner label or a self-hosted host
+      #      offering an older QEMU codebase.
+      #   2. THE PACKAGE REVISION, read from dpkg and held to QEMU_MIN_PACKAGE_VERSION with
+      #      `dpkg --compare-versions`, which is Debian's own comparison rather than a string
+      #      sort that would order 1.18 before 1.2. Catches a stale mirror serving an 8.2.2
+      #      that is missing Canonical's security patches while reporting the same program
+      #      version. Both floors are documented in this file's env with their provenance.
+      #   3. THAT THIS BUILD SUPPORTS SECCOMP CONFINEMENT AT ALL, by probe rather than by
+      #      assumption - the boot step below passes -sandbox unconditionally, and a build
+      #      without CONFIG_SECCOMP would fail there, forty minutes of provisioning later,
+      #      with a message about an unknown option.
+      #   4. THAT THE PROBE IN 3 DISCRIMINATES, by a NEGATIVE CONTROL. A deliberately invalid
+      #      sandbox key must be REFUSED. Without this, a future QEMU that ignored unknown
+      #      keys would let check 3 pass while proving nothing, which is the failure mode a
+      #      capability probe is most prone to.
+      #   5. THAT THE FILTER IS ACTUALLY INSTALLABLE, not merely parseable. `-version` exits
+      #      inside the option loop, before the filter is applied, so check 3 alone proves only
+      #      that the keys are recognised. `-machine none` with QMP over stdio takes QEMU all
+      #      the way through initialisation - installing the seccomp filter - and then quits
+      #      cleanly, without emulating a guest or touching the image.
+      #
+      # IT RUNS HERE, immediately after the install and before the two GoogleTest builds, the
+      # four Binder/AIDL builds, the kernel build, debootstrap and the image build, so a
+      # boundary that cannot be established costs seconds instead of an hour.
+      #
+      # THE MEASUREMENTS ARE RECORDED, not just checked, into tools/qemu-boundary.txt, which
+      # "Upload the provisioning records" attaches and the artifact-completeness gate requires.
+      # A reader disputing this job's evidence needs to know which qemu produced it.
+      - name: Record and gate the QEMU virtualization boundary
+        run: |
+          set -euo pipefail
+          record="$GITHUB_WORKSPACE/tools/qemu-boundary.txt"
+          mkdir -p -- "$(dirname -- "$record")"
+          rc=0
+
+          # The binary this job invokes, resolved by the same name the boot step uses rather
+          # than assumed to be at a path.
+          qemu_bin="$(command -v qemu-system-i386 || true)"
+          if [ -z "$qemu_bin" ]; then
+            echo "::error::qemu-system-i386 is not on PATH, so this job cannot boot the binder-capable guest and cannot produce the A-E matrix. The 'Install packages' step installs qemu-system-x86, which provides it; check that it ran."
+            exit 1
+          fi
+
+          # 1. THE PROGRAM VERSION. Parsed from the first line's 'version <n.n.n>' rather than
+          #    by field position, because the parenthesised distribution suffix that follows it
+          #    differs between builds.
+          program_version="$("$qemu_bin" --version | sed -n '1s/.*version \([0-9][0-9.]*\).*/\1/p')"
+          if [ -z "$program_version" ]; then
+            echo "::error::could not read a version out of '$qemu_bin --version'. This job will not boot a guest on an emulator whose version it cannot state; the boundary between that guest and this runner is the emulator."
+            exit 1
+          fi
+          at_least() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$2" ]; }
+          if ! at_least "$program_version" "$QEMU_MIN_PROGRAM_VERSION"; then
+            echo "::error::qemu-system-i386 reports version $program_version but this job requires at least $QEMU_MIN_PROGRAM_VERSION. An older emulator is REFUSED rather than accepted with a warning: it is the trust boundary around a guest that runs repository-controlled code as root. Do not lower QEMU_MIN_PROGRAM_VERSION to make this pass - establish why this runner offers an older QEMU than the archive publishes."
+            rc=1
+          fi
+
+          # 2. THE PACKAGE REVISION, which is where the security patches live. dpkg's own
+          #    comparison, so epochs and the .18-after-.2 ordering are handled correctly.
+          package_version="$(dpkg-query -W -f='${Version}' qemu-system-x86 2>/dev/null || true)"
+          if [ -z "$package_version" ]; then
+            echo "::error::dpkg-query reports no installed version for qemu-system-x86, so the security revision of the emulator cannot be established even though a binary was found. A qemu from outside the archive is not what this pin was reviewed against."
+            rc=1
+          elif ! dpkg --compare-versions "$package_version" ge "$QEMU_MIN_PACKAGE_VERSION"; then
+            echo "::error::qemu-system-x86 is installed at $package_version but this job requires at least $QEMU_MIN_PACKAGE_VERSION. That floor is the newest revision Launchpad publishes for this runner's series, so a lower one means a stale mirror or a pre-baked image older than the last security update - the program version alone would not have shown it. Re-run apt-get update, or establish why this archive is behind."
+            rc=1
+          fi
+
+          # 3. SECCOMP SUPPORT, BY PROBE. -sandbox is only a recognised option when the build
+          #    has CONFIG_SECCOMP, so acceptance of the exact key set this job uses is the
+          #    capability check. -version exits inside the option loop, so nothing is emulated.
+          sandbox_parse_log="$(mktemp)"
+          if "$qemu_bin" -sandbox "$QEMU_SANDBOX_OPTIONS" -version > /dev/null 2> "$sandbox_parse_log"; then
+            sandbox_supported=yes
+          else
+            sandbox_supported=no
+            echo "::error::this qemu build does not accept '-sandbox $QEMU_SANDBOX_OPTIONS'. Either it was built without seccomp support or one of the key names has changed, and in both cases the boot step below - which passes the same option - would fail after the whole guest had been provisioned. What it reported:"
+            sed 's/^/  /' -- "$sandbox_parse_log"
+            echo "::error::do NOT respond by dropping -sandbox from the boot step. It is what bounds the host-side impact of CVE-2026-48914, for which no fixed QEMU exists; install a qemu built with seccomp support instead."
+            rc=1
+          fi
+
+          # 4. THE NEGATIVE CONTROL for check 3. An invalid key must be refused, or check 3
+          #    proves nothing about a build that ignores what it does not recognise.
+          if "$qemu_bin" -sandbox 'on,cec-not-a-real-sandbox-key=deny' -version > /dev/null 2>&1; then
+            echo "::error::this qemu ACCEPTED a deliberately invalid sandbox key ('cec-not-a-real-sandbox-key'), so it does not validate the -sandbox key set and the capability probe above cannot be trusted. Establish that the four denials this job relies on are really applied before booting a guest that runs repository-controlled code as root."
+            rc=1
+            sandbox_discriminates=no
+          else
+            sandbox_discriminates=yes
+          fi
+
+          # 5. THE FILTER IS INSTALLED, NOT MERELY PARSED. -machine none has no guest at all;
+          #    the QMP handshake and quit take QEMU through the initialisation that applies the
+          #    seccomp filter and then out again. A bounded timeout, because a probe that hangs
+          #    is a probe that costs the job its whole allowance.
+          sandbox_install_log="$(mktemp)"
+          if printf '{"execute":"qmp_capabilities"}\n{"execute":"quit"}\n' \
+               | timeout 120 "$qemu_bin" \
+                   -sandbox "$QEMU_SANDBOX_OPTIONS" \
+                   -machine none -display none -nodefaults -no-user-config -qmp stdio \
+                   > "$sandbox_install_log" 2>&1; then
+            sandbox_installed=yes
+          else
+            sandbox_installed=no
+            echo "::error::qemu could not complete initialisation with the seccomp filter applied, so the boot step below would fail the same way after the guest had been provisioned. This is the runtime half of the sandbox check and it is separate from the parse-time half above: the keys are recognised but the filter itself did not install. What it reported:"
+            sed 's/^/  /' -- "$sandbox_install_log"
+            rc=1
+          fi
+
+          {
+            echo "# The QEMU virtualization boundary for this run of .github/workflows/aidl-path-tests.yml"
+            echo "# The guest boots repository-controlled code as root; this process is the boundary."
+            printf 'binary                     %s\n' "$qemu_bin"
+            printf 'program version            %s   (floor %s)\n' "$program_version" "$QEMU_MIN_PROGRAM_VERSION"
+            printf 'qemu-system-x86 package    %s   (floor %s)\n' "${package_version:-<not installed via dpkg>}" "$QEMU_MIN_PACKAGE_VERSION"
+            printf 'seccomp option accepted    %s\n' "$sandbox_supported"
+            printf 'seccomp probe discriminates %s\n' "$sandbox_discriminates"
+            printf 'seccomp filter installs    %s\n' "$sandbox_installed"
+            printf 'sandbox options at boot    -sandbox %s\n' "$QEMU_SANDBOX_OPTIONS"
+            printf 'root block device model    emulated AHCI (-device ahci + -device ide-hd); virtio-blk deliberately NOT instantiated\n'
+            echo "# Unfixed upstream, bounded rather than closed by the sandbox above:"
+            echo "#   CVE-2026-48914  virtio-blk OOB write in the QEMU host heap, affects through 11.0.1"
+            echo "#   CVE-2024-8612   virtio-blk/scsi/crypto bounce-buffer host memory disclosure"
+            echo "# Neither device model is instantiated by this job's boot line, which is the actual answer;"
+            echo "# the guest kernel additionally asserts CONFIG_VIRTIO_BLK absent so the two sides must agree."
+          } > "$record"
+
+          echo "================ QEMU VIRTUALIZATION BOUNDARY ================"
+          cat -- "$record"
+          echo "================ END QEMU VIRTUALIZATION BOUNDARY ================"
+          rm -f -- "$sandbox_parse_log" "$sandbox_install_log"
+          [ "$rc" -eq 0 ] || exit 1
+          echo "the emulator this job will boot is recorded above, meets both committed floors, and applies the seccomp filter"
 
       # THE TOOLCHAIN GATE. IT RUNS BEFORE ANYTHING IS BUILT, AND IT FAILS THE JOB RATHER THAN
       # WARNING.
@@ -1162,7 +1680,7 @@ jobs:
           echo "the pinned toolchain reaches this step by resolved name as well as by absolute path"
 
       - name: Checkout hdmicec
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           path: hdmicec
           # NO ACTIONS CREDENTIAL IS LEFT IN ANY CHECKOUT IN THIS JOB.
@@ -1220,7 +1738,7 @@ jobs:
       # without its Git metadata" copies it without .git and the builder is pointed at that
       # copy, because the image is uploaded as an artifact and .git has no business inside it.
       - name: Checkout hdmicec again as the guest payload
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           path: hdmicec-payload
           # THE MOST IMPORTANT ONE: this tree is the source of the payload that is copied into
@@ -1230,7 +1748,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout googletest
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           repository: google/googletest
           path: googletest
@@ -1242,7 +1760,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout rdk-halif-aidl
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           repository: ${{ env.AIDL_REPOSITORY }}
           path: rdk-halif-aidl
@@ -1250,7 +1768,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout rdk-halif-aidl again for the i386 staging
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           repository: ${{ env.AIDL_REPOSITORY }}
           path: rdk-halif-aidl-i386
@@ -1288,7 +1806,7 @@ jobs:
       # with the same force as the payload tree: this tree's content is copied into the guest
       # image, which is uploaded as an artifact.
       - name: Checkout the Sink caller source for the L1 drift guard
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           repository: ${{ env.SINK_REPOSITORY }}
           path: entservices-hdmicecsink
@@ -1312,7 +1830,7 @@ jobs:
       # with the same force as the payload tree: build-tools is deleted before the image is
       # built, but nothing should rely on a deletion to keep a token out of a published image.
       - name: Checkout the Binder SDK source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           repository: ${{ env.BINDER_SDK_REPOSITORY }}
           path: rdk-halif-aidl/build-tools/linux_binder_idl
@@ -1320,7 +1838,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout the Binder SDK source again for the i386 staging
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
         with:
           repository: ${{ env.BINDER_SDK_REPOSITORY }}
           path: rdk-halif-aidl-i386/build-tools/linux_binder_idl
@@ -2661,14 +3179,27 @@ jobs:
       # kernel that can run it. i386_defconfig is the base and the options below are layered
       # on: the binder set the SDK requires, ashmem, the two IKCONFIG options so the guest can
       # READ its own configuration back out of /proc/config.gz rather than being told what it
-      # is, devtmpfs so /dev is populated before init runs, and ext4 plus virtio-blk because
-      # the payload arrives as a copied disk image rather than an initramfs.
+      # is, devtmpfs so /dev is populated before init runs, and ext4 plus the libata/AHCI
+      # block stack because the payload arrives as a copied disk image rather than an
+      # initramfs. THE ROOT DISK IS DELIBERATELY NOT ON virtio-blk - CONFIG_VIRTIO_BLK is
+      # asserted ABSENT and the boot step attaches the image to an emulated AHCI controller
+      # instead. The reasoning is in the boot step's own comment block; the short form is that
+      # the host's QEMU virtio-blk device model carries an unfixed host-memory disclosure and
+      # an unfixed host-heap out-of-bounds write, and the surest answer to a vulnerable device
+      # model is not to instantiate it.
       #
-      # THE PIN STAYS AT 5.15 AND THE PROTOCOL-7 OPTION IS RESTORED BY PATCH. 5.15 is
-      # binderfs-capable, which the plan requires as an always-required option and which the
+      # THE PIN STAYS ON THE 5.15 SERIES AND THE PROTOCOL-7 OPTION IS RESTORED BY PATCH. 5.15
+      # is binderfs-capable, which the plan requires as an always-required option and which the
       # in-guest init needs; it is also new enough that mainline no longer carries
       # CONFIG_ANDROID_BINDER_IPC_32BIT, which the plan ALSO requires. The step between the
       # fetch and the build closes that gap; its own comment block is the reasoning.
+      #
+      # THE POINT RELEASE WITHIN THAT SERIES IS THE CURRENT LONGTERM ONE, AND IT IS A SECURITY
+      # PIN RATHER THAN A FIXTURE DETAIL. It moved from 5.15.148 to 5.15.219 because the older
+      # release carried 561 OSV advisories - two of them, CVE-2024-26926 and CVE-2024-46740,
+      # in the binder driver this job exists to validate - while 5.15.219 carries none. The
+      # full reasoning, the verification performed and the digest's provenance are in the
+      # GUEST_KERNEL_VERSION and GUEST_KERNEL_SHA256 blocks in this file's env.
       # THE WORK DIRECTORY'S OWNERSHIP, FIXED BEFORE ANYTHING IS WRITTEN INTO IT.
       #
       # Two directories, two owners, and the split is the whole point:
@@ -2934,7 +3465,7 @@ jobs:
           # the pinned tree is not the tree these hunks were written against, and a fuzzed or
           # partial application would produce a kernel whose protocol nobody can predict.
           if ! patch -p1 --dry-run --forward < "$patch_file"; then
-            echo "::error::the CONFIG_ANDROID_BINDER_IPC_32BIT restoration patch does not apply cleanly to linux-$GUEST_KERNEL_VERSION. The hunks were written against 5.15.148's drivers/android/{Kconfig,binder.c,Makefile}; if the pin moved, re-derive them against the new tree rather than loosening the patch. This job does not build a kernel whose binder protocol it cannot state."
+            echo "::error::the CONFIG_ANDROID_BINDER_IPC_32BIT restoration patch does not apply cleanly to linux-$GUEST_KERNEL_VERSION. The hunks are last verified against linux-5.15.219's drivers/android/{Kconfig,binder.c,Makefile} - dry run clean, no fuzz and no offset - so if GUEST_KERNEL_VERSION has moved past that, re-derive them against the new tree rather than loosening the patch. This job does not build a kernel whose binder protocol it cannot state."
             exit 1
           fi
           patch -p1 --forward < "$patch_file"
@@ -2984,7 +3515,12 @@ jobs:
             --enable  EXT4_FS \
             --enable  VIRTIO \
             --enable  VIRTIO_PCI \
-            --enable  VIRTIO_BLK \
+            --enable  SCSI \
+            --enable  BLK_DEV_SD \
+            --enable  ATA \
+            --enable  SATA_AHCI \
+            --enable  ATA_PIIX \
+            --disable VIRTIO_BLK \
             --enable  ANDROID_BINDER_IPC_32BIT
           make ARCH=i386 olddefconfig
 
@@ -2997,7 +3533,8 @@ jobs:
           rc=0
           for option in CONFIG_ANDROID CONFIG_ANDROID_BINDER_IPC CONFIG_ANDROID_BINDERFS \
                         CONFIG_ANDROID_BINDER_DEVICES CONFIG_ASHMEM CONFIG_IKCONFIG_PROC \
-                        CONFIG_DEVTMPFS_MOUNT CONFIG_EXT4_FS CONFIG_VIRTIO_BLK \
+                        CONFIG_DEVTMPFS_MOUNT CONFIG_EXT4_FS CONFIG_SCSI CONFIG_BLK_DEV_SD \
+                        CONFIG_ATA CONFIG_SATA_AHCI CONFIG_ATA_PIIX \
                         CONFIG_SERIAL_8250_CONSOLE; do
             line="$(grep -E "^($option=|# $option is not set)" .config || true)"
             if [ -z "$line" ]; then
@@ -3013,6 +3550,39 @@ jobs:
               esac
             fi
           done
+          # THE VIRTIO-BLK DRIVER, ASSERTED ABSENT RATHER THAN MERELY NOT REQUESTED.
+          # The loop above can only express "this option must be present"; this one is the
+          # opposite polarity and therefore needs its own check. It is the guest half of the
+          # host-side decision recorded in tools/qemu-boundary.txt: the root disk is attached to
+          # an emulated AHCI controller precisely so the QEMU virtio-blk device model - which
+          # carries CVE-2024-8612 (host memory disclosure through the bounce buffer) and
+          # CVE-2026-48914 (out-of-bounds write in the QEMU host heap, unfixed through 11.0.1) -
+          # is never instantiated. Asserting the driver absent here is what makes the two sides
+          # agree: a half-revert that restores `if=virtio` on the boot line without restoring
+          # this option gives a guest with no driver for its root disk and fails at mount, and a
+          # half-revert that restores this option without the boot line fails HERE by name. The
+          # option is explicitly --disable'd above rather than left to i386_defconfig, so
+          # "absent from .config" is itself a failure - it would mean the request did not reach
+          # the resolved configuration at all.
+          virtio_blk_state="$(grep -E '^(CONFIG_VIRTIO_BLK=|# CONFIG_VIRTIO_BLK is not set)' .config || true)"
+          case "$virtio_blk_state" in
+            '# CONFIG_VIRTIO_BLK is not set')
+              echo "  $virtio_blk_state"
+              echo "    ^ REQUIRED ABSENT. The root disk is on emulated AHCI (-device ahci +"
+              echo "      -device ide-hd) so QEMU's virtio-blk device model is not instantiated."
+              echo "      CVE-2024-8612 and CVE-2026-48914 are both virtio-blk-specific and"
+              echo "      CVE-2026-48914 has no fixed QEMU release, so not instantiating the"
+              echo "      device model is the remedy rather than a version bump."
+              ;;
+            '')
+              echo "::error::CONFIG_VIRTIO_BLK is ABSENT from the resolved configuration - neither set nor explicitly unset - even though this build explicitly requests --disable VIRTIO_BLK. That means the request did not reach .config and the resolved state is unknown. Do not proceed: re-check the scripts/config invocation above."
+              rc=1
+              ;;
+            *)
+              echo "::error::CONFIG_VIRTIO_BLK resolved to '$virtio_blk_state' rather than being unset. This guest would carry the virtio-blk driver, and the only reason to carry it is to attach the root disk to QEMU's virtio-blk device model - which is exactly what this job avoids, because CVE-2026-48914 (OOB write in the QEMU host heap) has no fixed release through 11.0.1 and CVE-2024-8612 leaks host memory through the same code. If a future change genuinely needs virtio-blk, that is a security decision to take deliberately: change the boot line, this option, tools/qemu-boundary.txt and the console root-device assertion together, and record why."
+              rc=1
+              ;;
+          esac
           # THE PROTOCOL-7 OPTION, ASSERTED IN THE BUILT CONFIGURATION AND NOT MERELY REQUESTED.
           # This is the check that proves the restoration patch took effect. Its shape matters:
           # the restored symbol has no prompt string, exactly as upstream's did, so it is a
@@ -3235,17 +3805,58 @@ jobs:
       # documentation. GitHub's token formats are prefixed and fixed-length, which is what
       # makes a shape match precise enough to be worth running.
       #
-      # rsync is used rather than cp because --exclude is the whole point, and it is installed
-      # by the package step above.
+      # THE COPY IS DONE WITH tar, NOT WITH rsync, AND THAT IS A SUPPLY-CHAIN DECISION.
+      #
+      # This is the one copy in the whole job whose INPUT is a repository-controlled tree: every
+      # file under hdmicec-payload/ arrives from a checkout, so its names, its depth, its
+      # symlinks and its sizes are all chosen by whoever wrote the branch under test. That makes
+      # the program performing the copy part of the attack surface rather than a utility, and
+      # rsync is the wrong program to put there for a reason that has nothing to do with this
+      # workflow: the distribution's rsync carries a set of published defects in its own file-
+      # list and argument handling that upstream fixed in 3.5.0 and that the packaged version
+      # does not have. tar performs this copy exactly, is in every base image, and is already
+      # relied on by this job for the lcov and CMake tarballs.
+      #
+      # THE REPLACEMENT WAS MEASURED, NOT ASSUMED, and it came out strictly closer to the source
+      # than the rsync it replaces. Against a tree built to exercise all seven patterns at
+      # several depths - symlinks (including a dangling one), hard links, 0755 and 0644 modes,
+      # dotfiles, sub-second mtimes and both a .git DIRECTORY and a .git gitlink FILE - the tar
+      # pipe below reproduced the source's member list, content and metadata EXACTLY: same modes,
+      # same symlink targets, same mtimes to the nanosecond, on files, on symlinks and on
+      # directories. `rsync -a` did not: it re-stamped every directory mtime and the symlink's
+      # mtime with the transfer time. Nothing in the payload depends on a directory mtime, so
+      # that was never a defect - but it does mean the exact-copy claim belongs to tar and not to
+      # what was here before.
+      #
+      # Two details make that true and neither is optional:
+      #
+      #   * --format=posix is REQUIRED. The default gnu format stores mtimes truncated to whole
+      #     seconds, so without it the copy loses the sub-second component - measured, not
+      #     theorised.
+      #   * tar's exclusion patterns are unanchored and match at any path component, which is
+      #     what makes '.netrc', 'id_rsa' and '*.pem' behave as rsync's did at every depth.
+      #
+      # TWO BEHAVIOURAL DIFFERENCES EXIST AND BOTH ARE SAFE IN THIS DIRECTION. tar preserves hard
+      # links as hard links where rsync -a (without -H) breaks them into separate files. And
+      # '.git' without a trailing slash also excludes a .git REGULAR FILE - the gitlink pointer a
+      # submodule working tree carries - whereas rsync's '.git/' matched directories only. That
+      # second one is not a cosmetic difference: measured on the same tree, the rsync copy left a
+      # .git gitlink file in the staged payload and FAILED the leftover check below, while the tar
+      # copy passes it. Stripping repository metadata is precisely what this step is for, so the
+      # stronger match is the intended one and the check below still asserts the outcome
+      # independently rather than trusting the exclusion list.
       - name: Stage the guest payload without its Git metadata
         run: |
           set -euo pipefail
           staged="$GITHUB_WORKSPACE/guest-payload"
           rm -rf -- "$staged"
           mkdir -p -- "$staged"
-          rsync -a --exclude '.git/' --exclude '.git-credentials' --exclude '.netrc' \
-            --exclude '.npmrc' --exclude 'id_rsa' --exclude 'id_rsa.pub' --exclude '*.pem' \
-            "$GITHUB_WORKSPACE/hdmicec-payload/" "$staged/"
+          tar --create --format=posix --file - \
+              --directory "$GITHUB_WORKSPACE/hdmicec-payload" \
+              --exclude='.git' --exclude='.git-credentials' --exclude='.netrc' \
+              --exclude='.npmrc' --exclude='id_rsa' --exclude='id_rsa.pub' --exclude='*.pem' \
+              -- . \
+            | tar --extract --file - --preserve-permissions --directory "$staged"
 
           rc=0
           # 1. No repository metadata and no credential store anywhere in the staged tree.
@@ -3426,8 +4037,11 @@ jobs:
           # what stops the staged image, the destination or the lock being substituted between a
           # check and the privileged truncate, mkfs, losetup or rename that follows. That window
           # closed when publish_outputs() returned. What follows needs the opposite: the boot step
-          # runs `qemu-system-i386` WITHOUT sudo, with `-drive ...,cache=writeback` and
-          # `root=/dev/vda rw`, and the guest WRITES its coverage artifacts and its status file
+          # runs `qemu-system-i386` WITHOUT sudo, with the image attached as a writable backend
+          # (`-drive ...,if=none,cache=writeback` behind `-device ahci` + `-device ide-hd`, which
+          # is why the guest's root argument is `root=/dev/sda rw` and not a virtio node - see THE
+          # ROOT DISK IS ON EMULATED AHCI in the boot step), and the guest WRITES its coverage
+          # artifacts and its status file
           # into the filesystem inside this image. A non-root process cannot open a root-owned
           # 0644 file read-write, so the boot would fail with a permission error that has nothing
           # to do with binder, the SDK or the tests.
@@ -3544,6 +4158,43 @@ jobs:
       # restoring the ability to reach the network. Belt and braces, because the two failures
       # look identical from outside and only one of them is visible in this file.
       #
+      # THE ROOT DISK IS ON EMULATED AHCI, DELIBERATELY, AND NOT ON virtio-blk.
+      #
+      # This guest runs repository-controlled code as root, so QEMU is the boundary between that
+      # code and the runner. Two published defects live specifically in QEMU's virtio-blk device
+      # model: CVE-2024-8612, a bounce-buffer HOST-memory disclosure, and CVE-2026-48914, an
+      # out-of-bounds write in the QEMU host heap reachable from a privileged guest and unfixed
+      # through QEMU 11.0.1. There is no version to move to for the second, so the answer is not
+      # a bump - it is to not instantiate the device model at all. `-drive ...,if=none` attaches
+      # the image as a backend with no front-end of its own, and the two `-device` lines put it
+      # behind an emulated AHCI controller (ICH9 SATA, PCI 8086:2922) as a single ide-hd. That is
+      # a different QEMU code path, exercised by every stock cloud image, and it reaches the
+      # guest as an ordinary SCSI disk - hence `root=/dev/sda`, major 8, rather than /dev/vda.
+      #
+      # BOTH SIDES MUST AGREE, so both sides are asserted. The kernel build --disable's
+      # CONFIG_VIRTIO_BLK and refuses to proceed if it resolved any other way, so a half-revert
+      # that restores `if=virtio` here without restoring the driver fails at mount instead of
+      # quietly re-enabling the vulnerable path, and one that restores the driver without the
+      # boot line fails by name in the configuration record. The console assertion below closes
+      # the loop from the third direction: it requires the kernel's own "VFS: Mounted root ... on
+      # device 8:0." line, which virtio-blk can never produce because virtblk registers a
+      # DYNAMIC block major. CONFIG_VIRTIO and CONFIG_VIRTIO_PCI stay enabled - they cost
+      # nothing, this invocation instantiates no virtio device whatsoever, and removing them
+      # would be a change to the guest's transport stack rather than to its block stack.
+      #
+      # THE QEMU PROCESS ITSELF IS CONFINED. -sandbox on with obsolete, elevateprivileges, spawn
+      # and resourcecontrol all denied installs a seccomp filter around the emulator, which is
+      # what bounds the host-side reach of anything that does escape the guest - CVE-2026-48914
+      # included. All four denials are safe for THIS invocation and that was checked rather than
+      # assumed: it uses no obsolete syscall-backed feature, it does not use -runas or any other
+      # privilege drop (so denying setuid/setgid removes nothing it does), it spawns no helper
+      # process (no -netdev with a helper, no -drive with a filter binary, no migration exec), and
+      # it does not set affinity or scheduling priority. The pinned build's ability to install
+      # that filter is PROVEN before this step, not hoped for: the "Record and gate the QEMU
+      # virtualization boundary" step probes the exact option string against a real emulator
+      # start, includes a negative control so a QEMU that ignores unknown sandbox keys cannot
+      # pass, and writes the verdict into tools/qemu-boundary.txt with the version it belongs to.
+      #
       # THE PIPELINE'S STATUS IS CAPTURED, NOT LOST. This step's own `set -uo pipefail` does not
       # turn errexit OFF, and GitHub's default step shell is `bash -e {0}`, so errexit is
       # INHERITED here. Combined with pipefail that meant a qemu failure aborted the step AT the
@@ -3622,11 +4273,14 @@ jobs:
           set +e
           timeout --kill-after=120 "$QEMU_TIMEOUT_SECONDS" \
             qemu-system-i386 \
+              -sandbox "$QEMU_SANDBOX_OPTIONS" \
               -machine pc,accel=tcg \
               -cpu max -smp 2 -m 2048 \
               -kernel "$GUEST_KERNEL_IMAGE" \
-              -drive file="$image_fd_path",format=raw,if=virtio,cache=writeback \
-              -append "root=/dev/vda rw init=$GUEST_INIT_PATH console=ttyS0,115200 panic=-1" \
+              -drive file="$image_fd_path",format=raw,if=none,id=root0,cache=writeback \
+              -device ahci,id=ahci0 \
+              -device ide-hd,drive=root0,bus=ahci0.0 \
+              -append "root=/dev/sda rw init=$GUEST_INIT_PATH console=ttyS0,115200 panic=-1" \
               -nic none \
               -display none -monitor none -serial stdio -no-reboot \
               < /dev/null 2>&1 | tee "$GUEST_CONSOLE_LOG"
@@ -3655,6 +4309,70 @@ jobs:
           if [ "$tee_status" -ne 0 ]; then
             echo "::error::tee exited $tee_status, so $GUEST_CONSOLE_LOG is incomplete or was not written. That log is the ONLY place the BINDER PLATFORM RECORD, the protocol agreement verdict and the branch-arm gate's output exist, so a truncated one is a failure of this job's evidence regardless of how the guest fared. Check free space on the runner: df -h."
             rc=1
+          fi
+
+          # THE ROOT DEVICE THIRD, READ OUT OF THE GUEST'S OWN CONSOLE.
+          #
+          # The boot line above attaches the image to an emulated AHCI controller rather than to
+          # QEMU's virtio-blk device model, because that device model carries CVE-2024-8612 (host
+          # memory disclosure) and CVE-2026-48914 (out-of-bounds write in the QEMU host heap,
+          # with no fixed release through 11.0.1). Two of the three sides of that decision are
+          # already asserted: the kernel build refuses a configuration in which CONFIG_VIRTIO_BLK
+          # resolved to anything but unset, and the "Record and gate the QEMU virtualization
+          # boundary" step records the device topology it expects. This is the third side, and
+          # the only one that speaks for the RUN rather than for its inputs.
+          #
+          # THE DISCRIMINATOR IS THE BLOCK MAJOR, NOT THE DEVICE NAME. init/do_mounts.c prints
+          # "VFS: Mounted root (<fs> filesystem) on device <major>:<minor>." from the numbers the
+          # kernel actually mounted. sd devices are major 8 (SCSI_DISK0_MAJOR in
+          # include/uapi/linux/major.h), a fixed constant; virtio_blk takes its major from
+          # register_blkdev(0, "virtblk"), which is a DYNAMIC allocation and can never be 8. So a
+          # log carrying "on device 8:0." proves the root filesystem came up on the libata/AHCI
+          # path, and no rename or symlink inside the guest can forge it. A boot on the wrong
+          # device model is therefore a named failure here rather than a silent success that
+          # re-instantiates the vulnerable code.
+          #
+          # It is checked only when there is a log to check: when tee failed, the absence of the
+          # line says nothing about the guest, and reporting it as a root-device fault would send
+          # the reader to the wrong place. That case is already a failure on tee's own account.
+          if [ "$tee_status" -eq 0 ] && [ -s "$GUEST_CONSOLE_LOG" ]; then
+            mounted_root="$(grep -E 'VFS: Mounted root \(.*\) on device [0-9]+:[0-9]+\.' -- "$GUEST_CONSOLE_LOG" | tail -n 1 || true)"
+            if [ -z "$mounted_root" ]; then
+              echo "::error::the guest console log carries no 'VFS: Mounted root (...) on device <major>:<minor>.' line, so this job cannot establish which block driver the root filesystem came up on. That line is the kernel's own report and it is printed on every successful root mount, so its absence means either the guest never mounted a root filesystem - read the log for the panic - or the console capture began too late. Do not treat a green matrix without this line as evidence: the AHCI root device is a security decision (CVE-2024-8612, CVE-2026-48914) and it is only established by being measured."
+              rc=1
+            else
+              echo "root device     : $mounted_root"
+              case "$mounted_root" in
+                *'on device 8:0.')
+                  echo "  ^ major 8 is SCSI_DISK0_MAJOR, so the root filesystem came up on the"
+                  echo "    libata/AHCI path this job boots deliberately. virtio_blk registers a"
+                  echo "    DYNAMIC major (register_blkdev(0, \"virtblk\")) and can never be 8,"
+                  echo "    which is what makes this line decisive rather than merely consistent."
+                  ;;
+                *)
+                  echo "::error::the guest mounted its root filesystem on a device other than major 8 minor 0: '$mounted_root'. This job attaches the image to an emulated AHCI controller ON PURPOSE, because QEMU's virtio-blk device model carries CVE-2024-8612 (host memory disclosure through the bounce buffer) and CVE-2026-48914 (out-of-bounds write in the QEMU host heap, unfixed through 11.0.1), and a guest that booted from something else means the -drive/-device topology, the kernel's block configuration or the root= argument has been changed away from that decision. Establish which of the three moved and restore the agreement rather than relaxing this check."
+                  rc=1
+                  ;;
+              esac
+            fi
+
+            # THE NEGATIVE HALF, kept narrow so it cannot fire on unrelated text. These three
+            # tokens exist in a console log only if the virtio block path was actually restored:
+            # the driver's own name as the kernel prints it when it probes, and the root=
+            # argument as the kernel echoes it back on two separate lines.
+            virtio_evidence="$(grep -nE 'virtio_blk|virtblk|root=/dev/vd' -- "$GUEST_CONSOLE_LOG" | head -n 5 || true)"
+            if [ -n "$virtio_evidence" ]; then
+              echo "::error::the guest console log contains evidence that the virtio block path was used, which this job deliberately does not instantiate (CVE-2024-8612, CVE-2026-48914 - the second has no fixed QEMU release through 11.0.1). First matches follow; correct the boot line, the kernel configuration and root= together rather than removing this check."
+              printf '%s\n' "$virtio_evidence"
+              rc=1
+            fi
+
+            # AND THE COMMAND LINE THE KERNEL ITSELF RECEIVED, which is the one place a wrong
+            # root= shows up even on a boot that then failed before mounting anything.
+            if ! grep -qE 'Kernel command line: (.* )?root=/dev/sda( |$)' -- "$GUEST_CONSOLE_LOG"; then
+              echo "::error::the guest console log does not show the kernel receiving 'root=/dev/sda' on its command line. The -append above passes it, so a log without it means either the append was changed or the log is missing the kernel's early output. root=/dev/sda is the AHCI/libata node that pairs with this job's -device ahci/-device ide-hd topology; /dev/vda would mean the virtio-blk device model was re-instantiated."
+              rc=1
+            fi
           fi
 
           [ "$rc" -eq 0 ] || exit "$rc"
@@ -3940,6 +4658,10 @@ jobs:
             "the kernel configuration that was actually built, which is where a reader checks the binder options and the protocol"
           require_artifact "$GITHUB_WORKSPACE/tools/supply-chain-pins.txt" \
             "the resolved pins that fix WHICH source was compiled"
+          require_artifact "$GITHUB_WORKSPACE/tools/apt-packages.txt" \
+            "the runner's resolved package set - exact binary and source versions of everything installed, plus the minimum-version gate's verdicts and the recorded residuals - without which the toolchain a run used cannot be audited after the fact"
+          require_artifact "$GITHUB_WORKSPACE/tools/qemu-boundary.txt" \
+            "the virtualization boundary's own record: the emulator version that was gated, its seccomp verdict and the root device model, without which the guest's isolation is claimed rather than measured"
           require_artifact "$GITHUB_WORKSPACE/tools/i386-protocol7-toolchain.cmake" \
             "one of the two records that fix the wire protocol on the userspace side"
           require_artifact "$GITHUB_WORKSPACE/tools/i386-binder-CMakeCache.txt" \
@@ -3965,7 +4687,7 @@ jobs:
       # in a separate checked-in file. So this upload is the gate's result, alongside the trace.
       - name: Upload the guest console log
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 (v4.6.2)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (v7.0.1)
         with:
           name: guest-console-aidl-path-tests
           path: qemu-work/host/guest-console.log
@@ -3982,7 +4704,7 @@ jobs:
       # run_invocation_<L>.log for every one of A through E.
       - name: Upload the coverage artifacts
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 (v4.6.2)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (v7.0.1)
         with:
           name: coverage-aidl-path-tests
           path: coverage-artifacts/
@@ -3990,19 +4712,24 @@ jobs:
 
       # How the guest was provisioned, so a later reader can reproduce or dispute it: the image
       # manifest, the kernel configuration that was actually built, the resolved supply-chain
-      # pins that fix WHICH SOURCE was compiled, the two records that fix the wire protocol on
+      # pins that fix WHICH SOURCE was compiled, the runner's full resolved package set with the
+      # minimum-version gate's verdicts and its recorded residuals, the virtualization boundary's own record
+      # (emulator version against its committed floor, the seccomp verdict and the root device
+      # model), the two records that fix the wire protocol on
       # the userspace side, and the kernel patch that makes protocol 7 reachable at all. The patch is uploaded because it is the least conventional thing this
       # job does and the first thing a reader will want to inspect: it is generated from a
       # heredoc in this workflow, so the uploaded copy is exactly what was applied.
       - name: Upload the provisioning records
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 (v4.6.2)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (v7.0.1)
         with:
           name: provisioning-aidl-path-tests
           path: |
             qemu-work/publish/cec-l2-rootfs.ext4.manifest
             qemu-work/host/kernel/config
             tools/supply-chain-pins.txt
+            tools/apt-packages.txt
+            tools/qemu-boundary.txt
             tools/i386-protocol7-toolchain.cmake
             tools/i386-binder-CMakeCache.txt
             kernel-src/binder-ipc32-restore.patch

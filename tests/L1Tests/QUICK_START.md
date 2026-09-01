@@ -322,7 +322,22 @@ with *"threshold must be between 0 and 100"*, the same as `101`.  That is worth
 stating because it did not always hold — an arithmetic `[ -gt ]` returns status
 **2**, not false, for a value the shell cannot hold, so such a bar used to pass
 validation untouched and reach `lcov`.  `./run_coverage.sh --selftest` holds
-the guard to both ends of that range as step 3 of 4 and runs no suite.
+the guard to both ends of that range as step 3 of 6 and runs no suite; steps 4
+and 5 are the two guards added since -- the untrusted-value renderer and the
+direct-object loader guard below.
+
+**Every action of `run_coverage.sh`, `--help` and `--selftest` and `--restore`
+included, is REFUSED when `LD_PRELOAD`, `LD_AUDIT`, `LD_PROFILE`,
+`LD_DYNAMIC_WEAK` or `LD_ORIGIN_PATH` is set.**  Those name objects to load or
+change how symbols bind, so the loader-path rebuild this script performs does
+not reach them, and every child of a run -- `lcov`, `gcov`, `genhtml`, `awk`,
+`git`, `make`, both test binaries, the fake host -- would have run someone
+else's object before its own `main`.  The check runs before the script resolves
+its own path, and the refusal prints its remedy:
+`env -u LD_PRELOAD ./run_coverage.sh --build --run`.  The same five are removed
+from every child environment as well.  A set-but-EMPTY value is warned about and
+unset rather than accepted, because glibc activates `LD_DYNAMIC_WEAK` on
+presence and ignores its value.
 A missing or unusable `flock` and an unsafe artifact-directory
 ancestry are **fatal**, not advisory — as is a suite process that **outlives**
 its invocation, which on the L2 tier is the fake service host holding the
@@ -358,7 +373,9 @@ selection is already on legacy and a green run proves nothing.
 **483 is the pre-existing legacy-path baseline**, and the binary now registers 606 cases in 25
 fixtures.  Every total above is measured: A and D on any host, and B, C and E on the Binder-capable
 guest that `.github/workflows/aidl-path-tests.yml` provisions, where all five invocations ran green
-on 2026-09-01 (E: 14 registered, 8 passed, 6 skipped).  A host without a Binder driver cannot
+on 2026-09-01 (E: 14 registered, 8 passed, 6 skipped -- recorded before
+`DualPathHostLifecycleTest` was added, so a re-run registers 15 and should report 9 passed and the
+same 6 skips; no E run has been performed since, and that expectation is not a measurement).  A host without a Binder driver cannot
 reproduce B, C or E at all — `run_coverage.sh` reports those three DEFERRED there, never as passes.  The counts are documentation, not the gate — `run_coverage.sh` asks the binary how many
 cases each filter selects, every time.
 
@@ -443,8 +460,12 @@ workflow, script or documented command supplies either:
   Unset simply means no parent wants to drive events (the standalone-run case); set-but-unusable is
   a hard failure with its own exit code (**8** for a mis-wired channel, **9** for one that breaks
   mid-run).  This channel is what lets invocation E assert the
-  **inbound** leg, which is why **8 of E's 14 cases are mandatory** -- the 6 `DualPathLegacyFlowTest`
-  cases are E's permitted skips, exactly as the 4 `DualPathAidlFlowTest` cases are D's.
+  **inbound** leg, which is why **8 of E's 14 cases were mandatory** when E was last run -- the 6
+  `DualPathLegacyFlowTest` cases are E's permitted skips, exactly as the 4 `DualPathAidlFlowTest`
+  cases are D's.  The tier has since gained `DualPathHostLifecycleTest`, which is mandatory under
+  both, so the mandatory counts are now 11 of 15 for D (measured) and 9 of 15 for E (expected on a
+  re-run).  Neither number is written down anywhere the run consults: `run_coverage.sh` derives
+  "the selection minus the permitted set" from the binary each time.
 
 `README.md` has the detail.
 
@@ -522,11 +543,11 @@ build, so `configure` fails naming the roots it tried when a prefix does not res
 
    **A bare `./run_L1Tests` exits 1** — see [Run Tests Manually](#run-tests-manually)
 6. Test the L2 tier — **invocation D**.  Same two forms, same working-directory rule:
-   - **from `tests/L2Tests`**: `CEC_TEST_AIDL_MODE=absent ./run_L2Tests` — measured **14 executed,
-     10 passed, 4 permitted skips, exit 0**.  A bare `make check` from this directory is the same
+   - **from `tests/L2Tests`**: `CEC_TEST_AIDL_MODE=absent ./run_L2Tests` — measured **15 executed,
+     11 passed, 4 permitted skips, exit 0**.  A bare `make check` from this directory is the same
      route through automake and also exits 0
    - **from the submodule root**: `make -C tests/L2Tests check` — measured `PASS: run_L2Tests`,
-     `# TOTAL: 1  # PASS: 1`, exit 0.  Again **one test, the whole binary**: the 14/10/4 belong to
+     `# TOTAL: 1  # PASS: 1`, exit 0.  Again **one test, the whole binary**: the 15/11/4 belong to
      the runner form above, not to this one
 
 Or let `./run_coverage.sh --build --run` drive the matrix: it runs A and D here and reports

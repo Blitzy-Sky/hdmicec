@@ -258,6 +258,7 @@
 #include <cerrno>
 #include <climits>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -268,6 +269,164 @@
 #include <time.h>
 #include <unistd.h>
 #include <vector>
+
+/*
+ * RENDERING AN UNTRUSTED VALUE INTO A DIAGNOSTIC.  CWE-117, closed by construction.
+ *
+ * THE DEFECT THIS REMOVES.  Diagnostics in this file used to stream caller-supplied text
+ * verbatim.  A value carrying a newline therefore did not appear inside a message - it ENDED
+ * that message and began a line of its own, and a line beginning "::error::" is a GitHub
+ * Actions workflow command.  Measured before the fix:
+ * CEC_TEST_AIDL_MODE=$'bogus\n::error::FORGED_L1_ANNOTATION' produced a standalone forged
+ * "::error::" annotation in the run log, and a five-thousand-character value produced more
+ * than ten kilobytes of diagnostics, burying the real failure.
+ *
+ * THE CONTRACT, in the order the steps are applied, because the order is what makes the
+ * escaping unambiguous and reversible:
+ *
+ *   (a) a literal backslash becomes \\ FIRST, so that every escape introduced below is
+ *       distinguishable from the same characters occurring literally in the value;
+ *   (b) 0x0A becomes \n, 0x0D becomes \r, 0x09 becomes \t, and EVERY OTHER byte outside
+ *       printable ASCII 0x20..0x7E becomes \xNN in lower-case hex.  The classification is by
+ *       byte value on unsigned char and calls no locale-sensitive function - no isprint, no
+ *       iswprint, no ctype table - so it behaves as it would under LC_ALL=C whatever locale
+ *       the process is in, and no multi-byte sequence can hide a control character inside
+ *       itself;
+ *   (c) the rendering is truncated at RENDER_LIMIT characters and
+ *       "...[truncated, N bytes total]" is appended when it truncates, N being the value's own
+ *       length in bytes.  A caller cannot drown a log, and the message still says how much
+ *       was withheld;
+ *   (d) it is applied to the VALUE and never to the surrounding message, and the result is
+ *       always returned delimited - "..." here - so an empty value is visible as "" rather
+ *       than as a gap in a sentence;
+ *   (e) it never begins a diagnostic line.  Every message keeps its own prefix in front of it,
+ *       and the rendering itself begins with '"'.  Together with (b), which leaves no raw
+ *       newline anywhere in the output, that makes a forged standalone ::error::, ::warning::
+ *       or ::notice:: line UNREACHABLE BY CONSTRUCTION rather than unlikely.
+ *
+ * THIS IS ONE OF FIVE COPIES OF ONE CONTRACT.  The five must not diverge; a change to any of
+ * them is a change to all five.  The others are:
+ *
+ *   - hdmicec/tests/L1Tests/run_coverage.sh                      -- render_untrusted()
+ *   - hdmicec/.github/workflows/aidl-path-tests-rootfs.sh        -- render_untrusted()
+ *   - hdmicec/tests/L1Tests/test_main.cpp                        -- renderUntrustedValue()
+ *   - hdmicec/tests/L2Tests/test_main.cpp                        -- renderUntrustedValue()
+ *   - hdmicec/mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp  -- renderUntrustedValue()
+ *
+ * The two convenience overloads are `inline` so that a copy which happens not to need one of
+ * them in its own file is not a -Wunused-function warning: the five copies are identical by
+ * construction, and which overloads a given file calls is a property of that file's callers.
+ *
+ * They are five file-local copies rather than one shared helper deliberately: two are shell
+ * and three are C++, they live in three build targets and one non-built script, and a shared
+ * header would add a build-system edge for a twenty-line function.  The cost of the choice is
+ * this cross-reference, which is why every copy carries it.
+ */
+
+/** @brief How many rendered characters a diagnostic will carry before it is truncated. */
+static const std::size_t RENDER_LIMIT = 200;
+
+/**
+ * @brief Renders an untrusted byte string as one bounded, escaped, quoted token.
+ *
+ * The five-clause contract above, implemented once. Every diagnostic in this file that names
+ * a value the environment, the command line or another process supplied goes through it.
+ *
+ * @param [in] value  - The bytes to render. Any content at all is acceptable, including
+ *                      embedded newlines, carriage returns, ANSI escape sequences, invalid
+ *                      UTF-8 and multi-kilobyte payloads
+ *
+ * @return std::string  - The rendering, always surrounded by double quotes, always one line,
+ *                        never longer than RENDER_LIMIT characters plus the truncation note
+ *                        and the two quotes
+ *
+ * @post The result contains no byte below 0x20 and no byte above 0x7E, so it cannot terminate
+ *       the line it sits on and cannot begin a new one.
+ *
+ * @warning Apply it to the VALUE only. Rendering a whole message would escape the message's
+ *          own punctuation and destroy the prefix that clause (e) depends on.
+ */
+static std::string renderUntrustedValue(const char *value, std::size_t length)
+{
+    static const char HEX_DIGITS[] = "0123456789abcdef";
+
+    std::string rendered;
+    rendered.reserve(RENDER_LIMIT + 40);
+    rendered.push_back('"');
+
+    std::size_t used = 0;
+    bool truncated = false;
+
+    for (std::size_t index = 0; index < length; ++index) {
+        const unsigned char byte = static_cast<unsigned char>(value[index]);
+        char escape[5];
+        std::size_t escapeLength = 0;
+
+        /*
+         * The backslash arm is FIRST, and that ordering is the whole of clause (a): escaping it
+         * before anything else is introduced is what makes a rendered "\n" unambiguously the
+         * two characters the value contained or unambiguously a newline it contained, never
+         * either.
+         */
+        if (byte == '\\') {
+            escape[0] = '\\'; escape[1] = '\\'; escapeLength = 2;
+        } else if (byte == '\n') {
+            escape[0] = '\\'; escape[1] = 'n';  escapeLength = 2;
+        } else if (byte == '\r') {
+            escape[0] = '\\'; escape[1] = 'r';  escapeLength = 2;
+        } else if (byte == '\t') {
+            escape[0] = '\\'; escape[1] = 't';  escapeLength = 2;
+        } else if (byte >= 0x20u && byte <= 0x7Eu) {
+            escape[0] = static_cast<char>(byte); escapeLength = 1;
+        } else {
+            escape[0] = '\\';
+            escape[1] = 'x';
+            escape[2] = HEX_DIGITS[(byte >> 4) & 0x0Fu];
+            escape[3] = HEX_DIGITS[byte & 0x0Fu];
+            escapeLength = 4;
+        }
+
+        if (used + escapeLength > RENDER_LIMIT) {
+            truncated = true;
+            break;
+        }
+
+        rendered.append(escape, escapeLength);
+        used += escapeLength;
+    }
+
+    if (truncated) {
+        rendered.append("...[truncated, ");
+        rendered.append(std::to_string(static_cast<unsigned long long>(length)));
+        rendered.append(" bytes total]");
+    }
+
+    rendered.push_back('"');
+    return rendered;
+}
+
+/** @brief renderUntrustedValue() for a std::string. @see renderUntrustedValue(const char *, std::size_t) */
+static inline std::string renderUntrustedValue(const std::string &value)
+{
+    return renderUntrustedValue(value.data(), value.size());
+}
+
+/**
+ * @brief renderUntrustedValue() for a C string that may be null.
+ *
+ * A null pointer renders as the four characters <unset>, undelimited, because "unset" and
+ * "set to the empty string" are different facts and a diagnostic that showed both as "" would
+ * be describing the wrong one.
+ *
+ * @see renderUntrustedValue(const char *, std::size_t)
+ */
+static inline std::string renderUntrustedValue(const char *value)
+{
+    if (value == nullptr) {
+        return std::string("<unset>");
+    }
+    return renderUntrustedValue(value, std::strlen(value));
+}
 
 /**
  * @brief Prefix every diagnostic line this program prints carries.
@@ -335,17 +494,13 @@ static const size_t MAX_COMMAND_LINE_LENGTH = 4096;
  */
 static const size_t CONTROL_READ_CHUNK = 512;
 
-/**
- * @brief Longest command text a diagnostic line reproduces, in bytes.
- *
- * A command may legitimately be long - a `deliver` carrying a long payload - and a client that has
- * lost its framing may produce one longer still.  Tracing either in full drowns the very output that
- * has to explain a failure, so a longer command is traced truncated with an ellipsis.  This bounds a
- * diagnostic only: the command itself is dispatched whole.
- *
- * @see serveControlChannel()
+/*
+ * TRACED_COMMAND_LIMIT used to live here and bounded the traced command text at 120 bytes with a
+ * plain substr().  It is gone because renderUntrustedValue() now bounds that trace, at RENDER_LIMIT,
+ * and it escapes as well as bounds - which the substr() did not, so a command carrying a carriage
+ * return reached the log intact.  The bound the trace still has, and why the command itself is
+ * dispatched whole regardless of it, is documented on renderUntrustedValue() and serveControlChannel().
  */
-static const size_t TRACED_COMMAND_LIMIT = 120;
 
 /**
  * @brief Milliseconds one call to writeReplyLine() may spend delivering a reply, in total.
@@ -755,8 +910,9 @@ static bool resolveReadinessFd(int &readinessFd)
      */
     int parsedFd = -1;
     if (!parseDescriptorNumber(rawValue, parsedFd)) {
-        std::cout << TRACE_PREFIX << READY_FD_VARIABLE << " is set to \"" << rawValue
-                  << "\", which is not a usable non-negative file descriptor number" << std::endl;
+        std::cout << TRACE_PREFIX << READY_FD_VARIABLE << " is set to "
+                  << renderUntrustedValue(rawValue)
+                  << ", which is not a usable non-negative file descriptor number" << std::endl;
         return false;
     }
 
@@ -833,15 +989,17 @@ static bool resolveControlChannelFds(int &controlFd, int &observeFd, bool &chann
 
     int resolvedControlFd = -1;
     if (!parseDescriptorNumber(rawControl, resolvedControlFd)) {
-        std::cout << TRACE_PREFIX << CONTROL_FD_VARIABLE << " is set to \"" << rawControl
-                  << "\", which is not a usable non-negative file descriptor number" << std::endl;
+        std::cout << TRACE_PREFIX << CONTROL_FD_VARIABLE << " is set to "
+                  << renderUntrustedValue(rawControl)
+                  << ", which is not a usable non-negative file descriptor number" << std::endl;
         return false;
     }
 
     int resolvedObserveFd = -1;
     if (!parseDescriptorNumber(rawObserve, resolvedObserveFd)) {
-        std::cout << TRACE_PREFIX << OBSERVE_FD_VARIABLE << " is set to \"" << rawObserve
-                  << "\", which is not a usable non-negative file descriptor number" << std::endl;
+        std::cout << TRACE_PREFIX << OBSERVE_FD_VARIABLE << " is set to "
+                  << renderUntrustedValue(rawObserve)
+                  << ", which is not a usable non-negative file descriptor number" << std::endl;
         return false;
     }
 
@@ -1822,17 +1980,17 @@ static int serveControlChannel(int controlFd, int observeFd, FakeHdmiCecService 
 
             if (hasReply) {
                 /*
-                 * The traced command is truncated because a line may legitimately be thousands of
-                 * bytes long - a deliver carrying a long payload, or a client that has lost its
-                 * framing - and a diagnostic that reproduces one in full drowns the log that has to
-                 * explain the failure.
+                 * Both halves of this trace are untrusted and both go through the renderer.  The
+                 * command arrived from another process, so it may carry any byte at all and may be
+                 * thousands of bytes long - a `deliver` with a long payload, or a client that has
+                 * lost its framing.  The reply is derived from it: an unrecognised verb is echoed
+                 * back as "ERR unknown-command <verb>", so the reply carries caller bytes too.
+                 * Rendering supplies the bounding this trace used to do for itself with a plain
+                 * substr() - which is why TRACED_COMMAND_LIMIT is gone: two bounding mechanisms with
+                 * different guarantees is exactly the divergence the one contract exists to prevent.
                  */
-                const std::string tracedLine = (line.size() <= TRACED_COMMAND_LIMIT)
-                                                   ? line
-                                                   : (line.substr(0, TRACED_COMMAND_LIMIT) + "...");
-
-                std::cout << TRACE_PREFIX << "Command \"" << tracedLine << "\" answered \"" << reply
-                          << "\"" << std::endl;
+                std::cout << TRACE_PREFIX << "Command " << renderUntrustedValue(line)
+                          << " answered " << renderUntrustedValue(reply) << std::endl;
 
                 const ReplyOutcome outcome = writeReplyLine(observeFd, reply);
 

@@ -61,10 +61,14 @@ tests/L2Tests/
 ├── .gitignore                    # Ignores this tier's build output, run_L2Tests and
 │                                 #   fake_hdmi_cec_aidl_host included
 ├── test_main.cpp                 # Runner entry point; owns the fake service host's
-│                                 #   lifecycle -- launch, readiness wait, reap
+│                                 #   lifecycle -- launch in its own process group, readiness
+│                                 #   wait, group-wide bounded teardown, reap.  Also carries
+│                                 #   DualPathHostLifecycleTest, the one case that proves it
 └── ccec/
     └── test_DualPathIntegration.cpp # One CCEC round trip, asserted against each
-                                     #   HAL back-end over its real transport.  14 cases;
+                                     #   HAL back-end over its real transport.  14 cases,
+                                     #   the tier's 15th being DualPathHostLifecycleTest in
+                                     #   test_main.cpp;
                                      #   the legacy arm runs anywhere, the AIDL arm needs
                                      #   a Binder-capable host and skips without one
 
@@ -117,7 +121,8 @@ and `MessageDecoderTrackingTest`.
 Everything above is the **legacy-path baseline**: the units enumerated in this section, unmodified.
 The binary also registers the AIDL contract suite from `ccec/test_DriverAidl.cpp` -- **119 cases in
 7 fixtures**, so `run_L1Tests` now registers **606 cases in 25 fixtures** -- and the L2 tier is a
-separate binary again, with **14 cases in 3 fixtures**.
+separate binary again, with **15 cases in 4 fixtures** -- the three integration fixtures in
+`ccec/test_DualPathIntegration.cpp` and `DualPathHostLifecycleTest` in `test_main.cpp`.
 
 **Those 119 are counted here and nowhere else in this guide**, so that no second copy of the total
 can drift away from this one: a passage below that splits them names this same total and points
@@ -283,6 +288,26 @@ The build system has been configured with the following changes:
 The whole sequence is automated — `cd tests/L1Tests && ./run_coverage.sh --build --run` builds
 instrumented, runs every invocation it can, captures coverage and applies the 80% line gate.  What
 follows is that same sequence by hand.
+
+**Clear the direct-object loader variables from your shell before any of it.**  `run_coverage.sh`
+refuses every action — `--build`, `--run`, `--help`, `--selftest` and `--restore` alike — when
+`LD_PRELOAD`, `LD_AUDIT`, `LD_PROFILE`, `LD_DYNAMIC_WEAK` or `LD_ORIGIN_PATH` is set, and it also
+removes those five from every child environment it launches.  They name objects to LOAD, or change
+how symbols bind, so the loader **search path** the script rebuilds from validated roots does not
+reach them: with one set, `lcov`, `gcov`, `genhtml`, `awk`, `git`, `make`, both test binaries and the
+fake service host would each have run an unreviewed object before their own `main`, and the coverage
+figures, the pass counts and the gate verdict would be that object's output as much as the code's.
+The refusal happens at load time, before the script resolves its own path, and prints the remedy:
+
+```bash
+env -u LD_PRELOAD ./run_coverage.sh --build --run
+```
+
+A set-but-empty value is warned about and unset rather than accepted, because glibc activates
+`LD_DYNAMIC_WEAK` on presence and ignores its value.  `LD_LIBRARY_PATH` is **not** in that set: it
+names directories, the script rebuilds it deliberately from roots it has validated, and that rebuild
+is unchanged.  Note also that the in-guest init the rootfs builder generates unsets the same five
+before it exports the build environment, so the guest run starts from the same guarantee.
 
 **On a host with no Binder driver, expect that command to exit `1`, and expect exactly one file to
 be named.**  Measured on this tree, where only invocations A and D could run: **32 source files,
@@ -615,8 +640,8 @@ that a later one cannot overwrite an earlier one's evidence:
 | A | `run_L1Tests` | not reachable | Legacy | 568 selected, 38 excluded | **Yes, on any host: measured 568 of 568 from 23 suites, exit `0`** |
 | B | `run_L1Tests` | in-process, compatible | AIDL, via the local interface | 422 selected, 184 excluded | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 422 of 422 from 15 suites, exit `0`** |
 | C | `run_L1Tests` | in-process, **incompatible** — reports interface hash `"-1"` | Legacy, with the incompatibility logged | 384 selected, 222 excluded | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 384 of 384 from 13 suites, exit `0`** |
-| D | `run_L2Tests` | host not launched | Legacy | 14 registered | **Yes, on any host: measured 10 passed, 4 skipped, exit `0`** |
-| E | `run_L2Tests` | host launched and ready | AIDL, over a real remote proxy | 14 registered | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 8 passed, 6 skipped, exit `0`** |
+| D | `run_L2Tests` | host not launched | Legacy | 15 registered | **Yes, on any host: measured 11 passed, 4 skipped, exit `0`** |
+| E | `run_L2Tests` | host launched and ready | AIDL, over a real remote proxy | 15 registered | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest at the time — 8 passed, 6 skipped of the 14 then registered, exit `0`.  `DualPathHostLifecycleTest` was added after that run and is mandatory here as under D, so a re-run should report 9 passed and 6 skipped; that is an expectation, not a measurement** |
 
 **Where each of the five has and has not run, stated once and exactly, because it is the fact most
 easily blurred.**  On **this** host, and on the **committed** CI runner, invocations **B, C and E
@@ -633,10 +658,11 @@ here: a second copy of a measured figure is a second thing to go stale.
 
 Every Cases figure in the table above is measured, because each comes from listing that
 invocation's own filter against the built binary — but a *selection* total is not a result, which
-is what the right-hand column is for.  The L2 tier's 14 registered cases divide into 4 that belong
-to neither arm, 6 legacy-arm and 4 AIDL-arm, which is why **D reports 10 passed and 4 skipped** and
-**E reports 8 passed and 6 skipped**: a case whose arm is not the resolved back-end skips rather
-than fails.  For why B, C and E cannot run here at all, see
+is what the right-hand column is for.  The L2 tier's 15 registered cases divide into 4 that belong
+to neither arm, 6 legacy-arm, 4 AIDL-arm and 1 that tests the harness itself and is mandatory under
+both, which is why **D reports 11 passed and 4 skipped**: a case whose arm is not the resolved
+back-end skips rather than fails.  E's recorded 8 passed and 6 skipped are of the 14 registered
+before the harness case existed.  For why B, C and E cannot run here at all, see
 [Runtime prerequisites for the AIDL path](#runtime-prerequisites-for-the-aidl-path); for the job
 that is meant to produce them in CI, and its unrun state, see
 [CI/CD Integration](#cicd-integration).
@@ -781,9 +807,9 @@ against a real transport once, in the §4.2 guest, where two of them failed on t
 and were corrected -- each had derived its expected wire image from the caller's pre-header frame --
 so read them as assertions that one purpose-built guest has run, **never as evidence that this host,
 or the committed binder job, has observed delivery over a real proxy or receipt on a binder
-threadpool thread.**  Under invocation D those four cases skip, which is why D reports 10 passed and
-4 skipped rather than 14 passed; under E it is the six legacy-arm cases that skip, which is why E
-reports 8 passed and 6 skipped.
+threadpool thread.**  Under invocation D those four cases skip, which is why D reports 11 passed and
+4 skipped rather than 15 passed; under E it is the six legacy-arm cases that skip, which is why E
+reported 8 passed and 6 skipped of the 14 registered when it last ran.
 
 #### Runtime prerequisites for the AIDL path
 
@@ -1476,7 +1502,7 @@ Four notes on that example:
 1. **Integration tests**: done -- `tests/L2Tests/` is that directory.  It holds its own runner and
    an out-of-process fake AIDL service host, and it asserts one CCEC round trip against each HAL
    back-end over that back-end's real transport.  **The legacy half runs here** -- invocation D,
-   measured 10 passed and 4 skipped of 14, exit `0` -- and **the AIDL half does not**: its four
+   measured 11 passed and 4 skipped of 15, exit `0` -- and **the AIDL half does not**: its four
    cases are the ones that skip, and they need the binder-capable host described under
    [Runtime prerequisites for the AIDL path](#runtime-prerequisites-for-the-aidl-path), where they
    have run once (`blitzy/documentation/Project Guide.md` §4.2, invocation E at 8 passed and 6
@@ -1653,7 +1679,7 @@ The L1 unit test framework provides:
   outcome (see [Back-End Selection](#back-end-selection-the-invocation-matrix))
 - ⚠️ **Both back-ends have been *executed*, each under its own selection -- but not both here.**  The
   legacy selection runs on any host and is measured green -- invocation A at 568 of 568, invocation D
-  at 10 passed and 4 skipped of 14.  The three binder-dependent invocations (B, C, E) are **deferred
+  at 11 passed and 4 skipped of 15.  The three binder-dependent invocations (B, C, E) are **deferred
   on this host and on the committed CI runner**, for want of a Binder kernel driver, and have been
   executed green against a real binder transport in purpose-built binder-capable QEMU guests,
   recorded in `blitzy/documentation/Project Guide.md` §4.2: B 422 of 422, C 384 of 384, E 8 passed
