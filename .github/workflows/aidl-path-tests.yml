@@ -115,12 +115,12 @@ name: aidl-path-tests
 # matching "#define BINDER_IPC_32BIT 1" from drivers/android/binder.c. CONFIG_ANDROID_BINDERFS,
 # which the in-guest init REQUIRES, exists only from 5.0. On a STOCK kernel the two are
 # therefore mutually exclusive, and asking olddefconfig for a Kconfig symbol that does not
-# exist silently produces nothing - which is what an earlier revision of this workflow measured
-# and why it built protocol 8 instead.
+# exist silently produces nothing at all - so a job that leaves the option to the stock tree
+# gets protocol 8 and no diagnostic, not protocol 7.
 #
-# What that conclusion missed is the SIZE of the removal. It was 13 lines of Kconfig plus 4
-# lines of binder.c and nothing else: include/uapi/linux/android/binder.h still carries both
-# branches in 5.15 - "#ifdef BINDER_IPC_32BIT" still selects __u32 binder_size_t and
+# WHAT MAKES PROTOCOL 7 CONSTRUCTIBLE ANYWAY is the SIZE of the removal. It was 13 lines of
+# Kconfig plus 4 lines of binder.c and nothing else: include/uapi/linux/android/binder.h still
+# carries both branches in 5.15 - "#ifdef BINDER_IPC_32BIT" still selects __u32 binder_size_t and
 # BINDER_CURRENT_PROTOCOL_VERSION 7 - and so does the copy vendored inside the Binder SDK
 # itself. So the "Restore CONFIG_ANDROID_BINDER_IPC_32BIT" step below re-adds the option to the
 # pinned 5.15 tree with a minimal patch carried inline, fails hard if the patch does not apply
@@ -155,36 +155,41 @@ name: aidl-path-tests
 # coverage met the bar. Exit 1 is a failure. EXIT 3 IS ADVISORY AND IS NOT A PASS - the script
 # says so in terms, and the image manifest's STATUS_FILE_FORMAT repeats it.
 #
-# ITS BRANCH_MANIFEST IS POPULATED, AND AN EMPTY ENTRY IS NOW A REGRESSION. All 31 records -
-# 29 required arms plus 2 recorded unreachable by construction - carry measured line, block
-# and branch coordinates, read out of a real unfiltered trace and cross-checked against
-# `gcov -b -c -t`. An earlier revision of this comment described the opposite state, and an
-# operator following it would go hunting for empty fields that no longer exist. apply_branch_gate
-# treats an unpopulated record as an arm that was ADDED WITHOUT BEING MEASURED and says so;
-# populating coordinates is not a step this job's first run is expected to leave behind.
+# ITS BRANCH_MANIFEST IS POPULATED, AND AN EMPTY ENTRY IS A REGRESSION. All 92 records - 90
+# required arms plus 2 recorded unreachable by construction, selection.reason-unrecorded and
+# compat.client-era-frozen - carry measured line, block and branch coordinates, read out of a
+# real unfiltered trace and cross-checked against `gcov -b -c -t`. apply_branch_gate treats an
+# unpopulated record as an arm that was added without being measured and says so, so there are
+# no empty fields to go hunting for: populating coordinates is not a step this job's first run
+# leaves behind.
 #
 # WHAT ACTUALLY PRODUCES A NON-ZERO VERDICT NOW, in the order a reader will meet it:
 #
 #   * EXIT 1, THE PER-FILE LINE GATE, on any host where the binder transport turns out not to
-#     be usable. run_coverage.sh defers invocations B, C and E in that case, and the two files
-#     whose AIDL-selected code only those invocations reach - ccec/src/Driver.cpp and
-#     ccec/src/DriverAidlImpl.cpp - fall below the 80% bar, measured at 78.6% (11/14) and
-#     45.6% (160/351) on a
-#     driverless host. Per-file gating is on for an acceptance run, so that is a `die` and a
+#     be usable. run_coverage.sh defers invocations B, C and E in that case, and
+#     ccec/src/DriverAidlImpl.cpp - most of whose body only those invocations reach - falls
+#     below the 80% bar, measured at 58.6% (379/647) on a driverless host. Its sibling
+#     ccec/src/Driver.cpp clears the bar there at 80.0% (12/15), because the legacy-selection
+#     arm of the factory is reached by invocations A and D; the aggregate clears it too, at
+#     86.0% (2405/2795) over 32 source files. So the per-file half is the one that fails, and
+#     it fails on one file. Per-file gating is on for an acceptance run, so that is a `die` and a
 #     1, not an advisory. It is the outcome a driverless host measures today, and it is exactly
 #     what this job's guest provisioning exists to change: binderfs, the device nodes and
 #     servicemanager are all in place before run_coverage.sh starts, so a deferral here means
 #     one of those did not come up and the console log's BINDER PLATFORM RECORD says which.
 #
 #   * EXIT 3, THE DEFERRED ARMS, when those same deferrals happen while the line figures still
-#     clear the bar. 15 of the 29 required arms carry an invocation prerequisite - 14 need
-#     invocation B and one needs invocation C - so a matrix that did not run them leaves those
-#     15 unmeasured. The gate reports each by name with the invocation it needed, never as a
-#     pass and never as a failure of the test set: the cases exist, are compiled into the
-#     binaries, and were not run. Those three figures are BRANCH_MANIFEST's as it stands and
-#     are quoted here so this block says something checkable; the gate counts and prints its
-#     own per run, and its numbers are the ones to trust if the two ever disagree - a stale
-#     count in this comment is what the previous revision of it got wrong.
+#     clear the bar. 31 of the 90 required arms carry a prerequisite - 29 need invocation B, one
+#     needs invocation C, and one needs a usable binder driver with no service registered on it,
+#     which is a condition rather than an invocation letter - so a matrix that did not run them
+#     leaves those 31 unmeasured. The remaining 59 required arms carry no prerequisite at all:
+#     they are enforced and measured on every run, including one on a host with no binder driver,
+#     so a zero on one of those is a failure here and now rather than a deferral. The gate
+#     reports each deferred arm by name with the prerequisite it needed, never as a pass and
+#     never as a failure of the test set: the cases exist, are compiled into the binaries, and
+#     were not run. Those figures are BRANCH_MANIFEST's as it stands and are quoted here so this
+#     block says something checkable; the gate counts and prints its own census per run, and its
+#     numbers are the ones to trust if the two ever disagree.
 #
 #   * EXIT 3, A WEAKENED GATE. COVERAGE_MIN other than 80, --no-per-file-gate,
 #     COVERAGE_GATE_EXEMPT_FILES, GTEST_EXTRA_ARGS, or a capture without --run each record an
@@ -309,7 +314,70 @@ env:
   # reports "main". No token or secret is named anywhere in this file.
   AIDL_REPOSITORY: Blitzy-Sky/rdk-halif-aidl
   AIDL_REF: 3ff17d171a46805decc7408fa69f545c80226d4b
-  GOOGLETEST_REF: v1.15.0
+
+  # GOOGLETEST IS PINNED TO A COMMIT, AND THE TAG SURVIVES ONLY AS THE COMMENT BESIDE IT.
+  #
+  # This used to read the tag `v1.15.0`. A tag is a POINTER ITS PUBLISHER CAN MOVE, and this
+  # tree is not merely downloaded: it is configured, compiled, linked into every test binary
+  # and executed - here on the runner and again inside the guest, whose i386 GoogleTest is
+  # built from this same checkout. Repointing the tag would therefore change compiled, executed
+  # code with no byte changing in this file, which is the identical hazard the action SHAs
+  # further down exist to close; the same argument applies to a dependency's source tree as to
+  # an action's.
+  #
+  # v1.15.0 is a LIGHTWEIGHT tag, so the value it resolves to IS a commit rather than a tag
+  # object, and that value is the one below - read from the publisher with
+  # `git ls-remote --tags https://github.com/google/googletest 'v1.15.0'`.
+  #
+  # UPDATE POLICY, the same one the action pins use: read the new tag's commit from the
+  # publisher, review what changed, then move BOTH the SHA and the tag comment in one edit. The
+  # step "Verify the pinned dependency checkouts" asserts the checked-out HEAD against this
+  # value, so a pin that is edited without the tree agreeing fails there by name rather than
+  # silently building something else. L1-tests.yml pins the same commit; move them together.
+  GOOGLETEST_REF: e39786088138f2749d64e9e90e0f9902daa77c40 # v1.15.0
+
+  # THE BINDER SDK SOURCE IS PINNED TO A COMMIT, AND ITS RESOLUTION IS NOW FAIL-CLOSED.
+  #
+  # WHAT WAS WRONG. Both Binder SDK steps ran `./build_binder.sh` with BINDER_VERSION unset, and
+  # their comments said that was deliberate because the script reads the committed pin out of
+  # rdk-halif-aidl/binder_sdk.version. The script does read it - and then fails OPEN in three
+  # separate places, each of which builds a DIFFERENT Binder SDK than the pin names, silently,
+  # and none of which can be corrected inside the script, which is a read-only input here:
+  #
+  #   1. BINDER_VERSION="${BINDER_VERSION:-${_PINNED_BINDER_VERSION:-2.0.0}}" - an unreadable,
+  #      empty or comment-only binder_sdk.version degrades to 2.0.0.
+  #   2. its clone step returns SUCCESS with only a printed warning when the source directory
+  #      already exists at a different ref, so a stale or substituted tree is built as it stands.
+  #   3. a failed `git checkout "$BINDER_VERSION"` prints "using default branch" and carries on,
+  #      so a ref that does not resolve becomes whatever the default branch is.
+  #
+  # THAT MATTERS MORE IN THIS JOB THAN IN THE HOSTED ONE. The i386 SDK built from this source is
+  # STAGED INTO THE GUEST ROOT IMAGE THIS JOB UPLOADS, and libbinder is the component every
+  # AIDL-path invocation runs against - so an unpinned source tree would put unaccounted code
+  # into a published artefact and into the evidence the matrix produces.
+  #
+  # WHAT THIS JOB DOES INSTEAD. It resolves the source itself, at an immutable commit, once per
+  # staging tree: each is checked out by actions/checkout at BINDER_SDK_COMMIT, its HEAD is
+  # asserted before the build, the script is pointed at it through BINDER_SOURCE_DIR and given
+  # the same commit as BINDER_VERSION, and THE HEAD IS ASSERTED AGAIN after the script returns
+  # and before anything is built from or staged out of the tree - because arm 2 above means the
+  # script's own existing-tree path only warns.
+  #
+  # binder_sdk.version IS STILL READ, and is now a GATE rather than a fallback: the job fails if
+  # the file is missing, unreadable or carries no non-comment value, and fails if its value is
+  # not BINDER_SDK_TAG. That is what keeps the pin living in rdk-halif-aidl and the commit
+  # committed here from drifting apart.
+  #
+  # 2.6.0 IS AN ANNOTATED TAG, unlike the lightweight tags the action pins use: refs/tags/2.6.0
+  # resolves to a TAG OBJECT (1b3148a1297fd4b8ad1c5e94b9e4a7a1b46a360a) and NOT to a commit. The
+  # value below is the commit that tag points at - `git rev-parse refs/tags/2.6.0^{}` - because a
+  # commit is what `git rev-parse HEAD` reports in a checkout and therefore the only thing an
+  # assertion can compare against.
+  #
+  # L1-tests.yml carries these three values under the same three names; move them together.
+  BINDER_SDK_REPOSITORY: rdkcentral/linux_binder_idl
+  BINDER_SDK_TAG: '2.6.0'
+  BINDER_SDK_COMMIT: e5035dc02d810d3c93e03188ca8e3fb7cb165c95 # tag 2.6.0 (annotated; tag object 1b3148a1297fd4b8ad1c5e94b9e4a7a1b46a360a)
 
   # Two CMake installations coexist. The job-wide one stays on the project's pin because the
   # rest of the chain depends on it; the newer one is reached ONLY by a step-scoped PATH
@@ -317,20 +385,30 @@ env:
   # any override hook (no CMAKE_BIN, no CMAKE_COMMAND, no "command -v cmake", no CMAKE=), so
   # an absolute path is not implementable for them. The floor belongs to the BINDER SDK
   # specifically - the AIDL snapshot's own CMakeLists declares cmake_minimum_required 3.8.
-  CMAKE_PINNED_VERSION: '3.16.x'
+  #
+  # THE JOB-WIDE PIN IS AN EXACT RELEASE, NOT A SERIES. It used to read '3.16.x' and was handed
+  # to a third-party setup action, which made it two problems in one line: the patch level was
+  # chosen by the action at run time, so the toolchain could move with no byte changing here;
+  # and the archive was downloaded OUT OF BAND, so nothing this job could compute would show
+  # that the CMake it then ran was bytes Kitware published. "Set up CMake" below now fetches the
+  # exact release itself and holds it to the committed publisher digest below before it is
+  # unpacked. 3.16.9 is the last patch release of the series the project pins, so only the patch
+  # level is new; the series is unchanged and still load-bearing, because 3.20 and later break
+  # the plugin test-library configure.
+  CMAKE_PINNED_VERSION: '3.16.9'
   CMAKE_SDK_FLOOR: '3.22.1'
 
-  # THIS JOB FETCHES THREE EXECUTABLE ARTEFACTS AND VERIFIES ALL THREE AGAINST A DIGEST
+  # THIS JOB FETCHES FOUR EXECUTABLE ARTEFACTS AND VERIFIES ALL FOUR AGAINST A DIGEST
   # COMMITTED HERE, BEFORE USE, WITH NO OPTIONAL PATH THROUGH THE CHECK.
   #
-  # WHAT WAS WRONG. An earlier revision MEASURED each artefact's digest and then compared it
-  # only when a workflow_dispatch input happened to carry an expected value, printing the
-  # measurement and carrying on otherwise. Its reasoning was that a hard-coded constant "would
-  # be a fabricated measurement". That is TRUE OF A SELF-MEASURED VALUE and FALSE OF AN
-  # INDEPENDENTLY PUBLISHED ONE, and the distinction is the whole of the fix: sha256sum of a
-  # file this job just downloaded proves only that the download did not corrupt itself, whereas
-  # a digest the PUBLISHER issued, committed in this file and reviewed with it, is an
-  # independent statement about which bytes are the right bytes.
+  # WHY A COMMITTED CONSTANT RATHER THAN A MEASUREMENT. Measuring an artefact's digest and
+  # comparing it only when a workflow_dispatch input happens to carry an expected value checks
+  # nothing on an ordinary run: sha256sum of a file this job just downloaded proves only that
+  # the download did not corrupt itself. A hard-coded constant is a fabricated measurement when
+  # the job is the one that measured it, and is NOT one when the PUBLISHER issued it - that
+  # distinction is the whole of the policy. A digest the publisher issued, committed in this
+  # file and reviewed with it, is an independent statement about which bytes are the right
+  # bytes.
   #
   # SO EACH VALUE BELOW IS PUBLISHER-ISSUED, NOT MEASURED HERE, and its provenance is named
   # beside it. A mismatch is a hard failure; a MISSING expected value is a hard failure too,
@@ -340,10 +418,11 @@ env:
   # A COMMITTED DIGEST IS VALID FOR EXACTLY ONE VERSION. Each digest is therefore paired with a
   # *_SHA256_FOR_VERSION value naming the release it was published for, and every verifying
   # step compares that against the version actually in use and fails by name when they diverge.
-  # Bumping CMAKE_SDK_FLOOR, LCOV_VERSION or GUEST_KERNEL_VERSION without its digest stops the
-  # job at the version guard rather than checking a digest against the wrong artefact.
+  # Bumping CMAKE_PINNED_VERSION, CMAKE_SDK_FLOOR, LCOV_VERSION or GUEST_KERNEL_VERSION without
+  # its digest stops the job at the version guard rather than checking a digest against the
+  # wrong artefact.
   #
-  # The fourth fetched input, the debootstrapped base root filesystem, is deliberately NOT in
+  # The fifth fetched input, the debootstrapped base root filesystem, is deliberately NOT in
   # this set: nobody publishes a digest for a tarball this job creates, and debootstrap output
   # is not reproducible. See the base_expected_sha256 input above for the full reasoning and
   # for what pins that input instead.
@@ -353,6 +432,21 @@ env:
   # tarball it describes.
   CMAKE_SDK_SHA256: '73565c72355c6652e9db149249af36bcab44d9d478c5546fd926e69ad6b43640'
   CMAKE_SDK_SHA256_FOR_VERSION: '3.22.1'
+
+  # CMake 3.16.9 for x86_64 Linux - the JOB-WIDE one, fetched and verified by "Set up CMake".
+  # Source of the digest: Kitware's own release manifest cmake-3.16.9-SHA-256.txt, published as
+  # an asset of the v3.16.9 release alongside the tarball it describes.
+  #
+  # ITS ASSET NAME USES A CAPITAL L, AND THAT IS AN ERA DIFFERENCE RATHER THAN A TYPO: Kitware
+  # named these assets cmake-<v>-Linux-x86_64.tar.gz through the 3.19 series and
+  # cmake-<v>-linux-x86_64.tar.gz from 3.20 onwards, so this tarball and the 3.22.1 tarball
+  # above genuinely spell the platform differently. Each step composes its own name from its own
+  # version, which is what keeps each version to one spelling.
+  #
+  # L1-tests.yml carries these three values under the same three names and resolves its job-wide
+  # CMake the same way; move them together.
+  CMAKE_PINNED_SHA256: '96d79367dcafb47d606573a4687021d3cb18dd53d83458fc1d6d9c89bf31b553'
+  CMAKE_PINNED_SHA256_FOR_VERSION: '3.16.9'
 
   # lcov 2.x is a HARD prerequisite of run_coverage.sh, which uses --fail-under-lines and
   # --rc branch_coverage=1 and parses 2.x record spellings; the suite's .lcovrc_l1 is written
@@ -372,7 +466,7 @@ env:
   # artefact Gentoo also distributes. Two publishers, one artefact - which is what makes this a
   # cross-check rather than a restatement of the download.
   #
-  # It matters more here than for the other two: this tarball is not merely extracted, it is
+  # It matters more here than for the other three: this tarball is not merely extracted, it is
   # `sudo make install`ed onto the runner and the same tarball is installed inside the guest
   # image by aidl-path-tests-rootfs.sh, so an unverified one would be root-installed twice.
   LCOV_SHA256: '1857bb18e27abe8bcec701a907d5c47e01db4d4c512fc098d1a6acd29267bf46'
@@ -415,13 +509,13 @@ env:
 
   # THE PACKAGE SOURCE IS AN IMMUTABLE, DATE-PINNED SNAPSHOT, NOT A LIVE MIRROR.
   #
-  # WHAT WAS WRONG WITH A LIVE MIRROR. deb.debian.org serves the CURRENT contents of a suite.
-  # bookworm is a stable release, so its package set moves slowly - but it does move, on every
-  # point release and every security update, and a rebuild after one produces a different base
-  # tarball, a different digest and a different toolchain inside the guest. A job whose whole
-  # purpose is to produce coverage evidence cannot have "which day was it built on" as an
-  # input to that evidence, and the digest mechanism could only ever REPORT the difference
-  # after the fact, never prevent it.
+  # WHY NOT A LIVE MIRROR. deb.debian.org serves the CURRENT contents of a suite. bookworm is a
+  # stable release, so its package set moves slowly - but it does move, on every point release
+  # and every security update, and a rebuild after one produces a different base tarball, a
+  # different digest and a different toolchain inside the guest. A job whose whole purpose is to
+  # produce coverage evidence cannot have "which day was it built on" as an input to that
+  # evidence, and the digest mechanism could only ever REPORT such a difference after the fact,
+  # never prevent it.
   #
   # snapshot.debian.org serves the archive AS IT WAS at a timestamp, immutably. Pinning it
   # gives a reproducible base AND a reproducible in-image package set from one value, which is
@@ -513,6 +607,27 @@ jobs:
       HALIF_PREFIX_I386: ${{ github.workspace }}/rdk-halif-aidl-i386
       GTEST_PREFIX_I386: ${{ github.workspace }}/install-i386/usr
 
+      # WHERE THE TWO VERIFIED BINDER SDK SOURCE TREES LIVE, AND WHY EXACTLY THERE.
+      #
+      # These are build_binder.sh's OWN DEFAULT location for the tree, once per staging: the
+      # script resolves BINDER_REPO_DIR to
+      # ${BINDER_INSTALL_DIR:-<rdk-halif-aidl>/build-tools}/linux_binder_idl, and
+      # build_modules.sh independently defaults its toolchain root to
+      # <rdk-halif-aidl>/build-tools/linux_binder_idl. Putting each verified checkout at the path
+      # both scripts already expect enforces the pin without moving anything either script looks
+      # for, and it keeps "Reclaim build scratch space" below correct unchanged - that step
+      # already deletes both build-tools directories, which is where these now sit, so the
+      # cloned upstream sources still do not travel into the published image.
+      #
+      # TWO TREES RATHER THAN ONE SHARED TREE, for the same reason there are two rdk-halif-aidl
+      # checkouts: the x86_64 and i386 builds are separate builds of separate stagings, and the
+      # upstream Android sources the script clones under the tree are build inputs of each.
+      #
+      # BINDER_SOURCE_DIR is still passed explicitly at each call site rather than left to the
+      # default, so the tree being used is stated where it is used.
+      BINDER_SDK_SOURCE_DIR: ${{ github.workspace }}/rdk-halif-aidl/build-tools/linux_binder_idl
+      BINDER_SDK_SOURCE_DIR_I386: ${{ github.workspace }}/rdk-halif-aidl-i386/build-tools/linux_binder_idl
+
       WORK_DIR: ${{ github.workspace }}/qemu-work
       # THE ANCESTRY OF THE PUBLISHED IMAGE, AND WHY EVERY LEVEL OF IT IS SPELLED OUT HERE.
       #
@@ -564,16 +679,23 @@ jobs:
     # payload staging can vouch for what is in them. A 40-character commit SHA is the one
     # reference GitHub's own hardening guidance calls immutable.
     #
-    # THE THREE PINS USED IN THIS FILE, each read from the publisher's own tag with
-    # `git ls-remote`. All three are LIGHTWEIGHT tags, so the value the tag resolves to IS a
+    # THE TWO PINS USED IN THIS FILE, each read from the publisher's own tag with
+    # `git ls-remote`. Both are LIGHTWEIGHT tags, so the value the tag resolves to IS a
     # commit SHA rather than a tag object:
     #
     #   actions/checkout            a37ce9120846195fa4ece8f58b268e6043cb2f26   = v3 = v3.7.0
     #   actions/upload-artifact     ea165f8d65b6e75b540449e92b4886f43607fa02   = v4 = v4.6.2
-    #   jwlawson/actions-setup-cmake 65b272e1213f99771fbba0c237e0b3312270e0c9  = v1.13 = v1.13.1
+    #
+    # There used to be a third, jwlawson/actions-setup-cmake, and it is gone rather than
+    # re-pinned: a digest can only be checked by whoever holds the file, and that action
+    # downloaded the CMake archive out of band, so no pin on the action could establish that the
+    # CMake this job then ran was bytes Kitware published. "Set up CMake" below fetches and
+    # digest-verifies the exact pinned release itself. That matters more here than in an
+    # ordinary job, because this CMake configures the SDK that is staged into an uploaded guest
+    # image. Do not re-introduce the action to "simplify" that step.
     #
     # PINNING CHANGED NO STEP'S INPUTS, and one of those inputs must survive every future
-    # edit: `persist-credentials: false` appears on ALL FIVE checkouts below and the step
+    # edit: `persist-credentials: false` appears on ALL SEVEN checkouts below and the step
     # "Verify no Actions credential is persisted in any checkout" fails the job if any of them
     # loses it. A re-pin that rewrote a checkout step wholesale and dropped that line would
     # reintroduce a token into a tree this job copies towards an uploaded image.
@@ -582,19 +704,67 @@ jobs:
     # to. To move one: read the new tag's SHA from the publisher (`git ls-remote --tags
     # https://github.com/<owner>/<repo> '<tag>'`), review what changed between the two, then
     # replace BOTH the SHA and the tag comment in the same edit - a SHA whose comment names a
-    # different release is worse than no comment. L1-tests.yml pins the same three actions to
-    # the same three SHAs deliberately; move them together, or the two jobs stop being
+    # different release is worse than no comment. L1-tests.yml pins the same two actions to
+    # the same two SHAs deliberately; move them together, or the two jobs stop being
     # comparable and the shared build contract between them stops meaning anything.
     steps:
+      # THE JOB-WIDE CMAKE, FETCHED HERE AND VERIFIED BEFORE IT IS UNPACKED.
+      #
+      # This step replaces a `jwlawson/actions-setup-cmake` step that was given the RANGE
+      # '3.16.x'. The reasoning is in the CMAKE_PINNED_VERSION and CMAKE_PINNED_SHA256 blocks in
+      # this file's env above; the short form is that the version is now exact and the bytes are
+      # now checkable, because this job is the one that holds the file.
+      #
+      # ORDER OF THE GUARDS IS THE SAME ONE "Resolve the CMake installations" USES FOR THE SDK
+      # FLOOR, on purpose - version coupling first, so a version bumped without its digest stops
+      # at a guard that says exactly that instead of failing later as a digest mismatch that
+      # reads like tampering; then the non-empty check, so a removed value cannot pass as a
+      # satisfied comparison; then measured versus committed; and only then extract.
+      #
+      # PREPENDED TO GITHUB_PATH, WHICH IS WHAT MAKES IT JOB-WIDE, exactly as the action it
+      # replaces did. "Install packages" below apt-installs cmake as a dependency of other
+      # things and the distribution's cmake is not the one this chain may use; the prepend puts
+      # this prefix ahead of /usr/bin for every later step. GITHUB_PATH takes effect from the
+      # NEXT step onwards, so the assertion belongs downstream - "Resolve the CMake
+      # installations" reads CMAKE_PINNED_VERSION back and fails if the job-wide cmake is
+      # anything else.
       - name: Set up CMake
-        uses: jwlawson/actions-setup-cmake@65b272e1213f99771fbba0c237e0b3312270e0c9 # v1.13 (v1.13.1)
-        with:
-          # CMAKE_PINNED_VERSION rather than the literal, so the project pin has ONE spelling
-          # in this file: this input, and the assertion in "Resolve the CMake installations"
-          # that reads the same value back. Two copies of a pin are a pin that can disagree
-          # with itself.
-          cmake-version: ${{ env.CMAKE_PINNED_VERSION }}
-          github-api-token: ''
+        run: |
+          set -euo pipefail
+          prefix="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_PINNED_VERSION"
+          mkdir -p "$prefix"
+
+          if [ "$CMAKE_PINNED_VERSION" != "${CMAKE_PINNED_SHA256_FOR_VERSION:-}" ]; then
+            echo "::error::CMAKE_PINNED_VERSION is '$CMAKE_PINNED_VERSION' but the committed CMAKE_PINNED_SHA256 was published by Kitware for '${CMAKE_PINNED_SHA256_FOR_VERSION:-<unset>}'. A committed digest is valid for one version only. Read the new release's own cmake-<version>-SHA-256.txt manifest, update CMAKE_PINNED_SHA256 and CMAKE_PINNED_SHA256_FOR_VERSION together with the version, and do not verify one version's tarball against another's digest."
+            exit 1
+          fi
+          [ -n "${CMAKE_PINNED_SHA256:-}" ] || { echo "::error::CMAKE_PINNED_SHA256 is empty, so this tarball cannot be authenticated. This job does not extract an unverified CMake: commit the digest from Kitware's cmake-$CMAKE_PINNED_VERSION-SHA-256.txt release manifest."; exit 1; }
+
+          # CAPITAL L: this pin predates the 3.20 rename of the release asset, as the env block
+          # above sets out. The version appears once, here.
+          asset="cmake-$CMAKE_PINNED_VERSION-Linux-x86_64.tar.gz"
+          tarball="$GITHUB_WORKSPACE/tools/$asset"
+          curl -fsSL --output "$tarball" \
+            "https://github.com/Kitware/CMake/releases/download/v$CMAKE_PINNED_VERSION/$asset"
+
+          measured="$(sha256sum "$tarball" | awk '{ print $1 }')"
+          echo "cmake tarball  : $tarball"
+          echo "measured sha256: $measured"
+          echo "committed      : $CMAKE_PINNED_SHA256  (Kitware cmake-$CMAKE_PINNED_SHA256_FOR_VERSION-SHA-256.txt)"
+          if [ "$measured" != "$CMAKE_PINNED_SHA256" ]; then
+            echo "::error::CMake tarball digest mismatch. measured $measured, committed $CMAKE_PINNED_SHA256 (published by Kitware for $CMAKE_PINNED_SHA256_FOR_VERSION). Either the download was tampered with or the release asset was replaced; this job will not extract an unverified CMake, and it will not be made to by relaxing this check."
+            exit 1
+          fi
+          echo "verified against the committed publisher digest"
+
+          tar -xz --strip-components=1 -C "$prefix" -f "$tarball"
+          got="$("$prefix/bin/cmake" --version | head -n 1 | awk '{ print $3 }')"
+          if [ "$got" != "$CMAKE_PINNED_VERSION" ]; then
+            echo "::error::the extracted cmake reports '$got', not the pinned $CMAKE_PINNED_VERSION. The archive that matched the committed digest does not contain the release it is named for; do not proceed on it."
+            exit 1
+          fi
+          echo "job-wide cmake : $prefix/bin/cmake ($got)"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
 
       # flex and bison are BUILD-SDK prerequisites, not extras: build_binder.sh configures the
       # Binder SDK with -DBUILD_HOST_AIDL=ON, which builds the host AIDL compiler, and that
@@ -692,8 +862,9 @@ jobs:
           repository: google/googletest
           path: googletest
           # GOOGLETEST_REF rather than the literal, so this pin also has one spelling in this
-          # file. It is the same GoogleTest tag L1-tests.yml checks out, and both GoogleTest
-          # builds below - the x86_64 one and the guest's i386 one - come from this tree.
+          # file. It is the same GoogleTest COMMIT L1-tests.yml checks out - see the env block
+          # for why it is a commit and not the v1.15.0 tag - and both GoogleTest builds below,
+          # the x86_64 one and the guest's i386 one, come from this tree.
           ref: ${{ env.GOOGLETEST_REF }}
           persist-credentials: false
 
@@ -711,6 +882,38 @@ jobs:
           repository: ${{ env.AIDL_REPOSITORY }}
           path: rdk-halif-aidl-i386
           ref: ${{ env.AIDL_REF }}
+          persist-credentials: false
+
+      # THE BINDER SDK SOURCE, OBTAINED BY THIS JOB AT AN IMMUTABLE COMMIT, ONCE PER STAGING.
+      #
+      # It used to be cloned by build_binder.sh, which resolves it from mutable ref text and
+      # fails open three ways - see the BINDER_SDK_* block in this file's env for the three, for
+      # why none of them can be fixed in the script, and for why it matters more here than in
+      # the hosted job. Checking each tree out at a commit is what makes the resolution
+      # immutable; the assertions in the next step and at each call site are what make it
+      # provable.
+      #
+      # EACH LANDS INSIDE ITS OWN rdk-halif-aidl CHECKOUT, at exactly the path both build
+      # scripts already default to, so these two steps must come AFTER both rdk-halif-aidl
+      # checkouts - a checkout cleans its destination, and the reverse order would delete them.
+      #
+      # persist-credentials: false for the same reason as every other checkout in this job, and
+      # with the same force as the payload tree: build-tools is deleted before the image is
+      # built, but nothing should rely on a deletion to keep a token out of a published image.
+      - name: Checkout the Binder SDK source
+        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 (v3.7.0)
+        with:
+          repository: ${{ env.BINDER_SDK_REPOSITORY }}
+          path: rdk-halif-aidl/build-tools/linux_binder_idl
+          ref: ${{ env.BINDER_SDK_COMMIT }}
+          persist-credentials: false
+
+      - name: Checkout the Binder SDK source again for the i386 staging
+        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 (v3.7.0)
+        with:
+          repository: ${{ env.BINDER_SDK_REPOSITORY }}
+          path: rdk-halif-aidl-i386/build-tools/linux_binder_idl
+          ref: ${{ env.BINDER_SDK_COMMIT }}
           persist-credentials: false
 
       # CREDENTIAL ABSENCE IS ASSERTED, NOT ASSUMED FROM AN INPUT.
@@ -738,14 +941,21 @@ jobs:
         run: |
           set -euo pipefail
           rc=0
-          for tree in hdmicec hdmicec-payload googletest rdk-halif-aidl rdk-halif-aidl-i386; do
+          for tree in hdmicec hdmicec-payload googletest rdk-halif-aidl rdk-halif-aidl-i386 \
+                      rdk-halif-aidl/build-tools/linux_binder_idl \
+                      rdk-halif-aidl-i386/build-tools/linux_binder_idl; do
             dir="$GITHUB_WORKSPACE/$tree"
             [ -d "$dir/.git" ] || { echo "::error::$tree is not a git checkout at $dir, so this job's later steps cannot rely on it."; rc=1; continue; }
             keys="$(git -C "$dir" config --local --name-only --list 2>/dev/null || true)"
             offenders="$(printf '%s\n' "$keys" | grep -Ei 'extraheader|credential\.|insteadof' || true)"
             if [ -n "$offenders" ]; then
+              # KEYS ONLY - and even the key is redacted where it can carry a credential
+              # ITSELF: a url.<base>.insteadOf entry embeds its base in the key name, and that
+              # base may carry userinfo (https://user:token@host). Printing the raw key would
+              # then print the token in the very message that reports it, so any //userinfo@ is
+              # replaced before anything reaches the log. Which entry it is stays legible.
               echo "::error::$tree retains credential-bearing git configuration. Offending KEYS (values deliberately not printed):"
-              printf '%s\n' "$offenders" | sed 's/^/  /'
+              printf '%s\n' "$offenders" | sed -E 's#//[^/@[:space:]]*@#//<redacted>@#g' | sed 's/^/  /'
               echo "  Set persist-credentials: false on that checkout. This tree may be copied into the guest image, which is uploaded as an artifact."
               rc=1
             fi
@@ -757,7 +967,104 @@ jobs:
             done
           done
           [ "$rc" -eq 0 ] || exit 1
-          echo "no persisted Actions credential, credential helper, URL rewrite or credential store in any of the five checkouts"
+          echo "no persisted Actions credential, credential helper, URL rewrite or credential store in any of the checkouts"
+
+      # THE PINS ARE ASSERTED AGAINST WHAT WAS ACTUALLY CHECKED OUT, NOT TRUSTED FROM AN INPUT.
+      #
+      # A `ref:` input states an intention. This step establishes the result, and the two are
+      # not the same thing: a ref can resolve to something other than what the pin names -
+      # through a repointed tag, a cached tree on a self-hosted runner, or an edit that put a
+      # mutable ref back - and every one of those changes code this job COMPILES AND EXECUTES,
+      # some of it inside a guest image this job then UPLOADS. So the commit is read back out of
+      # each tree with `git rev-parse HEAD` and compared against the value committed in this
+      # file, before anything is built from it.
+      #
+      # A PIN THAT IS NOT A FULL COMMIT IS REFUSED BEFORE ANY COMPARISON. A tag or a short SHA
+      # could never equal rev-parse output, so comparing it would fail with a message about the
+      # TREE when the defect is in the PIN; naming it directly is also what stops a future edit
+      # from quietly reintroducing a mutable ref.
+      #
+      # THE RESOLVED COMMITS ARE RECORDED, not just checked, into the provisioning record this
+      # job already uploads - so what was built and what went into the published image are
+      # answerable after the fact from the run itself.
+      #
+      # The two rdk-halif-aidl checkouts are pinned to a commit as well, and the content they
+      # must supply is asserted by "Verify rdk-halif-aidl source include roots" below. What this
+      # step exists for is the pins that used to be MUTABLE, which is where the exposure was.
+      #
+      # L1-tests.yml carries this step in the same shape over its own tree list; move them
+      # together.
+      - name: Verify the pinned dependency checkouts
+        run: |
+          set -euo pipefail
+          rc=0
+          record="$GITHUB_WORKSPACE/tools/supply-chain-pins.txt"
+          mkdir -p "$(dirname "$record")"
+          {
+            echo "# Resolved supply-chain pins for this run of .github/workflows/aidl-path-tests.yml"
+            echo "# what                     resolved commit or declared value          where"
+          } > "$record"
+
+          is_commit() { printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$'; }
+
+          assert_pinned_head() {
+            local tree="$1" expected="$2" what="$3"
+            local dir="$GITHUB_WORKSPACE/$tree" head=''
+            if ! is_commit "$expected"; then
+              echo "::error::the pin for $what is '$expected', which is not a 40-character commit SHA. $what is compiled and executed by this job, so it is pinned to an immutable commit and never to a tag or a branch: a tag is a pointer its publisher can move. Read the intended tag's commit with 'git ls-remote --tags <url> <tag>' and commit that value, keeping the tag as the comment beside it."
+              rc=1
+              return 0
+            fi
+            if [ ! -d "$dir/.git" ]; then
+              echo "::error::$tree is not a git checkout at $dir, so the commit $what was taken from cannot be established. Nothing may be built from a tree whose provenance cannot be read, least of all something staged into the published image."
+              rc=1
+              return 0
+            fi
+            head="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
+            if [ "$head" != "$expected" ]; then
+              echo "::error::$what at $dir is checked out at '${head:-<unreadable>}' but this job pins $expected. Do not adjust the pin to match the tree - establish which commit is intended, from the publisher, and correct whichever of the two is wrong."
+              rc=1
+              return 0
+            fi
+            printf '%-24s %s  %s\n' "$what" "$head" "$tree" | tee -a "$record"
+          }
+
+          assert_pinned_head googletest "${GOOGLETEST_REF:-}" "GoogleTest"
+          assert_pinned_head rdk-halif-aidl/build-tools/linux_binder_idl "${BINDER_SDK_COMMIT:-}" "Binder SDK source"
+          assert_pinned_head rdk-halif-aidl-i386/build-tools/linux_binder_idl "${BINDER_SDK_COMMIT:-}" "Binder SDK source i386"
+
+          # binder_sdk.version IS A GATE HERE, NOT A FALLBACK, AND IT IS CHECKED IN BOTH
+          # STAGINGS because each Binder SDK build reads the copy in its own tree.
+          # build_binder.sh reads the same file and degrades to a hardcoded 2.0.0 when it cannot;
+          # this job refuses to build at all unless the file exists, is readable, carries a
+          # non-comment value, and that value is the tag whose commit is pinned in this file's
+          # env. So a pin bumped in rdk-halif-aidl without the commit here moving with it stops
+          # as a named failure, instead of building one revision while this file claims another -
+          # and instead of staging that revision into the published guest image.
+          for staging in rdk-halif-aidl rdk-halif-aidl-i386; do
+            pin_file="$GITHUB_WORKSPACE/$staging/binder_sdk.version"
+            if [ ! -r "$pin_file" ]; then
+              echo "::error::$pin_file is missing or unreadable, so the Binder SDK revision this rdk-halif-aidl snapshot declares cannot be read. build_binder.sh would fall back to its hardcoded 2.0.0 default at this point; this job will not build an SDK whose declared revision it cannot establish."
+              rc=1
+              continue
+            fi
+            # The same expression the script uses to read this file - first non-comment,
+            # non-blank line, whitespace stripped - so the value compared here is the value the
+            # script would have resolved.
+            declared="$(grep -vE '^[[:space:]]*(#|$)' "$pin_file" | head -n 1 | tr -d '[:space:]' || true)"
+            if [ -z "$declared" ]; then
+              echo "::error::$pin_file carries no non-comment value, so it declares no Binder SDK revision at all. This is precisely the case build_binder.sh turns into a silent 2.0.0; commit the intended tag on its own line."
+              rc=1
+            elif [ "$declared" != "${BINDER_SDK_TAG:-}" ]; then
+              echo "::error::$pin_file declares '$declared' but this job pins the Binder SDK at tag '${BINDER_SDK_TAG:-<unset>}', whose commit ${BINDER_SDK_COMMIT:-<unset>} is committed in this file. The two must agree or the job would build one revision while claiming another. To move the pin: read the new tag's commit with 'git rev-parse refs/tags/<tag>^{}' against the publisher (2.6.0 is an ANNOTATED tag, so the ^{} matters), then move BINDER_SDK_TAG and BINDER_SDK_COMMIT together in one edit."
+              rc=1
+            else
+              printf '%-24s %s  %s\n' "Binder SDK tag" "$declared" "$staging/binder_sdk.version" | tee -a "$record"
+            fi
+          done
+
+          [ "$rc" -eq 0 ] || exit 1
+          echo "every pinned dependency checkout is at its committed commit and both declared Binder SDK tags agree with it; the record above is at $record and is uploaded by 'Upload the provisioning records'"
 
       # THE SPARSE-CHECKOUT TRAP, ASSERTED RATHER THAN ASSUMED.
       #
@@ -806,18 +1113,17 @@ jobs:
           job_wide="$(command -v cmake)"
           job_wide_version="$(cmake_version_of "$job_wide")"
           echo "job-wide cmake : $job_wide ($job_wide_version)"
-          # The expected series is derived from CMAKE_PINNED_VERSION - the same value the
-          # "Set up CMake" step is given - rather than written out a third time, so the pin
-          # cannot disagree with itself. '3.16.x' becomes the prefix '3.16.' and the patch
-          # level is free, which is exactly what the action's own version spec means.
-          pinned_series="${CMAKE_PINNED_VERSION%.x}."
-          case "$job_wide_version" in
-            "$pinned_series"*) : ;;
-            *)
-              echo "::error::the job-wide cmake is $job_wide_version, expected $CMAKE_PINNED_VERSION. The rest of this chain depends on the project pin, so the newer CMake must never become the job-wide one - it is reached only by a step-scoped PATH prepend."
-              exit 1
-              ;;
-          esac
+          # EXACT EQUALITY against CMAKE_PINNED_VERSION - the same value "Set up CMake"
+          # downloaded and digest-verified - so the pin has one spelling in this file and this
+          # step measures the toolchain against it rather than against a derivative of it. It
+          # used to derive a SERIES prefix ('3.16.x' -> '3.16.') and accept any patch release
+          # in it, which was the right assertion for a range and is the wrong one for a pin: the
+          # patch level is now part of what was verified, so a different patch level here means
+          # the verified prefix is not what PATH resolves to.
+          if [ "$job_wide_version" != "$CMAKE_PINNED_VERSION" ]; then
+            echo "::error::the job-wide cmake is $job_wide_version, expected exactly $CMAKE_PINNED_VERSION. The rest of this chain depends on the project pin, so the newer CMake must never become the job-wide one - it is reached only by a step-scoped PATH prepend - and the pinned one must be the prefix 'Set up CMake' verified."
+            exit 1
+          fi
 
           newer_cmake=''
           for candidate in /usr/bin/cmake /usr/local/bin/cmake; do
@@ -846,11 +1152,11 @@ jobs:
             tools="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_SDK_FLOOR"
             mkdir -p "$tools"
 
-            # DOWNLOADED TO A FILE AND VERIFIED BEFORE IT IS EXTRACTED. It used to be piped
-            # straight into tar, which cannot be verified at all: by the time the last byte has
-            # been hashed the archive has already been unpacked, so there is nothing left to
-            # refuse. The file lands in a scratch directory, is compared against the committed
-            # publisher digest, and only then is unpacked.
+            # DOWNLOADED TO A FILE AND VERIFIED BEFORE IT IS EXTRACTED. A download piped straight
+            # into tar cannot be verified at all: by the time the last byte has been hashed the
+            # archive has already been unpacked, so there is nothing left to refuse. The file
+            # lands in a scratch directory, is compared against the committed publisher digest,
+            # and only then is unpacked.
             tarball="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_SDK_FLOOR-linux-x86_64.tar.gz"
             curl -fsSL --output "$tarball" \
               "https://github.com/Kitware/CMake/releases/download/v$CMAKE_SDK_FLOOR/cmake-$CMAKE_SDK_FLOOR-linux-x86_64.tar.gz"
@@ -885,14 +1191,14 @@ jobs:
       # installed and asserted by aidl-path-tests-rootfs.sh from this same tarball.
       #
       # THE DIGEST IS CHECKED AGAINST A PUBLISHER-ISSUED VALUE COMMITTED IN THIS FILE, ALWAYS,
-      # BEFORE `sudo make install` RUNS. An earlier revision measured the digest and compared it
-      # only when the workflow_dispatch input carried something, on the grounds that a
-      # hard-coded constant "would be a fabricated measurement". That holds for a value THIS JOB
-      # measures and not for one the PUBLISHER issues: LCOV_SHA256 in the env block above is the
-      # lcov v2.0 release asset's own digest, corroborated by Gentoo's independently maintained
-      # Manifest for the same bytes, and it is reviewed with this file rather than produced by
-      # the download it authenticates. Both the mismatch arm and the empty-value arm are hard
-      # failures, so there is no path from an unauthenticated tarball to a root install.
+      # BEFORE `sudo make install` RUNS. Comparing only when the workflow_dispatch input carries
+      # something would leave an ordinary run unchecked, and the objection that a hard-coded
+      # constant "would be a fabricated measurement" holds for a value THIS JOB measures and not
+      # for one the PUBLISHER issues: LCOV_SHA256 in the env block above is the lcov v2.0 release
+      # asset's own digest, corroborated by Gentoo's independently maintained Manifest for the
+      # same bytes, and it is reviewed with this file rather than produced by the download it
+      # authenticates. Both the mismatch arm and the empty-value arm are hard failures, so there
+      # is no path from an unauthenticated tarball to a root install.
       #
       # The sidecar file is written in sha256sum's own "digest  filename" form, which is one of
       # the two forms the image builder accepts, so the verified digest travels with the tarball
@@ -1035,22 +1341,65 @@ jobs:
             exit 1
           fi
 
-      # BINDER_VERSION is deliberately NOT set and no version is hardcoded: build_binder.sh
-      # reads the pin out of rdk-halif-aidl/binder_sdk.version and falls back to an older
-      # default only when that file is unreadable. The version named in the script's own help
-      # text is stale, so setting BINDER_VERSION from it would actively downgrade the SDK.
-      # The step is idempotent - a present .sdk_ready short-circuits the build - so the
-      # assertion afterwards is on the marker the script itself writes.
+      # BINDER_VERSION AND BINDER_SOURCE_DIR ARE BOTH SET, DELIBERATELY, AND THIS COMMENT USED
+      # TO SAY THE OPPOSITE.
+      #
+      # The earlier revision left BINDER_VERSION unset and argued that the script's own reading
+      # of rdk-halif-aidl/binder_sdk.version was the safer pin. That was wrong in the direction
+      # that matters: the script reads the pin and then fails OPEN three ways - a hardcoded
+      # 2.0.0 when the pin file cannot be read, success-with-a-warning when the source directory
+      # already exists at another ref, and "using default branch" when the checkout of the
+      # requested ref fails. The BINDER_SDK_* block in this file's env sets out all three. The
+      # concern that motivated the old comment is still honoured: the version is not taken from
+      # the script's stale help text, it is the commit of the tag binder_sdk.version declares,
+      # and "Verify the pinned dependency checkouts" has already refused to let those two
+      # disagree.
+      #
+      # So the tree is the one "Checkout the Binder SDK source" produced and that step asserted,
+      # named here through the script's own BINDER_SOURCE_DIR hook, and BINDER_VERSION is the
+      # immutable COMMIT rather than a tag - which also makes the script's clone path correct if
+      # the tree were ever absent, instead of leaving it on a branch. The script prints an
+      # advisory line comparing BINDER_VERSION against the tree's ABBREVIATED sha and will say
+      # they differ; that comparison is its own, it is not a failure, and the assertions here are
+      # what govern.
+      #
+      # THE HEAD IS ASSERTED TWICE, AND THE SECOND TIME IS THE POINT: before the build, so
+      # nothing is compiled from an unexpected tree, and AGAIN after the script returns and
+      # BEFORE the marker check and everything staged out of it, because the script's
+      # existing-tree arm only warns.
+      #
+      # The step is idempotent - a present .sdk_ready short-circuits the build - and that marker
+      # is still asserted. IT IS NECESSARY AND NOT SUFFICIENT: it says a build finished and says
+      # nothing about WHICH SOURCE it was built from, which is what the two HEAD assertions are
+      # for. Neither replaces the other.
       - name: Build the Binder SDK
         run: |
           set -euo pipefail
+          src="$BINDER_SDK_SOURCE_DIR"
+
+          assert_source_head() {
+            local when="$1" head=''
+            head="$(git -C "$src" rev-parse HEAD 2>/dev/null || true)"
+            if [ "$head" != "$BINDER_SDK_COMMIT" ]; then
+              echo "::error::the Binder SDK source at $src is at '${head:-<not a readable git checkout>}' $when, but this job pins $BINDER_SDK_COMMIT (tag $BINDER_SDK_TAG). Nothing may be built from or staged out of a Binder source tree that is not the pinned commit."
+              exit 1
+            fi
+            echo "  ok  Binder SDK source at $src is $head $when"
+          }
+
+          assert_source_head "before the build"
+
           cd "$HALIF_PREFIX"
-          PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_binder.sh
+          BINDER_SOURCE_DIR="$src" BINDER_VERSION="$BINDER_SDK_COMMIT" \
+            PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_binder.sh
+
+          assert_source_head "after build_binder.sh returned"
+
           if [ ! -f "$BINDER_SDK_DIR/.sdk_ready" ]; then
             echo "::error::the Binder SDK build did not leave its readiness marker at $BINDER_SDK_DIR/.sdk_ready, so the staged tree cannot be trusted even if the script exited zero."
             exit 1
           fi
-          echo "Binder SDK staged: $(grep -vE '^[[:space:]]*(#|$)' "$HALIF_PREFIX/binder_sdk.version" | head -n 1)"
+          echo "Binder SDK staged: declared tag $(grep -vE '^[[:space:]]*(#|$)' "$HALIF_PREFIX/binder_sdk.version" | head -n 1), built from $src at $BINDER_SDK_COMMIT"
 
       # common is built and linked at 0.2.0.0 and NOT at the component's newer release, because
       # 0.2.0.0 is the ABI the released hdmicec snapshot was generated and pinned against: that
@@ -1164,6 +1513,14 @@ jobs:
       # Putting the cache where it is looked for means the guest reports the ACTUAL
       # BINDER_IPC_32BIT value it was built with, which is one of the three halves of the
       # protocol-equality record and the one that cannot be read from the running kernel.
+      #
+      # THE SOURCE TREE IS THE i386 STAGING'S OWN VERIFIED CHECKOUT, AND ITS HEAD IS ASSERTED ON
+      # BOTH SIDES OF THE BUILD - the same contract as the x86_64 step above, for the same three
+      # fail-open arms in build_binder.sh, and it carries more weight here: THIS is the SDK that
+      # is staged into the guest root image this job uploads, and libbinder is what every
+      # AIDL-path invocation in the matrix runs against. BINDER_SOURCE_DIR names the i386 tree
+      # explicitly so the two stagings cannot be crossed, and BINDER_VERSION is the immutable
+      # commit rather than a tag.
       - name: Build the Binder SDK for the guest (i386, protocol 7)
         env:
           HALIF_PREFIX: ${{ github.workspace }}/rdk-halif-aidl-i386
@@ -1173,8 +1530,26 @@ jobs:
           BINDER_BUILD_DIR: ${{ github.workspace }}/rdk-halif-aidl-i386/out/build/binder-cmake
         run: |
           set -euo pipefail
+          src="$BINDER_SDK_SOURCE_DIR_I386"
+
+          assert_source_head() {
+            local when="$1" head=''
+            head="$(git -C "$src" rev-parse HEAD 2>/dev/null || true)"
+            if [ "$head" != "$BINDER_SDK_COMMIT" ]; then
+              echo "::error::the i386 Binder SDK source at $src is at '${head:-<not a readable git checkout>}' $when, but this job pins $BINDER_SDK_COMMIT (tag $BINDER_SDK_TAG). Nothing may be built from or staged out of a Binder source tree that is not the pinned commit, and this staging is the one that goes into the published guest image."
+              exit 1
+            fi
+            echo "  ok  i386 Binder SDK source at $src is $head $when"
+          }
+
+          assert_source_head "before the build"
+
           cd "$HALIF_PREFIX_I386"
-          CMAKE_TOOLCHAIN_FILE="$AIDL_I386_TOOLCHAIN" PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_binder.sh
+          BINDER_SOURCE_DIR="$src" BINDER_VERSION="$BINDER_SDK_COMMIT" \
+            CMAKE_TOOLCHAIN_FILE="$AIDL_I386_TOOLCHAIN" PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_binder.sh
+
+          assert_source_head "after build_binder.sh returned"
+
           if [ ! -f "$HALIF_PREFIX_I386/out/target/.sdk_ready" ]; then
             echo "::error::the i386 Binder SDK build did not leave its readiness marker at $HALIF_PREFIX_I386/out/target/.sdk_ready. If the failure above is a compile or link error, read it as evidence about the 32-bit build specifically: the guest userspace is all-32-bit because the image builder accepts only i386 or armhf and its verify_sdk_tree refuses a 64-bit staged library, so the remedy is to make the SDK build for the target architecture and never to relax that gate."
             exit 1
@@ -1322,9 +1697,9 @@ jobs:
       # configure.ac's AC_CONFIG_FILES, so the `autoreconf -if` and `./configure` in the step
       # below OVERWRITE it with generated output. That single fact fixes the ordering: after the
       # Autotools step there is no hand-written makefile left on this runner to build, so this
-      # stage runs before it or not at all. An earlier revision of this file said exactly that
-      # in a comment and then validated nothing, which left the build that actually ships on a
-      # device untested by the one job that has both back-ends staged.
+      # stage runs before it or not at all. Stating that ordering in a comment is not enough on
+      # its own - without this step the build that actually ships on a device goes untested by
+      # the one job that has both back-ends staged.
       #
       # AN AUTOTOOLS-ONLY CHECK CANNOT STAND IN FOR IT. The two systems carry the AIDL back-end
       # by completely different mechanisms - libRCEC_la_SOURCES plus libRCEC_la_LIBADD,
@@ -1460,16 +1835,16 @@ jobs:
           #    direct edges and AAP 0.9.4 verifies the produced ELF against the expected
           #    NEEDED set.
           #
-          #    Three were asserted here previously, on a real measurement: libcommon-v0.2.0.0-cpp
-          #    is the one library no middleware symbol references - PropertyValue is reached
-          #    only through the hdmicec stub library's own interface - so --as-needed, on by
-          #    default in these toolchains, dropped the edge, and DT_NEEDED came back as
-          #    libhdmicec-v0.1.0.0-cpp.so, libbinder.so, libutils.so, libstdc++.so.6,
-          #    libgcc_s.so.1, libc.so.6. The measurement was correct; asserting only what it
-          #    showed was not, because it made deleting -lcommon-v0.2.0.0-cpp from AIDL_LIBS a
-          #    change every check in this job would have passed. ccec/src/Makefile now scopes
+          #    Four rather than three, and the fourth is the one worth explaining:
+          #    libcommon-v0.2.0.0-cpp is the one library no middleware symbol references -
+          #    PropertyValue is reached only through the hdmicec stub library's own interface -
+          #    so with --as-needed, on by default in these toolchains, the linker drops the edge
+          #    and DT_NEEDED comes back as libhdmicec-v0.1.0.0-cpp.so, libbinder.so,
+          #    libutils.so, libstdc++.so.6, libgcc_s.so.1, libc.so.6. Asserting only the three
+          #    that survive that default would make deleting -lcommon-v0.2.0.0-cpp from
+          #    AIDL_LIBS a change every check in this job passes. ccec/src/Makefile scopes
           #    -Wl,--no-as-needed to exactly these four and restores --as-needed after them, so
-          #    the fourth edge is in the ELF and is required here.
+          #    the fourth edge is in the ELF and is required here like the other three.
           rc=0
           needed="$(readelf -d "$lib" | awk -F'[][]' '/NEEDED/ { print $2 }')"
           for soname in libhdmicec-v0.1.0.0-cpp.so libcommon-v0.2.0.0-cpp.so libbinder.so libutils.so; do
@@ -1569,11 +1944,13 @@ jobs:
       # Binder edges, and produces all three test binaries, on the same runner and with the
       # same commands L1-tests.yml uses.
       #
-      # -std=c++17 is NOT set here. configure detects it and substitutes it into
-      # ccec/src/Makefile.am, tests/L1Tests/Makefile.am and tests/L2Tests/Makefile.am, so the
-      # library and both suites carry it explicitly. It is a hard requirement rather than a
-      # tidy-up: rdk-halif-aidl/common/current/halcompat.h:73 opens a NESTED NAMESPACE
-      # DEFINITION, which does not compile at c++14 at all.
+      # No -std= is passed on this command line. configure probes for the dialect and
+      # substitutes the flag it accepted for the @AIDL_CXXFLAGS@ placeholder that
+      # ccec/src/Makefile.am, tests/L1Tests/Makefile.am and tests/L2Tests/Makefile.am each carry
+      # in AM_CXXFLAGS beside a literal -std=c++17, so the library and both suites compile at a
+      # named dialect rather than at whatever the compiler happens to default to. It is a hard
+      # requirement rather than a tidy-up: halcompat.h, in rdk-halif-aidl's common/current, opens
+      # a nested-namespace definition, which does not compile at c++14 at all.
       #
       # There are THREE make passes because the top-level Makefile.am sets SUBDIRS to osal and
       # ccec only, so a root "make all" builds no test binary. The third pass is the L2 tier and
@@ -1617,20 +1994,32 @@ jobs:
 
           # THE DIALECT, ASSERTED FOR THE LIBRARY AS WELL AS FOR THE TESTS. All three
           # Makefile.am files - ccec/src/Makefile.am for the library and the two test ones -
-          # now carry a LITERAL -std=c++17 in AM_CXXFLAGS, so its absence from any generated
+          # carry a LITERAL -std=c++17 in AM_CXXFLAGS, so its absence from any generated
           # Makefile means the substitution or the regeneration went wrong, and that IS a
           # failure. ccec/src/Makefile is the AUTOMAKE-GENERATED file at this point in the job:
           # configure overwrote the hand-written one, which was built and inspected in its own
           # step before autoreconf, so what is being read here is genuinely the Autotools
-          # library build.
+          # library build. Asserting it for the library matters most, because the library is the
+          # consumer whose SOC toolchain the requirement exists to protect.
           #
-          # An earlier revision of this step deliberately did NOT assert the library's dialect,
-          # on the grounds that ccec/src/Makefile.am carried no literal and configure could
-          # legitimately leave @AIDL_CXXFLAGS@ empty on a host whose compiler already defaults
-          # to C++17. Both premises are now false: configure settles -std=c++17 unconditionally
-          # and refuses a compiler that rejects it, and the library's Makefile.am spells the
-          # flag itself. The dialect is therefore assertable for the shipping library, which is
-          # the consumer whose SOC toolchain the requirement exists to protect.
+          # What is checked here is a property of those files' own text, not a claim about which
+          # dialect configure picked, and the two are worth keeping apart. The grep below asks
+          # one question: did the literal -std=c++17 that each AM_CXXFLAGS spells survive
+          # regeneration into the generated Makefile. That is answerable by reading the file,
+          # which is why it is checkable here at all.
+          #
+          # What configure ACCEPTS is wider than that one spelling. Its probe compiles the two
+          # constructs the dependencies use - a std::optional parameter and a nested-namespace
+          # definition - and decides on the result rather than on the name of a dialect. A -std=
+          # already present in CXXFLAGS is probed as given and adopted verbatim when it compiles
+          # them, so C++17 and anything newer is accepted, while C++14 or older fails the probe
+          # and stops configuration by name; with none given, -std=c++17, -std=gnu++17 and
+          # -std=c++1z are tried in that order, the first that compiles is adopted, and
+          # configuration fails if none does. So @AIDL_CXXFLAGS@ carries the accepted
+          # C++17-or-newer flag, which can be a different spelling from the literal above, and
+          # each AM_CXXFLAGS places it AFTER that literal, where a later -std= is the one in
+          # force. A generated Makefile legitimately carries both, and neither this check nor
+          # anything else in this job requires the two strings to be equal.
           for generated in ccec/src/Makefile tests/L1Tests/Makefile tests/L2Tests/Makefile; do
             if ! grep -q -- '-std=c++17' "$generated"; then
               echo "::error::$generated does not carry -std=c++17. All three Makefile.am files set it literally, so this means the Makefile was not regenerated from them. The generated AIDL headers declare a std::optional parameter and halcompat.h opens a nested namespace definition, neither of which compiles at c++14."
@@ -1645,17 +2034,16 @@ jobs:
       # which configure has overwritten by the time this step runs - was built and inspected in
       # its own step BEFORE autoreconf, for exactly that reason. The two checks are separate
       # because the two build systems carry the link edges in different places and a green
-      # result from one says nothing about the other; both are needed and both now run.
+      # result from one says nothing about the other; both are needed and both run.
       #
       # Two measured facts keep this check honest. libcommon-v0.2.0.0-cpp IS among libRCEC's
       # own DT_NEEDED entries, and only because Makefile.am wraps the four AIDL and Binder
       # libraries in a comma-joined -Wl,--no-as-needed group: no middleware symbol references
-      # that library, so with --as-needed in force the edge was dropped, which an earlier
-      # revision of this file recorded as the reason not to require it. The measurement was
-      # right and requiring only three was still wrong, because it made deleting the token
-      # invisible - so all four are now required as direct edges and in the closure. And
-      # libcutils_sockets is not reachable from libRCEC at all, so it is checked as a staged,
-      # self-resolving library rather than as an entry in this closure.
+      # that library, so with --as-needed in force the linker drops the edge. Requiring only the
+      # three that survive that default would make deleting the token invisible, so all four are
+      # required as direct edges and in the closure. And libcutils_sockets is not reachable from
+      # libRCEC at all, so it is checked as a staged, self-resolving library rather than as an
+      # entry in this closure.
       #
       # This library, unlike the hand-built one, resolves its closure with NO LD_LIBRARY_PATH:
       # libtool bakes a RUNPATH in from the -L flags configure was given. That difference is
@@ -1916,8 +2304,9 @@ jobs:
       # drivers/android/binder.c. CONFIG_ANDROID_BINDERFS, which the in-guest init requires,
       # starts at 5.0. So on a stock kernel the two requirements are mutually exclusive, and
       # asking scripts/config or olddefconfig for a symbol that does not exist silently
-      # produces nothing at all - which is why an earlier revision of this workflow built
-      # protocol 8 instead and documented that as a technical necessity. It is not one.
+      # produces nothing at all - which is how a job settles for protocol 8 and calls it a
+      # technical necessity. It is not one: the option is restorable, as the next paragraph
+      # shows, so protocol 8 here would be a plan violation rather than a constraint.
       #
       # WHY IT IS CONSTRUCTIBLE. The removal was 13 lines of Kconfig plus 4 lines of binder.c
       # and NOTHING ELSE. include/uapi/linux/android/binder.h still carries both branches in
@@ -2073,13 +2462,13 @@ jobs:
           # EVERY PATH THIS STEP USES IS DERIVED HERE, IN THIS STEP. A shell variable set in
           # one `run:` block does not exist in the next one - each block is a separate shell
           # process, and only the workflow/job `env:` block, `$GITHUB_ENV` and Actions' own
-          # variables cross that boundary. The fetch step above assigns src_root and this step
-          # used to expand it, which under `set -u` aborted the job at the FINAL command,
-          # AFTER the whole kernel build had been paid for and before the rootfs, the QEMU boot
-          # and the A-E matrix had run at all. ShellCheck names it SC2154. It is re-derived from
-          # $GITHUB_WORKSPACE and $GUEST_KERNEL_VERSION - the two values that DO cross, the
-          # first from Actions and the second from this workflow's env block - so the two steps
-          # agree by construction rather than by an assignment neither can see.
+          # variables cross that boundary. The fetch step above assigns src_root, and expanding
+          # that assignment here would be unset under `set -u` and would abort the job at the
+          # FINAL command - AFTER the whole kernel build had been paid for and before the rootfs,
+          # the QEMU boot and the A-E matrix had run at all. ShellCheck names it SC2154. So the
+          # path is re-derived from $GITHUB_WORKSPACE and $GUEST_KERNEL_VERSION - the two values
+          # that DO cross, the first from Actions and the second from this workflow's env block -
+          # and the two steps agree by construction rather than by an assignment neither can see.
           src_root="$GITHUB_WORKSPACE/kernel-src"
           kernel_tree="$src_root/linux-$GUEST_KERNEL_VERSION"
           [ -d "$kernel_tree" ] || { echo "::error::the extracted kernel tree is missing at $kernel_tree. The 'Fetch and verify the guest kernel source' step is what extracts it and the 'Restore CONFIG_ANDROID_BINDER_IPC_32BIT' step patches it; one of them did not run, or something removed the tree between them and here."; exit 1; }
@@ -2188,28 +2577,29 @@ jobs:
 
       # THE BASE ROOT FILESYSTEM, BUILT FROM AN IMMUTABLE SNAPSHOT AND MEASURED HERE.
       #
-      # WHAT CHANGED AND WHY. This step used to debootstrap from deb.debian.org, which serves
-      # the CURRENT contents of the suite - so a rerun after any point release or security
-      # update produced a different base, a different toolchain inside the guest and different
-      # coverage evidence, with nothing to say it had happened. It now builds from
-      # snapshot.debian.org at a PINNED TIMESTAMP, which serves the archive as it was at that
-      # instant and never changes. The same URL is handed to the image builder as --apt-mirror,
+      # WHY THE SNAPSHOT AND NOT deb.debian.org. That mirror serves the CURRENT contents of the
+      # suite, so a rerun after any point release or security update would produce a different
+      # base, a different toolchain inside the guest and different coverage evidence, with
+      # nothing to say it had happened. This step debootstraps from snapshot.debian.org at a
+      # PINNED TIMESTAMP instead, which serves the archive as it was at that instant and never
+      # changes. The same URL is handed to the image builder as --apt-mirror,
       # so the packages installed inside the image come from the same archive state the base
       # was unpacked from; the builder's own snapshot handling (it writes
       # Acquire::Check-Valid-Until "false" when --apt-mirror is given) exists for exactly this.
       #
       # THIS IS THE ONE FETCHED INPUT WITH NO COMMITTED DIGEST, AND THAT IS A REASONED
-      # EXCEPTION WITH A NAMED CAUSE - NOT THE GAP THE OTHER THREE HAD.
+      # EXCEPTION WITH A NAMED CAUSE - not an unauthenticated fetch of the kind the other four
+      # steps refuse.
       #
-      # The CMake, lcov and kernel steps each verify their artefact against a PUBLISHER-ISSUED
-      # digest committed in this workflow's env block, unconditionally, before use. This base
-      # tarball cannot be treated the same way, for a reason that is a property of the artefact
-      # rather than a gap in the checking:
+      # The two CMake steps, the lcov step and the kernel step each verify their artefact
+      # against a PUBLISHER-ISSUED digest committed in this workflow's env block,
+      # unconditionally, before use. This base tarball cannot be treated the same way, for a
+      # reason that is a property of the artefact rather than a gap in the checking:
       #
       #   * NOBODY PUBLISHES A DIGEST FOR IT. The tarball is not downloaded; this step CREATES
       #     it by running debootstrap. There is no publisher to take an independent value from,
       #     and a constant invented here would be exactly the fabricated measurement the other
-      #     three steps' committed digests are NOT.
+      #     four steps' committed digests are NOT.
       #   * DEBOOTSTRAP OUTPUT IS NOT REPRODUCIBLE. Two runs over the same immutable snapshot
       #     still differ: the tarball captures mtimes, generated state (ldconfig caches, dpkg
       #     status, machine-id and the like) and directory order that debootstrap does not
@@ -2474,12 +2864,12 @@ jobs:
           #
           # The builder pins the publication directory on a descriptor and composes every
           # privileged operation as /proc/self/fd/<n>/<leaf>, so nothing can redirect a check
-          # away from the operation that follows it. THAT CUSTODY ENDED WHEN THE BUILDER EXITED
-          # and closed the descriptor -- and the lines that used to follow here resolved
-          # $GUEST_IMAGE afresh for a `sudo chown` (which dereferences its argument), for the
-          # stats and for the writability gate. A substitution of the publication directory or of
-          # either leaf between the builder's exit and those lines would have had root chown
-          # whatever the new path resolved to.
+          # away from the operation that follows it. THAT CUSTODY ENDS WHEN THE BUILDER EXITS
+          # and closes the descriptor. Resolving $GUEST_IMAGE afresh from here on - for a
+          # `sudo chown`, which dereferences its argument, for the stats or for the writability
+          # gate - would reopen that window: a substitution of the publication directory or of
+          # either leaf between the builder's exit and those lines would have root chown whatever
+          # the new path resolves to.
           #
           # So this step opens the directory ONCE, verifies that the object behind the descriptor
           # is a root-owned directory, and names every leaf as /proc/$$/fd/8/<leaf> afterwards.
@@ -2871,7 +3261,7 @@ jobs:
               echo "branch-arm gate's own output are in the uploaded artifacts and in the console log."
               ;;
             3)
-              echo "::error::run_coverage.sh exited 3, which is ADVISORY AND IS NOT A PASS. The figures met the bar but something reduced this run to measuring what it did not establish, and the COVERAGE ADVISORY block in the console log names every reason it recorded - read that first, because it is the diagnosis rather than a hint. The likely one for this job is a DEFERRED INVOCATION: if the guest's binder transport did not come up, invocations B, C and E do not run, which also leaves 15 of the 29 required branch arms unmeasured (14 need invocation B, one needs invocation C) - the branch-arm gate lists each by name with the invocation it needed. Cross-read the BINDER PLATFORM RECORD in the console log for binderfs, the device nodes, the protocol agreement and servicemanager. The other advisory sources are a weakened gate (COVERAGE_MIN other than 80, --no-per-file-gate, COVERAGE_GATE_EXEMPT_FILES, GTEST_EXTRA_ARGS, or a capture without --run - this job sets none of them), an unclassified dependency-header record in the line gate's trace, and a BRANCH_MANIFEST entry added without its measured line, block and branch coordinates. None of them is fixed by treating this status as a pass."
+              echo "::error::run_coverage.sh exited 3, which is ADVISORY AND IS NOT A PASS. The figures met the bar but something reduced this run to measuring what it did not establish, and the COVERAGE ADVISORY block in the console log names every reason it recorded - read that first, because it is the diagnosis rather than a hint. The likely one for this job is a DEFERRED INVOCATION: if the guest's binder transport did not come up, invocations B, C and E do not run, which also leaves 31 of the 90 required branch arms unmeasured (29 need invocation B, one needs invocation C, and one needs a usable binder driver with no service registered on it) - the branch-arm gate lists each by name with the prerequisite it needed and prints its own census, and the other 59 required arms are enforced on this run whatever the transport did. Cross-read the BINDER PLATFORM RECORD in the console log for binderfs, the device nodes, the protocol agreement and servicemanager. The other advisory sources are a weakened gate (COVERAGE_MIN other than 80, --no-per-file-gate, COVERAGE_GATE_EXEMPT_FILES, GTEST_EXTRA_ARGS, or a capture without --run - this job sets none of them), an unclassified dependency-header record in the line gate's trace, and a BRANCH_MANIFEST entry added without its measured line, block and branch coordinates. None of them is fixed by treating this status as a pass."
               exit 1
               ;;
             1)
@@ -2917,9 +3307,9 @@ jobs:
           if-no-files-found: error
 
       # How the guest was provisioned, so a later reader can reproduce or dispute it: the image
-      # manifest, the kernel configuration that was actually built, the two records that fix the
-      # wire protocol on the userspace side, and the kernel patch that makes protocol 7
-      # reachable at all. The patch is uploaded because it is the least conventional thing this
+      # manifest, the kernel configuration that was actually built, the resolved supply-chain
+      # pins that fix WHICH SOURCE was compiled, the two records that fix the wire protocol on
+      # the userspace side, and the kernel patch that makes protocol 7 reachable at all. The patch is uploaded because it is the least conventional thing this
       # job does and the first thing a reader will want to inspect: it is generated from a
       # heredoc in this workflow, so the uploaded copy is exactly what was applied.
       - name: Upload the provisioning records
@@ -2930,6 +3320,7 @@ jobs:
           path: |
             qemu-work/publish/cec-l2-rootfs.ext4.manifest
             qemu-work/host/kernel/config
+            tools/supply-chain-pins.txt
             tools/i386-protocol7-toolchain.cmake
             tools/i386-binder-CMakeCache.txt
             kernel-src/binder-ipc32-restore.patch
@@ -2941,12 +3332,12 @@ jobs:
       # and has already run inside the guest by the time anything here executes. What is left
       # out here is the loop device and the mount this job created, released in reverse order.
       #
-      # A CLEANUP FAILURE IS A FAILURE. An earlier revision of this step ended every privileged
-      # command with "|| true" and then "exit 0", so a run that could not release its mount or
-      # its loop device reported success and left the runner in a state that breaks the NEXT
-      # job on it - a self-hosted runner keeps its loop devices, and a still-mounted image is
-      # still-attached storage. Worse, the failure was invisible: the step printed "unmounted
-      # ..." and "detached ..." unconditionally, whether or not either had happened. Cleanup
+      # A CLEANUP FAILURE IS A FAILURE, so nothing here ends in "|| true" and the step does not
+      # finish with a bare "exit 0". A run that could not release its mount or its loop device
+      # and reported success would leave the runner in a state that breaks the NEXT job on it -
+      # a self-hosted runner keeps its loop devices, and a still-mounted image is still-attached
+      # storage - and the leak would be invisible, because a step that prints "unmounted ..."
+      # and "detached ..." unconditionally says nothing about whether either happened. Cleanup
       # decides nothing about the test verdict, which is exactly why its own failure has to be
       # reported on its own account - nothing else in this job is looking at it.
       #

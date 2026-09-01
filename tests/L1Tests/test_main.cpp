@@ -156,17 +156,32 @@ const char *const AIDL_MODE_REMOTE       = "remote";
  */
 const char *const BROKEN_INTERFACE_HASH = "-1";
 
-/*
- * Fails the run when something is already published under the production service name.
+/**
+ * @brief Fails the run when something is already published under the production service name
  *
- * A stale registration left behind by another process would make this run's back-end
- * selection resolve against that service instead of the fake this harness publishes,
- * so the run's outcome would depend on what happened to be running on the machine.
- * That is a hard failure and not a condition to work around: overwriting the entry
- * would hide the collision, and tolerating it would make a green result meaningless.
+ * A stale registration left behind by another process makes this run's back-end selection
+ * resolve against that service instead of the fake this harness publishes, so the run's
+ * outcome depends on what happened to be running on the machine. That is a hard failure
+ * and not a condition to work around: overwriting the entry hides the collision, and
+ * tolerating it makes a green result meaningless.
  *
- * @pre The binder preflight has already passed, so reaching the service manager here is
- *      safe. This function must never be called before it.
+ * @param [in] serviceName  - Production service name to look up. Supplied by the caller
+ *                            from the generated interface rather than from a literal, so
+ *                            this harness cannot drift from the name the middleware
+ *                            itself looks up.
+ *
+ * @return None. A collision, or a service manager that cannot be reached, is raised as a
+ *         fatal gtest failure.
+ *
+ * @pre DriverAidlImpl::isBinderPreflightOk() has returned true, so reaching the service
+ *      manager here is safe. Called ahead of it, this aborts or blocks the process
+ *      instead of failing the test.
+ * @post Nothing is published and no registration is withdrawn. This is a lookup only,
+ *       and the pinned C++ IServiceManager offers no way to clear a collision.
+ * @warning A fatal assertion returns from this function without unwinding its caller, so
+ *          a caller invokes it through ASSERT_NO_FATAL_FAILURE and stops on failure.
+ *
+ * @see publishFakeForMode()
  */
 void failIfServiceAlreadyPublished(const std::string &serviceName) {
     const ::android::sp< ::android::IServiceManager> serviceManager =
@@ -183,13 +198,43 @@ void failIfServiceAlreadyPublished(const std::string &serviceName) {
            "own; stop that process and run again";
 }
 
-/*
- * Publishes the fake AIDL service, configured for the requested mode.
+/**
+ * @brief Publishes the in-process fake AIDL service, configured for the requested mode
  *
  * The fake's defaults are the real frozen interface version and hash compiled into the
- * snapshot, so mode compatible needs no configuration at all - registering it IS the
- * compatible case. Mode incompatible differs by exactly one call, the hash override,
- * which is what makes the two modes' divergence auditable at a glance.
+ * snapshot, so mode compatible needs no configuration at all - publishing the fake is the
+ * compatible case. Mode incompatible differs by exactly one call, the interface-hash
+ * override, which is what keeps the two modes' divergence auditable at a glance.@n
+ * Both modes need a usable binder transport, and where there is none this fails the run
+ * rather than publishing nothing: publishing nothing would select the legacy back-end and
+ * report a green result for an AIDL invocation that never ran.
+ *
+ * @param [in] mode  - The requested CEC_TEST_AIDL_MODE value, either compatible or
+ *                     incompatible. Every other value is resolved by
+ *                     applyAidlModeBeforeInit() and never reaches here.
+ *
+ * @return None. Each failure - no usable binder transport, the name already published, a
+ *         fake that cannot be constructed, a fake that cannot be published - is raised as
+ *         a fatal gtest failure.
+ *
+ * @pre The back-end selection has not resolved yet, so this runs ahead of the
+ *      LibCCEC::init() call in CecTestEnvironment::SetUp(). The selection resolves once
+ *      per process, and a fake published after init leaves the already-resolved selection
+ *      on the legacy back-end and produces a green run that proves nothing about the AIDL
+ *      path.
+ * @pre Nothing is published under the production service name, which
+ *      failIfServiceAlreadyPublished() establishes. A service left behind by another
+ *      process is a hard failure, because this run's outcome would otherwise depend on a
+ *      process the suite does not own.
+ * @post The fake is published under the name IHdmiCec::serviceName() reports,
+ *       FakeHdmiCecService::setInstance() points the test bodies at it, and a strong
+ *       reference to it is held for the lifetime of the process. Nothing withdraws the
+ *       registration, because the pinned C++ IServiceManager has no service-removal API.
+ * @warning A fatal assertion returns from this function without unwinding its caller, so
+ *          a caller invokes it through ASSERT_NO_FATAL_FAILURE and stops on failure.
+ *
+ * @see applyAidlModeBeforeInit()
+ * @see failIfServiceAlreadyPublished()
  */
 void publishFakeForMode(const std::string &mode) {
     ASSERT_TRUE(DriverAidlImpl::isBinderPreflightOk())
@@ -229,12 +274,37 @@ void publishFakeForMode(const std::string &mode) {
               << "\" for " << AIDL_MODE_VARIABLE << "=" << mode << std::endl;
 }
 
-/*
- * Reads CEC_TEST_AIDL_MODE and does whatever it asks, before the selection resolves.
+/**
+ * @brief Reads CEC_TEST_AIDL_MODE and does what it asks, before the selection resolves
  *
+ * The four values, and what each one makes the service lookup find, are set out in the
+ * note at the top of this translation unit; this function is the one place in run_L1Tests
+ * that acts on them. Mode remote is the exception: it means "launch the out-of-process
+ * fake service host", which only run_L2Tests does, so here it is a hard failure naming
+ * that runner.@n
  * Every path that does not need libbinder avoids it entirely, which is what keeps the
  * default invocation runnable on a host with no kernel binder support: absent returns
  * without touching it, and both rejection paths fail before reaching it.
+ *
+ * @return None. An unrecognised value, mode remote, and any failure to publish the fake
+ *         are each raised as a fatal gtest failure.
+ *
+ * @pre Called ahead of the LibCCEC::init() call in CecTestEnvironment::SetUp(), which is
+ *      the first thing in this binary that forces Driver::getInstance(). The selection
+ *      resolves once per process and is fixed for its lifetime from then on, so a service
+ *      reached after init leaves the already-resolved selection on the legacy back-end and
+ *      produces a green run that proves nothing about the AIDL path.
+ * @post For absent, nothing is published and libbinder has not been touched. For
+ *       compatible and incompatible, publishFakeForMode() has published the fake and this
+ *       process holds a reference to it.
+ * @warning An unrecognised value is a hard failure, never a quiet fall back to absent. A
+ *          typo that downgraded the run to the legacy back-end would report a green result
+ *          for an AIDL invocation that never happened, which is the class of defect this
+ *          harness exists to make impossible.
+ * @warning A fatal assertion returns from this function without unwinding its caller, so
+ *          CecTestEnvironment::SetUp() invokes it through ASSERT_NO_FATAL_FAILURE.
+ *
+ * @see publishFakeForMode()
  */
 void applyAidlModeBeforeInit() {
     const char *const requested = ::getenv(AIDL_MODE_VARIABLE);
@@ -288,15 +358,15 @@ public:
 
         // Initialize the Bus so it's ready for tests
         //
-        // NO LONGER SWALLOWED, and the claim the swallow used to carry - "Ignore if
-        // already initialized" - was false. LibCCEC::init does throw InvalidStateException
-        // when called a second time, but this environment's SetUp runs exactly once per
-        // process, so a correct run never reaches that condition and nothing here can
-        // legitimately be ignored. Every exception init can actually raise is a real
-        // failure: Driver::getInstance().open() being refused by the HAL, or Bus::start()
-        // failing. Swallowing those reported a green suite for a process that had never
-        // initialized, with every driver-dependent case then asserting against an unopened
-        // stack - which made every other green result in this binary meaningless.
+        // A failure here is fatal to the whole run. This SetUp runs once for the binary,
+        // and every driver-dependent case in it takes an initialized CEC stack as its
+        // precondition, so a suite that carried on past a failed init would assert against
+        // an unopened stack and report a green result for a process that never came up.
+        // There is nothing here that can legitimately be ignored either: init() raises
+        // InvalidStateException when called a second time, but running exactly once per
+        // process means a correct run never reaches that condition, and the exceptions it
+        // can actually raise - Driver::getInstance().open() refused by the HAL, or
+        // Bus::getInstance().start() failing - are all real failures.
         ASSERT_NO_THROW({ LibCCEC::getInstance().init("CEC_TEST"); })
             << "the CEC library could not be initialized, so not one suite in this binary "
                "has its precondition; continuing would assert against an uninitialized stack";

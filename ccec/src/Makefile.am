@@ -23,29 +23,76 @@ SUBDIRS =
 # choice between them is made at runtime rather than at build time.  There is
 # deliberately no --enable switch and no Automake conditional guarding it.
 #
-# @AIDL_CPPFLAGS@ carries the four include roots the generated stubs need, and
-# @AIDL_CXXFLAGS@ the C++17 dialect flag configure settled on.  Both are resolved
-# by configure from the HALIF and Binder SDK prefixes.
+# @AIDL_CPPFLAGS@ carries the four include roots the generated stubs need,
+# @AIDL_ABI_CPPFLAGS@ the Binder WIRE ABI define, and @AIDL_CXXFLAGS@ the C++17 dialect
+# flag configure settled on.  All three are resolved by configure from the HALIF and
+# Binder SDK prefixes.
 #
-# -std=c++17 IS SPELLED LITERALLY HERE, IN ADDITION TO @AIDL_CXXFLAGS@, and the
+# @AIDL_ABI_CPPFLAGS@ IS NOT OPTIONAL HERE AND ITS ABSENCE IS NOT A STYLE MATTER.
+# configure derives it by RESOLVING android::Parcel::ipcSetDataReference against the
+# staged libbinder - the mangling of that symbol differs between the two Binder wire
+# ABIs - and substitutes either -DBINDER_IPC_32BIT or nothing.  That define selects
+# BINDER_CURRENT_PROTOCOL_VERSION (7 against 8) and the width of binder_size_t and
+# binder_uintptr_t, so it changes the LAYOUT THE BINDER HEADERS DECLARE rather than
+# merely enabling code.  Every target that compiles a translation unit which sees a
+# Binder header must therefore carry it, which is the contract configure.ac states
+# beside the substitution and which names this file as one of its consumers.
+#
+# Omitting it here compiled the SHIPPED library against protocol-8 layouts while the two
+# test Makefile.am files - which do carry it - compiled their own copies of the same
+# headers against protocol 7.  The two disagreements that produces are both silent at
+# build time: the middleware's preflight compares the driver's reported protocol version
+# against a constant this file got wrong, so a correctly provisioned Binder platform is
+# reported as "AIDL absent" and every SOC with an AIDL HAL falls back to the legacy
+# back-end; and where a transaction is reached anyway, the structures crossing to the
+# kernel carry fields of the wrong width.  Neither shows up in a test suite whose own
+# translation units were compiled with the flag.
+#
+# There is deliberately no literal spelling of the define here, and that is the OPPOSITE
+# convention from -std=c++17 below.  The dialect is a property of THIS LIBRARY's source -
+# it needs <optional> whatever host builds it - whereas the wire ABI is a property of the
+# LIBBINDER THIS BUILD LINKS, which only configure can measure.  A literal here would be
+# a second, unmeasured opinion about a value that must agree with the staged SDK exactly,
+# and disagreement is what this flag exists to prevent.  The hand-written
+# ccec/src/Makefile, which has no configure step, derives the same value for itself from
+# the staged libbinder's exported symbol and folds it into CFLAGS as AIDL_ABI_CFLAGS.
+#
+# -std=c++17 is spelled literally here, in addition to @AIDL_CXXFLAGS@, and the
 # duplication is deliberate.  The generated AIDL headers include <optional> and
 # declare std::optional parameters, so the dialect is a requirement of this
-# library and not of the host that happens to build it; a substitution is the
-# wrong place to keep the only copy of it, because a host whose compiler already
-# defaults to gnu++17 would leave that substitution empty and the requirement
-# would be invisible until a SOC toolchain with an older default reached
-# DriverAidlImpl.cpp.  The other three consumers - the hand-written
-# ccec/src/Makefile, which has no configure step at all, and the two test
-# Makefile.am files - already name it the same way, so this is the fourth of
-# four rather than a new convention.
+# library rather than of the host that happens to build it, and the literal is
+# what states that requirement in the build file itself instead of leaving it to
+# whatever dialect the compiler defaults to - a default that already covers
+# C++17 would otherwise hide the requirement until a SOC toolchain with an older
+# one reached DriverAidlImpl.cpp.  The literal is also the only form available to
+# the hand-written ccec/src/Makefile, which has no configure step to substitute
+# into; the two test Makefile.am files name it the same way, so this is the
+# fourth of four consumers rather than a new convention.
 #
-# THIS IS SAFE ONLY BECAUSE CONFIGURE REFUSES A COMPILER THAT REJECTS THE FLAG:
-# the C++17 probe in configure.ac tests -std=c++17 first and errors out when it
-# is not accepted, so no configured build can reach this line with a compiler
-# that would reject it.  @AIDL_CXXFLAGS@ is kept as well - it is the same value,
-# repeating an identical -std= is a no-op, and dropping it would silently break
-# the substituted contract the two test Makefile.am files also consume.
-AM_CXXFLAGS = -pthread -Wall -std=c++17 @AIDL_CXXFLAGS@ -I${top_srcdir}/osal/include -I${top_srcdir}/ccec/include @AIDL_CPPFLAGS@
+# @AIDL_CXXFLAGS@ carries the dialect flag configure accepted, which is C++17 or
+# newer and need not be this literal spelling.  configure settles it by probing
+# rather than by naming: a -std= the integrator supplied in CXXFLAGS is probed as
+# given and adopted verbatim when it compiles the C++17 constructs the AIDL
+# headers use, and configuration stops when it does not, because Automake places
+# CXXFLAGS after AM_CXXFLAGS and this package cannot override it; with no such
+# flag supplied, -std=c++17, -std=gnu++17 and -std=c++1z are tried in that order
+# and the first that compiles is adopted.  The substitution can therefore read
+# -std=gnu++17, -std=c++1z or a newer dialect, which is why the order of the two
+# on the line below is load-bearing: both reach the compile command, the
+# substitution lands last, and the last -std= governs.  That is also why neither
+# is redundant - the literal names the requirement, and the substitution is the
+# spelling this compiler was measured to accept.
+#
+# The same four-of-four rule governs @AIDL_ABI_CPPFLAGS@, by a different route: the
+# two test Makefile.am files consume the substitution and the hand-written
+# ccec/src/Makefile derives the equivalent value itself, so this line is again the
+# fourth consumer of four.  The difference is which copy is authoritative -
+# configure's measurement of the staged libbinder, never a literal in a Makefile -
+# for the reason stated in the block above.  It is spelled as a substitution rather
+# than a literal because a wrong wire ABI does not fail to build: the library would
+# open the driver and be rejected, or truncate a buffer address, so the value must
+# come from the measurement and must reach every translation unit in this library.
+AM_CXXFLAGS = -pthread -Wall -std=c++17 @AIDL_CXXFLAGS@ -I${top_srcdir}/osal/include -I${top_srcdir}/ccec/include @AIDL_CPPFLAGS@ @AIDL_ABI_CPPFLAGS@
 
 lib_LTLIBRARIES = libRCEC.la
 

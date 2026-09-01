@@ -55,8 +55,8 @@
 #        workflows, or /etc/lcovrc.  It never commits, never regenerates a committed
 #        build file behind your back, and IT NEVER RUNS `git checkout` AT ALL -- not in
 #        the coverage pipeline, not in `--restore`, and not as advice it prints for
-#        someone to paste.  That is a STRONGER promise than this clause used to make, and
-#        the reason it had to be strengthened is measured rather than theoretical.
+#        someone to paste.  The promise covers advice as well as action for a measured
+#        reason rather than a theoretical one.
 #        `configure` OVERWRITES the six git-tracked Makefiles listed at
 #        REGENERATED_MAKEFILES, and one of them -- ccec/src/Makefile -- is not toolchain
 #        output at all: it is a hand-written RDK build file that carries real source
@@ -100,19 +100,19 @@
 #        ACCUMULATE across runs, so a stale *.gcda keeps a line marked hit long after the
 #        test that hit it stopped running -- which would let a gate pass on an earlier
 #        run's evidence.
-#        SO THE ORDER IS: ZERO ONCE, RUN THE MATRIX, CAPTURE ONCE.  That is a change from
-#        the per-run zeroing this clause used to describe, and the reason is the reason
-#        the matrix exists at all.  The HAL back-end selection resolves ONCE PER PROCESS,
+#        SO THE ORDER IS: ZERO ONCE, RUN THE MATRIX, CAPTURE ONCE -- not zero once per
+#        invocation, and the reason is the reason the matrix exists at all.
+#        The HAL back-end selection resolves ONCE PER PROCESS,
 #        inside LibCCEC::init, so one binary run can only ever exercise one arm of the
 #        selection branch; covering both needs several processes, and ACCUMULATION ACROSS
 #        THEM is the only way anything ever sees both arms.  Zeroing before each
 #        invocation would leave the capture describing only the last one -- a report that
 #        looks complete and covers half the design.  Never zeroing would let an earlier
-#        run's evidence in, which is what this clause has always forbidden.  Zeroing once
+#        run's evidence in, which this clause forbids outright.  Zeroing once
 #        before the first invocation and capturing once after the last one has PASSED has
-#        neither failure mode, and the anti-stale guarantee is untouched: the figures are
-#        still an account of THIS run and of nothing before it.
-#        The verification is unchanged and still does not trust the tool: after zeroing,
+#        neither failure mode, and the anti-stale guarantee holds either way: the figures
+#        are an account of THIS run and of nothing before it.
+#        The verification does not trust the tool: after zeroing,
 #        the *.gcda files are RE-COUNTED rather than `lcov --zerocounters`'s exit status
 #        being believed, and a survivor is fatal.  Nothing is captured unless the
 #        invocations produced fresh counters.
@@ -183,14 +183,14 @@
 #      with GTEST_EXTRA_ARGS instead of the matrix's own filters, deferring an invocation for
 #      want of a binder driver, moving the bar, waiving the per-file half of the gate, and
 #      either half of the branch-arm gate being unable to measure or to check a required arm.
-#      Each used to end in "COVERAGE GATE PASSED" and exit 0, which is indistinguishable from
-#      a clean acceptance to any caller, human or CI.  They now end in "COVERAGE ADVISORY"
-#      and exit 3: the figures and every artifact are still produced, and a caller that
-#      requires an acceptance verdict fails on the status instead of being told a reassuring
-#      lie.  Below the bar is still exit 1 in every mode.  EVERY trigger is enumerated in
+#      Every one of them ends in "COVERAGE ADVISORY" and exit 3 rather than in "COVERAGE GATE
+#      PASSED" and exit 0, because exit 0 is indistinguishable from a clean acceptance to any
+#      caller, human or CI: the figures and every artifact are still produced, and a caller
+#      that requires an acceptance verdict fails on the status instead of being told a
+#      reassuring lie.  Below the bar is exit 1 in every mode.  EVERY trigger is enumerated in
 #      the EXIT STATUS section of --help, which is the list to keep current: a summary here
-#      that drifts from the call sites is how "currently only when --run was omitted" came
-#      to be written beside nine of them.
+#      that drifts from the call sites is how a qualifier such as "currently only when --run
+#      was omitted" comes to stand beside triggers it does not describe.
 #   2. FUNCTION FIGURES COME FROM THE ALIAS RECORDS, NOT THE LEADER RECORDS.  lcov 2.x
 #      writes per-function data as FNL:<index>,<start>,<end> and
 #      FNA:<index>,<count>,<name> (this trace carries 440 FNA and 431 FNL records and
@@ -244,14 +244,14 @@
 #   byte for byte if that is what you want -- at which point keeping them out of a commit
 #   becomes yours to manage.
 #
-#   ARTIFACT CUSTODY IS THE SAME ON BOTH BRANCHES, and that is a correction rather than a
-#   restatement.  A directory this script MINTS was already owner-only; a directory a
-#   caller NAMED used to be accepted exactly as found, and the files inside it were created
-#   at the caller's umask.  Under `umask 000` and a pre-existing mode-0755 directory, every
-#   artifact was written 0666 and an unprivileged local account could read them, append to
-#   them, and forge the gate's own input (a fabricated 100.0% row in
+#   ARTIFACT CUSTODY IS THE SAME ON BOTH BRANCHES.  A directory this script MINTS is
+#   owner-only by construction; a directory a caller NAMED is held to the same standard
+#   rather than accepted exactly as found, because accepting it as found leaves the files
+#   inside it created at the caller's umask.  Under `umask 000` and a pre-existing mode-0755
+#   directory that means every artifact at 0666, which lets an unprivileged local account
+#   read them, append to them, and forge the gate's own input (a fabricated 100.0% row in
 #   per_file_coverage.tsv) or squat on .run.lock to defeat the concurrency guard.  Three
-#   things now hold for both branches:
+#   things therefore hold for both branches:
 #     * `umask 077` is set before anything is resolved, so every file this run or any of
 #       its children creates is 0600 and every directory 0700 -- see the block above
 #       `set -euo pipefail`'s successor at the top of the executable section;
@@ -260,7 +260,7 @@
 #     * a caller-named path is COLLAPSED lexically and then checked for where it lands
 #       (canonicalise_path_lexically, assert_artifact_location_plausible), so a near-root
 #       value or one whose '..' components collapse into a system tree is refused instead
-#       of created -- the refusal both plugin runners already made and this one did not.
+#       of created -- the same refusal both plugin runners make, for the same reason.
 #
 # ==============================================================================
 # USAGE
@@ -323,7 +323,7 @@
 #   run (B, C and E defer on any host with no binder driver) would leave the previous run's
 #   results file standing as this run's evidence.
 #
-#   PER-INVOCATION NAMES CARRY A LETTER, NEVER A TIMESTAMP.  The suite is now run once per
+#   PER-INVOCATION NAMES CARRY A LETTER, NEVER A TIMESTAMP.  The suite is run once per
 #   selection outcome (see THE INVOCATION MATRIX below), and a single results file would mean
 #   the last run's evidence standing in for all of them -- an empty or failed invocation erased
 #   by whichever green one came after it.  The letter keeps them distinct while keeping clause 5
@@ -371,7 +371,7 @@
 #
 #   THE STUB RECIPE IS SPELLED TWICE IN THIS FILE -- here, and executed in do_build -- and
 #   the two are kept identical on purpose: a documented recipe that has drifted from the
-#   one that runs is worse than no documentation, because it is trusted.  It gained no new
+#   one that runs is worse than no documentation, because it is trusted.  It carries no
 #   entry for the AIDL back-end, and that is not an omission: stubs/ mutes the IARM bus
 #   headers this middleware includes but does not ship, and substitutes the HAL driver mock
 #   for the real legacy driver header.  The AIDL headers are REAL and are found through the
@@ -404,7 +404,7 @@
 #   file with its own object list and link command -- real source content -- and it is
 #   listed in configure.ac's AC_CONFIG_FILES all the same, so configure clobbers it by
 #   design.  Measured, not assumed: after a `--build` on this host the regenerated copy
-#   no longer contains the DriverAidlImpl.o entry the hand-written one carries.
+#   does not contain the DriverAidlImpl.o entry the hand-written one carries.
 #
 #   SO `--build` SNAPSHOTS ALL SIX AND RESTORES THEM ITSELF.  The snapshot is taken from
 #   the WORKING TREE immediately before autoreconf runs, held in a run-scoped mktemp -d
@@ -412,7 +412,7 @@
 #   cleans up the private lcov HOME -- so a cancelled or failed build restores too.
 #   Nothing is left for anyone to paste.
 #
-#   DO NOT REVERT THESE SIX WITH `git checkout`, AND THIS SCRIPT NO LONGER SUGGESTS IT.
+#   DO NOT REVERT THESE SIX WITH `git checkout`, AND THIS SCRIPT DOES NOT OFFER IT.
 #   A blanket checkout over those paths restores whatever the INDEX holds: it is right
 #   only under an assumption about the index, and it silently DESTROYS an uncommitted
 #   edit to any of the six -- an edit to ccec/src/Makefile most of all, that being the
@@ -430,8 +430,8 @@
 #   the function that does it, because "two gates read two files" looks like a defect
 #   until the reason is in front of the reader.
 #
-#   THE BRANCH GATE READS THE UNFILTERED CAPTURE.  Since libRCEC gained the AIDL
-#   back-end, some of the branches that have to be accounted for live in header-only code
+#   THE BRANCH GATE READS THE UNFILTERED CAPTURE.  libRCEC carries the AIDL back-end, so
+#   some of the branches that have to be accounted for live in header-only code
 #   outside this submodule -- above all in halcompat.h's isCompatible<>(), whose empty-hash,
 #   "-1", "notfrozen", era and major arms are exactly what the selection rests on.  Filter
 #   first and those records are gone, and a branch gate that cannot see its own subject
@@ -451,10 +451,10 @@
 #   ccec/src/DriverAidlImpl.cpp are never filtered from either form, and their presence is
 #   ASSERTED after filtering rather than inferred from the globs not naming them.
 #
-#   The seven globs themselves are UNTOUCHED and nothing was added to them -- clause 6
+#   The seven globs themselves are UNTOUCHED and no exclusion is added to them -- clause 6
 #   holds.  The dependency exclusions are a separate list applied in a separate step
-#   producing a separate artifact, so filtered_coverage.info still means what its comment
-#   has always said it means.
+#   producing a separate artifact, so filtered_coverage.info means exactly what its comment
+#   says it means.
 #
 # ==============================================================================
 # THE LEGACY-PATH BASELINE -- REFERENCE ONLY, AND LABELLED AS SUCH
@@ -471,7 +471,7 @@
 #     ccec/src/LibCCEC.cpp     100%  line / 100%  function / 65.9% branch
 #
 #   THEY ARE NOT A POST-CHANGE EXPECTATION AND MUST NOT BE READ AS ONE.  The suite is
-#   larger now, ccec/src/DriverAidlImpl.cpp is in the denominator, and -- decisively -- the
+#   larger than that, ccec/src/DriverAidlImpl.cpp is in the denominator, and -- decisively -- the
 #   figures a run produces depend on HOW MANY INVOCATIONS THE HOST COULD RUN.  On a host
 #   with no binder driver, three of the five are deferred and the AIDL back-end's source is
 #   unmeasured by construction, so the aggregate is necessarily lower and says nothing about
@@ -492,16 +492,17 @@
 #
 #   THE PER-FILE HALF OF THE GATE IS ON BY DEFAULT.  Directive 4 sets the bar PER TARGET,
 #   so an aggregate that clears 80% while one file sits at 33% clears a total and misses the
-#   requirement.  Every file in this suite's filtered trace is now at or above the bar, so
+#   requirement.  Every file in this suite's filtered trace is at or above the bar, so
 #   there is nothing for the per-file half to be lenient about.
 #
 #   That includes the three template-heavy headers under ccec/include that measured below it at
 #   the engagement baseline: ccec/include/ccec/Operand.hpp 0.0% (0/6),
-#   Exception.hpp 33.3% (4/12), Messages.hpp 76.5% (228/298).  Each was closed the only way a
-#   coverage bar may be closed, by ADDING TESTS: Operand's three default virtuals and all
-#   seven Exception::what() overrides are exercised from ccec/test_Operands.cpp, and the
-#   previously unserialised message types from ccec/test_MessageEncoder.cpp.  None of them
-#   was exempted, and none was excluded from the trace.
+#   Exception.hpp 33.3% (4/12), Messages.hpp 76.5% (228/298).  Each is covered the only way a
+#   coverage bar may be closed, by TESTS rather than by exemption: Operand's three default
+#   virtuals and all seven Exception::what() overrides are exercised from
+#   ccec/test_Operands.cpp, and the message types those figures leave unserialised from
+#   ccec/test_MessageEncoder.cpp.  None of them is exempted, and none is excluded from the
+#   trace.
 #
 #   `--no-per-file-gate` (or COVERAGE_PER_FILE_GATE=0) downgrades the per-file half to a
 #   report, for a diagnostic run that wants the table without the verdict.  It is not a
@@ -533,14 +534,15 @@ set -euo pipefail
 # long before any byte is written, because it is inherited by every child too -- lcov,
 # genhtml, gcov and the test binary all create files in this run's name.
 #
-# WHY IT IS NOT ENOUGH TO CHMOD THE DIRECTORY.  The artifact DIRECTORY was already
-# created 0700 on the branch that mints it, but the FILES inside it were created at
-# whatever umask the caller happened to have.  Under a permissive umask -- `umask 000` is
-# the case that was demonstrated -- coverage.info, filtered_coverage.info,
-# per_file_coverage.tsv, uncovered_lines.txt, capture.log, filter.log and .run.lock were
-# all written 0666.  Inside a caller-supplied directory that was left world-traversable,
-# an unprivileged local account could then READ them, APPEND to them, and FORGE the very
-# file the gate reads: a fabricated 100.0% row in per_file_coverage.tsv, or a .run.lock
+# WHY IT IS NOT ENOUGH TO CHMOD THE DIRECTORY.  The artifact DIRECTORY is created 0700 on
+# the branch that mints it, but a directory's mode says nothing about the FILES inside it:
+# absent a umask of this run's own they are created at whatever umask the caller happens
+# to have.  Under a permissive one -- `umask 000` is the case measured here --
+# coverage.info, filtered_coverage.info, per_file_coverage.tsv, uncovered_lines.txt,
+# capture.log, filter.log and .run.lock are all written 0666.  Inside a caller-supplied
+# directory that is world-traversable, an unprivileged local account can then READ them,
+# APPEND to them, and FORGE the very file the gate reads: a fabricated 100.0% row in
+# per_file_coverage.tsv, or a .run.lock
 # it can hold to break the concurrency guard.  For a script whose only product is
 # trustworthy coverage evidence, that is the failure that matters -- not confidentiality
 # (the artifacts hold source paths and counts, never secrets) but INTEGRITY.
@@ -549,8 +551,8 @@ set -euo pipefail
 # read by another account -- the suite, lcov, genhtml and the gate all run as this user
 # in this process tree -- so there is no consumer to break, and CI collects artifacts as
 # the same user that produced them.  The HTML report stays fully readable by its owner.
-# The one file that already chmod'd itself to 600 (provenance.txt) keeps doing so; this
-# makes every other artifact match it instead of being the exception.
+# provenance.txt chmods itself to 600 in its own right; the umask makes every other
+# artifact match it instead of leaving it the exception.
 # ------------------------------------------------------------------------------------
 umask 077
 
@@ -646,10 +648,10 @@ COVERAGE_PER_FILE_GATE="${COVERAGE_PER_FILE_GATE:-1}"
 # against the `file` column of per_file_coverage.tsv (which is relative to $WS).
 #
 # EMPTY BY DEFAULT, AND THAT IS THE POINT.  Every file in the filtered trace of this suite
-# is at or above the bar, including the three template-heavy ccec/include headers that used
-# to sit below it -- Operand.hpp (was 0/6), Exception.hpp (was 4/12) and Messages.hpp (was
-# 228/298).  They were closed the only way a coverage bar may be closed: by adding tests
-# (ccec/test_Operands.cpp and ccec/test_MessageEncoder.cpp), never by listing them here.
+# is at or above the bar, including the three template-heavy ccec/include headers whose
+# engagement-baseline figures sit below it -- Operand.hpp (0/6), Exception.hpp (4/12) and
+# Messages.hpp (228/298).  Each is covered the only way a coverage bar may be closed: by
+# tests (ccec/test_Operands.cpp and ccec/test_MessageEncoder.cpp), never by listing it here.
 #
 # WHAT AN ENTRY HERE MEANS, AND WHAT IT DOES NOT.  An entry suppresses one file's per-file
 # pass/fail VOTE.  It does not remove the file from the trace, from the aggregate
@@ -684,7 +686,7 @@ SUITE_TIMEOUT="${SUITE_TIMEOUT:-600}"
 # anything able to create entries in a world-writable parent could pre-create that name as a
 # symlink or as a directory of its own and collect, redirect or tamper with every trace, log
 # and HTML page written under it.  An unpredictable name cannot be pre-created, and a
-# world-writable parent is no longer chosen at all.
+# world-writable parent is not chosen at all.
 # A caller who needs a stable location still passes --output-dir / COVERAGE_OUTPUT_DIR,
 # and that path is then held to the stricter checks in resolve_output_dir, because a name
 # chosen in advance is by definition guessable.
@@ -701,7 +703,7 @@ GTEST_EXTRA_ARGS="${GTEST_EXTRA_ARGS:-}"
 # ------------------------------------------------------------------------------------
 # THE AIDL/BINDER STAGING PREFIXES -- four names, and NOT ONE HARD-CODED PATH.
 #
-# libRCEC now links the generated AIDL client stubs and the Binder client library
+# libRCEC links the generated AIDL client stubs and the Binder client library
 # unconditionally, for every SOC vendor, so the build this script drives needs to find their
 # headers and libraries.  It does NOT get to decide where those are.
 #
@@ -790,14 +792,14 @@ readonly LCOV_EXCLUDES=(
 # its comment says.  So this is a second list, applied in a second step, producing a third
 # artifact -- and the seven-glob step keeps its name, its content and its meaning untouched.
 #
-# WHY A SECOND LIST IS NEEDED AT ALL.  Since libRCEC gained the AIDL back-end, the compiled
+# WHY A SECOND LIST IS NEEDED AT ALL.  libRCEC carries the AIDL back-end, so the compiled
 # objects reference header-only code from outside this submodule: halcompat.h's templates, the
 # generated Bp*/Bn* inline definitions, and binder SDK headers.  gcov attributes records to
 # those paths, and NONE of the seven globs describes them.  MEASURED on this host: the capture
 # holds 145 source-file records, the seven globs reduce that to 42, and of those 42 exactly 31
 # are inside this submodule while ELEVEN are dependency headers -- six binder SDK headers, four
 # generated AIDL stub headers, and halcompat.h.  Left in, they change the file set the per-file
-# gate judges and the denominator the aggregate is computed over, so a figure produced now would
+# gate judges and the denominator the aggregate is computed over, so the figure would
 # not be comparable with the recorded baseline and the per-file gate would start voting on
 # whether a binder SDK header is well tested by this suite.
 #
@@ -820,9 +822,9 @@ readonly LCOV_EXCLUDES=(
 #   called from the selection path, their branches are branches this migration is answerable
 #   for, and SC6 asks for them by name.  Filtering it would delete the evidence.
 #
-# Anything the caller told us about the staging layout is added below, at resolve time, so a
+# Anything the caller states about the staging layout is added below, at resolve time, so a
 # Yocto-style layout whose binder headers do not sit under a binder_sdk directory is still
-# described.  A prefix that was never set contributes nothing.
+# described.  A prefix that is not set contributes nothing.
 # ------------------------------------------------------------------------------------
 readonly DEPENDENCY_EXCLUDES=(
     '*/binder_sdk/*'
@@ -841,7 +843,7 @@ readonly DEPENDENCY_EXCLUDES=(
 # WHY halcompat.h IS ON THIS LIST AND NOT MERELY MENTIONED IN A COMMENT.  AAP 0.6.5 requires it
 # retained in the filtered copy: it is CONSUMED HALIF SOURCE, not third-party toolchain code.
 # getService<I>() and isCompatible<I>() are called from the selection path, and SEVENTEEN of the
-# 64 required branch arms in BRANCH_MANIFEST below live inside isCompatible<>() -- both arms of
+# 90 required branch arms in BRANCH_MANIFEST below live inside isCompatible<>() -- both arms of
 # the null gate, of the empty-hash and "-1" gates, of the "notfrozen" gate, and of each of the
 # era, major and ordering comparisons.  The branch gate reads the UNFILTERED capture, so those
 # seventeen are not what a
@@ -867,9 +869,8 @@ readonly PROTECTED_TRACE_FILES=(
 GENHTML_TITLE='hdmicec coverage'
 # NOT readonly: write_provenance() appends the superproject's short SHA so that every page of
 # the HTML report carries the revision it was produced from. A trace or a report that does not
-# say which tree it came from cannot be relied on, which is exactly how a previous round's
-# artifacts ended up unusable - they were produced in one clone and read as though they applied
-# to another.
+# say which tree it came from cannot be relied on: artifacts produced in one clone and read as
+# though they applied to another are unusable, and nothing in the artifact itself would say so.
 PROVENANCE_TXT=''
 
 # Error classes tolerated per step.  `category` is NOT a documented class and is
@@ -906,7 +907,7 @@ fi
 #
 # FIVE OF THESE ARE TOOLCHAIN OUTPUT AND THE SIXTH IS NOT, which is the whole reason the
 # snapshot machinery below exists.  ccec/src/Makefile is a hand-written RDK build file --
-# its own CFLAGS, its own nine-entry object list, its own link command -- and it is in
+# its own CFLAGS, its own explicit object list, its own link command -- and it is in
 # configure.ac's AC_CONFIG_FILES anyway, so configure overwrites it with generated content
 # every time.  Restoring it is therefore not "throwing away generated noise": it is putting
 # a source file back, and the only mechanism that does that correctly under every condition
@@ -922,30 +923,28 @@ readonly REGENERATED_MAKEFILES=(
 )
 
 # ------------------------------------------------------------------------------------
-# THE MAKEFILE SNAPSHOT -- what replaced `git checkout`, and why it is not the same thing
-# wearing a different name.
+# THE MAKEFILE SNAPSHOT -- why the restore remembers the bytes instead of asking git for
+# them.
 #
-# WHAT WAS WRONG WITH THE OLD MECHANISM.  `do_restore` used to run
-# `git -C <hdmicec> checkout -- <the six>`, `announce_regenerated_makefiles` printed that
-# exact command for the caller to paste, and the BUILD RECIPE block in the header
-# documented it a third time.  All three restore WHATEVER THE INDEX HOLDS, which is a
-# different claim from "what was there before configure ran", and the difference is not
-# academic: an uncommitted edit to any of the six is destroyed outright, with no prompt and
-# no copy.  ccec/src/Makefile is precisely the file someone edits -- it is hand-written
-# source, not output -- so the one path where the old mechanism was most dangerous is also
-# the one it was most likely to be used on.
+# WHY `git checkout` IS NOT THE MECHANISM.  `git -C <hdmicec> checkout -- <the six>`
+# restores WHATEVER THE INDEX HOLDS, which is a different claim from "what was there before
+# configure ran", and the difference is not academic: an uncommitted edit to any of the six
+# is destroyed outright, with no prompt and no copy.  ccec/src/Makefile is precisely the
+# file someone edits -- it is hand-written source, not output -- so the path where a blanket
+# checkout does the most damage is also the one it would most often be aimed at.  No mode of
+# this script runs it, and no message prints it as advice for a caller to paste.
 #
-# WHAT THIS DOES INSTEAD.  `--build` copies the working-tree bytes and the MODE of all six
+# WHAT THE SNAPSHOT DOES INSTEAD.  `--build` copies the working-tree bytes and the MODE of all six
 # into a run-scoped mktemp -d directory immediately before autoreconf -- with autoreconf as the
-# literal next mutating command, since the stub-header step was lifted out ahead of it -- and
+# literal next mutating command, the stub-header step running ahead of it -- and
 # the EXIT/INT/TERM trap restores from that copy at the end of the same invocation.  It is
 # unconditionally correct: it does not consult the index, does not care whether the file is
 # committed, modified, staged or pristine, and cannot revert anything that was not itself about
 # to be clobbered.  A cancelled build restores too, because the restore hangs off the trap
 # rather than off the build's success path.
 #
-# THREE PROPERTIES THE RESTORE HAS THAT A `cp` LOOP DOES NOT, each closing a way the old shape
-# could leave the tree worse than it found it:
+# THREE PROPERTIES THE RESTORE HAS THAT A `cp` LOOP DOES NOT, each closing a way a restore
+# can leave the tree worse than it found it:
 #   * ATOMIC PER FILE.  Each path is written to a temporary IN THE SAME DIRECTORY and renamed
 #     into place, so there is no moment at which a tracked Makefile holds a partial write for
 #     an impatient second Ctrl-C to catch.
@@ -958,22 +957,23 @@ readonly REGENERATED_MAKEFILES=(
 #
 # WHAT IT DELIBERATELY DOES NOT DO.  It does not fall back to git when there is no snapshot,
 # and it does not treat a git index comparison as a substitute for one.  A fallback would
-# reintroduce exactly the destruction this replaced, at the one moment a caller is least able
-# to notice -- and "we could not do the safe thing so we did the unsafe thing" is not a
+# bring back exactly the destruction described above, at the one moment a caller is least able
+# to notice -- and "the safe thing was unavailable, so the unsafe thing ran" is not a
 # recovery.  A standalone `--restore` has no snapshot by construction, so it always reports
 # that and exits non-zero.
 #
 # PRESENCE IS PART OF THE SNAPSHOT, NOT A SIDE EFFECT OF WHAT WAS COPIED.
 #
-# The record used to be a list of the paths that were successfully copied, which made "was
-# absent" and "was never recorded" the same value.  The consequence was one-directional: a
-# path that did NOT exist when the snapshot was taken -- an unconfigured checkout has none of
-# the five toolchain-generated Makefiles -- was created by configure and then left behind,
-# because the restore only ever put back what it had copied.  The tree that came out of the
-# run therefore differed from the tree that went in, in the one respect the mechanism exists
-# to prevent, and `git status` reported five untracked-looking modifications nobody asked for.
+# A record that was merely the list of paths successfully copied would make "absent" and
+# "never recorded" the same value, and the consequence is one-directional: a path that did
+# NOT exist when the snapshot was taken -- an unconfigured checkout has none of the five
+# toolchain-generated Makefiles -- is created by configure and then left behind, because a
+# restore that only puts back what it copied has nothing to say about it.  The tree that came
+# out of the run would differ from the tree that went in, in the one respect this mechanism
+# exists to prevent, and `git status` would report five untracked-looking modifications
+# nobody asked for.
 #
-# So every allowlisted path now gets an EXPLICIT state, and the restore acts on both:
+# So every allowlisted path carries an EXPLICIT state, and the restore acts on both:
 #   present -- content and mode were captured; the restore puts those bytes back and proves it
 #   absent  -- the path did not exist; the restore REMOVES it if the build created one
 # A path with no record at all is a defect in the snapshot, and the restore says so rather
@@ -1042,7 +1042,7 @@ assert_snapshot_dir_still_safe() { # $1=what is about to happen, for the message
 #                                                   invocation in the matrix
 #   the capture, the filter and the gate            READ those counters and decide the verdict
 #
-# A lock that covered only the build (which is all the previous one did) left the rest of
+# A lock that covered only the build would leave the rest of
 # that list unprotected, and the unprotected part is where a second run does the most damage:
 # it can zero the counters between this run's last invocation and its capture, so the capture
 # reports a tree that nothing exercised; or run its own suite while this one captures, so the
@@ -1067,9 +1067,9 @@ assert_snapshot_dir_still_safe() { # $1=what is about to happen, for the message
 # somebody unlinked and recreated the name, which is the precise mechanism by which two
 # contenders end up flocking two different inodes and both believing they hold the lock.
 #
-# MISSING flock IS FATAL, not advisory.  It used to warn and record an advisory, which meant
-# an acceptance run on a host without flock still reached a verdict while having proved
-# nothing about exclusivity.  An advisory that reaches acceptance is indistinguishable from
+# MISSING flock IS FATAL, not advisory.  A warning plus a recorded advisory would let an
+# acceptance run on a host without flock reach a verdict while having proved
+# nothing about exclusivity, and an advisory that reaches acceptance is indistinguishable from
 # no check at all: the only two honest outcomes are "the lock is held" and "this run stops".
 # ------------------------------------------------------------------------------------
 TREE_LOCK_FD=''            # open descriptor while held; empty when not
@@ -1099,8 +1099,8 @@ rule() { printf '%s\n' '--------------------------------------------------------
 # chose, with this script's privileges.  On a CI runner that is a write into another job's
 # workspace; run under sudo, it is a write anywhere.
 #
-# The root this script MINTS is not predictable (mktemp -d), and since select_safe_temp_parent
-# was introduced it is not under a world-writable parent either.  Both roots are held to the
+# The root this script MINTS is not predictable (mktemp -d), and select_safe_temp_parent keeps
+# it out of a world-writable parent as well.  Both roots are held to the
 # checks below regardless, because "unpredictable" and "unreachable" are different properties
 # and only the second one survives another account being able to write the parent.
 #
@@ -1131,11 +1131,11 @@ readonly EUID_VALUE
 # LEXICAL CANONICALISATION -- collapse '.', '..' and doubled slashes, and NOTHING ELSE.
 #
 # WHY IT IS NEEDED.  Absolutising a caller-supplied path is not the same as canonicalising
-# it.  `--output-dir "$SANDBOX/ok/../../../../etc/name"` is already absolute, so it passed
-# straight into the ancestry walk -- which then validated `$SANDBOX/ok/..`,
-# `$SANDBOX/ok/../..` and so on as ordinary existing directories owned by root, created
-# every missing component in turn, and wrote the artifacts into /etc/name.  Every
-# individual check held; the PATH had simply left the tree the caller appeared to name.
+# it.  `--output-dir "$SANDBOX/ok/../../../../etc/name"` is already absolute, so an ancestry
+# walk handed the raw value validates `$SANDBOX/ok/..`,
+# `$SANDBOX/ok/../..` and so on as ordinary existing directories owned by root, creates
+# every missing component in turn, and writes the artifacts into /etc/name.  Every
+# individual check holds; the PATH has simply left the tree the caller appears to name.
 # Collapsing the components first means the checks below, the location guard above and the
 # messages a reader sees all describe the one directory that will actually be written to.
 #
@@ -1175,11 +1175,11 @@ canonicalise_path_lexically() { # $1=absolute path -> canonical path on stdout
 
 # ------------------------------------------------------------------------------------
 # WHERE AN ARTIFACT ROOT MAY NOT BE.  Both sibling plugin runners refuse a near-root
-# artifact root outright ("implausibly short"); this file had no equivalent check, so
-# `--output-dir /etc` was accepted and created /etc/.run.lock, and a '..'-collapsed value
-# landed under /etc as well.  Three sibling scripts written together must not disagree
-# about that, so the same refusal lives here now, with the system-location half made
-# explicit rather than left to a length test.
+# artifact root outright ("implausibly short"), and this one refuses it identically: without
+# that refusal `--output-dir /etc` is accepted and creates /etc/.run.lock, and a
+# '..'-collapsed value lands under /etc just as easily.  Three sibling scripts written
+# together must not disagree about that, so the same refusal lives here, with the
+# system-location half made explicit rather than left to a length test.
 #
 # The list is deliberately SHORT and holds only trees the operating system owns.  /tmp,
 # /var/tmp, /run/user/<uid>, /opt, /home and /root are all legitimate destinations and are
@@ -1302,7 +1302,7 @@ open_fd_identity() { # $1=file descriptor number
 #
 # So the rules stay in one place and the VERDICT becomes a mode.  While PATH_CHECK_PROBE is 1,
 # a violation records its reason and returns non-zero instead of exiting; every other caller
-# leaves the flag at 0 and gets exactly the behaviour it had before.  `die` never returns, so
+# leaves the flag at 0 and gets the fatal verdict.  `die` never returns, so
 # `path_check_reject ... || return 1` is a no-op in fatal mode rather than a second code path.
 # ------------------------------------------------------------------------------------
 PATH_CHECK_PROBE=0        # 1 only inside probe_safe_ancestry
@@ -1354,26 +1354,27 @@ assert_component_safe() { # $1=path  $2=context for the message  $3=named|minted
     numeric_mode="$(( 8#$mode ))"
     if [ "$(( numeric_mode & 0022 ))" -ne 0 ] && [ "$(( numeric_mode & 01000 ))" -eq 0 ]; then
         # Writable by others, with no sticky bit to stop them renaming or removing what is
-        # inside it.  BOTH VERDICTS ARE NOW FATAL, and the change from a warning on the
-        # `minted` arm is the point of this block rather than an incidental tightening.
+        # inside it.  BOTH VERDICTS ARE FATAL, the `minted` arm included, and that is the
+        # point of this block rather than an incidental strictness.
         #
         #   * A CALLER-CHOSEN path is guessable by construction -- it was chosen in advance
         #     and often appears in a CI file -- so pre-creating the name is enough to collect
         #     or redirect the evidence.
-        #   * A path this script MINTED with mktemp -d cannot be pre-created, so it used to be
-        #     reported and accepted.  That reasoning covered only half the attack: the name is
-        #     unguessable, but another local account able to write the PARENT can still remove
-        #     the minted directory mid-run and put its own there under the same name, and it
-        #     can do it in the window between any two of this script's steps.
+        #   * A path this script MINTED with mktemp -d cannot be pre-created, which covers only
+        #     half the attack: the name is unguessable, but another local account able to write
+        #     the PARENT can still remove the minted directory mid-run and put its own there
+        #     under the same name, and it can do it in the window between any two of this
+        #     script's steps.
         #
-        # The warning was not theoretical either.  Measured on this host: /tmp is mode 2777 --
-        # world-writable, setgid, no sticky bit -- so every run printed it, twice, and wrote
-        # its trace, its lock and its Makefile snapshot below /tmp anyway.  A warning nobody
-        # can act on is a warning that trains readers to ignore it.
+        # A warning in place of that refusal is not theoretical either.  Measured on this host:
+        # /tmp is mode 2777 -- world-writable, setgid, no sticky bit -- so a warning fires on
+        # every run, twice, while the trace, the lock and the Makefile snapshot are written
+        # below /tmp regardless.  A warning nobody can act on is a warning that trains readers
+        # to ignore it.
         #
         # WHAT MAKES FAILING CLOSED SAFE HERE, and why this is not simply the script refusing
-        # to run on a normal container: nothing this script mints lands under an unsafe parent
-        # any more.  select_safe_temp_parent chooses the parent -- TMPDIR, then
+        # to run on a normal container: nothing this script mints lands under an unsafe parent.
+        # select_safe_temp_parent chooses the parent -- TMPDIR, then
         # XDG_RUNTIME_DIR, then HOME -- and holds each candidate to these same rules at
         # `named` strictness before choosing it, so on this host the lock, the snapshot,
         # lcov's HOME and the minted artifact root all land under $HOME (0700) and this arm
@@ -1450,18 +1451,19 @@ probe_safe_ancestry() { # $1=absolute path  $2=named|minted
 # WHERE THIS RUN'S PRIVATE DIRECTORIES GO, AND WHY IT IS NOT "${TMPDIR:-/tmp}".
 #
 # Every private path this script needs -- the tree lock, the Makefile snapshot, lcov's
-# throwaway HOME, the minted artifact root -- used to be created under "${TMPDIR:-/tmp}"
-# with an UNCONDITIONAL fallback to /tmp, and an unsafe /tmp was reported as a warning
-# because failing closed there would have made the script unrunnable on a host whose /tmp is
-# group- or world-writable without the sticky bit.
+# throwaway HOME, the minted artifact root -- has to sit where no other account can reach it.
+# "${TMPDIR:-/tmp}" does not establish that: it falls back to /tmp unconditionally, and an
+# unsafe /tmp can then only be reported as a warning, because failing closed on it would make
+# the script unrunnable on any host whose /tmp is group- or world-writable without the sticky
+# bit.
 #
 # MEASURED ON THIS HOST: /tmp is mode 2777 -- world-writable, setgid, and NO sticky bit --
-# TMPDIR and XDG_RUNTIME_DIR are both unset, and $HOME is /root at mode 0700.  So the warning
-# was not theoretical: every run on this host wrote its evidence and its lock below a
-# directory any local account could rename or remove entries in, and said so twice in the log
+# TMPDIR and XDG_RUNTIME_DIR are both unset, and $HOME is /root at mode 0700.  So that warning
+# is not theoretical: an unconditional /tmp puts this run's evidence and its lock below a
+# directory any local account can rename or remove entries in, and says so twice in the log
 # while doing it.
 #
-# The fix is to CHOOSE a parent rather than to accept one and complain.  In order:
+# So the parent is CHOSEN rather than accepted and complained about.  In order:
 #   TMPDIR            -- the caller's explicit choice, honoured first when it is safe
 #   XDG_RUNTIME_DIR   -- per-user, mode 0700 by specification, the right answer on a systemd
 #                        host and empty on a container like this one
@@ -1505,9 +1507,9 @@ consider_temp_parent() { # $1=variable name it came from  $2=its value
 #
 # IT SETS GLOBALS RATHER THAN PRINTING THE PATH, and that is not a style preference.  A
 # printing form has to be read with a command substitution, which runs it in a SUBSHELL: the
-# memo assignment then dies with the subshell, so the selection was re-derived on every call,
-# the announcement was printed once per call, and RUNNER_TEMP_PARENT_SOURCE -- which one
-# caller puts in a diagnostic -- was permanently empty in the caller.  Measured: three
+# memo assignment dies with the subshell, so the selection is re-derived on every call, the
+# announcement prints once per call, and RUNNER_TEMP_PARENT_SOURCE -- which one caller puts in
+# a diagnostic -- stays permanently empty in the caller.  Measured in that shape: three
 # identical "private directories for this run go under" lines in a single measure-only run.
 select_safe_temp_parent() { # -> sets RUNNER_TEMP_PARENT and RUNNER_TEMP_PARENT_SOURCE
     [ -z "$RUNNER_TEMP_PARENT" ] || return 0
@@ -1534,11 +1536,11 @@ select_safe_temp_parent() { # -> sets RUNNER_TEMP_PARENT and RUNNER_TEMP_PARENT_
 # The lock leaf cannot be minted per run -- two runs that must exclude each other have to
 # agree on the name, so it is derived from the tree path and it PERSISTS between runs.  That
 # makes it predictable, and a predictable name in a shared directory is the inode-substitution
-# hole: a foreign-owned regular file sitting at that name was previously accepted and locked,
-# and a contender that unlinked and recreated it split the two runs across two inodes so that
-# both held "the" lock.
+# hole: a foreign-owned regular file sitting at that name is lockable by anybody, and a
+# contender that unlinks and recreates it splits the two runs across two inodes so that both
+# hold "the" lock.
 #
-# The name stays predictable -- it has to -- but it now lives one level down, inside a
+# The name stays predictable -- it has to -- but it lives one level down, inside a
 # directory that is proved to be ours and unreachable by anyone else.  `mkdir` is the
 # primitive that does the proving: it either creates the directory or fails, so an existing
 # entry of the wrong kind or ownership cannot be silently adopted, and assert_private_dir then
@@ -1548,7 +1550,7 @@ RUNNER_LOCK_DIR=''
 
 # Sets RUNNER_LOCK_DIR, for the same subshell reason select_safe_temp_parent sets a global:
 # a printing form memoises nothing when it is read with a command substitution, so the
-# directory was re-created and re-validated on every call.
+# directory is re-created and re-validated on every call.
 runner_lock_dir() { # -> sets RUNNER_LOCK_DIR
     [ -z "$RUNNER_LOCK_DIR" ] || return 0
 
@@ -1626,13 +1628,13 @@ assert_private_dir() { # $1=path
 # ------------------------------------------------------------------------------------
 # ONE PRIVACY POSTURE FOR BOTH BRANCHES OF THE ARTIFACT DIRECTORY.
 #
-# The minted branch already ended at `chmod 700` + assert_private_dir, so a directory this
-# script created was owner-only.  A CALLER-SUPPLIED directory got neither: it was accepted
-# as it was found, so a pre-existing mode-0755 directory stayed 0755 and every artifact
-# written into it was reachable by any local account that could traverse it -- which is how
-# an unprivileged user was able to read, append to and forge the gate's own input file.
+# The minted branch ends at `chmod 700` + assert_private_dir, so a directory this script
+# created is owner-only.  A CALLER-SUPPLIED directory accepted as it is found gets neither: a
+# pre-existing mode-0755 directory stays 0755 and every artifact written into it is reachable
+# by any local account that can traverse it, which is all it takes for an unprivileged user
+# to read, append to and forge the gate's own input file.
 # The caller-named branch is the predictable one, so if anything it warrants the stricter
-# treatment, not the weaker.
+# treatment, not the weaker -- hence both branches end in the same posture.
 #
 # TIGHTENED RATHER THAN REFUSED, and only when the mode actually grants something away:
 # the directory has already been proved to be OWNED by this user (assert_owned_and_private),
@@ -1753,11 +1755,11 @@ STAGE_DIR_IDENTITY=''
 # ------------------------------------------------------------------------------------
 # `rm -rf` A DIRECTORY THIS SCRIPT MINTED, HAVING RE-PROVED IT IS THE SAME DIRECTORY.
 #
-# A recursive remove is the most destructive thing this script does, and every one of them
-# used to rest on a two-component path pattern alone: enough to keep the remove away from '/'
-# and '/anything', not enough to establish that the name still refers to the directory this
+# A recursive remove is the most destructive thing this script does, and a two-component path
+# pattern alone does not authorise one: it keeps the remove away from '/' and '/anything', and
+# it establishes nothing about whether the name still refers to the directory this
 # script created.  Between creation and cleanup the name can be re-pointed -- that is the
-# whole reason the minted-parent arm of assert_component_safe is now fatal -- and the remove
+# whole reason the minted-parent arm of assert_component_safe is fatal -- and the remove
 # would then delete whatever the new target is, recursively, as the last act of a run whose
 # only job was to measure.
 #
@@ -1848,7 +1850,7 @@ cleanup_makefile_snapshot() {
 
 # ------------------------------------------------------------------------------------
 # Take the snapshot.  Called from do_build with AUTORECONF AS THE NEXT MUTATING COMMAND --
-# the stub-header step that used to sit in between is now its own step ahead of this one, so
+# the stub-header step is its own step ahead of this one rather than sitting in between, so
 # the snapshot is provably of pre-build content rather than argued to be (see do_build).
 #
 # EVERY allowlisted path gets a record, present or absent, and the mode is captured with the
@@ -1876,8 +1878,8 @@ snapshot_regenerated_makefiles() {
     # of which -- ccec/src/Makefile -- is hand-written RDK build SOURCE that `git checkout`
     # would destroy rather than restore.  It therefore gets the strictest parent this host
     # can offer, chosen by select_safe_temp_parent rather than defaulted to /tmp, which is
-    # mode 2777 with no sticky bit here: any local account could have removed the recovery
-    # copy mid-build.
+    # mode 2777 with no sticky bit here: any local account can remove entries there, and the
+    # recovery copy would be one of them.
     local parent
     select_safe_temp_parent
     parent="$RUNNER_TEMP_PARENT"
@@ -1971,17 +1973,17 @@ snapshot_regenerated_makefiles() {
 # ------------------------------------------------------------------------------------
 # PUT ONE PATH BACK, ATOMICALLY, AND PROVE IT.
 #
-# The old restore was `cp -p snapshot target` and a `die` if cp complained.  Two defects
-# followed from that shape, and both are the kind that only show up on the bad day:
+# A restore of the shape `cp -p snapshot target` plus a `die` if cp complains has two defects,
+# both of the kind that only show up on the bad day:
 #
-#   * IT WAS INTERRUPTIBLE IN THE MIDDLE OF A FILE.  `cp` writes into the target in place, so
-#     a second Ctrl-C landing during the write left a tracked Makefile that was neither the
-#     pre-build content nor the generated content -- a truncated hybrid, and the snapshot was
-#     then removed by the cleanup that followed.  So the write now goes to a temporary in the
+#   * IT IS INTERRUPTIBLE IN THE MIDDLE OF A FILE.  `cp` writes into the target in place, so
+#     a second Ctrl-C landing during the write leaves a tracked Makefile that is neither the
+#     pre-build content nor the generated content -- a truncated hybrid, with the snapshot
+#     removed by the cleanup that follows.  So the write goes to a temporary in the
 #     SAME DIRECTORY and is renamed into place: `mv` within one directory is rename(2), which
 #     either has happened or has not, and there is no state in between for a signal to catch.
 #     The whole restore also runs with INT/TERM/HUP masked (see the caller).
-#   * IT PROVED NOTHING.  A `cp` that returns 0 establishes that a write was attempted.  Full
+#   * IT PROVES NOTHING.  A `cp` that returns 0 establishes that a write was attempted.  Full
 #     filesystem, short write, a concurrent writer -- all leave it happy.  So the temporary is
 #     compared against the snapshot BEFORE the rename, and the target is compared again AFTER
 #     it, together with its mode.
@@ -2012,7 +2014,7 @@ restore_one_makefile() { # $1=relative path  $2=octal mode recorded at snapshot 
 
     # THE TEMPORARY LIVES BESIDE THE TARGET, not in a temp directory, and that is the whole
     # mechanism: rename(2) is atomic only within one filesystem, and a cross-filesystem `mv`
-    # silently degrades to copy-then-unlink, which reintroduces the partial-write window this
+    # silently degrades to copy-then-unlink, which opens exactly the partial-write window this
     # exists to close.  The leading dot and the pid keep it out of the way; it is removed on
     # every failure path, so only a SIGKILL between the copy and the rename can leave one.
     tmp="$dir/.run_coverage-restore.$$.$(basename -- "$rel")"
@@ -2065,11 +2067,12 @@ restore_one_makefile() { # $1=relative path  $2=octal mode recorded at snapshot 
 # ------------------------------------------------------------------------------------
 # TAKE ONE PATH BACK OUT, because it did not exist when the snapshot was taken.
 #
-# This is the other half of F3's exactness: an unconfigured checkout has none of the five
-# toolchain-generated Makefiles, configure creates them, and a restore that only replaced what
-# it had copied left all five behind.  The tree that came out of the run then differed from the
-# tree that went in.  Only paths RECORDED ABSENT are removed, and only when they are regular
-# files -- so this can never delete content the snapshot holds, and never follows a link.
+# This is the other half of returning the tree exactly as it was found: an unconfigured
+# checkout has none of the five toolchain-generated Makefiles, configure creates them, and a
+# restore that replaced only what it had copied would leave all five behind -- so the tree
+# that came out of the run would differ from the tree that went in, in the one respect this
+# mechanism exists to prevent.  Only paths RECORDED ABSENT are removed, and only when they are
+# regular files -- so this can never delete content the snapshot holds, and never follows a link.
 # ------------------------------------------------------------------------------------
 remove_regenerated_makefile() { # $1=relative path recorded as absent
     local rel="$1"
@@ -2116,9 +2119,9 @@ remove_regenerated_makefile() { # $1=relative path recorded as absent
 # `die`: a `die` from inside the exit trap would skip the staging cleanup, the private lcov
 # HOME and the lock release, so every failure is reported and returned instead.
 #
-# The pre-check/post-check discipline of the old git-based do_restore is KEPT, because it was
-# the good part: report what was dirty going in (`was:`), do the work, then re-read git and
-# report anything still dirty (`still:`).  `git` is used here for REPORTING ONLY -- when it is
+# A PRE-CHECK AND A POST-CHECK BRACKET THE WORK: report what was dirty going in (`was:`), do
+# the restore, then re-read git and report anything still dirty
+# (`still:`).  `git` is used here for REPORTING ONLY -- when it is
 # absent or this is not a working tree the restore still happens and the reporting degrades to
 # a note.  The restore does not depend on git in any way, which is the whole point.
 # ------------------------------------------------------------------------------------
@@ -2225,9 +2228,9 @@ restore_regenerated_makefiles_from_snapshot() {
         after="$(git -C "$HDMICEC_ROOT" status --porcelain -- "${REGENERATED_MAKEFILES[@]}" 2>/dev/null || true)"
         if [ -n "$after" ]; then
             printf '%s\n' "$after" | sed 's/^/[run_coverage]   still: /' >&2
-            # NOT fatal, and the difference from the old git-based check is deliberate.  The old
-            # one compared against the index and so "still dirty" could only mean the checkout
-            # had failed.  Here the snapshot is the reference, and a path that was ALREADY
+            # NOT fatal, deliberately.  A check that took the INDEX as its reference could read
+            # "still dirty" only as a restore that had failed.  Here the snapshot is the
+            # reference, and a path that was ALREADY
             # modified relative to the index before this run started is still modified after a
             # faithful restore -- correctly so.  That is a report, not a failure.
             warn "the paths above still differ from the index.  That is expected when they were"
@@ -2274,7 +2277,8 @@ acquire_tree_lock() { # $1=short description of what this run is about to do, fo
        while looking entirely plausible.  It can also interleave the Makefile snapshot with a
        restore and put the other run's GENERATED content back over your source.
        flock ships with util-linux; install it, or run this script on a host that has it.
-       (This used to be a warning.  A warning that still reaches a verdict proves nothing.)"
+       (This is fatal rather than advisory: a warning that still reaches a verdict proves
+       nothing.)"
 
     local dir key path identity_before identity_open identity_after
     runner_lock_dir
@@ -2290,17 +2294,17 @@ acquire_tree_lock() { # $1=short description of what this run is about to do, fo
     fi
     path="$dir/tree$key.lock"
 
-    # THE LEAF GETS FILE CHECKS, NOT THE ANCESTRY WALK, and that is a measured correction
-    # rather than a subtlety worth guessing at.  assert_safe_ancestry validates every EXISTING
+    # THE LEAF GETS FILE CHECKS, NOT THE ANCESTRY WALK, and the reason is measured rather than
+    # a subtlety worth guessing at.  assert_safe_ancestry validates every EXISTING
     # component of the path it is given and requires each one to be a DIRECTORY.  The lock's
     # leaf is a regular FILE and -- unlike the artifact root, which is minted fresh -- it
-    # PERSISTS between runs, so on the second run the walk reached an existing regular file
-    # where it expected a directory and refused.  Measured symptom: the first --build
-    # succeeded because the leaf did not exist yet, and every subsequent one died with "is a
-    # regular empty file, not a directory".
+    # PERSISTS between runs, so a walk over the leaf reaches an existing regular file
+    # where it expects a directory and refuses.  Measured symptom of that shape: the first
+    # --build succeeds because the leaf does not exist yet, and every subsequent one dies with
+    # "is a regular empty file, not a directory".
     #
     # So the ancestry is proved once, for the DIRECTORY, by runner_lock_dir -- which is
-    # strictly stronger than the old walk, because that directory is created by mkdir and
+    # strictly stronger than walking the leaf, because that directory is created by mkdir and
     # verified owner-only, so no other account can put anything beside the leaf at all -- and
     # the leaf itself gets the checks that are meaningful for a file: not a symlink, a regular
     # file, created exclusively when it is new, and verified by device and inode across the
@@ -2403,12 +2407,12 @@ release_tree_lock() {
 # ------------------------------------------------------------------------------------
 # CANCELLATION.  A run that cannot be stopped is a run CI cannot cancel.
 #
-# Bash runs a trap only BETWEEN commands.  The suite used to be launched as a FOREGROUND child
-# -- `( cd …; timeout … ./run_L1Tests ) >"$run_log"` -- so while this shell sat inside that
-# command an external SIGTERM was recorded and then withheld from the handler until the child
-# finished on its own.  For the length of a whole suite the runner therefore ignored its own
-# cancellation, and nothing forwarded the signal to the suite: a cancelled job left the test
-# binary running and the private lcov HOME and staging directory behind it.
+# Bash runs a trap only BETWEEN commands.  A suite launched as a FOREGROUND child
+# -- `( cd …; timeout … ./run_L1Tests ) >"$run_log"` -- leaves this shell sitting inside that
+# command, so an external SIGTERM is recorded and then withheld from the handler until the child
+# finishes on its own.  For the length of a whole suite the runner would ignore its own
+# cancellation, with nothing forwarding the signal to the suite: a cancelled job leaves the
+# test binary running and the private lcov HOME and staging directory behind it.
 #
 # So the suite is launched in the BACKGROUND and in its OWN PROCESS GROUP -- `set -m` makes a
 # background job a process-group leader -- and this shell waits on it.  `wait` is interruptible,
@@ -2444,9 +2448,9 @@ await_process_exit() { # $1 = kill target  $2 = seconds
 #   1 -- the group STILL EXISTS after SIGTERM and SIGKILL.  Extinction could not be established,
 #        so SUITE_PGID is DELIBERATELY LEFT POPULATED: the EXIT trap calls this function again
 #        and gets another attempt, and the id stays in every diagnostic printed after this point.
-#        Clearing it here was the defect -- it discarded the only custody record this script has
-#        for the group at the exact moment that record became load-bearing, leaving a live
-#        process nothing could address and nothing could report.
+#        Clearing it here would discard the only custody record this script has for the group at
+#        the exact moment that record becomes load-bearing, leaving a live process nothing could
+#        address and nothing could report.
 # A caller that cannot act on the status must say so explicitly (`|| warn …`), never by ignoring
 # it: this runs under `set -e`, and a bare call inside the EXIT trap would abort the rest of the
 # trap -- the Makefile restore included -- the first time a group outlived a SIGKILL.
@@ -2503,9 +2507,9 @@ stop_suite_group() { # $1 = signal name to forward
 # passed, and a survivor is REPORTED rather than quietly cleaned up -- a harness that leaks its
 # host is a defect worth someone's attention, and this is the only place it surfaces.
 #
-# A DETECTED SURVIVOR NOW FAILS THE INVOCATION, WHICH IS THE POINT OF THE FUNCTION.  Reporting
-# it and returning 0 was the defect: the run continued, later invocations ran against a process
-# from this one, and the coverage verdict was issued as though nothing had happened.  Nothing
+# A DETECTED SURVIVOR FAILS THE INVOCATION, WHICH IS THE POINT OF THE FUNCTION.  Reporting
+# it and returning 0 would let the run continue, later invocations run against a process from
+# this one, and the coverage verdict be issued as though nothing had happened.  Nothing
 # downstream can distinguish "the harness reaped its host" from "the harness leaked it and this
 # script cleaned up after it", so the two cannot share an outcome -- the second is a failed
 # invocation whether or not the cleanup then worked, because the evidence the invocation
@@ -2556,16 +2560,17 @@ on_exit() {
     # (130/143/129), that failed a gate (1) or that reached only an advisory verdict (3) keeps
     # its own status, because that status is the primary finding and the leak is a second one.
     # The explicit `||` is also structural: this trap runs under `set -e`, so a bare call whose
-    # status is now sometimes non-zero would abort the rest of the trap -- the Makefile restore
+    # status can be non-zero would abort the rest of the trap -- the Makefile restore
     # included -- exactly when the tree most needs restoring.
     stop_suite_group "${SUITE_SIGNAL:-TERM}" || { [ "$rc" -ne 0 ] || rc=1; }
     # THE MAKEFILE RESTORE HANGS OFF THE TRAP, NOT OFF THE BUILD'S SUCCESS PATH, and that is
     # the reason it is here rather than at the end of do_build.  A build that fails half way
     # through configure has already had some of the six overwritten; a run cancelled with
-    # Ctrl-C has too.  Both used to leave the caller holding generated content over their own
-    # source and a printed `git checkout` command as the only way out.  Restoring from the trap
-    # covers every exit path there is -- success, failure, gate failure and cancellation --
-    # with one mechanism and no special cases.  It runs BEFORE the snapshot is removed, and
+    # Ctrl-C has too.  Hung off the success path, neither would be restored at all and both
+    # would leave the caller holding generated content over their own source with no way back.
+    # Restoring from the trap covers every exit path there is -- success, failure, gate failure
+    # and cancellation -- with one mechanism and no special cases.  It runs BEFORE the snapshot
+    # is removed, and
     # both are no-ops when no snapshot was ever taken (any invocation without --build).
     #
     # A FAILED RESTORE CHANGES THE RUN'S EXIT STATUS, and `return` from an EXIT trap is what
@@ -2593,8 +2598,8 @@ on_exit() {
     # could not record that fact has not produced the evidence it exists to produce, so its
     # status becomes 1 -- which `return "$rc"` below turns into the script's own exit status,
     # measured on this host's bash.  Two things make that safe rather than merely strict.  The
-    # marker on disk at that moment cannot be another generation's verdict: the purge superseded
-    # or removed the prior one and prepare_output_dir refused to run without publishing this
+    # marker on disk at that moment cannot be another generation's verdict: the purge supersedes
+    # or removes the prior one and prepare_output_dir refuses to run without publishing this
     # run's IN-PROGRESS, so what survives a failed final write is at worst THIS run's own
     # IN-PROGRESS or PURGING marker -- a same-run, conservative "did not reach its end", which is
     # exactly what a reader should conclude.  And the conservative write is attempted anyway,
@@ -2642,8 +2647,8 @@ on_exit() {
 }
 
 # The signal handler `exit`s rather than re-raising, because a shell terminated by a signal with
-# its default disposition never runs its EXIT trap: re-raising would have skipped the staging
-# cleanup, the private lcov HOME and -- now -- the suite itself.  `exit 130/143/129` reports the
+# its default disposition never runs its EXIT trap: re-raising would skip the staging
+# cleanup, the private lcov HOME and the suite itself.  `exit 130/143/129` reports the
 # same status a signalled shell would while guaranteeing the handler runs.
 on_signal() { # $1 = signal name  $2 = exit status
     SUITE_SIGNAL="$1"
@@ -2695,12 +2700,12 @@ trap 'on_signal HUP 129' HUP
 # overrides, which is what makes the run reproducible on any host.
 # ------------------------------------------------------------------------------------
 make_private_lcov_home() {
-    # The parent comes from select_safe_temp_parent, not from "${TMPDIR:-/tmp}": the fallback
-    # to /tmp put lcov's configuration directory below a world-writable directory on this
+    # The parent comes from select_safe_temp_parent, not from "${TMPDIR:-/tmp}": a fallback
+    # to /tmp would put lcov's configuration directory below a world-writable directory on this
     # host (measured mode 2777, no sticky bit).  The chosen parent has already been proved
     # safe at `named` strictness, so the ancestry check below is a re-assertion at the moment
-    # of use rather than the first check -- which is the posture every custody path in this
-    # script now has.
+    # of use rather than the first check -- the posture every custody path in this
+    # script takes.
     local parent
     select_safe_temp_parent
     parent="$RUNNER_TEMP_PARENT"
@@ -2767,10 +2772,10 @@ readonly SELFTEST_NOT_A_COMMAND
 # expansion of a variable that was never defined, is therefore invisible to `bash -n`, invisible
 # to shellcheck, and invisible until the run is already under way -- at which point it aborts
 # with `command not found` or `unbound variable` after the banner has printed, having produced
-# no measurement.  Two real defects of exactly that shape were found in this workspace's
-# runners: calls to a `prepare_lcov_home` that was never defined alongside wrappers built over
-# an undefined `LCOV_HOME_DIR`, and a per-file gate that expanded an undefined
-# `COVERAGE_GATE_EXEMPT_FILES` the moment any file fell below the bar.
+# no measurement.  Defects of exactly that shape are what this audit is for, and they are not
+# hypothetical in a runner of this size: a call to a `prepare_lcov_home` that nothing defines,
+# sitting beside wrappers built over an undefined `LCOV_HOME_DIR`; or a per-file gate that
+# expands an undefined `COVERAGE_GATE_EXEMPT_FILES` the moment any file falls below the bar.
 #
 # WHAT IT CHECKS.  Two things, statically, over this script's own text:
 #   1. Every snake_case word in a command position resolves -- to a function defined here, a
@@ -2829,11 +2834,11 @@ reference_audit() {
     # STAGE 3: a reference written WITH a default but never assigned anywhere.
     #
     # Stage 2 deliberately accepts \${X:-...} because it cannot abort under 'set -u'.  That is
-    # exactly what let a real defect through: the sink runner read \${STAT_BIN:-} in path_metadata()
-    # but never assigned STAT_BIN, so the guard was permanently empty and every run died at the
-    # first artifact-ancestry check with "stat was not found on PATH" while /usr/bin/stat was on
-    # PATH all along.  Safe from 'set -u', and wrong in every run - so the default form has to be
-    # audited too, not treated as proof of resolution.
+    # exactly the shape a defect slips through in: a runner that reads \${STAT_BIN:-} in
+    # path_metadata() while never assigning STAT_BIN has a permanently empty guard, and every run
+    # dies at the first artifact-ancestry check with "stat was not found on PATH" while
+    # /usr/bin/stat is on PATH all along.  Safe from 'set -u', and wrong in every run - so the
+    # default form is audited too, not treated as proof of resolution.
     #
     # Names that are genuinely read from the environment and are MEANT to be unassigned here are
     # listed below with the reason.  Every other tool handle, path and tunable this script uses is
@@ -2903,8 +2908,8 @@ usage() {
     # substitution within it.  Two reasons, and the second is the load-bearing one: a heredoc
     # holding a loop is unreadable, and the reference audit reads this script's text with grep,
     # so a loop variable inside a heredoc looks exactly like a call to a command that does not
-    # exist.  It caught this one when it was written the other way -- which is the audit doing
-    # its job, and the fix is to write it so there is nothing to except.
+    # exist.  The audit reports that shape as a call to a missing definition, which is the audit
+    # doing its job, so the loop is written where there is nothing to except rather than excepted.
     local matrix_summary='' record
     local label tier mode back_end select_filter exclude_filter synopsis permit_skip
     for record in "${INVOCATION_MATRIX[@]}"; do
@@ -3067,6 +3072,18 @@ ENVIRONMENT (command-line flags win)
                                under BINDER_SDK_DIR.
                                Currently: ${BINDER_SDK_INCLUDE_DIR:-<unset>}
 
+  THE LOADER PATH THE RUNNERS RECEIVE IS REBUILT FROM THE PREFIXES ABOVE AND FROM NOTHING
+  ELSE.  An LD_LIBRARY_PATH present in this script's own environment is deliberately NOT
+  propagated to the test binaries: an inherited loader path is untrusted input to a process
+  that loads shared objects, and these binaries and the staged Binder closure carry no
+  RUNPATH, so the first directory that answers a soname is the one that gets loaded.  Each
+  directory derived from the prefixes is admitted only if it exists, is a real directory
+  rather than a symbolic link, is owned by you or by root, and is not group- or
+  world-writable; one that exists and fails a check is named and the run stops rather than
+  searching it, and one that is simply absent is named and skipped.  Every discarded
+  inherited entry is logged too, so nothing disappears quietly.  Stage the libraries under
+  these prefixes, or register them with ldconfig, rather than exporting LD_LIBRARY_PATH.
+
   TEST HARNESS VARIABLES -- set by this script per invocation, listed so their contract is
   discoverable from --help rather than only from the sources.  Do not set them yourself: a
   value in the environment would be overridden per invocation anyway.
@@ -3123,9 +3140,9 @@ EXIT STATUS
          invocation or the binder driver that arm needs was unavailable
        * the branch-arm gate could not CHECK one or more required arms because a manifest
          entry was added without coordinates
-     Two conditions that USED to end here no longer do, and are now fatal: a missing or
-     unusable flock (a run that cannot prove it is alone must not reach a verdict), and a
-     minted directory whose ancestry is unsafe (a safe parent is chosen instead).
+     Two related conditions do not end here.  A missing or unusable flock is fatal, because
+     a run that cannot prove it is alone must not reach a verdict; and an unsafe ancestry for
+     the minted directory is not reported at all, because a safe parent is chosen instead.
 
 RESOLVED PATHS FOR THIS INVOCATION
   script          ${SCRIPT_PATH}
@@ -3208,8 +3225,8 @@ parse_args() {
     fi
     # 80 is this submodule's acceptance bar.  Any other value is a diagnostic, and saying so is
     # not enough on its own: a warning still lets the run print the same PASS line and return
-    # the same 0 a real acceptance run returns, so `COVERAGE_MIN=0` used to buy an acceptance
-    # success with no coverage requirement behind it.  The weakening is therefore recorded as an
+    # the same 0 a real acceptance run returns, so on a warning alone `COVERAGE_MIN=0` buys an
+    # acceptance success with no coverage requirement behind it.  The weakening is recorded as an
     # ADVISORY REASON, which forces the final verdict to ADVISORY and the exit status to
     # $EXIT_ADVISORY - a status a caller can branch on and cannot mistake for a pass.
     # 80, 80.0 and 80.00 are the same bar; 80.5 is not.
@@ -3385,7 +3402,7 @@ require_instrumented_tree() {
         # instead of silent -- the age of the newest counter is usually enough to tell a
         # fresh measurement from a stale one at a glance.
         #
-        # ACCUMULATION IS NOW BOTH THE MECHANISM AND THE HAZARD, which is why this warning
+        # ACCUMULATION IS BOTH THE MECHANISM AND THE HAZARD, which is why this warning
         # says less than it looks as though it should.  Under `--run` the counters are
         # zeroed once and then accumulated DELIBERATELY across the matrix, because the
         # back-end selection resolves once per process and that is the only way both arms
@@ -3405,7 +3422,7 @@ require_instrumented_tree() {
         warn "  Use --run to zero the counters and measure exactly one suite execution."
         # And make that visible in the VERDICT, not only in the log.  Warning about stale
         # evidence and then exiting 0 with "COVERAGE GATE PASSED" is indistinguishable, to
-        # any caller, from a clean measurement -- so this invocation can no longer produce
+        # any caller, from a clean measurement -- so this invocation does not produce
         # an acceptance verdict at all.  The figures and artifacts are still produced.
         note_advisory "the suite was NOT run by this invocation (no --run): the figures come from
        pre-existing, cumulative .gcda counters (newest: ${newest:-unknown}) and may credit
@@ -3421,22 +3438,22 @@ require_instrumented_tree() {
 # prerequisites, not committed artifacts, and both are stripped from the coverage denominator
 # by the '*/stubs/*' and '*/mocks/*' globs.
 #
-# WHY IT IS LIFTED OUT OF THE BUILD CHAIN.  It used to be the first link of the `&&` chain
-# inside the build subshell, which put a MUTATING step between the Makefile snapshot and
-# autoreconf.  The mutation was benign -- it creates directories and one symlink under stubs/
-# and touches none of the six -- but "benign" is a property of today's step list, and the
-# snapshot's guarantee should not depend on a reader re-deriving it every time the chain
-# changes.  With the step lifted out, autoreconf is literally the next mutating command after
-# the snapshot, so the guarantee is structural rather than argued.
+# WHY IT IS ITS OWN STEP RATHER THAN THE FIRST LINK OF THE BUILD CHAIN.  As the first link of
+# the `&&` chain inside the build subshell it would be a MUTATING step sitting between the
+# Makefile snapshot and autoreconf.  The mutation is benign -- it creates directories and one
+# symlink under stubs/ and touches none of the six -- but "benign" is a property of the current
+# step list, and the snapshot's guarantee should not depend on a reader re-deriving it every
+# time the chain changes.  Kept out here, autoreconf is literally the next mutating command
+# after the snapshot, so the guarantee is structural rather than argued.
 #
-# IT ALSO GAINS VALIDATION, which the inline version had none of: `touch` and `ln -sf` both
+# IT ALSO CARRIES VALIDATION, which an inline chain has none of: `touch` and `ln -sf` both
 # succeed in situations that leave the build unable to compile -- a stubs/ path that is a
 # symlink to somewhere else, a mock header that has been moved so the link dangles, a stub
 # that exists as a directory.  Each is checked, and each failure names the file and the
 # operation rather than surfacing later as a missing-header error from the compiler.
 #
 # The `###STEP:` marker is written to the same build log the chain writes to, so the failure
-# attribution the chain relies on -- grep the last marker -- keeps working across the move.
+# attribution the chain relies on -- grep the last marker -- covers this step too.
 # ------------------------------------------------------------------------------------
 STUB_HEADER_DIRS=(
     'stubs/rdk/iarmbus'
@@ -3668,17 +3685,15 @@ $( { tail -n 25 -- "$build_log" | sed 's/^/         /'; } 2>/dev/null || true )
 
 # ------------------------------------------------------------------------------------
 # The build rewrote six git-tracked Makefiles.  THIS RUN PUTS THEM BACK ITSELF, from the
-# snapshot it took before autoreconf, and this function's job is now to say so rather than
+# snapshot it took before autoreconf, so this function's job is to say so rather than
 # to hand the caller a command.
 #
-# WHAT THIS FUNCTION USED TO DO, AND WHY IT NO LONGER DOES IT.  It built a
-# `git -C <hdmicec> checkout -- <the six>` string and printed it as one of two offered
-# routes.  Both routes were destructive and the printed one was the more dangerous of the
-# two, because a paste is unreviewed: it restores whatever the index holds and destroys any
-# uncommitted edit to ccec/src/Makefile, which is hand-written source rather than generated
-# output.  Fixing only the action and leaving the advice in place would have left the footgun
-# loaded and merely moved the trigger, so the advice went with it.  Nothing here prints a
-# command for anyone to run.
+# WHY IT PRINTS NO COMMAND.  A `git -C <hdmicec> checkout -- <the six>` string offered here as
+# a route would be the more dangerous of the two available, because a paste is unreviewed: it
+# restores whatever the index holds and destroys any uncommitted edit to ccec/src/Makefile,
+# which is hand-written source rather than generated output.  Making the action safe while
+# leaving that advice standing would leave the footgun loaded and merely move the trigger, so
+# neither exists: nothing here prints a command for anyone to run.
 # ------------------------------------------------------------------------------------
 announce_regenerated_makefiles() {
     rule
@@ -3705,7 +3720,7 @@ announce_regenerated_makefiles() {
         warn "  need to run anything, and there is nothing to paste."
         warn "DO NOT revert these paths with 'git checkout'.  It restores what the INDEX holds,"
         warn "  not what was there, so it would silently destroy an uncommitted edit to any of"
-        warn "  the six.  This script no longer offers that route in any form."
+        warn "  the six.  This script offers no such route in any form."
     else
         # Reachable only if do_build is ever called without its snapshot step, which would be
         # a defect in this script rather than a caller error -- so it says exactly that.
@@ -3723,9 +3738,9 @@ announce_regenerated_makefiles() {
 # The snapshot holds the WORKING-TREE bytes and modes as this run found them, per path, with
 # presence recorded; it is the only record that can put the tree back the way it was.
 #
-# WHAT THIS USED TO DO AND MUST NOT.  With no snapshot, it fell back to asking git whether the
-# six differed from the INDEX, and when they did not it printed "nothing to restore" and
-# returned 0.  That is a success status for an invocation that restored nothing and, worse, it
+# WHAT IT MUST NOT DO.  With no snapshot, falling back to asking git whether the six differ
+# from the INDEX -- and printing "nothing to restore" with a 0 status when they do not -- is a
+# success status for an invocation that restored nothing and, worse, it
 # is a success status derived from the wrong reference:
 #
 #   * clean-against-the-index does not mean unchanged-since-this-run-started.  A tree whose
@@ -3739,8 +3754,9 @@ announce_regenerated_makefiles() {
 # as INFORMATION about the tree, never as the basis for the verdict.
 #
 # AND IT NEVER REACHES FOR `git checkout`.  That is the mechanism this whole snapshot machinery
-# replaced: it restores what the index holds rather than what was there, so on ccec/src/Makefile
-# -- hand-written RDK build source that configure clobbers because it is in AC_CONFIG_FILES --
+# stands in place of: it restores what the index holds rather than what was there, so on
+# ccec/src/Makefile -- hand-written RDK build source that configure clobbers because it is in
+# AC_CONFIG_FILES --
 # it would silently destroy an uncommitted edit.  The one code path a caller invokes precisely
 # when something has already gone wrong must not be the one that loses their work.
 # ------------------------------------------------------------------------------------
@@ -3807,7 +3823,7 @@ do_restore() {
 # THE INVOCATION MATRIX
 # ====================================================================================
 #
-# WHY THERE IS A MATRIX AT ALL, rather than one run.  The middleware now compiles BOTH HAL
+# WHY THERE IS A MATRIX AT ALL, rather than one run.  The middleware compiles BOTH HAL
 # back-ends into libRCEC and chooses between them ONCE PER PROCESS, inside LibCCEC::init,
 # which is the first thing either harness does that forces Driver::getInstance().  By the
 # time any TEST_F body runs the choice is made and cannot be changed, so ONE BINARY RUN
@@ -3860,7 +3876,7 @@ do_restore() {
 # bad metadata, cannot reach the compatibility-rejection arms B and C reach.
 #
 # ------------------------------------------------------------------------------------
-# THE FILTERS ARE MEASURED, NOT ESTIMATED -- and the counts are not written down at all.
+# THE FILTERS ARE MEASURED, NOT ESTIMATED -- and no count written down here is a gate input.
 #
 # --gtest_filter selects by SUITE name, and several source files declare more than one suite,
 # so a filter derived from file names would be wrong in a way nothing would catch.  The two
@@ -3893,9 +3909,13 @@ readonly LEGACY_BOUND_SUITES='BusTest.*:ConnectionTest.*:IntegrationFlowTest.*:D
 # The contract suite's own fixtures, partitioned by which back-end each one requires.  Read
 # from the FIXTURE MANIFEST in tests/L1Tests/ccec/test_DriverAidl.cpp, which is the authority
 # for its own case set, and cross-checked against the built binary.
-#   back-end independent  Compatibility 11, Preflight 7, LocalInstance 9   -- run under A, B and C
-#   legacy back-end only  Selection 4, LegacyArm 4                         -- run under A only
-#   AIDL back-end only    Session 19, Transmit 12                          -- run under B only
+#   back-end independent  Compatibility 19, Preflight 27, LocalInstance 25  = 71, under A, B and C
+#   legacy back-end only  Selection 4, LegacyArm 5                          =  9, under A only
+#   AIDL back-end only    Session 23, Transmit 12                           = 35, under B only
+# That is 115 contract cases, so run_L1Tests registers 598 in total: the 483 pre-existing cases
+# plus these 115.  Under the filters below that comes out as 563 selected and 35 excluded on
+# invocation A, 414 and 184 on B, and 379 and 219 on C -- figures the reconciliation in
+# run_one_invocation measures from the binary rather than reading from here.
 readonly CONTRACT_ANY_BACKEND_SUITES='DriverAidlCompatibilityTest.*:DriverAidlPreflightTest.*:DriverAidlLocalInstanceTest.*'
 readonly CONTRACT_LEGACY_ONLY_SUITES='DriverAidlSelectionTest.*:DriverAidlLegacyArmTest.*'
 readonly CONTRACT_AIDL_ONLY_SUITES='DriverAidlSessionTest.*:DriverAidlTransmitTest.*'
@@ -3920,11 +3940,12 @@ readonly L2_SUITES='DualPath*'
 #   8 permitted skips   the ONLY cases this invocation may report as SKIPPED, as gtest globs.
 #                       Empty means none: any skip fails the invocation.
 #
-# FIELD 8 IS THE MANDATORY-PASS CONTRACT, and it exists because a skipped case used to count as
-# an executed one.  The count check compares the JSON's "tests" against the filter's selection,
-# and GoogleTest counts a case it SKIPPED among "tests" -- so an invocation whose cases all
-# skipped in SetUp reconciled perfectly, exited 0, and reported a full complement of evidence it
-# had not produced.  On invocation E that is not a hypothetical: its four AIDL-flow cases are the
+# FIELD 8 IS THE MANDATORY-PASS CONTRACT, and it exists because a skipped case counts as an
+# executed one everywhere else.  The count check compares the JSON's "tests" against the
+# filter's selection, and GoogleTest counts a case it SKIPPED among "tests" -- so without this
+# field an invocation whose cases all skipped in SetUp reconciles perfectly, exits 0, and
+# reports a full complement of evidence it did not produce.
+# On invocation E that is not a hypothetical: its four AIDL-flow cases are the
 # only proof this suite ever has that a frame crosses real binder IPC and arrives on a binder
 # thread, and they skip rather than fail when the resolved back-end is not theirs.  A green E
 # with those four skipped is the exact false green this whole matrix exists to prevent.
@@ -3947,12 +3968,12 @@ readonly L2_SUITES='DualPath*'
 #
 # WHY FIELD 6 EXISTS RATHER THAN BEING COMPUTED.  The check it feeds is
 # `selected + excluded == registered`, measured all three times from the binary, and that is
-# the generalisation of the guard this script has always had: it used to compare the executed
-# count against the UNFILTERED inventory and raise an advisory on any gap, which was exactly
-# right when nothing was filtered and would now fire on every filtered invocation by design.
+# the generalisation of a guard against a suite that goes unrun.  Comparing the executed count
+# against the UNFILTERED inventory and raising an advisory on any gap is exactly right when
+# nothing is filtered, and fires on every filtered invocation by design once a matrix exists.
 # Deriving the complement arithmetically (registered - selected) would prove nothing at all,
 # because both sides would come from the same subtraction.  Spelling it out as suite globs and
-# MEASURING it makes the reconciliation real, and it buys something the old check could not:
+# MEASURING it makes the reconciliation real, and it buys what an unfiltered comparison cannot:
 # a suite added to the binary and classified into neither group breaks the arithmetic and
 # fails the invocation, instead of silently going unrun on four invocations out of five.
 #
@@ -4031,17 +4052,209 @@ binder_transport_present() {
 # an empty path element -- an empty element in LD_LIBRARY_PATH means the CURRENT DIRECTORY,
 # which is a genuine hazard and not merely untidy.
 # ------------------------------------------------------------------------------------
-binder_runtime_library_path() { # $1 = the path built so far -> the extended path on stdout
-    local path="${1:-}" candidate
+# AN INHERITED LOADER PATH IS UNTRUSTED INPUT TO A PROCESS THAT LOADS SHARED OBJECTS, so the
+# search path handed to the test binaries is REBUILT from this script's own resolved roots
+# rather than filtered out of whatever the caller happened to export.
+#
+# WHAT THIS REPLACES, stated plainly because the shape of the old code is what made it wrong.
+# The path used to be SEEDED with ${LD_LIBRARY_PATH:-} and the trusted roots PREPENDED to it.
+# Prepending changes precedence and nothing else: the inherited tail survived intact and was
+# exported to the runner, so every directory on the caller's loader path was searched by the
+# test binaries this script launches.  That is not a theoretical exposure here -- the
+# hand-built libRCEC and the staged Binder closure carry no RUNPATH, so EVERY soname they need
+# is resolved by searching, and the first directory that answers wins.  A shadowing
+# libbinder.so, libutils.so, libgtest.so or any member of the transitive closure, placed in a
+# directory an attacker can write and reached through a loader path nobody reviews, is loaded in
+# preference to nothing at all -- into a process that opens the binder driver, registers a
+# global service name, and is routinely run with elevated privileges in CI.  CWE-427, and the
+# fix is to stop treating the ambient environment as an input to the search path.
+#
+# WHY REBUILDING RATHER THAN FILTERING.  A filter has to be right about every entry it keeps,
+# and an entry kept by mistake is indistinguishable from one it was told to keep.  Rebuilding
+# inverts the default: the only directories the child can search are the ones this script
+# resolved for itself and then proved safe, so a new hazard has to get past an admission check
+# to appear at all.  Little is lost in the ordinary case either -- the staged roots are exactly
+# what a working environment puts on LD_LIBRARY_PATH in the first place, and here they are named
+# from configuration this run prints in its own log.
+#
+# WHAT "TRUSTED" MEANS HERE, and it is a narrower claim than the artifact-path checks above
+# make.  A candidate is admitted only when all of these hold:
+#   * it exists and is a directory -- a name that resolves to nothing contributes nothing, and
+#     a non-directory on a search path is a mis-staged prefix rather than a library store;
+#   * it is not a symbolic link.  A link is a name whose target can be repointed after the check
+#     without the name changing, which is the substitution being defended against; resolving it
+#     and admitting the target would validate one thing and search another;
+#   * it is an absolute path.  A relative element is resolved against the working directory of
+#     the process that inherits it -- and the launch below cds into the binary's directory --
+#     so a relative root is a search path that moves with the process;
+#   * it is owned by this effective user or by root.  Anyone else owning it can replace its
+#     contents between this check and the load;
+#   * it is NOT group- or world-writable, AND THERE IS NO STICKY-BIT EXEMPTION, which is where
+#     this deliberately differs from assert_component_safe.  The sticky bit stops a non-owner
+#     REMOVING or RENAMING an entry, which is the whole risk for a directory this script writes
+#     artifacts into.  It does not stop anyone CREATING one -- and creating libbinder.so where
+#     the loader will look for it is the entire attack, so sticky buys nothing here and
+#     accepting it would reintroduce the finding under a different mode.
+#
+# THE ANCESTRY IS DELIBERATELY NOT WALKED, unlike the artifact paths.  Those are paths this
+# script WRITES to, where a substituted parent redirects the write; this is a path the loader
+# READS from, and these roots are named by this run's own configuration rather than pre-created
+# by somebody else.  Requiring a safe ancestry would also reject the ordinary case outright: a
+# staged prefix or a build tree under a conventional /tmp (measured on this host: mode 2777,
+# world-writable, no sticky bit) would fail on its grandparent, and a check that refuses to run
+# on the normal arrangement gets deleted rather than obeyed.  What is searched is the candidate
+# itself, so the candidate itself is what is held to the rules.
+#
+# THE SCOPE OF THE CLAIM.  This governs the loader's SEARCH PATH.  LD_PRELOAD and LD_AUDIT are a
+# different mechanism -- they name objects directly rather than directories to search -- and are
+# outside this finding; they are not filtered here and this block does not pretend to.
+#
+# NOTHING IS DROPPED SILENTLY, in either direction.  A candidate that fails a SECURITY property
+# is fatal, because admitting it would import the exposure while quietly skipping it would
+# surface three steps later as "cannot open shared object file" with nothing naming the cause.
+# A candidate that simply is not there is reported and skipped, because a derived path such as
+# HALIF_PREFIX/lib/halif legitimately does not exist in a split staging layout -- it is still
+# named, so a mis-staged prefix is visible now rather than mysterious later.  And an inherited
+# LD_LIBRARY_PATH is reported entry by entry, so a caller who relied on it learns that it was
+# discarded on purpose instead of debugging a load failure.
+# ------------------------------------------------------------------------------------
+
+# The ONE place the Binder/HALIF runtime roots are named.  It populates an array rather than
+# printing, so its caller runs in THIS shell and a fatal verdict on a candidate ends the run
+# rather than ending a command substitution.
+#
+# The order is the order the prepending version added them in, and it is preserved so that this
+# change alters WHAT is searched and not the order in which it is searched.
+BINDER_RUNTIME_LIBRARY_ROOTS=()
+binder_runtime_library_roots() { # -> BINDER_RUNTIME_LIBRARY_ROOTS
+    BINDER_RUNTIME_LIBRARY_ROOTS=()
+    [ -z "$HALIF_LIB_DIR" ]  || BINDER_RUNTIME_LIBRARY_ROOTS+=("$HALIF_LIB_DIR")
+    [ -z "$HALIF_PREFIX" ]   || BINDER_RUNTIME_LIBRARY_ROOTS+=("$HALIF_PREFIX/lib/halif")
+    [ -z "$BINDER_SDK_DIR" ] || BINDER_RUNTIME_LIBRARY_ROOTS+=("$BINDER_SDK_DIR/lib/binder" \
+                                                               "$BINDER_SDK_DIR/lib")
+}
+
+# One candidate's verdict, and no exit of its own: the caller decides what a verdict costs.
+# That split is what keeps the rules in a single copy and lets them be exercised directly.
+#
+#   admit   -- every property above holds; it may go on the loader path.
+#   absent  -- there is nothing there to admit.  Reported by the caller, not fatal.
+#   unsafe  -- it exists and violates a security property.  Fatal at the caller.
+TRUSTED_LIBRARY_DIR_VERDICT=''
+TRUSTED_LIBRARY_DIR_REASON=''
+classify_trusted_library_dir() { # $1=candidate directory -> 0 admit, 1 reject (verdict+reason set)
+    local candidate="${1:-}" meta uid rest mode kind numeric_mode
+
+    TRUSTED_LIBRARY_DIR_VERDICT='unsafe'
+    TRUSTED_LIBRARY_DIR_REASON=''
+
+    if [ -z "$candidate" ]; then
+        TRUSTED_LIBRARY_DIR_VERDICT='absent'
+        TRUSTED_LIBRARY_DIR_REASON='the name is empty, and an empty loader-path element names the
+       current working directory rather than nothing'
+        return 1
+    fi
+
+    case "$candidate" in
+        /*) ;;
+        *)  TRUSTED_LIBRARY_DIR_REASON="it is not an absolute path, so it would be resolved against
+       the working directory of whichever process inherited it"
+            return 1 ;;
+    esac
+
+    # lstat semantics, and BEFORE the metadata read, so a link is rejected as a link rather than
+    # reported as whatever it points at.
+    if [ -L "$candidate" ]; then
+        TRUSTED_LIBRARY_DIR_REASON="it is a symbolic link, whose target can be repointed after this
+       check without the name changing.  Name the real directory instead"
+        return 1
+    fi
+
+    meta="$(path_metadata "$candidate")"
+    if [ -z "$meta" ]; then
+        TRUSTED_LIBRARY_DIR_VERDICT='absent'
+        TRUSTED_LIBRARY_DIR_REASON='it does not exist, or its ownership and permissions cannot be read'
+        return 1
+    fi
+
+    uid="${meta%% *}"
+    rest="${meta#* }"
+    mode="${rest%% *}"
+    kind="${rest#* }"
+
+    if [ "$kind" != "directory" ]; then
+        TRUSTED_LIBRARY_DIR_REASON="it is a $kind, not a directory"
+        return 1
+    fi
+
+    if [ "$uid" != "$EUID_VALUE" ] && [ "$uid" != "0" ]; then
+        TRUSTED_LIBRARY_DIR_REASON="it is owned by uid $uid, which is neither this user ($EUID_VALUE)
+       nor root, so its owner can replace what is inside it between this check and the load"
+        return 1
+    fi
+
+    # No sticky-bit exemption, for the reason given at length above: sticky stops removal and
+    # renaming, not creation, and creating a shadowing library is the attack.
+    numeric_mode="$(( 8#$mode ))"
+    if [ "$(( numeric_mode & 0022 ))" -ne 0 ]; then
+        TRUSTED_LIBRARY_DIR_REASON="its mode is $mode -- writable by group or world -- so any local
+       account able to write it can place a shadowing shared object where the loader will find it"
+        return 1
+    fi
+
+    TRUSTED_LIBRARY_DIR_VERDICT='admit'
+    return 0
+}
+
+# The loader path the launched test binaries receive: built from the roots above and from
+# nothing else.
+#
+# BUILT ONCE PER RUN and memoised, so the diagnostics are printed once rather than once per
+# invocation of the matrix.  That is sound because every input is resolved configuration that
+# does not change during a run -- the four staging variables and GTEST_PREFIX are fixed at
+# startup, and the first call happens after any --build step has finished staging.
+TRUSTED_LIBRARY_PATH=''
+TRUSTED_LIBRARY_PATH_BUILT=0
+build_trusted_library_path() {
+    [ "$TRUSTED_LIBRARY_PATH_BUILT" -eq 0 ] || return 0
+
+    local inherited="${LD_LIBRARY_PATH:-}"
+    local path='' candidate entry
     local -a candidates=()
 
-    [ -z "$HALIF_LIB_DIR" ]  || candidates+=("$HALIF_LIB_DIR")
-    [ -z "$HALIF_PREFIX" ]   || candidates+=("$HALIF_PREFIX/lib/halif")
-    [ -z "$BINDER_SDK_DIR" ] || candidates+=("$BINDER_SDK_DIR/lib/binder" "$BINDER_SDK_DIR/lib")
+    # GTest goes on first and the Binder/HALIF roots are prepended over it, which reproduces the
+    # precedence the previous version produced.
+    [ -z "$GTEST_PREFIX" ] || candidates+=("$GTEST_PREFIX/lib")
+    binder_runtime_library_roots
+    candidates+=("${BINDER_RUNTIME_LIBRARY_ROOTS[@]:-}")
 
     for candidate in "${candidates[@]:-}"; do
         [ -n "$candidate" ] || continue
-        [ -d "$candidate" ] || continue
+        if ! classify_trusted_library_dir "$candidate"; then
+            case "$TRUSTED_LIBRARY_DIR_VERDICT" in
+                absent)
+                    log "loader path: NOT admitted -- $candidate"
+                    log "             ($TRUSTED_LIBRARY_DIR_REASON)"
+                    ;;
+                *)
+                    die "the staged library directory
+           $candidate
+       cannot be put on the loader path of the test binaries this script launches, because
+       $TRUSTED_LIBRARY_DIR_REASON.
+       Those binaries and the staged Binder closure carry no RUNPATH, so every shared object
+       they need is resolved by searching this path and the first directory that answers wins.
+       This run will not search a directory it cannot vouch for, and will not drop one silently
+       either: dropping it would reappear later as 'cannot open shared object file' with nothing
+       naming the cause.
+       Fix the staging rather than the check:
+           chmod g-w,o-w '$candidate'      (if it is writable by group or world)
+           chown $EUID_VALUE '$candidate'  (if it is owned by somebody else)
+       or point GTEST_PREFIX / HALIF_LIB_DIR / HALIF_PREFIX / BINDER_SDK_DIR at a real
+       directory you own."
+                    ;;
+            esac
+            continue
+        fi
         # Already present?  Do not add it twice; a search path that grows on every call is how
         # a long-running loop ends up with an environment too large to exec.
         case ":$path:" in
@@ -4049,7 +4262,46 @@ binder_runtime_library_path() { # $1 = the path built so far -> the extended pat
         esac
         path="$candidate${path:+:$path}"
     done
-    printf '%s\n' "$path"
+
+    TRUSTED_LIBRARY_PATH="$path"
+    TRUSTED_LIBRARY_PATH_BUILT=1
+
+    if [ -n "$path" ]; then
+        log "loader path for the test binaries (rebuilt from validated roots): $path"
+    else
+        # Legitimate when the whole closure is registered with ldconfig, and the cause of a load
+        # failure when it is not -- so it is named either way rather than assumed.
+        log "loader path for the test binaries is EMPTY: no staged library directory was admitted,
+       so the runners must resolve libbinder, libutils, the AIDL stubs and gtest through the
+       system loader cache alone.  If they cannot, set GTEST_PREFIX, HALIF_LIB_DIR and
+       BINDER_SDK_DIR to the staged prefixes."
+    fi
+
+    # WHAT THE CALLER'S OWN LD_LIBRARY_PATH WAS, AND THAT IT WENT NOWHERE.  A user who exported
+    # it -- the shared environment file in this workspace does -- is entitled to know why the run
+    # behaves differently rather than to discover it through a load failure.  Every entry is
+    # named, and an entry the rebuilt path supplies anyway is marked as such, because "dropped"
+    # and "dropped but also admitted from a trusted root" are different facts to a reader.
+    if [ -n "$inherited" ]; then
+        local -a inherited_entries=()
+        log "an inherited LD_LIBRARY_PATH was present in this script's own environment and was
+       deliberately NOT propagated to the test binaries: an inherited loader path is untrusted
+       input to a process that loads shared objects, so the path above was rebuilt from this
+       script's resolved roots instead of filtered.  Entry by entry:"
+        IFS=':' read -r -a inherited_entries <<<"$inherited"
+        for entry in "${inherited_entries[@]:-}"; do
+            if [ -z "$entry" ]; then
+                log "             dropped: <empty element -- names the current directory>"
+                continue
+            fi
+            case ":$path:" in
+                *":$entry:"*)
+                    log "             dropped: $entry" \
+                        "(also admitted from a trusted root, so nothing is lost)" ;;
+                *)  log "             dropped: $entry" ;;
+            esac
+        done
+    fi
 }
 
 # Does this invocation need the binder transport in order to run at all?
@@ -4067,7 +4319,7 @@ invocation_needs_binder() { # $1 = invocation letter
 
 # ------------------------------------------------------------------------------------
 # Optional suite execution.  The order -- zero once, run the matrix, capture once -- is the
-# whole point, and the first of those three words changed for a measured reason recorded at
+# whole point, and the first of those three words rests on the measured reason recorded at
 # clause 4 in the header: gcov counters ACCUMULATE, and because the back-end selection
 # resolves once per process, accumulation ACROSS the invocations is the only way both arms of
 # the selection branch are ever covered by anything.  Zeroing per invocation would leave the
@@ -4075,12 +4327,11 @@ invocation_needs_binder() { # $1 = invocation letter
 # the figures.  Zeroing once, before the first invocation, and capturing once, after the last
 # one has passed, is the only arrangement that has neither failure mode.
 #
-# Verifying after each invocation is unchanged and is still what proves a suite ran rather
-# than exited early.
+# Verification after each invocation is what proves a suite ran rather than exited early.
 # ------------------------------------------------------------------------------------
 # A zero exit status from run_L1Tests means "nothing failed", which is NOT the same as
 # "something ran".  GoogleTest exits 0 for an empty selection, so a mistyped or overly narrow
-# --gtest_filter produced a green line and a coverage figure measured over no execution at
+# --gtest_filter yields a green line and a coverage figure measured over no execution at
 # all.  Three things are therefore required of the results file the run writes.  The file was
 # deleted immediately beforehand, so:
 #   * it exists            -> this run wrote it, rather than an earlier one;
@@ -4096,14 +4347,14 @@ invocation_needs_binder() { # $1 = invocation letter
 # which is precisely the "whatever ran was not this suite" condition it exists to catch.  Each
 # invocation names which pattern applies, from its tier.
 #
-# THE L1 PATTERN GAINED THE CONTRACT SUITE'S BACK-END-INDEPENDENT FIXTURES, and that is not a
-# weakening even though it widens what counts as "this suite".  The reason it is safe is that
-# the pattern is no longer the guard against a PARTIAL run: the per-invocation count
+# THE L1 PATTERN INCLUDES THE CONTRACT SUITE'S BACK-END-INDEPENDENT FIXTURES, and that is not a
+# weakening even though it widens what counts as "this suite".  It is safe because the
+# pattern is not the guard against a PARTIAL run: the per-invocation count
 # reconciliation below is, and it is far stronger -- it compares the executed count against
 # what the invocation's own filter selects and requires selected + excluded to equal the whole
-# registered inventory.  A run narrowed to one fixture now fails on the count with a specific
-# number, where before it could only be caught by not matching a name.  Widening the name test
-# while a real count test stands behind it costs nothing; widening it INSTEAD of one would have
+# registered inventory.  A run narrowed to one fixture fails on the count with a specific
+# number rather than having to be caught by not matching a name.  Widening the name test
+# while a real count test stands behind it costs nothing; widening it INSTEAD of one would
 # cost everything.
 readonly EXPECTED_SUITE_PATTERN='"(classname|name)"[[:space:]]*:[[:space:]]*"(CECFrameTest|ConnectionTest|BusTest|DriverTest|LibCCECTest|OpCodeTest|MessageDecoderTest|MessageEncoderTest|OperandsTest|DriverAidlCompatibilityTest|DriverAidlPreflightTest|DriverAidlLocalInstanceTest)'
 
@@ -4117,24 +4368,27 @@ readonly L2_EXPECTED_SUITE_PATTERN='"(classname|name)"[[:space:]]*:[[:space:]]*"
 # exactly two spaces; a fixture line is not indented, and GoogleTest's trailing "# GetParam() ="
 # annotations are stripped before counting.
 #
-# THE FILTER PARAMETER IS THE WHOLE GENERALISATION, and it needs stating because the old version
-# of this function REFUSED to take one.  Its comment said so: a filtered listing would agree with
-# a filtered run and prove nothing.  That was correct when there was one unfiltered run to check,
-# and it is still correct as far as it goes -- which is why the caller asks THREE questions rather
+# THE FILTER PARAMETER NEEDS STATING, because taking one at all looks like the mistake it would
+# be on its own: a filtered listing agrees with a filtered run and proves nothing.  That
+# objection is correct as far as it goes, which is why the caller asks THREE questions rather
 # than one, and never just the filtered one:
 #
 #   registered_test_count <...>            the whole inventory, no filter        -> registered
 #   registered_test_count <...> "$select"  what this invocation intends to run   -> selected
 #   registered_test_count <...> "$exclude" what it intends NOT to run            -> excluded
 #
-# `executed == selected` alone would indeed prove nothing, for exactly the reason the old comment
-# gave.  `selected + excluded == registered`, with all three read independently from the binary, is
+# `executed == selected` alone would indeed prove nothing, for exactly that reason.
+# `selected + excluded == registered`, with all three read independently from the binary, is
 # what makes it an assertion: it is only satisfiable if the invocation's own account of what it
 # runs and what it skips adds up to everything that exists.
 #
 # Prints the count, or nothing when the listing could not be obtained - in which case the caller
 # treats the inventory as unknown rather than as satisfied.
-registered_test_count() { # $1=directory  $2=binary name  $3=LD_LIBRARY_PATH  $4=filter (optional)
+# $3 IS THE REBUILT LOADER PATH, not an inherited one: this function launches the test binary to
+# list its cases, so it is a launch site in its own right and receives exactly the allowlist
+# build_trusted_library_path constructed.  Nothing here reads LD_LIBRARY_PATH from the
+# environment; the value is passed in so there is one construction and one place to audit it.
+registered_test_count() { # $1=directory  $2=binary name  $3=rebuilt loader path  $4=filter (optional)
     local dir="$1" binary="$2" ld_path="$3" filter="${4:-}" listing
     local -a filter_args=()
     [ -z "$filter" ] || filter_args=("--gtest_filter=$filter")
@@ -4150,19 +4404,19 @@ registered_test_count() { # $1=directory  $2=binary name  $3=LD_LIBRARY_PATH  $4
 # ------------------------------------------------------------------------------------
 # Verify one invocation's results file.
 #
-# EVERY GUARD THE SINGLE-RUN VERSION HAD IS STILL HERE, unchanged in intent and in most cases
-# unchanged in text: the file must exist (it was deleted immediately beforehand), "tests" must
-# be positive, executed = declared - disabled must be positive, failures and errors must both
-# be zero even when the exit status was zero, and the results must name one of this tier's own
-# fixtures.  None of them was weakened to accommodate a filtered run; the parameters below are
-# what let them apply per invocation instead of once.
+# EVERY GUARD A SINGLE UNFILTERED RUN WOULD GET APPLIES HERE TOO: the file must exist (it was
+# deleted immediately beforehand), "tests" must be positive, executed = declared - disabled
+# must be positive, failures and errors must both be zero even when the exit status was zero,
+# and the results must name one of this tier's own fixtures.  None of them is weakened to
+# accommodate a filtered run; the parameters below are what let them apply per invocation
+# instead of once.
 #
-# WHAT CHANGED IS THE INVENTORY COMPARISON, and only its mechanism.  It used to compare the
-# executed count against the UNFILTERED registered inventory and raise an advisory on any gap,
-# which is exactly right when the run is unfiltered and fires on every filtered invocation by
-# design.  It is now a per-invocation HARD CHECK against the count the invocation's own filter
+# THE INVENTORY COMPARISON IS THE ONE THAT HAS TO BE PER-INVOCATION.  Comparing the executed
+# count against the UNFILTERED registered inventory and raising an advisory on any gap is
+# exactly right when the run is unfiltered and fires on every filtered invocation by design.
+# So it is a per-invocation HARD CHECK against the count the invocation's own filter
 # selects, backed by the selected + excluded == registered reconciliation described at
-# registered_test_count.  That is stricter than the old advisory in two ways worth naming: a
+# registered_test_count.  That is stricter than an advisory in two ways worth naming: a
 # mismatch FAILS rather than merely noting, and a suite classified into neither the select nor
 # the exclude group breaks the reconciliation instead of quietly going unrun.
 # ------------------------------------------------------------------------------------
@@ -4345,12 +4599,12 @@ verify_results() { # $1=results JSON  $2=label  $3=fixture pattern  $4=expected 
     # ------------------------------------------------------------------------------------
     # THE RECONCILIATION.  selected + excluded == registered, all three measured.
     #
-    # This is what the old unfiltered comparison became rather than what replaced it.  Its
-    # purpose was to notice cases that were never selected; under a matrix that is by design,
-    # so the question changed from "were any cases skipped" to "are the skipped cases exactly
+    # This is the matrix's form of an unfiltered comparison rather than a replacement for one.
+    # Noticing cases that were never selected is the purpose; under a matrix non-selection is by
+    # design, so the question is not "were any cases skipped" but "are the skipped cases exactly
     # the ones this invocation SAID it skips".  A suite added to the binary and classified into
-    # neither group fails here -- which the old check could not have caught either, since a new
-    # unclassified suite would simply have widened the gap it already tolerated as an advisory.
+    # neither group fails here -- which an unfiltered comparison could not catch either, since an
+    # unclassified suite would simply widen the gap such a check tolerates as an advisory.
     # ------------------------------------------------------------------------------------
     local accounted=$((expected + excluded))
     if [ "$accounted" -ne "$registered" ]; then
@@ -4584,10 +4838,10 @@ $survivors
 # ------------------------------------------------------------------------------------
 # Run ONE invocation of the matrix and hold it to all four checks.
 #
-# ARTIFACTS ARE PER-INVOCATION AND A LATER ONE CANNOT OVERWRITE AN EARLIER ONE.  This used to
-# be a single hard-coded run_L1Tests.log and a single rdkL1TestResults.json, which under a
-# matrix would mean the last invocation's evidence standing in for all five: an empty or failed
-# run would be erased by whichever green one came after it, and the artifact bundle would say
+# ARTIFACTS ARE PER-INVOCATION AND A LATER ONE CANNOT OVERWRITE AN EARLIER ONE.  A single
+# hard-coded run_L1Tests.log and a single rdkL1TestResults.json would mean, under a matrix, the
+# last invocation's evidence standing in for all five: an empty or failed
+# run erased by whichever green one came after it, and an artifact bundle that says
 # nothing about how the result was reached.  The invocation LETTER goes in the name -- and a
 # letter, not a timestamp, because clause 5 of the governing contract requires fixed artifact
 # names with no timestamp in any of them, so that the same tree produces the same file set and
@@ -4624,7 +4878,7 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
 
     local run_log="$OUTPUT_DIR/run_invocation_${label}.log"
     local results_json="$OUTPUT_DIR/rdkTestResults_invocation_${label}.json"
-    local ld_path="${LD_LIBRARY_PATH:-}"
+    local ld_path=''
 
     # Custody first, because the next two statements REMOVE a file and then have the suite
     # write two more.  A removal is the most destructive thing this function does, and the
@@ -4639,10 +4893,18 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # be judged against whatever an earlier invocation left at the same path -- and with
     # per-invocation names, against its own earlier attempt.
     rm -f -- "$results_json"
-    if [ -d "$GTEST_PREFIX/lib" ]; then
-        ld_path="$GTEST_PREFIX/lib${ld_path:+:$ld_path}"
-    fi
-    ld_path="$(binder_runtime_library_path "$ld_path")"
+
+    # THE LOADER PATH IS REBUILT, NEVER INHERITED.  Every directory the launched runner searches
+    # for a shared object comes from build_trusted_library_path -- this script's own resolved
+    # GTest and Binder/HALIF roots, each one validated -- and no part of it comes from the
+    # LD_LIBRARY_PATH this script was invoked with.  The reasoning is at that function; the short
+    # form is that an inherited loader path is untrusted input to a process that loads shared
+    # objects, these binaries have no RUNPATH, and the first directory that answers a soname is
+    # the one that gets loaded.  Both launch sites below -- the --gtest_list_tests listings in
+    # registered_test_count and the suite launch itself -- receive this one value and nothing
+    # else, so there is no second path by which the environment can reach the loader.
+    build_trusted_library_path
+    ld_path="$TRUSTED_LIBRARY_PATH"
 
     # THE EXPECTED COUNTS ARE READ FROM THE BINARY, NOW, with this invocation's own filters.
     # Three separate listings, so the reconciliation in verify_results compares independently
@@ -4661,9 +4923,10 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
 
     # THE MANDATORY COUNT IS MEASURED, NEVER WRITTEN DOWN.  It is this invocation's selection
     # with its permitted-skip set subtracted, obtained from the binary by a fourth listing so
-    # that adding a case to a fixture changes it automatically.  A hard-coded 9 and 7 would have
-    # to be edited by whoever next adds an L2 case, and the one thing worse than no contract is
-    # a contract that silently stops matching the suite.
+    # that adding a case to a fixture changes it automatically.  A hard-coded 10 and 8 -- the
+    # values D and E measure here today -- would have to be edited by whoever next adds an L2
+    # case, and the one thing worse than no contract is a contract that silently stops
+    # matching the suite.
     #
     # THE COMPOSITION IS GUARDED.  gtest filter syntax is `positive-negative` with at most ONE
     # '-', so appending a negative clause to a select filter that already carries one would
@@ -4713,10 +4976,11 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
         # and be wrong about the next one, every custom argument is recorded, so the verdict is
         # ADVISORY and the exit status is $EXIT_ADVISORY.
         #
-        # A FILTER PASSED THIS WAY NOW FAILS THE INVOCATION rather than being reported as a
-        # partial one, and that is a deliberate tightening.  GTEST_EXTRA_ARGS is appended after
-        # this invocation's own --gtest_filter, and GoogleTest lets the last one win, so an
-        # override silently turns invocation B into some other selection entirely.  The expected
+        # A FILTER PASSED THIS WAY FAILS THE INVOCATION rather than being reported as a partial
+        # one, which is stricter than the advisory above and deliberately so.  GTEST_EXTRA_ARGS
+        # is appended after this invocation's own --gtest_filter, and GoogleTest lets the last
+        # one win, so an override silently turns invocation B into some other selection
+        # entirely.  The expected
         # count in verify_results comes from the invocation's DECLARED filter, so the two
         # disagree and it dies with both numbers named.  Diagnostic flags remain useful here;
         # re-filtering does not, because a re-filtered invocation is a different invocation and
@@ -4733,12 +4997,12 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # this suite drives real pthread mutexes, condition variables and threads, and a mock that
     # never signals is one edit away -- would otherwise hang here for ever: no output, no exit,
     # no gate, and in CI a job killed by the runner's own limit with no diagnosis attached.
-    # `timeout --foreground` is kept, but NOT for the reason it usually is: the suite no longer
-    # runs in the terminal's foreground group at all (see the cancellation block next to
+    # `timeout --foreground` is kept, but NOT for the reason it usually is: the suite does not
+    # run in the terminal's foreground group at all (see the cancellation block next to
     # `trap on_exit`).  It is kept because --foreground makes `timeout` refrain from putting its
     # child in a process group of its OWN, which is what keeps `timeout` and the test binary
     # inside the one group the signal handler signals.  A Ctrl-C reaches the suite through that
-    # handler now, not through the terminal.  --kill-after is added where the local timeout
+    # handler rather than through the terminal.  --kill-after is added where the local timeout
     # preserves exit 124 with it (see the probe above), to escalate to SIGKILL if the suite
     # ignores SIGTERM.  Exit 124 is timeout's own signal that the limit fired, and it is reported
     # as its own outcome below rather than folded into "the suite failed", because the two need
@@ -4750,6 +5014,13 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # for exactly that reason: it deliberately does not put its child in a new process group, so
     # `timeout` and the test binary both stay in the one group the handler signals.
     # THE HARNESS ENVIRONMENT, and the one variable this script deliberately does NOT set.
+    #
+    # LD_LIBRARY_PATH IS SET FROM THE REBUILT ALLOWLIST AND NEVER PASSED THROUGH.  The value
+    # below is build_trusted_library_path's output -- this script's own validated GTest and
+    # Binder/HALIF roots -- and it REPLACES whatever loader path this script inherited, which is
+    # discarded and logged rather than forwarded.  Setting it explicitly here is what makes that
+    # true of the child: an environment assignment on the command that execs the runner overrides
+    # the inherited variable, so the child sees the allowlist and nothing else.
     #
     # CEC_TEST_AIDL_MODE is what distinguishes one invocation from the next.  It is read by
     # tests/L1Tests/test_main.cpp and tests/L2Tests/test_main.cpp and by nothing else -- no
@@ -4828,21 +5099,21 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # deliberately suppressed it.  A trapped signal interrupts the wait either way, which is the
     # whole point of waiting rather than running the suite in the foreground.
     #
-    # THE PROCESS GROUP IS ALSO WHAT REAPS THE FAKE SERVICE HOST, and no new machinery was added
-    # for it.  The harness forks the host from inside this group, so a cancelled or timed-out
+    # THE PROCESS GROUP IS ALSO WHAT REAPS THE FAKE SERVICE HOST, and it needs no machinery of
+    # its own.  The harness forks the host from inside this group, so a cancelled or timed-out
     # invocation has its host signalled along with the runner by stop_suite_group, which
     # addresses the group BY ID.  That matters: a pattern-based kill would match anything merely
     # mentioning the binary's name, up to and including the harness that started this script.
     #
-    # THE REGISTRATION SURVIVES THE WAIT, and that is the whole of the second half of the fix.
-    # It used to be cleared on the line after this one -- before the exit-status check, before
-    # the case-count check and before the selected-path check, all three of which are FATAL.  A
-    # `die` from any of them therefore ran on_exit with SUITE_PGID already empty, so
-    # stop_suite_group had nothing to address and every surviving member of the group was
-    # orphaned by the very failure that was supposed to end the run.  On invocation E that
-    # member is the fake service host.  It is cleared instead by finish_suite_group, once the
-    # invocation is fully accounted for, so every path out of the three checks below -- pass,
-    # die, timeout and signal -- goes through a terminate-reap-verify.
+    # THE REGISTRATION SURVIVES THE WAIT, and that is load-bearing.  Cleared on the line after
+    # this one it would go before the exit-status check, before the case-count check and before
+    # the selected-path check, all three of which are FATAL: a `die` from any of them would then
+    # run on_exit with SUITE_PGID already empty, so stop_suite_group would have nothing to
+    # address and every surviving member of the group would be orphaned by the very failure that
+    # was supposed to end the run.  On invocation E that member is the fake service host.  So it
+    # is cleared by finish_suite_group instead, once the invocation is fully accounted for, and
+    # every path out of the three checks below -- pass, die, timeout and signal -- goes through
+    # a terminate-reap-verify.
     wait "$SUITE_PGID" || rc=$?
 
     # STAMP THE GENERATION INTO THE LOG, and do it here rather than as a header.  The redirect
@@ -4911,10 +5182,10 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # released.  Every fatal path above left SUITE_PGID registered on purpose, which is what
     # lets on_exit's stop_suite_group reach the group instead of finding nothing to reach.
     #
-    # AND THE RESULT IS GATED, which is the whole of this check.  finish_suite_group used to be
-    # called for its side effect and its status thrown away, so an invocation that passed its
-    # three checks while leaking a live descendant was recorded as a pass and the matrix went on
-    # to the next letter.  On an L2 invocation that descendant is the fake service host, holding
+    # AND THE RESULT IS GATED, which is the whole of this check.  Called for its side effect
+    # with its status thrown away, finish_suite_group would let an invocation that passed its
+    # three checks while leaking a live descendant be recorded as a pass, and the matrix would go
+    # on to the next letter.  On an L2 invocation that descendant is the fake service host, holding
     # the "HdmiCec" name that IHdmiCec::serviceName() fixes in production code -- so the NEXT
     # invocation resolves against a process from this one and reports a selection that is not
     # the one under test.  A leaked descendant therefore fails the invocation it belongs to,
@@ -5042,7 +5313,7 @@ UNCOVERED_TXT=''
 #
 # THE DEFECT THIS CLOSES.  Every artifact name above is FIXED, which clause 5 of the governing
 # contract requires and which this design keeps: fixed names are what make a local run's bundle
-# interchangeable with CI's.  But fixed names have a consequence that was not handled.  Point an
+# interchangeable with CI's.  But fixed names carry a consequence of their own.  Point an
 # explicit --output-dir at a directory a previous run already wrote, and every artifact that
 # THIS run happens not to produce is left standing from the previous one -- with a modification
 # time, a plausible name and no way for a reader to tell it apart from this run's output.
@@ -5076,21 +5347,19 @@ UNCOVERED_TXT=''
 #                   about to create afresh, splitting two runs across two inodes -- the exact
 #                   failure mode acquire_tree_lock's identity checks exist to prevent, recreated
 #                   here by a cleanup.
-#   run_status.txt  is REPLACED FIRST, ATOMICALLY, AND WITH THIS RUN'S OWN MARKER -- and the
-#                   reasoning that once made it an exclusion is kept here because it was half
-#                   right and the half that was wrong is the F30 defect.  Right: there must be
-#                   no window in which the directory holds artifacts and no marker saying which
-#                   run they belong to, so removing it and writing a new one later is not
-#                   acceptable.  WRONG: "rewritten" was treated as something the run would get
-#                   round to.  The rewrite was optional (write_run_status warned and returned 0
-#                   on every failure) and it happened AFTER the purge, so a directory whose
-#                   marker leaf could not be replaced kept the PREVIOUS generation's
-#                   COMPLETE-PASS while this run removed the rest of that generation and wrote
-#                   its own artifacts beside it.  A current artifact set under a prior run's
-#                   acceptance verdict is the worst outcome available here, and it was reachable
-#                   with no warning a reader would see in the bundle.
-#                   So it is now the FIRST thing the purge touches, replaced by rename with a
-#                   marker naming THIS run id, before any other artifact of the previous
+#   run_status.txt  is REPLACED FIRST, ATOMICALLY, AND WITH THIS RUN'S OWN MARKER, and both
+#                   halves of that are load-bearing.  There must be no window in which the
+#                   directory holds artifacts and no marker saying which run they belong to, so
+#                   removing the leaf and writing a new one later is not acceptable -- and a
+#                   rewrite the run merely gets round to is not acceptable either.  An optional
+#                   rewrite (one that warns and returns 0 on failure) happening AFTER the purge
+#                   leaves a directory whose marker leaf could not be replaced carrying the
+#                   PREVIOUS generation's COMPLETE-PASS while this run removes the rest of that
+#                   generation and writes its own artifacts beside it.  A current artifact set
+#                   under a prior run's acceptance verdict is the worst outcome available here,
+#                   and it reaches a reader with no warning anywhere in the bundle.
+#                   So the marker is the FIRST thing the purge touches, replaced by rename with
+#                   a marker naming THIS run id, before any other artifact of the previous
 #                   generation is removed; a leaf that cannot be rewritten is removed instead;
 #                   and a leaf that can be neither rewritten nor removed ENDS THE RUN.  There is
 #                   no path from here on which another generation's verdict outlives the purge.
@@ -5302,13 +5571,13 @@ purge_previous_generation() {
 # including a die inside require_tools before an output directory exists.  With no directory
 # there is nothing to mark and nothing to mislead, so that one case returns 0 quietly.
 #
-# EVERY OTHER FAILURE RETURNS NON-ZERO, WHICH IS THE WHOLE OF THE F30 FIX.  This function used
-# to warn and return 0 for all three of its failures -- a refused custody check, a temp file it
-# could not write, and a rename it could not complete -- so the marker was advisory in exactly
-# the situations it exists for.  Combined with a purge that spared the marker, a reused
-# directory whose marker leaf could not be replaced (a path-specific immutable bit, an ACL, an
-# I/O error) kept the PREVIOUS run's COMPLETE-PASS verdict while this run removed the rest of
-# that generation and wrote its own artifacts beside it, and could still exit 0.  That is the
+# EVERY OTHER FAILURE RETURNS NON-ZERO, and that is what keeps the marker from being advisory
+# in exactly the situations it exists for.  All three of them -- a refused custody check, a temp
+# file that cannot be written, and a rename that cannot be completed -- are reported to the
+# caller rather than warned about and swallowed.  A version that warned and returned 0 would
+# leave a reused directory whose marker leaf cannot be replaced (a path-specific immutable bit,
+# an ACL, an I/O error) carrying the PREVIOUS run's COMPLETE-PASS verdict while this run removes
+# the rest of that generation, writes its own artifacts beside it and still exits 0 -- the
 # mixed-generation false green in its purest form: a current artifact set under a prior run's
 # acceptance verdict.
 #
@@ -5376,7 +5645,7 @@ write_run_status() { # $1=phase word  $2=one-line detail
         # generation's per-invocation files are removed -- so every one of them is still on disk
         # at this instant.  Listing them under a heading that says "belonging to this generation"
         # would put the previous run's results files into this run's inventory, which is the
-        # mislabelling the whole mechanism exists to prevent, introduced by the fix for it.
+        # mislabelling this whole mechanism exists to prevent.
         if [ "$phase" = 'PURGING' ]; then
             printf '%s\n' "  none yet: this run has taken the directory over and is still removing the"
             printf '%s\n' "  previous generation.  Any per-invocation file present at this moment belongs"
@@ -5515,7 +5784,7 @@ assert_ancestors_safe() { # $1=path -- walks upwards from the parent to /
 # and one output directory can be targeted from two trees.  Both are needed and neither
 # subsumes the other.
 #
-# Missing flock is FATAL here for the same reason it is fatal there: the alternative was a
+# Missing flock is FATAL here for the same reason it is fatal there: the alternative is a
 # warning followed by a verdict, and a verdict produced without exclusivity over the files it
 # read is not evidence.  The identity checks are lighter than the tree lock's because
 # OUTPUT_DIR has already been proved to be a directory owned by this user at mode 0700
@@ -5532,7 +5801,8 @@ acquire_output_lock() {
        $OUTPUT_DIR
        Two runs write the same fixed artifact names there, and the gate reads whichever
        finished last -- which is a verdict about a mixture of two runs.  flock ships with
-       util-linux.  (This used to be a warning that still let the run reach a verdict.)"
+       util-linux.  (This is fatal rather than advisory: a warning would still let the run
+       reach a verdict.)"
 
     [ ! -L "$lock" ] || die "refusing to lock through a symlink: $lock"
     exec {LOCK_FD}>>"$lock" || die "could not open the run lock: $lock"
@@ -5562,7 +5832,7 @@ prepare_output_dir() {
         # XDG_RUNTIME_DIR, then HOME, and holds each to the same rules that guard a named
         # --output-dir; it collapses the candidate lexically before checking it, so a TMPDIR
         # of /tmp/x/../../../etc is rejected for where it actually lands rather than for how
-        # it is spelled.  The unconditional fall back to /tmp that used to be here put this
+        # it is spelled.  An unconditional fall back to /tmp would put this
         # run's evidence below a directory measured at mode 2777 on this host.
         local parent
         select_safe_temp_parent
@@ -6090,13 +6360,14 @@ BELOW_BAR_FILES=''
 # function that holds them, rather than on the file, so that a future quoting mistake anywhere
 # else is still reported.
 #
-# A DIRECTIVE ATTACHES TO THE NEXT COMMAND, NOT TO THE NEXT FEW FUNCTIONS.  There used to be a
-# single blanket SC2016 suppression here (the directive text is deliberately not written out,
-# so that a grep for suppressions finds only real ones), intended to cover this function and
-# the three below it.  MEASURED: deleting it changed nothing -- shellcheck skips comments when it looks
-# for what a directive annotates, so it landed on git_sha_of(), which contains no single-quoted
-# awk program at all, while all seven real diagnostics went on being reported.  A suppression
-# that suppresses nothing is worse than none: it reads as "this was considered" when it was not.
+# A DIRECTIVE ATTACHES TO THE NEXT COMMAND, NOT TO THE NEXT FEW FUNCTIONS, which is why there
+# is no single blanket SC2016 suppression here (the directive text is deliberately not written
+# out, so that a grep for suppressions finds only real ones) covering this function and the
+# three below it.  MEASURED: one placed here suppresses nothing -- shellcheck skips comments
+# when it looks for what a directive annotates, so it lands on git_sha_of(), which contains no
+# single-quoted awk program at all, while all seven real diagnostics go on being reported.  A
+# suppression that suppresses nothing is worse than none: it reads as "this was considered"
+# when it was not.
 # ------------------------------------------------------------------------------------
 # PROVENANCE.  Who produced these artifacts, from which tree, with which script.
 #
@@ -6497,15 +6768,15 @@ per_file_report() {
 #       refactor that silently deleted an arm.  Without (b), deleting the branch would make the
 #       gate greener rather than redder, and a gate that rewards deletion is worse than none.
 #
-# WHAT `-` ACTUALLY MEANS, MEASURED, BECAUSE THIS FILE PREVIOUSLY HAD IT WRONG.  An earlier
-# version of this comment said gcov emits `-` for an arc it considers impossible to drive, and
-# the gate accordingly recorded every `-` as "unexercisable" and absolved it.  That is FALSE, and
-# it was the single largest false-green vector in this gate: `-` means THE ENCLOSING BASIC BLOCK
+# WHAT `-` ACTUALLY MEANS, MEASURED, BECAUSE IT IS EASY TO GET WRONG.  It reads as an arc gcov
+# considers impossible to drive, which would make every `-` "unexercisable" and absolve it.  That
+# reading is FALSE, and it is the single largest false-green vector available to this gate: `-`
+# means THE ENCLOSING BASIC BLOCK
 # WAS NEVER ENTERED.  A four-function probe compiled with the same gcc-13 and read back through
 # the same lcov settles it -- a function that is compiled, linked and never called reports `-`
 # on BOTH arcs of its `if`, while the identical `if` in a function that is called reports `1` and
-# `0`.  So "unexercisable" was indistinguishable from "untested", and the gate was treating the
-# latter as the former for every arm nothing drove.
+# `0`.  So under that reading "unexercisable" is indistinguishable from "untested", and the gate
+# would treat the latter as the former for every arm nothing drove.
 #
 # `-` IS THEREFORE A FAILURE ON ANY ARM THIS RUN COULD HAVE MEASURED, and is expected only where
 # the arm's reacher could not run at all.  Which of those two applies is not guesswork: field 9
@@ -6529,26 +6800,27 @@ per_file_report() {
 # the COMPILE-TIME .gcno, not from execution: a file that is compiled and linked emits a BRDA
 # record for every branch in it, with a `taken` of 0 or `-` where nothing drove it.  So the
 # COORDINATES of an arm belonging to a deferred invocation are as measurable here as any other,
-# and only its `taken` COUNT is unavailable.  An earlier version of this block reasoned that a
-# host without a driver could produce no coordinates at all and shipped every one of them empty; that was
-# a wrong inference from a correct principle, and the principle -- never write a number that was
-# not measured -- is what is kept.
+# and only its `taken` COUNT is unavailable.  Concluding that a host without a driver can produce
+# no coordinates at all, and leaving every one of them empty, is a wrong inference from a correct
+# principle; the principle -- never write a number that was not measured -- is what the `needs`
+# fields carry instead.
 #
-# WHAT IS STILL UNPROVEN, STATED PRECISELY.  The `taken` counts of the 30 arms that carry a
-# prerequisite -- 28 needing invocation B, 1 needing invocation C, and 1 needing a usable binder
+# WHAT IS STILL UNPROVEN, STATED PRECISELY.  The `taken` counts of the 31 arms that carry a
+# prerequisite -- 29 needing invocation B, 1 needing invocation C, and 1 needing a usable binder
 # driver without a service registered on it -- have NOT been observed non-zero anywhere.  That is
-# the whole of the unproven set as this manifest stands, and the other 34 required arms were all
+# the whole of the unproven set as this manifest stands, and the other 59 required arms were all
 # observed non-zero by a driverless run: every arm of the bounded preflight, including the two
 # beyond the BINDER_VERSION gate, is reached under invocation A through the BinderPreflightProbe
 # seam that ccec/src/DriverAidlImpl.hpp declares and isBinderPreflightOk() takes as a defaulted
 # third parameter, so their `needs` fields are empty and their counts are real.  A seam rather
 # than syscall interposition is what makes that true without a driver and without redefining
-# ioctl() or mmap() for a 539-case process.  The receive path's own two guards and the
-# slow-call diagnostic are the arms that most recently joined the deferred set, because a
+# ioctl() or mmap() for a 563-case process.  The receive path's own two guards and the
+# slow-call diagnostic are in the deferred set, because a
 # listener callback and a synchronous AIDL call both need a live session; the queue handoff's
-# reserved-slot arithmetic and the context-manager timeout ceiling did NOT, because a
+# reserved-slot arithmetic and the context-manager timeout ceiling are NOT, because a
 # test-local subclass drives offerReceivedFrame() directly and the probe seam records the
-# bound it was handed, so both of those pairs are enforced on any host.  branch_arm_unmet_requirement() below understands a
+# bound it was handed, so both of those pairs are enforced on any host.
+# branch_arm_unmet_requirement() below understands a
 # `binder` resource token and one arm -- availability.service-absent -- declares it, because that
 # arm needs the preflight to SUCCEED and the lookup to then return nothing, which is a driver
 # present with no service on it and is not the same condition as any invocation letter.
@@ -6562,8 +6834,9 @@ per_file_report() {
 #     and writes block `e0` for the arcs gcov labels "(throw)".  Block ids are therefore NOT
 #     always numeric, which is why the gate compares them as strings.
 #   * For a plain `if (cond)`, the FIRST non-throw record on the line is gcov's "(fallthrough)"
-#     arc, which is the condition TRUE / body-entered arm.  Verified on Driver.cpp:133,
-#     DriverAidlImpl.cpp:1562 and the probe.
+#     arc, which is the condition TRUE / body-entered arm.  Verified on resolveBackEnd()'s
+#     isServiceAvailable() guard in Driver.cpp, on DriverAidlImpl::open()'s state guard, and on
+#     the probe.
 #   * For a `&&`/`||` chain the per-operand arcs appear in evaluation order, and "fallthrough"
 #     there means "carry on evaluating" rather than "true" -- which is why halcompat.h's entries
 #     do not all sit on the line the condition is written on.  Its `era(server) == era(client)`
@@ -6596,16 +6869,16 @@ per_file_report() {
 # lifted out of C++, so it can and does contain the '|' this format separates on -- halcompat.h's
 # `if (hash.empty() || hash == "-1")` contains two.  A `read` with a fixed field list puts all
 # remaining text into its LAST variable, so keeping the quote last makes an embedded '|' harmless
-# rather than something to escape and get wrong.  Measured the other way round first: with the
-# quote in field 8, those two entries had their source truncated at the '||' and the fragment
-# after it parsed as a requirement token, and the gate duly reported "needs invocation |".
+# rather than something to escape and get wrong.  Measured the other way round: with the quote
+# in field 8, those two entries have their source truncated at the '||' and the fragment after it
+# parses as a requirement token, and the gate duly reports "needs invocation |".
 # Every other field is a token this script generates or a short prose phrase with no '|' in it.
 #
 # WHY FIELD 9 IS A SEPARATE FIELD RATHER THAN PARSED OUT OF FIELD 6.  Field 6 is prose written
 # for a human reading a failure report, and it says things like "invocation C at factory level;
 # unit test otherwise".  A gate that scraped invocation letters out of that would be deciding
 # fatal-versus-deferred by regex over an English sentence, and would silently change verdict the
-# next time someone improved the wording.  So the machine-readable requirement is stated once,
+# next time someone improves the wording.  So the machine-readable requirement is stated once,
 # separately, and the prose stays prose.
 # ====================================================================================
 readonly BRANCH_MANIFEST=(
@@ -6621,23 +6894,22 @@ readonly BRANCH_MANIFEST=(
 #   nothing.  ABSENCE is judged before prerequisites either way, so a coordinate that has moved
 #   or been deleted fails whatever its needs field says.
     # ---- GROUP 1: THE SELECTION HELPER.  resolveBackEnd in ccec/src/Driver.cpp decides once per
-    # process at line 137 and then reports the reason at line 168, so there are four arms: the
+    # process at line 140 and then reports the reason at line 170, so there are four arms: the
     # two outcomes of the decision, and the two arms of the reason report.
     #
-    # THE REASON ARMS MOVED, AND THAT IS WHY THIS GROUP IS SHAPED DIFFERENTLY THAN IT WAS.  The
-    # factory used to work out WHY the AIDL back-end had been declined by calling
-    # DriverAidlImpl::isBinderPreflightOk() a second time, so the two reason arms were a branch
-    # in this file and were mapped here.  It no longer does: isServiceAvailable() records which
+    # WHY THE REASON ARMS ARE NOT THE ONES THAT DISTINGUISH THE CAUSES.  The factory does not
+    # work out WHY the AIDL back-end was declined by calling
+    # DriverAidlImpl::isBinderPreflightOk() a second time: isServiceAvailable() records which
     # of its ordered stages declined and the factory reads that back through
-    # unavailabilityReason(), because re-running the preflight paid its context-manager timeout
-    # twice and could report a reason that did not cause the fallback.  So line 168's branch is
-    # now only "was a reason recorded", and the arms that distinguish transport-unavailable from
-    # no-compatible-service are in isServiceAvailable() -- mapped in GROUP 1B below, at their
+    # unavailabilityReason(), because re-running the preflight pays its context-manager timeout
+    # twice and can report a reason that did not cause the fallback.  So line 170's branch is
+    # only "was a reason recorded", and the arms that distinguish transport-unavailable from
+    # no-compatible-service belong to isServiceAvailable() -- mapped in GROUP 1B below, at their
     # real home rather than at a proxy for it.
-    "selection.aidl-selected|ccec/src/Driver.cpp|137|0|0|invocation B, and invocation E in the L2 tier: a compatible service resolves and the AIDL back-end is returned|required|B|if (aidlBackEnd.isServiceAvailable()) {"
-    "selection.legacy-fallback|ccec/src/Driver.cpp|137|0|1|invocations A, C and D (measured taken 2 by A and D on a driverless host)|required||if (aidlBackEnd.isServiceAvailable()) {"
-    "selection.reason-reported|ccec/src/Driver.cpp|168|0|0|every legacy fallback: the query recorded a reason and the factory logs it (measured taken 2 by A and D on a driverless host)|required||if (unavailability != NULL) {"
-    "selection.reason-unrecorded|ccec/src/Driver.cpp|168|0|1|NOTHING, and that is the point. isServiceAvailable() assigns a reason on every one of its false exits, so a NULL reason cannot arise from any code path that exists; the arm is a defensive report for an outcome nobody could otherwise diagnose. It is recorded UNREACHABLE rather than required so the gate still fails if it is DELETED while exempting it from the taken check -- exactly the disposition the one pre-existing unreachable record has|unreachable||if (unavailability != NULL) {"
+    "selection.aidl-selected|ccec/src/Driver.cpp|140|0|4|invocation B, and invocation E in the L2 tier: a compatible service resolves and the AIDL back-end is returned|required|B|if (aidlBackEnd.isServiceAvailable()) {"
+    "selection.legacy-fallback|ccec/src/Driver.cpp|140|0|5|invocations A, C and D (measured taken 2 by A and D on a driverless host)|required||if (aidlBackEnd.isServiceAvailable()) {"
+    "selection.reason-reported|ccec/src/Driver.cpp|170|0|0|every legacy fallback: the query recorded a reason and the factory logs it (measured taken 2 by A and D on a driverless host)|required||if (unavailability != NULL) {"
+    "selection.reason-unrecorded|ccec/src/Driver.cpp|170|0|1|NOTHING, and that is the point. isServiceAvailable() assigns a reason on every one of its false exits, so a NULL reason cannot arise from any code path that exists; the arm is a defensive report for an outcome nobody could otherwise diagnose. It is recorded UNREACHABLE rather than required so the gate still fails if it is DELETED while exempting it from the taken check -- exactly the disposition the one pre-existing unreachable record has|unreachable||if (unavailability != NULL) {"
 
     # ---- GROUP 1B: THE AVAILABILITY QUERY, which now owns the arms GROUP 1 used to proxy.
     # DriverAidlImpl::isServiceAvailable() answers in THREE ordered stages and records which one
@@ -6646,11 +6918,10 @@ readonly BRANCH_MANIFEST=(
     # an aggregate branch percentage cannot stand in for a named-arm gate: a high file figure and
     # an uncovered selection arm coexist perfectly well.
     #
-    # AN EARLIER REVISION OF THIS MANIFEST OMITTED THE MIDDLE STAGE, on the reasoning that no
-    # invocation reaches it on EVERY host -- A stops at the preflight where there is no
-    # transport, and B, C and E all register a service.  That reasoning was sound about the
-    # reachability and wrong about the remedy: the answer is a HOST-AWARE REACHER, not an
-    # omission.  The NO-SERVICE token resolves through NO_SERVICE_EVIDENCE exactly as
+    # THE MIDDLE STAGE IS MAPPED WITH A HOST-AWARE REACHER RATHER THAN OMITTED.  No invocation
+    # reaches it on EVERY host -- A stops at the preflight where there is no transport, and B, C
+    # and E all register a service -- and that is a fact about reachability rather than a reason
+    # to leave the arm out.  The NO-SERVICE token resolves through NO_SERVICE_EVIDENCE exactly as
     # PREFLIGHT-FALSE resolves through PREFLIGHT_FALSE_EVIDENCE, so the arm is DEFERRED on a
     # driverless host and REQUIRED on a binder-capable one, and neither host reports a false
     # verdict.
@@ -6658,17 +6929,27 @@ readonly BRANCH_MANIFEST=(
     # Arc numbering follows the same rule as everywhere else in this manifest: a condition whose
     # evaluation involves calls contributes a call-and-exception arc PAIR per call BEFORE the
     # decision pair, so the decision is the LAST pair on the line.  Read from the unfiltered
-    # trace of this tree rather than assumed:
-    #   * line 2378 carries EIGHT arcs -- its condition calls isBinderPreflightOk() with three
-    #     defaulted arguments -- so the decision is arcs 6 and 7.
-    #   * lines 2387 and 2393 carry FOUR arcs each, so the decision is arcs 2 and 3.  At 2387 the
-    #     condition is a comparison against a call result; at 2393 it is one call.
-    "availability.transport-declined|ccec/src/DriverAidlImpl.cpp|2998|0|6|the preflight-false arm, read at its source: invocation A on a driverless host, or invocation A-NB on a binder-capable one (measured taken 2)|required||if (!isBinderPreflightOk()) {"
-    "availability.transport-usable|ccec/src/DriverAidlImpl.cpp|2998|0|7|invocations B and C, the two that register an in-process fake and therefore need the transport to be usable before the lookup is attempted at all|required|B|if (!isBinderPreflightOk()) {"
-    "availability.service-absent|ccec/src/DriverAidlImpl.cpp|3011|0|2|invocation A on a host WITH a usable binder transport: it registers nothing, so the lookup reaches the service manager and returns null. This is the service-NOT-FOUND arm AAP section 0.9.3 requires by name. Its reacher is the host-aware NO-SERVICE token, so it is DEFERRED rather than failed where there is no transport for A to reach|required|binder|if (service == 0) {"
-    "availability.service-present|ccec/src/DriverAidlImpl.cpp|3011|0|3|invocations B, C and E: each registers a service under the production name, so the lookup returns non-null and the query proceeds to the compatibility stage. This is the service-FOUND arm|required|B|if (service == 0) {"
-    "availability.service-incompatible|ccec/src/DriverAidlImpl.cpp|3023|0|0|invocation C: a registered service whose metadata halcompat rejects. The compatibility verdict is now taken into a named local so the F10 elapsed-time diagnostic can bracket the call, so the branch is the negation of that local and carries two arcs rather than the call/throw pair the inline call produced|required|C|if (!compatible) {"
-    "availability.service-compatible|ccec/src/DriverAidlImpl.cpp|3023|0|1|invocation B, and invocation E in the L2 tier: halcompat accepts the registered service and the AIDL back-end becomes selectable. Same named-local shape as the sibling arm above|required|B|if (!compatible) {"
+    # trace of this tree rather than assumed, at the coordinates the six records below carry:
+    #   * the transport stage (availability.transport-declined / -usable) sits on a line of FOUR
+    #     arcs -- its condition calls isBinderPreflightOk() with all five arguments named, so the
+    #     call contributes one call-and-exception pair rather than the three the defaulted form
+    #     contributed.  The custody path is what changed that: the predicate takes the retained
+    #     descriptor and its identity as out-parameters, so the call site names them.  The
+    #     decision is therefore arcs 2 and 3.
+    #   * the service-presence stage (availability.service-absent / -present) sits on a line of
+    #     FOUR, its condition being a comparison against a call result, so the decision is arcs
+    #     2 and 3.
+    #   * the compatibility stage (availability.service-incompatible / -compatible) tests a plain
+    #     bool local, so its line carries the decision pair alone, arcs 0 and 1.
+    #   * the pre-lookup re-verification stage, mapped in GROUP 3b, sits on a line of FOUR for
+    #     the same reason as the transport stage.
+    #     same reason as 3826.
+    "availability.transport-declined|ccec/src/DriverAidlImpl.cpp|3347|0|2|the preflight-false arm, read at its source: invocation A on a driverless host, or invocation A-NB on a binder-capable one (measured taken 2)|required||if (!isBinderPreflightOk(binderDriverPath, contextManagerTimeoutMs, probe,"
+    "availability.transport-usable|ccec/src/DriverAidlImpl.cpp|3347|0|3|the preflight-TRUE arm. NO LONGER DEFERRED: the custody and re-verification cases drive isServiceAvailable() through a synthetic BinderPreflightProbe that passes, so this arm is measured on a driverless host and its needs field is now empty (measured taken 4)|required||if (!isBinderPreflightOk(binderDriverPath, contextManagerTimeoutMs, probe,"
+    "availability.service-absent|ccec/src/DriverAidlImpl.cpp|3379|0|2|invocation A on a host WITH a usable binder transport: it registers nothing, so the lookup reaches the service manager and returns null. This is the service-NOT-FOUND arm AAP section 0.9.3 requires by name. Its reacher is the host-aware NO-SERVICE token, so it is DEFERRED rather than failed where there is no transport for A to reach|required|binder|if (service == 0) {"
+    "availability.service-present|ccec/src/DriverAidlImpl.cpp|3379|0|3|invocations B, C and E: each registers a service under the production name, so the lookup returns non-null and the query proceeds to the compatibility stage. This is the service-FOUND arm|required|B|if (service == 0) {"
+    "availability.service-incompatible|ccec/src/DriverAidlImpl.cpp|3391|0|0|invocation C: a registered service whose metadata halcompat rejects. The compatibility verdict is now taken into a named local so the F10 elapsed-time diagnostic can bracket the call, so the branch is the negation of that local and carries two arcs rather than the call/throw pair the inline call produced|required|C|if (!compatible) {"
+    "availability.service-compatible|ccec/src/DriverAidlImpl.cpp|3391|0|1|invocation B, and invocation E in the L2 tier: halcompat accepts the registered service and the AIDL back-end becomes selectable. Same named-local shape as the sibling arm above|required|B|if (!compatible) {"
 
     # ---- GROUP 2: halcompat's compatibility predicate, arm by arm.
     # The template form is what the selection calls; the reject arms are only reachable
@@ -6677,8 +6958,8 @@ readonly BRANCH_MANIFEST=(
     # driven by DriverAidlCompatibilityTest, which is back-end independent and therefore runs
     # under A, B and C -- so `requires` is A,B,C throughout and A alone always satisfies it.
     #
-    # The counts quoted are from the measured trace and are what fixes each label.  Re-measured
-    # after the production-emitter cases were added: 17 calls to the template (1 null, 16 with a
+    # The counts quoted are from the measured trace and are what fixes each label.  Measured over
+    # the compatibility suite as it stands: 17 calls to the template (1 null, 16 with a
     # service); 16 interface-hash reads inside it (1 empty, 4 "-1", 2 "notfrozen", 9 frozen); and
     # 19 evaluations of detail::isCompatible -- the 9 that reach it through the template plus 10
     # made DIRECTLY, by the ordering case with a client of its own and by
@@ -6719,10 +7000,10 @@ readonly BRANCH_MANIFEST=(
     # has era(client) == 0 as a conjunct and is false for every possible server value.  Measured
     # taken 0, on the one evaluation the cross-era case produces.
     #
-    # THE SECOND ARM THIS GROUP USED TO HOLD IS NOW GATED RATHER THAN EXEMPT, and the correction
-    # is worth recording.  It was "older-same-major", proved unreachable on the grounds that for
-    # client 1000 the same-era same-major servers are exactly [1000,1999] and every one of them
-    # satisfies server >= client.  That proof is sound as far as it goes -- and it is about the
+    # WHY "OLDER-SAME-MAJOR" IS GATED ABOVE RATHER THAN EXEMPT HERE, THOUGH IT READS AS
+    # UNREACHABLE.  The argument for exempting it is that for client 1000 the same-era
+    # same-major servers are exactly [1000,1999] and every one of them satisfies
+    # server >= client.  That proof is sound as far as it goes -- and it is about the
     # TEMPLATE, not about the ARC.  The ordering conjunct's false arc IS reachable, by calling
     # detail::isCompatible with a client of its own, which is what
     # OlderSameMajorServerIsRejectedByTheOrderingRule does; the arc is measured taken 2.  So it
@@ -6737,16 +7018,20 @@ readonly BRANCH_MANIFEST=(
     # test above uses for exactly this reason.
     "compat.client-era-frozen|rdk-halif-aidl/common/current/halcompat.h|110|0|0|UNREACHABLE: IHdmiCec::VERSION is 1000, so era(client) == 0 falsifies the conjunction for every server value; measured taken 0|unreachable||return (era(serverVersion) >= 1 && era(clientVersion) >= 1)"
 
-    # ---- GROUP 3: THE BOUNDED BINDER PREFLIGHT, one record per arc of each of the five decision
-    # points isBinderPreflightOk is built from -- the source labels them "Decision point N of 5"
-    # so that this mapping can be checked against it by reading rather than by inference.
+    # ---- GROUP 3: THE BOUNDED BINDER PREFLIGHT, one record per arc of each of the eight decision
+    # points isBinderPreflightOk is built from -- the source labels them "Decision point N of 8"
+    # so that this mapping can be checked against it by reading rather than by inference.  Five of
+    # the eight are here; the three the F3 custody path added -- the node-identity, character-device
+    # and root-owner gates -- are GROUP 3a, so that the arms this migration introduced can be read
+    # apart from the ones it inherited.
     #
-    # THIS GROUP REPLACES AN EARLIER FOUR-RECORD SET THAT DID NOT MATCH THE CODE.  That set had
-    # node-absent and node-unopenable as separate arms although both reach the SAME arc -- there
-    # is one open call and one `driverFd < 0` test, and a missing node and an unopenable one are
-    # indistinguishable at it -- and it had no record at all for the empty-path check or for the
-    # protocol-version READ, as distinct from the protocol-version COMPARISON.  Both halves of
-    # that mismatch are corrected here: one record per real arc, ten in total.
+    # THE RECORDS ARE ONE PER REAL ARC -- TEN IN THIS GROUP, AND SIXTEEN ACROSS THE PREDICATE
+    # ONCE GROUP 3a'S THREE GATES ARE COUNTED -- RATHER THAN ONE PER NAMED FAILURE MODE.
+    # node-absent and node-unopenable are not separate arms and do not get separate records --
+    # there is one open call and one `driverFd < 0` test, and a missing node and an unopenable
+    # one are indistinguishable at it.  In the other direction, the empty-path check and the
+    # protocol-version READ -- as distinct from the protocol-version COMPARISON -- are arcs in
+    # their own right and each carries its own record, which a failure-mode keying would miss.
     #
     # THE REACHERS ARE UNIT TESTS UNDER INVOCATION A, NOT INVOCATION B, and that is a property of
     # the seam rather than of this host.  isBinderPreflightOk takes a BinderPreflightProbe, so
@@ -6754,43 +7039,43 @@ readonly BRANCH_MANIFEST=(
     # arms with a synthetic probe on any host, with no binder driver and without touching a real
     # node.  The remaining arms use a real path chosen by the test.  DriverAidlPreflightTest is
     # back-end independent and runs under A, B and C.
-    "preflight.empty-path|ccec/src/DriverAidlImpl.cpp|2606|0|0|unit test, DriverAidlPreflightTest.DeclinesAnEmptyDriverPath, and the same arm inside .EveryPreflightArmReleasesExactlyTheDescriptorsItOpened (measured taken 2)|required||if (binderDriverPath.empty()) {"
-    "preflight.path-given|ccec/src/DriverAidlImpl.cpp|2606|0|1|every other preflight case, and every production initialization (measured taken 15)|required||if (binderDriverPath.empty()) {"
-    "preflight.node-unopenable|ccec/src/DriverAidlImpl.cpp|2614|0|0|unit test, DriverAidlPreflightTest.DeclinesANonexistentDriverPath -- still the ONE arc a missing node and an unopenable node share, because both decline the predicate and the verdict is what this gate maps. They no longer share the MESSAGE: a nested test on errno inside this arm reports ENOENT as a legacy-only platform and every other errno as a platform fault. That nested branch changes no verdict, so it is not a fifth negative arm and is deliberately not a record of its own; the ENOENT side is the one every case here drives (measured taken 7, which includes the driverless host's own production preflight)|required||if (driverFd < 0) {"
-    "preflight.node-opened|ccec/src/DriverAidlImpl.cpp|2614|0|1|unit tests, DriverAidlPreflightTest.DeclinesAPathThatOpensButIsNotABinderDriver and every synthetic-probe case (measured taken 8)|required||if (driverFd < 0) {"
-    "preflight.version-unreadable|ccec/src/DriverAidlImpl.cpp|2646|0|2|unit test, DriverAidlPreflightTest.DeclinesAPathThatOpensButIsNotABinderDriver: a real node that opens and answers no BINDER_VERSION ioctl (measured taken 2)|required||if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {"
-    "preflight.version-read|ccec/src/DriverAidlImpl.cpp|2646|0|3|every synthetic-probe case, which reports a version and so reaches the comparison (measured taken 6)|required||if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {"
-    "preflight.protocol-mismatch|ccec/src/DriverAidlImpl.cpp|2672|0|2|unit test, DriverAidlPreflightTest.DeclinesANodeWhoseProtocolVersionDiffersFromThisBuild, driving expected+1 through the synthetic probe (measured taken 2)|required||if (protocolVersion != expectedBinderProtocolVersion()) {"
-    "preflight.protocol-equal|ccec/src/DriverAidlImpl.cpp|2672|0|3|unit tests, DriverAidlPreflightTest.DeclinesAMatchingProtocolWhoseContextManagerNeverAnswers and .AcceptsANodeWhoseProtocolMatchesAndWhoseContextManagerAnswers (measured taken 4)|required||if (protocolVersion != expectedBinderProtocolVersion()) {"
-    "preflight.context-manager-answers|ccec/src/DriverAidlImpl.cpp|2698|0|0|unit test, DriverAidlPreflightTest.AcceptsANodeWhoseProtocolMatchesAndWhoseContextManagerAnswers -- the whole-predicate TRUE verdict (measured taken 2)|required||if (contextManagerReachable) {"
-    "preflight.context-manager-silent|ccec/src/DriverAidlImpl.cpp|2698|0|1|unit test, DriverAidlPreflightTest.DeclinesAMatchingProtocolWhoseContextManagerNeverAnswers, which also asserts the caller's deadline reached the probe (measured taken 2)|required||if (contextManagerReachable) {"
+    "preflight.empty-path|ccec/src/DriverAidlImpl.cpp|2505|0|0|unit test, DriverAidlPreflightTest.DeclinesAnEmptyDriverPath, and the same arm inside .EveryPreflightArmReleasesExactlyTheDescriptorsItOpened (measured taken 3)|required||if (binderDriverPath.empty()) {"
+    "preflight.path-given|ccec/src/DriverAidlImpl.cpp|2505|0|1|every other preflight case, and every production initialization (measured taken 33)|required||if (binderDriverPath.empty()) {"
+    "preflight.node-unopenable|ccec/src/DriverAidlImpl.cpp|2513|0|0|unit test, DriverAidlPreflightTest.DeclinesANonexistentDriverPath -- still the ONE arc a missing node and an unopenable node share, because both decline the predicate and the verdict is what this gate maps. They no longer share the MESSAGE: a nested test on errno inside this arm reports ENOENT as a legacy-only platform and every other errno as a platform fault. That nested branch changes no verdict, so it is not a further negative arm and is deliberately not a record of its own; the ENOENT side is the one every case here drives (measured taken 8, which includes the driverless host's own production preflight)|required||if (driverFd < 0) {"
+    "preflight.node-opened|ccec/src/DriverAidlImpl.cpp|2513|0|1|unit tests, DriverAidlPreflightTest.DeclinesAPathThatOpensButIsNotABinderDriver and every synthetic-probe case (measured taken 25)|required||if (driverFd < 0) {"
+    "preflight.version-unreadable|ccec/src/DriverAidlImpl.cpp|2629|0|2|unit test, DriverAidlPreflightTest.DeclinesAPathThatOpensButIsNotABinderDriver: a real node that opens and answers no BINDER_VERSION ioctl (measured taken 2)|required||if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {"
+    "preflight.version-read|ccec/src/DriverAidlImpl.cpp|2629|0|3|every synthetic-probe case that survives the node-identity gates, which reports a version and so reaches the comparison (measured taken 16)|required||if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {"
+    "preflight.protocol-mismatch|ccec/src/DriverAidlImpl.cpp|2655|0|2|unit test, DriverAidlPreflightTest.DeclinesANodeWhoseProtocolVersionDiffersFromThisBuild, driving expected+1 through the synthetic probe (measured taken 3)|required||if (protocolVersion != expectedBinderProtocolVersion()) {"
+    "preflight.protocol-equal|ccec/src/DriverAidlImpl.cpp|2655|0|3|unit tests, DriverAidlPreflightTest.DeclinesAMatchingProtocolWhoseContextManagerNeverAnswers and .AcceptsANodeWhoseProtocolMatchesAndWhoseContextManagerAnswers, plus every custody and service-query case that needs the preflight to pass (measured taken 13)|required||if (protocolVersion != expectedBinderProtocolVersion()) {"
+    "preflight.context-manager-answers|ccec/src/DriverAidlImpl.cpp|2679|0|1|unit test, DriverAidlPreflightTest.AcceptsANodeWhoseProtocolMatchesAndWhoseContextManagerAnswers -- the whole-predicate TRUE verdict. THE CONDITION IS NOW WRITTEN NEGATED, if (!contextManagerReachable), because the positive arm falls through to the custody hand-off rather than to a return, so this arm is index 1 where it used to be index 0 (measured taken 8)|required||if (!contextManagerReachable) {"
+    "preflight.context-manager-silent|ccec/src/DriverAidlImpl.cpp|2679|0|0|unit test, DriverAidlPreflightTest.DeclinesAMatchingProtocolWhoseContextManagerNeverAnswers, which also asserts the caller's deadline reached the probe. Index 0 of the negated condition, per the sibling arm above (measured taken 5)|required||if (!contextManagerReachable) {"
 
     # ---- GROUP 4: THE ONE-ELEMENT ADDRESS ARRAYS, add and remove, both arcs of both decisions.
     # These are AIDL-path arms: they need the AIDL back-end resolved, so invocation B is their
     # reacher and a driverless host reports them DEFERRED rather than passed or failed.  Both
     # arcs of each decision are recorded, which is also what makes the TRUE/FALSE labels safe on
     # a host that cannot execute the line: a label the wrong way round still gates both arms.
-    "addlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2118|0|0|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions: a non-ok binder Status -> IOException|required|B|if (!txn.isOk()) {"
-    "addlogical.status-ok|ccec/src/DriverAidlImpl.cpp|2118|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMarshalsExactlyOneElement|required|B|if (!txn.isOk()) {"
-    "addlogical.refused|ccec/src/DriverAidlImpl.cpp|2122|0|0|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions: added == false -> AddressNotAvailableException|required|B|else if (!added) {"
-    "addlogical.accepted|ccec/src/DriverAidlImpl.cpp|2122|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMarshalsExactlyOneElement: the address is appended to the local list|required|B|else if (!added) {"
-    "removelogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2051|0|0|invocation B, DriverAidlSessionTest.RemoveLogicalAddressIgnoresTransportFailureAndStillRemovesLocally|required|B|if (!txn.isOk()) {"
-    "removelogical.status-ok|ccec/src/DriverAidlImpl.cpp|2051|0|1|invocation B, DriverAidlSessionTest.RemoveLogicalAddressSucceedsMarshalsOneElementAndDropsItLocally|required|B|if (!txn.isOk()) {"
-    "removelogical.refused|ccec/src/DriverAidlImpl.cpp|2054|0|0|invocation B, DriverAidlSessionTest.RemoveLogicalAddressMarshalsOneElementAndIgnoresHalRefusal: removed == false is logged at LOG_EXP and ignored|required|B|else if (!removed) {"
-    "removelogical.accepted|ccec/src/DriverAidlImpl.cpp|2054|0|1|invocation B, DriverAidlSessionTest.RemoveLogicalAddressSucceedsMarshalsOneElementAndDropsItLocally|required|B|else if (!removed) {"
+    "addlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2208|0|0|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions: a non-ok binder Status -> IOException|required|B|if (!txn.isOk()) {"
+    "addlogical.status-ok|ccec/src/DriverAidlImpl.cpp|2208|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMarshalsExactlyOneElement|required|B|if (!txn.isOk()) {"
+    "addlogical.refused|ccec/src/DriverAidlImpl.cpp|2212|0|0|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions: added == false -> AddressNotAvailableException|required|B|else if (!added) {"
+    "addlogical.accepted|ccec/src/DriverAidlImpl.cpp|2212|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMarshalsExactlyOneElement: the address is appended to the local list|required|B|else if (!added) {"
+    "removelogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2168|0|0|invocation B, DriverAidlSessionTest.RemoveLogicalAddressIgnoresTransportFailureAndStillRemovesLocally|required|B|if (!txn.isOk()) {"
+    "removelogical.status-ok|ccec/src/DriverAidlImpl.cpp|2168|0|1|invocation B, DriverAidlSessionTest.RemoveLogicalAddressSucceedsMarshalsOneElementAndDropsItLocally|required|B|if (!txn.isOk()) {"
+    "removelogical.refused|ccec/src/DriverAidlImpl.cpp|2171|0|0|invocation B, DriverAidlSessionTest.RemoveLogicalAddressMarshalsOneElementAndIgnoresHalRefusal: removed == false is logged at LOG_EXP and ignored|required|B|else if (!removed) {"
+    "removelogical.accepted|ccec/src/DriverAidlImpl.cpp|2171|0|1|invocation B, DriverAidlSessionTest.RemoveLogicalAddressSucceedsMarshalsOneElementAndDropsItLocally|required|B|else if (!removed) {"
 
     # ---- GROUP 5: getLogicalAddresses, every cardinality plus the transport failure.
-    "getlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|1926|0|0|invocation B, DriverAidlSessionTest.GetLogicalAddressReportsZeroOnTransportFailureWithoutRaising|required|B|if (!txn.isOk()) {"
-    "getlogical.status-ok|ccec/src/DriverAidlImpl.cpp|1926|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|if (!txn.isOk()) {"
-    "getlogical.empty|ccec/src/DriverAidlImpl.cpp|1929|0|0|invocation B, DriverAidlSessionTest.EmptyAddressResultReportsZeroSoTheExistingCallerSignalSurvives|required|B|else if (halAddresses.empty()) {"
-    "getlogical.non-empty|ccec/src/DriverAidlImpl.cpp|1929|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|else if (halAddresses.empty()) {"
-    "getlogical.more-than-one|ccec/src/DriverAidlImpl.cpp|1933|0|0|invocation B, DriverAidlSessionTest.MultipleReturnedAddressesUseEntryZeroAndAreLogged|required|B|if (halAddresses.size() > 1) {"
-    "getlogical.exactly-one|ccec/src/DriverAidlImpl.cpp|1933|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|if (halAddresses.size() > 1) {"
+    "getlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2056|0|0|invocation B, DriverAidlSessionTest.GetLogicalAddressReportsZeroOnTransportFailureWithoutRaising|required|B|if (!txn.isOk()) {"
+    "getlogical.status-ok|ccec/src/DriverAidlImpl.cpp|2056|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|if (!txn.isOk()) {"
+    "getlogical.empty|ccec/src/DriverAidlImpl.cpp|2059|0|0|invocation B, DriverAidlSessionTest.EmptyAddressResultReportsZeroSoTheExistingCallerSignalSurvives|required|B|else if (halAddresses.empty()) {"
+    "getlogical.non-empty|ccec/src/DriverAidlImpl.cpp|2059|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|else if (halAddresses.empty()) {"
+    "getlogical.more-than-one|ccec/src/DriverAidlImpl.cpp|2071|0|0|invocation B, DriverAidlSessionTest.MultipleReturnedAddressesUseEntryZeroAndAreLogged|required|B|if (halAddresses.size() > 1) {"
+    "getlogical.exactly-one|ccec/src/DriverAidlImpl.cpp|2071|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|if (halAddresses.size() > 1) {"
 
     # ---- GROUP 6: the frame-length guard, both sides.  The over-length side is difference 1
     # of the authorized observable differences, so both arms are evidence rather than trivia.
-    "framelen.over-contract|ccec/src/DriverAidlImpl.cpp|1818|0|0|invocation B, DriverAidlTransmitTest.FramesOverTheAidlLimitAreRefusedWithoutBeingSentOrTruncated|required|B|if (length > AIDL_MAX_MESSAGE_LENGTH) {"
-    "framelen.within-contract|ccec/src/DriverAidlImpl.cpp|1818|0|1|invocation B, every DriverAidlTransmitTest case that transmits, beginning with .DirectedFrameAcknowledgedByTheFollowerSucceeds|required|B|if (length > AIDL_MAX_MESSAGE_LENGTH) {"
+    "framelen.over-contract|ccec/src/DriverAidlImpl.cpp|1942|0|0|invocation B, DriverAidlTransmitTest.FramesOverTheAidlLimitAreRefusedWithoutBeingSentOrTruncated|required|B|if (length > AIDL_MAX_MESSAGE_LENGTH) {"
+    "framelen.within-contract|ccec/src/DriverAidlImpl.cpp|1942|0|1|invocation B, every DriverAidlTransmitTest case that transmits, beginning with .DirectedFrameAcknowledgedByTheFollowerSucceeds|required|B|if (length > AIDL_MAX_MESSAGE_LENGTH) {"
     # ---- GROUP 7: THE RECEIVE PATH'S TWO GUARDS.  Both were added because an out-of-process
     # HAL can deliver what an in-process one never could.
     #
@@ -6811,10 +7096,10 @@ readonly BRANCH_MANIFEST=(
     #
     # Both lines carry `-` on a driverless host: the listener is reached only through a live
     # session, so these arms belong to invocation B and E and are declared as needing B.
-    "receive.message-too-short|ccec/src/DriverAidlImpl.cpp|1090|0|0|invocations B and E: the fake service delivers an empty payload and the callback discards it before allocating|required|B|if (message.size() < MIN_RECEIVED_MESSAGE_LENGTH) {"
-    "receive.message-acceptable|ccec/src/DriverAidlImpl.cpp|1090|0|1|invocations B and E: every ordinary received frame, including the one-byte poll|required|B|if (message.size() < MIN_RECEIVED_MESSAGE_LENGTH) {"
-    "receive.queue-accepted|ccec/src/DriverAidlImpl.cpp|1134|0|2|invocations B and E: the ordinary delivery, where the queue takes the frame and the callback drops its pointer|required|B|if (owner->offerReceivedFrame(frame)) {"
-    "receive.queue-refused|ccec/src/DriverAidlImpl.cpp|1134|0|3|invocations B and E with a stalled reader: the queue is at its receive limit and the callback releases the frame rather than leaking it|required|B|if (owner->offerReceivedFrame(frame)) {"
+    "receive.message-too-short|ccec/src/DriverAidlImpl.cpp|1269|0|0|invocations B and E: the fake service delivers an empty payload and the callback discards it before allocating|required|B|if (message.size() < MIN_RECEIVED_MESSAGE_LENGTH) {"
+    "receive.message-acceptable|ccec/src/DriverAidlImpl.cpp|1269|0|1|invocations B and E: every ordinary received frame, including the one-byte poll|required|B|if (message.size() < MIN_RECEIVED_MESSAGE_LENGTH) {"
+    "receive.queue-accepted|ccec/src/DriverAidlImpl.cpp|1313|0|2|invocations B and E: the ordinary delivery, where the queue takes the frame and the callback drops its pointer|required|B|if (owner->offerReceivedFrame(frame)) {"
+    "receive.queue-refused|ccec/src/DriverAidlImpl.cpp|1313|0|3|invocations B and E with a stalled reader: the queue is at its receive limit and the callback releases the frame rather than leaking it|required|B|if (owner->offerReceivedFrame(frame)) {"
 
     # ---- GROUP 8: THE QUEUE HANDOFF'S RESERVED SLOT.  Both arms are measured DRIVERLESS, which
     # is what makes this group the enforced half of the receive-path work: DriverAidlLocalInstanceTest
@@ -6825,16 +7110,16 @@ readonly BRANCH_MANIFEST=(
     # would leave the Bus reader blocked in EventQueue::poll() with nothing coming to wake it,
     # so the receive path stops one entry early.  Measured on this host: 10 refusals and 7876
     # acceptances across the five F02 cases.
-    "offer.no-slot|ccec/src/DriverAidlImpl.cpp|2366|0|0|invocation A, DriverAidlLocalInstanceTest.ReceiveQueueReservesTheLastSlotForCloseSentinelAndRefusesTheFrameThatWouldTakeIt and .EveryFrameOfferedToAFullReceiveQueueHasExactlyOneOwner (measured taken 10)|required||if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {"
-    "offer.slot-available|ccec/src/DriverAidlImpl.cpp|2366|0|1|invocation A, every accepted offer in the five F02 cases (measured taken 7876)|required||if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {"
+    "offer.no-slot|ccec/src/DriverAidlImpl.cpp|2350|0|0|invocation A, DriverAidlLocalInstanceTest.ReceiveQueueReservesTheLastSlotForCloseSentinelAndRefusesTheFrameThatWouldTakeIt and .EveryFrameOfferedToAFullReceiveQueueHasExactlyOneOwner (measured taken 11)|required||if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {"
+    "offer.slot-available|ccec/src/DriverAidlImpl.cpp|2350|0|1|invocation A, every accepted offer in the five F02 cases (measured taken 7878)|required||if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {"
 
     # ---- GROUP 9: THE CONTEXT-MANAGER TIMEOUT CEILING.  isBinderPreflightOk() takes its bound
     # as an unsigned int, so a caller can name a figure larger than any plausible servicemanager
     # start-up delay and every millisecond of it would be time LibCCEC::init() spends blocked.
     # The clamp is measured driverlessly through the probe seam, which records the bound it was
     # actually handed, so both arms are enforced here rather than deferred.
-    "preflight.timeout-clamped|ccec/src/DriverAidlImpl.cpp|2688|0|0|invocation A, DriverAidlPreflightTest.ClampsAContextManagerTimeoutAboveTheCeilingToTheCeiling (measured taken 1)|required||if (effectiveTimeoutMs > MAX_CONTEXT_MANAGER_TIMEOUT_MS) {"
-    "preflight.timeout-within-ceiling|ccec/src/DriverAidlImpl.cpp|2688|0|1|invocation A, every other preflight case including .PassesAContextManagerTimeoutAtTheCeilingThroughUnchanged (measured taken 5)|required||if (effectiveTimeoutMs > MAX_CONTEXT_MANAGER_TIMEOUT_MS) {"
+    "preflight.timeout-clamped|ccec/src/DriverAidlImpl.cpp|2671|0|0|invocation A, DriverAidlPreflightTest.ClampsAContextManagerTimeoutAboveTheCeilingToTheCeiling (measured taken 1)|required||if (effectiveTimeoutMs > MAX_CONTEXT_MANAGER_TIMEOUT_MS) {"
+    "preflight.timeout-within-ceiling|ccec/src/DriverAidlImpl.cpp|2671|0|1|invocation A, every other preflight case including .PassesAContextManagerTimeoutAtTheCeilingThroughUnchanged (measured taken 12)|required||if (effectiveTimeoutMs > MAX_CONTEXT_MANAGER_TIMEOUT_MS) {"
 
     # ---- GROUP 10: THE SLOW-HAL-CALL DIAGNOSTIC.  A THRESHOLD, NOT A TIMEOUT: crossing it
     # abandons nothing and raises nothing, it only leaves a LOG_WARN line where a stall would
@@ -6845,10 +7130,129 @@ readonly BRANCH_MANIFEST=(
     # the preflight declines: they belong to invocation B.  The clock-unreadable arm is mapped
     # alongside the threshold because it decides whether a measurement is trusted, and a
     # diagnostic computed from a fabricated origin would be worse than none.
-    "halcall.clock-unreadable|ccec/src/DriverAidlImpl.cpp|446|0|0|invocation B with an unreadable CLOCK_MONOTONIC: the measurement is skipped rather than computed from a fabricated origin|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
-    "halcall.clock-readable|ccec/src/DriverAidlImpl.cpp|446|0|1|invocation B: the ordinary case, where both clock reads succeeded and the elapsed time can be compared|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
-    "halcall.slow|ccec/src/DriverAidlImpl.cpp|452|0|0|invocation B against a deliberately delayed fake: one LOG_WARN line naming the operation and the elapsed time|required|B|if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {"
-    "halcall.within-threshold|ccec/src/DriverAidlImpl.cpp|452|0|1|invocation B: every healthy synchronous call, which must stay silent|required|B|if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {"
+    "halcall.clock-unreadable|ccec/src/DriverAidlImpl.cpp|490|0|0|invocation B with an unreadable CLOCK_MONOTONIC: the measurement is skipped rather than computed from a fabricated origin|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
+    "halcall.clock-readable|ccec/src/DriverAidlImpl.cpp|490|0|1|invocation B: the ordinary case, where both clock reads succeeded and the elapsed time can be compared|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
+    "halcall.slow|ccec/src/DriverAidlImpl.cpp|496|0|0|invocation B against a deliberately delayed fake: one LOG_WARN line naming the operation and the elapsed time|required|B|if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {"
+    "halcall.within-threshold|ccec/src/DriverAidlImpl.cpp|496|0|1|invocation B: every healthy synchronous call, which must stay silent|required|B|if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {"
+
+    # ---- GROUP 3a: THE NODE-IDENTITY GATES, added with the F3 custody path.  The preflight used
+    # to open the driver node, validate it and CLOSE it before returning, and libbinder then
+    # reopened the SAME PATHNAME during the service lookup -- so everything the check established
+    # was established about an object the process no longer held.  On the pinned stack a driver
+    # open that fails, or a protocol that mismatches, is a LOG_ALWAYS_FATAL_IF abort rather than
+    # an error return, so a node substituted in that window turned a check whose whole purpose is
+    # a NONFATAL legacy fallback into a process abort.
+    #
+    # Three gates now stand between the open and the protocol read, and all three are measured
+    # driverlessly through the same BinderPreflightProbe seam the rest of GROUP 3 uses: the
+    # object behind the descriptor can be identified at all, it is a CHARACTER DEVICE, and it is
+    # owned by ROOT.  Each is a real refusal with its own verdict, so each is one arc pair.
+    "preflight.identity-unreadable|ccec/src/DriverAidlImpl.cpp|2554|0|2|unit test, DriverAidlPreflightTest.DeclinesANodeWhoseDescriptorCannotBeIdentified: without an identity there is nothing to re-verify before libbinder opens the same name, so the predicate declines rather than proceeding on an unverifiable node (measured taken 2)|required||if (0 != probe.identifyDescriptor(driverFd, &identity)) {"
+    "preflight.identity-read|ccec/src/DriverAidlImpl.cpp|2554|0|3|every synthetic-probe case whose node identifies, which is every case that reaches the type and owner gates below (measured taken 23)|required||if (0 != probe.identifyDescriptor(driverFd, &identity)) {"
+    "preflight.not-character-device|ccec/src/DriverAidlImpl.cpp|2571|0|0|unit test, DriverAidlPreflightTest.DeclinesANodeThatIsNotACharacterDevice. Every supported binder layout publishes a character device -- a devtmpfs node under /dev, or a binderfs node reached directly or through a symlink -- so a regular file at that name is the shape a substitution takes and is refused rather than handed to libbinder (measured taken 3)|required||if ((identity.mode & BINDER_NODE_MODE_TYPE_MASK) != BINDER_NODE_MODE_CHARACTER_DEVICE) {"
+    "preflight.character-device|ccec/src/DriverAidlImpl.cpp|2571|0|1|every case whose node is the expected character device (measured taken 20)|required||if ((identity.mode & BINDER_NODE_MODE_TYPE_MASK) != BINDER_NODE_MODE_CHARACTER_DEVICE) {"
+    "preflight.owner-not-root|ccec/src/DriverAidlImpl.cpp|2587|0|0|unit test, DriverAidlPreflightTest.DeclinesACharacterDeviceThatIsNotOwnedByRoot. devtmpfs and binderfs both create the node as root, so a node owned by anyone else is one an unprivileged process could have created, and selecting the AIDL path against it would put every transmitted and every delivered frame behind whatever registered there (measured taken 2)|required||if (identity.uid != BINDER_NODE_REQUIRED_OWNER_UID) {"
+    "preflight.owner-root|ccec/src/DriverAidlImpl.cpp|2587|0|1|every case whose node is root-owned (measured taken 18)|required||if (identity.uid != BINDER_NODE_REQUIRED_OWNER_UID) {"
+    # THE PERMISSION OBSERVATION IS VERDICT-NEUTRAL, AND BOTH ARMS ARE STILL REQUIRED.  A
+    # permissive binder node is REPORTED and then accepted, because binder requires the node to
+    # be openable by every client that uses it and rejecting a broadly-accessible node would
+    # decline the AIDL path on a conformant platform rather than protect it.  Both arms are
+    # mapped precisely BECAUSE the arm is verdict-neutral: the only thing that can regress here
+    # is somebody turning the report into a refusal, or deleting it, and an unmapped arm would
+    # let either through silently.
+    #
+    # Arc polarity was MEASURED, not assumed, and it is the opposite of the divergence decision
+    # inside binderNodeIdentitiesMatch(): running only
+    # DriverAidlPreflightTest.AcceptsAWorldWritableNodeAndReportsItsPermissionBits against zeroed
+    # counters puts branch 0 at taken 1 and branch 1 at taken 0, so branch 0 is the arm that
+    # reports.  gcov's "(fallthrough)" annotation does NOT identify the true arm consistently
+    # across sites in this file -- verify by running one case, never by reading the label.
+    "preflight.node-writable-beyond-owner|ccec/src/DriverAidlImpl.cpp|2622|0|0|unit test, DriverAidlPreflightTest.AcceptsAWorldWritableNodeAndReportsItsPermissionBits: a 0666 root-owned character device is ACCEPTED and its permission bits are reported once (measured taken 1)|required||if (0u != (identity.mode & (BINDER_NODE_MODE_GROUP_WRITE | BINDER_NODE_MODE_WORLD_WRITE))) {"
+    "preflight.node-owner-only|ccec/src/DriverAidlImpl.cpp|2622|0|1|every other case reaching this point, whose synthetic node is not writable beyond its owner and which must emit nothing (measured taken 22)|required||if (0u != (identity.mode & (BINDER_NODE_MODE_GROUP_WRITE | BINDER_NODE_MODE_WORLD_WRITE))) {"
+
+    # ---- GROUP 3b: THE PRE-LOOKUP RE-VERIFICATION, which is the other half of the F3 custody
+    # path and the whole of the F4 mitigation that IS implementable.  reverifyBinderNodeBeforeLookup()
+    # runs immediately before halcompat::getService(), and it decides FOUR things: the name still
+    # resolves, it resolves to the SAME object the preflight validated, a descriptor reopened on it
+    # still refers to that object, and a context manager still answers under the same bound.
+    #
+    # WHY THE PING RUNS ON A FRESH DESCRIPTOR rather than on the retained one, which is the one
+    # place this design departs from "re-check what you are holding": the binder driver permits
+    # exactly ONE mmap per open descriptor for that descriptor's lifetime, and pingContextManager
+    # maps the fd it is given, so a second ping on the retained descriptor would fail on every
+    # real platform and would decline the AIDL path universally.  The retained descriptor is the
+    # INODE PIN; the fresh one is fstat-identified against the retained identity before it is used.
+    #
+    # The reopened-unidentifiable arm and the ping-answers arm are the two that need naming: the
+    # first is driven by a probe whose identify fails only on its SECOND call, and the second
+    # cannot be driven on a driverless host at all, because a re-verification that SUCCEEDS is
+    # followed immediately by the real getService(), which needs a driver.
+    "reverify.path-unresolvable|ccec/src/DriverAidlImpl.cpp|3045|0|2|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenThePathCannotBeResolvedBeforeTheLookup: the name stopped resolving between the preflight and the lookup (measured taken 1)|required||if (0 != probe.identifyPath(binderDriverPath.c_str(), &observed)) {"
+    "reverify.path-resolved|ccec/src/DriverAidlImpl.cpp|3045|0|3|every case that reaches the identity comparison below (measured taken 3)|required||if (0 != probe.identifyPath(binderDriverPath.c_str(), &observed)) {"
+    "reverify.identity-changed|ccec/src/DriverAidlImpl.cpp|3057|0|3|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenTheNameResolvesToADifferentNodeBeforeTheLookup: the substituted-node case this whole custody path exists for (measured taken 1)|required||if (!binderNodeIdentitiesMatch(validated, observed)) {"
+    "reverify.identity-unchanged|ccec/src/DriverAidlImpl.cpp|3057|0|2|every case whose node is still the validated one (measured taken 1)|required||if (!binderNodeIdentitiesMatch(validated, observed)) {"
+    # THE FIVE-ATTRIBUTE COMPARISON IS MEASURED HERE, AT ITS CALLER, AND DELIBERATELY NOT AT THE
+    # `if (0u == divergence)` DECISION INSIDE binderNodeIdentitiesMatch() ITSELF.  The helper is
+    # inlined at some call sites and not others, so the arcs on its out-of-line body move with the
+    # compiler's inlining decisions and with which cases a filter happens to select: running one
+    # case alone reports that decision as never executed while the full suite reports both arms
+    # non-zero.  A record on an arc that relocates when the filter changes would report ABSENT for
+    # a reason that has nothing to do with the code, which is the one failure this gate must not
+    # manufacture.  The two arms above are on the caller's own line, they are stable, and every
+    # attribute the helper compares is asserted by a named case: mode by
+    # ...IsRePermissionedBeforeTheLookup, uid by ...IsReOwnedBeforeTheLookup, device/inode/rdev by
+    # the pre-existing substitution cases, and the all-match path by
+    # ...AcceptsAnUnchangedNodeOnAllFiveIdentityAttributes.
+    "reverify.reopened-unidentifiable|ccec/src/DriverAidlImpl.cpp|3080|0|3|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenTheReopenedDescriptorCannotBeIdentified, whose probe fails identifyDescriptor on its SECOND call only. THE ARC POLARITY IS PROVEN RATHER THAN ASSUMED: this is a short-circuited OR, and index 2 -- the operand-FALSE arc -- carries exactly the number of times the second operand was evaluated at all, which is the call count recorded on the next line, so index 3 is the operand-TRUE arc this record maps|required||if ((0 != probe.identifyDescriptor(freshFd, &reopened)) ||"
+    "reverify.reopened-identified|ccec/src/DriverAidlImpl.cpp|3080|0|2|every case whose reopened descriptor identifies, which is every case that goes on to compare it against the validated identity (measured taken 2). The second operand's own arc pair, on the continuation line, is deliberately NOT mapped: both of its arcs are taken exactly once by this suite, so nothing in the trace distinguishes the match arm from the mismatch arm, and a record that named one of them would be a guess wearing a coordinate|required||if ((0 != probe.identifyDescriptor(freshFd, &reopened)) ||"
+    "reverify.context-manager-silent|ccec/src/DriverAidlImpl.cpp|3102|0|0|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenTheContextManagerStopsAnsweringBeforeTheLookup. This is the F4 mitigation measured: driver present and servicemanager wedged becomes a DECLINED selection instead of an unbounded wait inside defaultServiceManager() (measured taken 1)|required||if (!contextManagerReachable) {"
+    "reverify.context-manager-answers|ccec/src/DriverAidlImpl.cpp|3102|0|1|invocations B, C and E: a re-verification that succeeds is followed immediately by the real halcompat::getService(), so this arm needs a binder driver and cannot be driven on a driverless host|required|B|if (!contextManagerReachable) {"
+    "availability.reverify-declined|ccec/src/DriverAidlImpl.cpp|3366|0|2|the caller's side of the same decision: every re-verification refusal above reaches isServiceAvailable() through this arc and declines the AIDL path nonfatally (measured taken 4)|required||if (!reverifyBinderNodeBeforeLookup(binderDriverPath, contextManagerTimeoutMs, probe,"
+    "availability.reverify-passed|ccec/src/DriverAidlImpl.cpp|3366|0|3|invocations B, C and E: the arm that proceeds to the service lookup, which needs a binder driver|required|B|if (!reverifyBinderNodeBeforeLookup(binderDriverPath, contextManagerTimeoutMs, probe,"
+
+    # ---- GROUP 5a: THE LOGICAL-ADDRESS RANGE GATE, added with F7.  getLogicalAddress() used to
+    # convert entry zero of the HAL's array with an unchecked cast, so any int32 the HAL returned
+    # became the local device's logical address and reached the initiator nibble of every outbound
+    # frame through Connection::matchSource().  The RAW value is what is tested, before any
+    # conversion: LogicalAddress narrows, so 256 would become 0 and 271 would become 0xF, and a
+    # post-conversion check would accept a plausible address the HAL never reported.
+    #
+    # It is a short-circuited `||`, so the first operand's pair is on the `if` line and the
+    # second operand's pair follows it there; the polarity is fixed by the count, exactly as in
+    # GROUP 3b -- index 0 carries the number of times the second operand was evaluated.
+    "getlogical.address-below-min|ccec/src/DriverAidlImpl.cpp|2075|0|1|invocation A, DriverAidlLocalInstanceTest.TheLogicalAddressReadAcceptsOnlyContractRangeValues: the -1 and INT32_MIN rows (measured taken 2)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
+    "getlogical.address-at-or-above-min|ccec/src/DriverAidlImpl.cpp|2075|0|0|every row at or above 0x0, which is every row that reaches the upper-bound test (measured taken 11)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
+    "getlogical.address-above-max|ccec/src/DriverAidlImpl.cpp|2075|0|3|invocation A, the 0xF, 0x10, 256, 271 and INT32_MAX rows of the same case -- including the two that a post-conversion check would have accepted (measured taken 5)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
+    "getlogical.address-within-contract|ccec/src/DriverAidlImpl.cpp|2075|0|2|invocation A, the 0x0, 0x1, 0x4 and 0xE rows plus the multi-address case's entry zero: the only values converted (measured taken 6)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
+
+    # ---- GROUP 6a: THE TRANSMIT-STATUS SWITCH, added with F8.  write() used to decide the
+    # transmit outcome with an if/else-if chain over SendMessageStatus, so a value that was
+    # none of BUSY, ACK_STATE_0 or ACK_STATE_1 fell through to "Send Completed" and a transmit
+    # the HAL never confirmed was reported to the caller as a success.  It is an exhaustive
+    # switch now, and the DEFAULT arm is the one this gate exists to hold.
+    #
+    # Two of the four arcs on that line are mapped and two are not, deliberately.  The default
+    # arm is unambiguous -- twelve rows drive it, which is the only count on the line that
+    # matches a single case -- and so is the ACK_STATE_0 arm at three.  The remaining two arcs
+    # are taken exactly twice each, so nothing in the trace tells BUSY from ACK_STATE_1, and
+    # naming either would be a guess.  Their behaviour is asserted by the tests regardless;
+    # what is missing is only a coordinate this gate could hold them to.
+    "transmit.status-unknown|ccec/src/DriverAidlImpl.cpp|1987|0|3|invocation A, DriverAidlLocalInstanceTest.AnUndocumentedTransmitStatusIsTreatedAsAFailedTransmit: 3, 4, 99, -1, INT32_MAX and INT32_MIN crossed with a directed and a broadcast destination, all twelve raising IOException instead of reporting a completed send (measured taken 12)|required||switch (sendResult) {"
+    "transmit.status-ack-state-0|ccec/src/DriverAidlImpl.cpp|1987|0|2|invocation A, DriverAidlLocalInstanceTest.EveryDocumentedTransmitStatusKeepsItsLegacyMapping: the directed-ACK row, the CEC-CTS-9-3-3 broadcast row and the non-CTS broadcast row (measured taken 3)|required||switch (sendResult) {"
+
+    # ---- GROUP 7a: THE RECEIVE FLUSH'S NULL CHECK, added with F5.  read()'s flush arm dequeued
+    # and dereferenced without checking, while close() offers a NULL sentinel on every transition
+    # out of OPENED -- so two sentinels in the queue faulted the Bus reader thread, the one thread
+    # whose death silently ends all CEC reception.
+    #
+    # THE POLARITY HERE IS MEASURED, NOT INFERRED FROM THE OTHER RECORDS, and it is the opposite
+    # of the fallthrough=true shape most of this manifest uses.  Running
+    # DriverAidlLocalInstanceTest.TheReceiveFlushSurvivesASecondCloseSentinel ALONE against a
+    # zeroed counter set puts 1 on arc 0 and 0 on arc 1, and that case's flush drains exactly one
+    # entry and that entry is a sentinel -- so arc 0 is the SKIPPED-SENTINEL arm.  A reader who
+    # assumes the shape rather than repeating that measurement will map these two backwards.
+    "read.flush-sentinel-skipped|ccec/src/DriverAidlImpl.cpp|1853|0|0|invocation A, DriverAidlLocalInstanceTest.TheReceiveFlushSurvivesASecondCloseSentinel: the second sentinel is skipped rather than dereferenced (measured taken 1)|required||if (inFrame != 0) {"
+    "read.flush-frame-drained|ccec/src/DriverAidlImpl.cpp|1853|0|1|invocation A, DriverAidlLocalInstanceTest.TheReceiveFlushReleasesARealFrameQueuedBehindTheCloseSentinel: the parity arm, where the flush meets a real frame and copies and releases it exactly as it did before the null check existed|required||if (inFrame != 0) {"
 )
 
 # Set by apply_branch_gate and folded into apply_gate's own failure count, so the script keeps
@@ -6871,17 +7275,20 @@ BRANCH_GATE_FAILURES=0
 #
 # WHY A CONJUNCTION AND NOT A LIST OF ALTERNATIVES.  No arm in the manifest is reached by "B or
 # C"; the ones with several possible reachers all include invocation A, which always runs, and
-# their `needs` is therefore empty.  A disjunction would be machinery with no member, and the
-# conjunction is what models `preflight.positive` -- invocation B, which itself implies a binder
-# driver, so one token carries both requirements.
+# their `needs` is therefore empty.  A disjunction would be machinery with no member.  What the
+# conjunction buys is a field that reads the same however many tokens an arm's requirement takes:
+# `availability.transport-usable` needs `B` alone, because an invocation that selected the AIDL
+# back-end implies a usable driver, while an arm needing the DRIVER without needing a selection
+# names `binder` on its own.
 #
-# THE `binder` TOKEN IS CURRENTLY CARRIED BY NO RECORD, and that is a property of the test set
-# rather than of this mechanism.  Its only two users were the preflight's protocol-mismatch and
-# handle-zero-timeout arms, which the L1 suite now drives from a FIFO and a scoped `ioctl`/`mmap`
-# interposition instead of a real node (see GROUP 3).  The token stays because it is the honest
-# answer for any arm that genuinely needs the driver and is named by a test that runs regardless
-# -- exactly the shape those two had -- and because deleting it would mean re-deriving it the
-# next time one appears.
+# THE `binder` TOKEN IS CARRIED BY EXACTLY ONE RECORD, `availability.service-absent`, whose
+# condition is a usable driver with nothing registered on it -- the service-NOT-FOUND arm, which
+# invocation A reaches on a binder-capable host and cannot reach at all without one.  No other
+# arm needs it: the preflight's protocol-version and context-manager arms name a driver in their
+# prose but reach those decisions through the BinderPreflightProbe seam rather than through a
+# real node (see GROUP 3), so their `needs` is empty and they are enforced on any host.  The
+# token is the honest answer for an arm that genuinely needs the driver while being named by a
+# test that runs regardless, and it stays in the mechanism for the next arm of that shape.
 #
 # THE INVOCATION SIDE IS ANSWERED FROM WHAT ACTUALLY RAN, not from what this host could in
 # principle do: INVOCATIONS_RUN is built by the matrix as each invocation passes its four
@@ -7319,7 +7726,7 @@ main() {
     # Tool PRESENCE first (it needs no lcov invocation), then the private HOME, and only
     # then is lcov asked anything -- including for its version.  Creating the private HOME
     # ahead of every lcov call also covers the counter zeroing inside do_run, which is an
-    # lcov invocation like any other and used to run with a home configuration in effect.
+    # lcov invocation like any other and must not see a home configuration either.
     require_tools
 
     # THE TREE LOCK IS TAKEN HERE: after tool resolution (it needs flock and stat) and before

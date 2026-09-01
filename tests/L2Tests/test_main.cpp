@@ -17,139 +17,148 @@
  * limitations under the License.
 */
 
-/*
- * L2 TEST HARNESS BOOTSTRAP: the process-global test environment for the integration
- * tier, and THE PARENT HALF OF A TWO-PROCESS LIFECYCLE whose child half is
- * mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp.
+/**
+* @defgroup hdmicec
+* @{
+* @defgroup ccec
+* @{
+**/
+
+
+/**
+ * @file test_main.cpp
  *
- * WHAT THIS TIER IS FOR, AND WHY IT NEEDS A SECOND PROCESS AT ALL.
- * libbinder resolves a service name that was registered in the CALLING process to the
- * local BBinder, so interface_cast there hands back that very object: no Bp* proxy is
- * created, no transaction crosses the binder driver, and the client threadpool is never
- * involved. An in-process fake therefore cannot prove the transport, however faithfully
- * it implements the interface - which is exactly what the L1 tier's in-process modes
- * are, and exactly why they are not enough. Hosting the same fake in a SEPARATE process
- * is what makes the middleware hold a real proxy and receive its event callbacks on a
- * binder threadpool thread. That separation is the whole substance of this tier, and it
- * is enforced by the build: the runner compiles the legacy mock, the host binary
- * compiles the fake, and neither target carries the other's source.
+ * @brief Process-global test environment for the L2 integration tier, and the parent
+ *        half of its two-process lifecycle
  *
- * THE BACK-END SELECTION RESOLVES ONCE PER PROCESS, AND IT RESOLVES BELOW.
- * The LibCCEC::init call in SetUp is the first thing in this binary that forces
- * Driver::getInstance(), whose helper in ccec/src/Driver.cpp constructs BOTH back-ends,
- * asks the AIDL one whether its service came up, and emits exactly one selected-path
- * line naming the winner. That choice is then FIXED for the lifetime of the process.
+ * This translation unit owns everything the L2 cases depend on and nothing they may
+ * touch directly: the legacy HAL double, the out-of-process fake service host, every
+ * descriptor and every child process in the binary, and the order in which they are
+ * brought up. The child half of the lifecycle is
+ * `mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp`.@n
+ * Three entry points cross into the case file and nothing else is shared:
+ * cecL2HostControlChannelIsOpen(), cecL2HostControlRequest() and
+ * cecL2ProveEpipeDiagnosticAndChildReaping().
  *
- * ORDERING IS LOAD-BEARING, AND IT IS THE FIRST OF THE TWO THINGS THAT MAKE THIS TIER
- * MEAN ANYTHING. Anything that is to influence the selection MUST happen BEFORE that
- * init call, and NOTHING after it can change the outcome. Launching the fake service
- * host AFTER init leaves the already-resolved selection on the legacy back-end: the
- * suite then exercises the legacy path from beginning to end, every case passes, and
- * the run is reported as AIDL evidence while never once having spoken binder. That is a
- * GREEN RUN THAT PROVES NOTHING, and it is the specific failure this tier exists to
- * rule out. So the launch and the readiness wait sit ahead of init by construction
- * rather than merely early in SetUp, and the sequence is: install the legacy mock ->
- * launch the host and wait for it to report ready -> only then init.
+ * @par Why this tier needs a second process
+ * libbinder resolves a service name registered in the calling process to the local
+ * BBinder, so interface_cast there hands back that very object: no Bp* proxy is created,
+ * no transaction crosses the binder driver, and the client threadpool is never involved.
+ * An in-process fake therefore cannot exercise the transport, however faithfully it
+ * implements the interface, which is what the L1 tier's in-process modes are. Hosting
+ * the same fake in a separate process is what makes the middleware hold a real proxy and
+ * receive its event callbacks on a binder threadpool thread. The build enforces the
+ * separation: the runner compiles the legacy mock, the host binary compiles the fake, and
+ * neither target carries the other's source.
  *
- * A PIPE AND NOT A SLEEP, WHICH IS THE SECOND OF THE TWO. The host signals readiness by
- * writing one fixed line to an inherited descriptor this process holds the read end of,
- * and this process blocks on that descriptor under a bounded timeout. A timed wait in
- * place of the token would convert a race into a flake: too short on a loaded machine
- * or inside an emulated guest, wasteful when it is not, and never once proof that the
- * service was actually published. The repository already models the correct disposition
- * for exactly this problem - tests/L1Tests/ccec/test_Connection.cpp's
- * DecodingFrameListener::WaitForNotification blocks on a condition variable with
- * wait_for rather than sleeping, for the reason its own comment gives - and this is the
- * same principle reached with a different primitive, because the event being waited for
- * originates in another process.
+ * @par The initialization contract: every setup fault fails the run
+ * No step of CecL2TestEnvironment::SetUp() tolerates a failure. The mode handling, the
+ * host launch, the readiness wait, the channel handshake and the LibCCEC::init() call
+ * each raise a fatal GoogleTest failure on their unhappy paths, and init() in particular
+ * is asserted rather than wrapped: what it raises is real - Driver::getInstance().open()
+ * refused by the selected HAL, or Bus::start() failing - and a failed initialization
+ * reported as a green suite is worse than a red one, because every driver-dependent case
+ * then asserts against an unopened stack and every other result in the binary becomes
+ * meaningless.
  *
- * The bound is not a nicety either. The host writes NO readiness line on any failure
- * path, so this wait is the ONLY detector of a host that failed to register, of a host
- * that could not reach a binder transport, and of a host that is blocked indefinitely
- * inside libbinder waiting for binder handle 0 because no service manager is running.
- * On timeout, on end of file without the token, and on a token that does not match, the
- * run FAILS - it is never allowed to continue and describe a legacy result as an AIDL
- * one.
+ * @par The host lifecycle this harness owns
+ * On the remote mode it launches the fake service host as a child process with an
+ * inherited readiness pipe, blocks on that pipe under a bounded timeout, and fails the
+ * run rather than proceeding when the bound expires. At the end of the suite
+ * CecL2TestEnvironment::TearDown() asks the host to shut down over the control channel,
+ * signals it, waits for its exit within a bound, escalates to SIGKILL if it stays, and
+ * reaps it. Nothing this run starts outlives it: an orphaned host would hold the
+ * production service name and make the next run fail on a stale registration.
  *
- * A CONTROL AND OBSERVATION CHANNEL, FOR THE TWO THINGS THE RUNNER CANNOT SEE FROM INSIDE
- * ITSELF. Beyond the readiness pipe, the remote mode hands the host two further inherited
- * descriptors - the read end of a pipe this harness writes commands to, and the write end
- * of a second pipe it reads one reply line per command from - named in
- * CEC_FAKE_HOST_CONTROL_FD and CEC_FAKE_HOST_OBSERVE_FD. The host's own file block is the
- * normative statement of that protocol; this file implements the client half of it and
- * publishes exactly two entry points, cecL2HostControlChannelIsOpen() and
- * cecL2HostControlRequest(), to the case file.
+ * @par Readiness is a token on a pipe rather than a timed wait
+ * The host writes one fixed line to the inherited descriptor whose read end this process
+ * holds, and this process blocks on that descriptor until the deadline. A sleep in place
+ * of the token would convert a race into a flake - too short on a loaded machine or
+ * inside an emulated guest, wasteful when it is not, and never evidence that the service
+ * was published at all. The host writes no readiness line on any failure path, so this
+ * wait is the only detector of a host that failed to register, of a host that could not
+ * reach a binder transport, and of a host blocked indefinitely inside libbinder waiting
+ * for binder handle 0 because no service manager is running. A timeout, an end of file
+ * without the token, and a token that does not match all fail the run.
  *
- * It exists because two of this tier's requirements are otherwise unassertable. An OUTBOUND
- * transmit that crossed the driver is visible here only as "sendTo did not throw", while the
- * bytes the service actually received live in the host process; and an INBOUND delivery can
- * be caused only by the fake service, which is also in the host process. Without the channel
- * the first is a no-throw tautology that a dropped or corrupted send would satisfy, and the
- * second cannot happen at all.
+ * @par The control and observation channel
+ * The remote mode hands the host two further inherited descriptors, named in
+ * CEC_FAKE_HOST_CONTROL_FD and CEC_FAKE_HOST_OBSERVE_FD: the read end of a pipe this
+ * harness writes commands to, and the write end of a second pipe it reads one reply line
+ * per command from. The host's own file block is the normative statement of that
+ * protocol and this file implements the client half of it. The channel exists because
+ * two of this tier's requirements are otherwise unassertable. An outbound transmit that
+ * crossed the driver is visible here only as "sendTo did not throw", while the bytes the
+ * service received live in the host process; and an inbound delivery can be caused only
+ * by the fake service, which is also in the host process. Without the channel the first
+ * is a no-throw tautology that a dropped or corrupted send would satisfy, and the second
+ * cannot happen at all.
  *
- * AND IT IS A PIPE, NOT A BINDER CALL, WHICH IS THE POINT: binder is the transport under
- * test, so evidence carried over binder would be attesting to the transport with the
- * transport. Every wait on it is bounded against one monotonic deadline and every failure is
- * a diagnostic naming the command - a harness that could hang would be killed from outside
- * with nothing recorded, which is worse than any failed assertion. For the same reason SIGPIPE
- * is IGNORED for the lifetime of this environment and restored afterwards: a write to a pipe
- * whose reader has gone must report EPIPE to the case that asked for the observation, not kill
- * this process before its teardown can reap the host. See ignoreBrokenPipeSignal().
+ * @par CEC_TEST_AIDL_MODE
+ * The variable selects what this process finds when it looks the service up. It is read
+ * here and in `tests/L1Tests/test_main.cpp` and nowhere else: no production source reads
+ * it, and none may.
+ * - `absent` - launch nothing. The lookup finds no service, the legacy back-end is
+ *   selected, and it is driven through the in-process legacy mock. An unset or empty
+ *   variable means exactly this, so a plain `./run_L2Tests` exercises the legacy round
+ *   trip and touches libbinder not at all. This is invocation D.
+ * - `remote` - launch the out-of-process fake service host with its readiness pipe and
+ *   its control and observation channel, wait for the readiness token, establish the
+ *   channel with one ping, and only then initialize. The middleware resolves a real proxy
+ *   over the binder driver and its listener callback arrives on a binder threadpool
+ *   thread. This is invocation E.
+ * - `compatible`, `incompatible` - in-process modes, which this runner does not
+ *   implement. They mean "register a fake inside this very process", which is
+ *   run_L1Tests' job: an in-process registration produces no proxy, no driver transaction
+ *   and no callback on a binder thread, so it cannot be what this tier runs. Either one
+ *   seen here is a fatal failure naming that runner rather than a quiet downgrade to
+ *   `absent`.
  *
- * A STALE REGISTRATION IS FATAL AND NOT A CONDITION TO WORK AROUND. Something already
- * published under the production service name would make the middleware's own lookup
- * resolve against THAT service instead of the fake this harness hosts; the invocation
- * would still run, and its result would describe something nobody chose. THE CHECK IS
- * THE HOST'S, DELIBERATELY, AND THIS PROCESS DOES NOT REPEAT IT: the host queries the
- * name with checkService() and exits with a code of its own, writing no readiness line,
- * which this harness's bounded wait then reports. Re-checking here would mean this
- * process reaching the service manager itself, and that is unsafe in two independent
- * ways on the pinned binder stack - with no driver node libbinder ABORTS the process
- * rather than returning an error, and with a driver node but no running service manager
- * it BLOCKS INDEFINITELY - neither of which may be risked in a runner that must also
- * execute the legacy invocation on a host with no binder support at all. Which brings
- * the point that governs the whole file: on the legacy invocation this harness touches
- * libbinder NOT AT ALL, and it links no binder symbol to make that impossible to get
- * wrong. It launches a binary; it does not host a fake.
+ * @note This file does not start the binder client threadpool. DriverAidlImpl::open()
+ *       owns that, and it runs inside the init() call. The host starts its own
+ *       service-side pool, which is a different pool serving a different direction;
+ *       starting one here would duplicate an ownership the production back-end holds.
+ * @note A stale registration is fatal and not a condition to work around, and the check
+ *       is the host's rather than this process's. Something already published under the
+ *       production service name would make the middleware's own lookup resolve against
+ *       that service instead of the fake this harness hosts, and the invocation would
+ *       still run and describe something nobody chose. The host queries the name with
+ *       checkService() and exits with a code of its own, writing no readiness line, which
+ *       this harness's bounded wait then reports. Re-checking here would mean this
+ *       process reaching the service manager itself, which is unsafe in two independent
+ *       ways on the pinned binder stack: with no driver node libbinder aborts the process
+ *       rather than returning an error, and with a driver node but no running service
+ *       manager it blocks indefinitely. Neither may be risked in a runner that must also
+ *       execute the legacy invocation on a host with no binder support at all.
+ * @note On the legacy invocation this harness touches libbinder not at all, and it links
+ *       no binder symbol so that this cannot be got wrong. It launches a binary; it does
+ *       not host a fake.
+ * @note SIGPIPE is ignored for the lifetime of this environment and the disposition found
+ *       on entry is restored afterwards, so that a write to a pipe whose reader has gone
+ *       reports EPIPE to the case that asked for the observation instead of killing this
+ *       process before teardown can reap the host. Observations travel over a pipe and
+ *       not over binder, because binder is the transport under test and evidence carried
+ *       over it would be attesting to the transport with the transport. See
+ *       ignoreBrokenPipeSignal().
  *
- * CEC_TEST_AIDL_MODE selects what this process finds when it looks the service up. It is
- * read HERE and in tests/L1Tests/test_main.cpp, and NOWHERE ELSE: no production source
- * reads it, and none may.
+ * @warning The order of the steps in CecL2TestEnvironment::SetUp() is what makes this
+ *          tier mean anything. The init() call is the first thing in this binary that
+ *          forces Driver::getInstance(), which constructs both back-ends, asks the AIDL
+ *          one whether its service came up, emits one selected-path line naming the
+ *          winner, and fixes that choice for the lifetime of the process. Anything that
+ *          is to influence the selection has to happen before init(), and nothing after
+ *          it can change the outcome. Launching the fake service host after init() leaves
+ *          the already-resolved selection on the legacy back-end: the suite then
+ *          exercises the legacy path from beginning to end, every case passes, and the
+ *          run is reported as AIDL evidence while never having spoken binder.
+ * @warning An unrecognised CEC_TEST_AIDL_MODE value is a fatal failure. Unset is the one
+ *          value treated permissively, because `absent` is the tier's default and a bare
+ *          `./run_L2Tests` is a legitimate way to run the legacy arm; a typo is not, and
+ *          a typo that silently downgraded the run would report a green result for an
+ *          invocation that never happened.
  *
- *   absent        Launch nothing. The lookup finds no service and the legacy back-end is
- *                 selected, driven through the in-process legacy mock. An unset or empty
- *                 variable means exactly this, so a plain ./run_L2Tests exercises the
- *                 legacy round trip and touches libbinder not at all.
- *                                                                     [invocation D]
- *   remote        Launch the out-of-process fake service host with its readiness pipe AND
- *                 its control and observation channel, wait for the readiness token, prove
- *                 the channel with one ping, and only then initialize. The middleware
- *                 resolves a real proxy over the binder driver and its listener callback
- *                 arrives on a binder threadpool thread.               [invocation E]
- *   compatible    IN-PROCESS modes, and NOT IMPLEMENTED HERE. They mean "register a fake
- *   incompatible  inside this very process", which is run_L1Tests' job: an in-process
- *                 registration produces no proxy, no driver transaction and no callback
- *                 on a binder thread, so it cannot be what this tier runs. Seen here
- *                 either one is a HARD FAILURE naming that runner, never a quiet
- *                 downgrade to absent - a misconfigured invocation that silently ran the
- *                 legacy path and reported green is the same defect as launching the
- *                 host too late, arrived at from a different direction.
- *
- * An unrecognised value is a HARD FAILURE for the same reason. Unset is the one value
- * treated permissively, because absent is genuinely the tier's default and a bare
- * ./run_L2Tests is a legitimate way to run the legacy arm; a TYPO is not, and is
- * refused.
- *
- * THIS FILE DOES NOT START THE BINDER CLIENT THREADPOOL. DriverAidlImpl::open() owns
- * that, and it runs inside the init call below. The host starts its own SERVICE-side
- * pool, which is a different pool serving a different direction. Starting one here would
- * duplicate an ownership the production back-end already holds.
- *
- * NOTHING HERE IS SWALLOWED. The L1 template this file is derived from used to wrap init
- * in catch (...) and discard the exception; that swallow is deliberately absent. A
- * failed initialization reported as a green suite is worse than a red one, because every
- * driver-dependent case then asserts against an unopened stack and every other result in
- * the binary becomes meaningless.
+ * @see mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp
+ * @see tests/L2Tests/ccec/test_DualPathIntegration.cpp
  */
 
 #include <gtest/gtest.h>
@@ -194,7 +203,7 @@ static HdmiCecDriverMock* g_driverMock = nullptr;
 static pid_t g_hostPid = -1;
 
 /*
- * Read end of the readiness pipe, held OPEN for the lifetime of the host rather than
+ * Read end of the readiness pipe, held open for the lifetime of the host rather than
  * closed once the token arrives, because it has a second job: end of file on it means
  * the host has closed its write end, which happens when and only when the host process
  * exits. That makes it a death channel, and it is what lets TearDown wait for the host
@@ -203,42 +212,42 @@ static pid_t g_hostPid = -1;
 static int g_hostReadinessReadFd = -1;
 
 /*
- * The parent's two ends of the host's CONTROL AND OBSERVATION CHANNEL, or -1 when this
+ * The parent's two ends of the host's control and observation channel, or -1 when this
  * invocation supplied none - which is every invocation that launches no host, i.e. the
  * legacy one.
  *
- * WHAT THE CHANNEL IS FOR, because it is the difference between an AIDL invocation that
+ * What the channel is for, because it is the difference between an AIDL invocation that
  * demonstrates something and one that merely completes. Two of this tier's requirements
  * cannot be discharged from inside this process at all:
  *
- *   OUTBOUND. A transmit that crosses the binder driver is observed by the runner only as
+ *   Outbound. A transmit that crosses the binder driver is observed by the runner only as
  *   "sendTo returned without throwing". A send that reached the far side with corrupt
  *   bytes, or that a fake had quietly dropped, returns exactly the same way. The bytes the
- *   service actually received live in ANOTHER PROCESS, and the fake is not linked into this
+ *   service actually received live in another process, and the fake is not linked into this
  *   runner - deliberately, since linking it would turn this tier back into the in-process
  *   case - so the only way to read them is to ask the host.
  *
- *   INBOUND. The only object that can invoke the middleware's IHdmiCecEventListener is the
+ *   Inbound. The only object that can invoke the middleware's IHdmiCecEventListener is the
  *   fake service, and it is in the host process. Without a way to ask the host to fire a
  *   callback, no case in this binary can cause an inbound delivery, and the requirement
  *   that a received frame arrive other than on the calling thread has nothing to assert.
  *
- * WHY IT IS A PIPE AND NOT A BINDER CALL, which is the point that makes the evidence worth
- * anything: BINDER IS THE THING UNDER TEST. An observation that travelled over binder would
+ * Why it is a pipe and not a binder call, which is the point that makes the evidence worth
+ * anything: binder is the thing under test. An observation that travelled over binder would
  * be attesting to the transport with the transport, so a transport fault could corrupt the
  * evidence and the corruption itself would be invisible. These two descriptors are an
  * ordinary pair of inherited pipes, and they work identically whether the driver is healthy,
  * degraded or absent.
  *
  * Both are module scope for the same reason g_hostPid is: SetUp acquires them, TearDown
- * releases them, and the client function that uses them is called from the OTHER translation
+ * releases them, and the client function that uses them is called from the other translation
  * unit in this binary, which has no other way to reach them.
  */
 static int g_hostControlWriteFd = -1;
 static int g_hostObserveReadFd  = -1;
 
 /*
- * Whether the host reached readiness AND answered on the channel.
+ * Whether the host reached readiness and answered on the channel.
  *
  * It gates exactly one thing - the polite `shutdown` request that teardown makes before it
  * signals - and it exists because the readiness-failure path calls the same teardown. A host
@@ -280,7 +289,7 @@ const char *const HOST_PATH_VARIABLE = "CEC_FAKE_AIDL_HOST_PATH";
 
 /*
  * The variable through which the host is told which inherited descriptor to signal on.
- * It carries the NUMBER of the write end of the pipe created below - this harness owns
+ * It carries the number of the write end of the pipe created below - this harness owns
  * the pipe and names the descriptor; the host parses the value strictly and refuses
  * anything that is not an unadorned non-negative decimal, so it is formatted here as
  * plain digits with no sign, no padding and no surrounding space.
@@ -288,7 +297,7 @@ const char *const HOST_PATH_VARIABLE = "CEC_FAKE_AIDL_HOST_PATH";
 const char *const HOST_READY_FD_VARIABLE = "CEC_FAKE_HOST_READY_FD";
 
 /*
- * The one readiness token, matched VERBATIM including its trailing newline.
+ * The one readiness token, matched verbatim including its trailing newline.
  *
  * It is a fixed contract owned by mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp and
  * copied here rather than invented: that file writes this exact line, once, with a raw
@@ -307,7 +316,7 @@ const char *const HOST_READINESS_TOKEN = "FAKE_HDMI_CEC_AIDL_HOST_READY\n";
  * Thirty seconds, and the value is reasoned rather than picked. It has to cover a cold
  * start of a second process that opens the binder driver, reaches the service manager,
  * publishes a service and starts a threadpool - and reaching the service manager retries
- * at ONE-SECOND granularity until binder handle 0 resolves, so a bound of a few hundred
+ * at one-second granularity until binder handle 0 resolves, so a bound of a few hundred
  * milliseconds could expire inside a single healthy retry. The AIDL invocation also runs
  * inside an emulated guest on a loaded CI machine, where every one of those steps is
  * slower than on a developer's host by a margin that is not worth predicting. Thirty
@@ -327,7 +336,7 @@ const int HOST_READINESS_TIMEOUT_MS = 30000;
  * libbinder, most plausibly - and waiting longer would only trade a diagnosable failure
  * for a hung suite. The escalation exists so that a wedged host cannot outlive the run
  * that started it, which would leave the production service name occupied and make the
- * NEXT run fail on a stale registration.
+ * next run fail on a stale registration.
  */
 const int HOST_SHUTDOWN_TIMEOUT_MS = 5000;
 
@@ -345,17 +354,18 @@ const std::size_t HOST_READINESS_MAX_BYTES = 4096;
  * The two variables through which the host is told which inherited descriptors carry its
  * control and observation channel. They are a fixed contract owned by
  * mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp, whose file block is the normative
- * statement of the protocol, and they TRAVEL TOGETHER: the host exits with a code of its
+ * statement of the protocol, and they travel together: the host exits with a code of its
  * own and writes no readiness token if one is set without the other, if either is not a
  * plain non-negative descriptor number, if either names a descriptor that is not open in
  * the child or is open in the wrong direction, or if both name the same descriptor. This
  * harness therefore sets both or neither, and never derives one from the other.
  *
- * CONTROL carries the number of the descriptor the host READS commands from - the read end
- * of a pipe this harness writes to. OBSERVE carries the number of the descriptor the host
- * WRITES replies to - the write end of a second pipe this harness reads from. Getting the
- * two the wrong way round is refused by the host rather than half-working, which is why the
- * direction is spelled out at every place either name appears in this file.
+ * The control variable carries the number of the descriptor the host reads commands from,
+ * the read end of a pipe this harness writes to. The observe variable carries the number of
+ * the descriptor the host writes replies to, the write end of a second pipe this harness
+ * reads from. Getting the two the wrong way round is refused by the host rather than
+ * half-working, which is why the direction is spelled out at every place either name
+ * appears in this file.
  */
 const char *const HOST_CONTROL_FD_VARIABLE = "CEC_FAKE_HOST_CONTROL_FD";
 const char *const HOST_OBSERVE_FD_VARIABLE = "CEC_FAKE_HOST_OBSERVE_FD";
@@ -363,7 +373,7 @@ const char *const HOST_OBSERVE_FD_VARIABLE = "CEC_FAKE_HOST_OBSERVE_FD";
 /**
  * @brief How long one control command may wait for its reply before the request fails.
  *
- * Ten seconds, and it is a FAILURE BOUND rather than an expected duration. Every command in
+ * Ten seconds, and it is a failure bound rather than an expected duration. Every command in
  * the vocabulary is answered from memory by a host that is already serving - an observation
  * command reads a counter, and a trigger command invokes a `oneway` callback that returns
  * without waiting for the middleware - so a healthy reply arrives in well under a
@@ -396,12 +406,12 @@ const std::size_t HOST_CONTROL_MAX_REPLY_BYTES = 4096;
 const char *const TRACE_PREFIX = "[CecL2TestEnvironment] ";
 
 /*
- * Exit codes the CHILD reports when it fails before it ever becomes the host.
+ * Exit codes the child reports when it fails before it ever becomes the host.
  *
  * They sit deliberately outside the range the host binary uses for its own documented
  * failures, so that a reader of an exit status can tell "the host ran and refused" from
  * "the host was never reached at all" without consulting either file. The host's codes
- * are file-local to its translation unit and are NOT duplicated here for the same
+ * are file-local to its translation unit and are not duplicated here for the same
  * reason: a second copy of that table would be a second thing to keep in step, and it is
  * not needed, because this harness reports the raw status it observed and the host's own
  * trace on standard output names the step it reached.
@@ -419,11 +429,11 @@ const int CHILD_EXIT_EXEC_FAILED     = 121;
  * other than the host is on the far end of that descriptor.
  */
 enum class ReadinessOutcome {
-    Ready,              /**< The token arrived, matched verbatim, and the host is serving. */
-    TimedOut,           /**< The bound expired with no token; the host is still alive.     */
-    ClosedWithoutToken, /**< The write end closed with no token; the host exited.           */
-    TokenMismatch,      /**< A complete line arrived and it was not the token.              */
-    PipeError           /**< The descriptor itself failed, which is neither of the above.   */
+    Ready,              /**< @brief The token arrived, matched verbatim, and the host is serving. */
+    TimedOut,           /**< @brief The bound expired with no token; the host is still alive.     */
+    ClosedWithoutToken, /**< @brief The write end closed with no token; the host exited.          */
+    TokenMismatch,      /**< @brief A complete line arrived and it was not the token.             */
+    PipeError           /**< @brief The descriptor itself failed, which is none of the above.     */
 };
 
 /**
@@ -539,47 +549,47 @@ bool reapChildBlocking(pid_t childPid, std::string &description)
 }
 
 /* ---------------------------------------------------------------------------------------------
- * THE DISPOSITION THAT MAKES THIS PROCESS'S CHANNEL WRITES SURVIVABLE, AND WHY IT IS A HARNESS-WIDE
- * ONE RATHER THAN A BLOCK AROUND EACH WRITE.
+ * The disposition that makes this process's channel writes survivable, and why it is a
+ * harness-wide one rather than a block around each write.
  *
- * SIGPIPE'S DEFAULT DISPOSITION TERMINATES THE PROCESS, and this harness has exactly one write that
+ * SIGPIPE's default disposition terminates the process, and this harness has exactly one write that
  * can provoke it: writeControlCommand()'s write to the host's control descriptor, whose reader is
- * ANOTHER PROCESS that can exit or close its read end at any moment. Under the default disposition
- * that write never returns - the runner is killed at the call - and TWO contracts this file states
+ * another process that can exit or close its read end at any moment. Under the default disposition
+ * that write never returns - the runner is killed at the call - and two contracts this file states
  * elsewhere are lost with it:
  *
- *   THE DIAGNOSTIC IS NEVER PRODUCED. writeControlCommand() carries an EPIPE arm whose whole purpose
+ *   The diagnostic is never produced. writeControlCommand() carries an EPIPE arm whose whole purpose
  *   is to say "the host has closed its control descriptor or exited" in the failure message of the
  *   case that asked for the observation. A signal delivers no errno to anyone, so GoogleTest records
  *   no result at all and the run reads as a crash of unknown origin - the outcome the bounded
  *   channel was designed to rule out, arrived at through the one path that bypasses the bound.
  *
- *   THE HOST IS NEVER REAPED. The global environment's TearDown is what signals the host, waits for
+ *   The host is never reaped. The global environment's TearDown is what signals the host, waits for
  *   it and collects it; a process killed by a signal runs no teardown, so a wedged or still-serving
- *   host survives the run that started it, holding the production service name and making the NEXT
+ *   host survives the run that started it, holding the production service name and making the next
  *   run fail on a stale registration. The promise that nothing outlives the run is a promise
  *   TearDown keeps, and TearDown has to be reached.
  *
- * WITH THE DISPOSITION INSTALLED both are restored, and the EPIPE arm becomes reachable - which is
+ * With the disposition installed both are restored, and the EPIPE arm becomes reachable - which is
  * the point of installing it rather than a side effect. The write returns -1 with EPIPE,
  * writeControlCommand() fails with its sentence naming the command, performHostControlRequest()
  * reports false, the calling case's assertion fails at its own line, and TearDown then reaps the host
  * and reports how it ended. One failed assertion carrying the reason, in place of a dead process.
  *
- * AND THAT WHOLE CHAIN IS EXERCISED RATHER THAN ARGUED FOR. cecL2ProveEpipeDiagnosticAndChildReaping()
- * below builds the hazard out of a pipe and a child of its own, calls THIS FILE'S OWN
+ * That whole chain is exercised rather than argued for. cecL2ProveEpipeDiagnosticAndChildReaping()
+ * below builds the hazard out of a pipe and a child of its own, calls this file's own
  * writeControlCommand() on a descriptor whose reader has genuinely gone, requires the false return and
  * the EPIPE sentence naming the command, and then ends that child through the same
  * terminateAndReapChildProcess() a teardown uses. So both halves of the paragraph above are checked by
  * a test: the diagnostic is produced by the real function, and the reap that a killed process would
  * have skipped is performed by the real code and required to succeed. The one thing the seam cannot
- * check is what happens WITHOUT the disposition, since establishing that would mean terminating the
+ * check is what happens without the disposition, since establishing that would mean terminating the
  * runner; the case therefore reads the disposition back out of the process first and fails fatally if
  * it is the default, before any write is attempted.
  *
- * SCOPE: THE WHOLE LIFE OF THE TEST ENVIRONMENT, installed as the FIRST step of SetUp and undone as
- * the LAST step of TearDown. A scoped block around each write would also work, and this is chosen
- * over it for two reasons rather than for brevity. First, the guarantee is asserted on BOTH
+ * The scope is the whole life of the test environment: installed as the first step of SetUp and
+ * undone as the last step of TearDown. A scoped block around each write would also work, and this is
+ * chosen over it for two reasons rather than for brevity. First, the guarantee is asserted on both
  * invocations - the seam above runs from a fixture that skips for nothing, so it executes under the
  * legacy invocation too - and on that invocation no host is launched at all, so a disposition
  * installed beside the pipes would leave that very case unprotected and the runner would die proving
@@ -591,24 +601,24 @@ bool reapChildBlocking(pid_t childPid, std::string &description)
  * own and every process default it can leave alone is one fewer difference between a run with a
  * channel and a run without. This harness's own test is the thing that needs the wider window.
  *
- * NOTHING IN THE MIDDLEWARE UNDER TEST RELIES ON SIGPIPE'S DEFAULT DISPOSITION, so this changes
+ * Nothing in the middleware under test relies on SIGPIPE's default disposition, so this changes
  * nothing for the code being exercised. CCEC's transports are an in-process C function-pointer ABI on
  * the legacy arm and binder ioctls on the AIDL arm; neither writes to a pipe or a socket, and no
  * ccec/ or osal/ source installs, blocks, raises or waits on SIGPIPE. What changes is confined to
  * this harness's own descriptors: a write to a reader-less pipe reports an error instead of killing
  * the process that made it.
  *
- * EVERY OTHER DESCRIPTOR OPERATION IN THIS FILE, CHECKED RATHER THAN ASSUMED, because "the one
+ * Every other descriptor operation in this file is checked rather than assumed, because "the one
  * write" is a claim and not an observation:
  *
- *   THE READINESS PIPE. This process holds the READ end only - awaitHostReadiness() and
+ *   The readiness pipe. This process holds the read end only - awaitHostReadiness() and
  *   waitForChildExitViaPipeEof() poll and read it, and the write end is closed in the parent
  *   immediately after the fork. A read cannot raise SIGPIPE, so there is nothing to protect.
  *
- *   THE OBSERVATION PIPE. Read end again, in readControlReply(), for the same reason and with the
+ *   The observation pipe. Read end again, in readControlReply(), for the same reason and with the
  *   same consequence.
  *
- *   writeRawFully(). Its only calls are in the CHILD, between fork() and execve(), and its
+ *   writeRawFully(). Its only calls are in the child, between fork() and execve(), and its
  *   descriptor is STDERR_FILENO. Standard error being a closed pipe would raise SIGPIPE there - and
  *   the child inherits the disposition installed here, so it is covered by the same install rather
  *   than by an argument that it cannot happen. Nothing else in this file writes to a descriptor.
@@ -617,12 +627,12 @@ bool reapChildBlocking(pid_t childPid, std::string &description)
  *   whoever ran the binary. It is inside the protected window in any case, because the window is the
  *   whole environment.
  *
- * AND THAT IS WHY THE ORIGINAL IS PUT BACK. A disposition is process-wide and outlives this
+ * And that is why the original is put back. A disposition is process-wide and outlives this
  * environment: anything running after global teardown - another ::testing::Environment's TearDown, a
  * static destructor, an atexit handler - would otherwise inherit a choice this harness made and never
  * announced. Restoring keeps the change scoped to the window that needs it.
  *
- * ONE INHERITANCE WORTH KNOWING: SIG_IGN survives fork() and is preserved across execve(), so the
+ * One inheritance is worth knowing: SIG_IGN survives fork() and is preserved across execve(), so the
  * host starts life with SIGPIPE already ignored. The host installs its own disposition regardless,
  * and correctly so - a program that must not be killed by a closed pipe cannot make that depend on
  * how it was launched.
@@ -740,7 +750,7 @@ bool restoreBrokenPipeSignalDisposition(std::string &failureDetail)
  * removes the question entirely.
  *
  * @par Descriptor inheritance, stated explicitly because it is easy to get backwards
- * The pipe is created with O_CLOEXEC on BOTH ends, and the child then clears the flag on
+ * The pipe is created with O_CLOEXEC on both ends, and the child then clears the flag on
  * the write end alone. So the read end is never inherited - it is closed in the child and
  * would be closed again by exec - while the write end survives into the host image, which
  * is the descriptor the host writes its token to. The parent closes its own copy of the
@@ -759,9 +769,9 @@ bool restoreBrokenPipeSignalDisposition(std::string &failureDetail)
  * @retval false                                  - The binary is unusable, or the pipe or
  *                                                  the fork failed; nothing was left open
  *
- * @post On success a child exists and MUST be reaped, whether or not it ever reports ready.
+ * @post On success a child exists and must be reaped, whether or not it ever reports ready.
  *
- * @warning A successful return means the child was started, NOT that the service was
+ * @warning A successful return means the child was started, not that the service was
  *          published. Only the readiness token establishes that, which is why
  *          awaitHostReadiness() is not optional and its bound is not optional either.
  *
@@ -804,14 +814,14 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
     const int writeFd = readinessPipe[1];
 
     /*
-     * The control and observation channel: TWO MORE PIPES, in opposite directions, created
+     * The control and observation channel: two more pipes, in opposite directions, created
      * the same way and for the same reason. One descriptor cannot serve both directions -
      * the host refuses a configuration in which both variables name the same number,
      * because it would have the host reading its own replies - so this is two pipes and
      * four descriptors, of which each process keeps two.
      *
-     *   control:  this harness holds the WRITE end, the child inherits the READ end
-     *   observe:  this harness holds the READ end,  the child inherits the WRITE end
+     *   control:  this harness holds the write end, the child inherits the read end
+     *   observe:  this harness holds the read end,  the child inherits the write end
      *
      * Either creation failing closes everything already open before returning, so a failed
      * launch leaks no descriptor into a run that then reports a different failure.
@@ -850,7 +860,7 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
     char *const childArgv[] = { const_cast<char *>(hostPathForChild.c_str()), nullptr };
 
     /*
-     * The child's environment: this process's own, minus any inherited value of the THREE
+     * The child's environment: this process's own, minus any inherited value of the three
      * descriptor variables, plus the three this launch is naming. Dropping the inherited
      * values matters - a stale descriptor number from an outer harness would otherwise be
      * ambiguous, and the host, quite correctly, refuses to guess between two.
@@ -860,7 +870,7 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
      * useful; it is a run that cannot start, which is the correct outcome and not one to
      * arrive at by accident.
      *
-     * The strings are all appended BEFORE any pointer into them is taken. Growing the
+     * The strings are all appended before any pointer into them is taken. Growing the
      * vector afterwards would move the std::string objects, and a short string keeps its
      * characters inside the object, so the pointers would dangle.
      */
@@ -913,7 +923,7 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
 
     if (child == 0) {
         /*
-         * CHILD. Nothing from here to execve() allocates or locks. Both messages below are
+         * In the child. Nothing from here to execve() allocates or locks. Both messages below are
          * string literals whose length is known at compile time, so even strlen() is out
          * of the picture, and _exit() is used rather than exit() so that no copy of the
          * parent's stdio buffers is flushed a second time.
@@ -921,7 +931,7 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
         ::close(readFd);
 
         /*
-         * The two ends of the channel that belong to the PARENT are closed here as well.
+         * The two ends of the channel that belong to the parent are closed here as well.
          * Leaving the control write end open in the child would mean the host never sees
          * end of file when the parent closes its own copy, so a parent that went away
          * without saying so would leave the host serving a channel nobody drives.
@@ -938,10 +948,10 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
         }
 
         /*
-         * THE STEP THE HOST'S OWN CONTRACT SINGLES OUT AS THE ONE MOST LIKELY TO BE
-         * FORGOTTEN, and it is forgotten silently: all four descriptors were created with
+         * The step the host's own contract singles out as the one most likely to be
+         * forgotten, and it is forgotten silently: all four descriptors were created with
          * O_CLOEXEC, so without clearing the flag here the two the host is about to be
-         * TOLD about would not survive its exec. The host would then find the numbers named
+         * told about would not survive its exec. The host would then find the numbers named
          * in its environment closed, refuse to start with a code of its own, and write no
          * readiness token - a loud failure rather than a quiet one, which is the right
          * direction, but a failure nonetheless. It is done for exactly the two descriptors
@@ -979,14 +989,14 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
     }
 
     /*
-     * PARENT. Closing this copy of the write end is what gives the read end a meaningful
+     * In the parent. Closing this copy of the write end is what gives the read end a meaningful
      * end of file: while the parent holds one open, a dead child produces no EOF and the
      * wait below would sit out its whole timeout diagnosing the wrong thing.
      */
     ::close(writeFd);
 
     /*
-     * And the two channel ends that belong to the CHILD, for the same reason in both
+     * And the two channel ends that belong to the child, for the same reason in both
      * directions: while this process holds the control read end open, the host would not
      * see end of file if it closed its write end; and while it holds the observation write
      * end open, a dead host would not produce end of file on the read end, so a bounded
@@ -1047,7 +1057,7 @@ std::string renderForDiagnostic(const std::string &received)
  * remaining until the deadline and returns the moment a byte arrives, so a healthy host is
  * noticed immediately and an unhealthy one is given the full bound and no more. The
  * deadline is taken from steady_clock rather than accumulated from per-iteration
- * timeouts, so an interrupted poll() resumes against the ORIGINAL deadline and cannot
+ * timeouts, so an interrupted poll() resumes against the original deadline and cannot
  * extend the bound by being interrupted repeatedly - and steady_clock in particular
  * because a wall-clock adjustment mid-run must not shorten or lengthen it.
  *
@@ -1069,7 +1079,7 @@ std::string renderForDiagnostic(const std::string &received)
  * @pre startFakeServiceHost() has reported success, so g_hostReadinessReadFd is open and
  *      this process has closed its own copy of the write end.
  *
- * @warning Reporting anything other than Ready means the AIDL invocation CANNOT be run.
+ * @warning Reporting anything other than Ready means the AIDL invocation cannot be run.
  *          The caller must fail the run rather than continue: continuing would leave the
  *          selection on the legacy back-end and describe the result as an AIDL one.
  *
@@ -1140,7 +1150,7 @@ ReadinessOutcome awaitHostReadiness(std::string &observed)
 
         /*
          * Matched only once a whole line is in hand. A partial read that delivered the
-         * token's name without its newline is NOT readiness, and treating it as such would
+         * token's name without its newline is not readiness, and treating it as such would
          * accept a truncated write as a published service.
          */
         const std::size_t terminator = received.find('\n');
@@ -1159,7 +1169,7 @@ ReadinessOutcome awaitHostReadiness(std::string &observed)
 }
 
 /*
- * Bytes read from the observation pipe that arrived AFTER the newline terminating the reply
+ * Bytes read from the observation pipe that arrived after the newline terminating the reply
  * they were read with, held for the next request.
  *
  * A read() takes whatever is available rather than exactly one line, so a host that wrote
@@ -1177,7 +1187,7 @@ std::string controlReplyResidual;
  * @brief Serialises control requests against each other.
  *
  * GoogleTest runs cases sequentially and no case starts a thread of its own, so nothing in
- * this binary issues two requests at once today. The lock is here because the CONSEQUENCE of
+ * this binary issues two requests at once today. The lock is here because the consequence of
  * that ever changing is not a failed assertion but a desynchronised channel - two commands
  * interleaved on the wire, each reading the other's reply - and a defect of that shape would
  * be blamed on the transport under test rather than on the harness. One uncontended lock per
@@ -1194,11 +1204,11 @@ std::mutex controlRequestMutex;
  * the remaining time is what turns that into a reported failure.
  *
  * @par Why the descriptor is a parameter and not the module-scope one
- * So that the EPIPE arm below can be DRIVEN rather than argued about. That arm exists only
+ * So that the EPIPE arm below can be driven rather than argued about. That arm exists only
  * because SIGPIPE is ignored, and the case that checks the ignore is in force -
  * tests/L2Tests/ccec/test_DualPathIntegration.cpp's broken-pipe case, through the
- * cecL2ProveEpipeDiagnosticAndChildReaping() seam below - has to make a real call to THIS
- * function against a descriptor whose reader has genuinely gone. A function that could only
+ * cecL2ProveEpipeDiagnosticAndChildReaping() seam below - has to make a real call to this
+ * very function against a descriptor whose reader has genuinely gone. A function that could only
  * ever write to the live channel could not be called that way: the live channel's reader is
  * the fake service host, and breaking it to prove a diagnostic would destroy the session the
  * rest of the invocation depends on. Taking the descriptor as an argument is the whole of the
@@ -1206,7 +1216,7 @@ std::mutex controlRequestMutex;
  * failure sentences are untouched, because a seam that exercised a modified copy of this
  * function would prove nothing about the one the harness actually uses.
  *
- * @param [in]  line                      - Command text WITHOUT its terminator
+ * @param [in]  line                      - Command text without its terminator
  * @param [in]  controlWriteFd            - Descriptor to write to, open for writing. The live
  *                                          call site passes g_hostControlWriteFd; the seam
  *                                          passes a pipe of its own whose reader has gone
@@ -1270,7 +1280,7 @@ bool writeControlCommand(const std::string &line, int controlWriteFd,
          * there is one diagnostic for "the host has gone" rather than two that differ by
          * which call noticed first.
          *
-         * THAT FALL-THROUGH IS ONLY SOUND BECAUSE SIGPIPE IS IGNORED. Under its default
+         * That fall-through is only sound because SIGPIPE is ignored. Under its default
          * disposition this write() would not return at all on a closed reader: the process
          * would be terminated here, the EPIPE arm below would never run, and the teardown
          * that signals and reaps the host would never run either. ignoreBrokenPipeSignal()
@@ -1316,7 +1326,7 @@ bool writeControlCommand(const std::string &line, int controlWriteFd,
  *
  * @param [in]  command                   - Command this reply answers, for the diagnostic
  * @param [in]  deadline                  - Monotonic instant after which this gives up
- * @param [out] reply                     - Receives the reply line WITHOUT its terminator.
+ * @param [out] reply                     - Receives the reply line without its terminator.
  *                                          Untouched on failure
  * @param [out] failureDetail             - Receives a diagnostic on failure. Untouched on
  *                                          success
@@ -1440,7 +1450,7 @@ bool readControlReply(const std::string &command,
  *                                                  legitimately be an "ERR " line
  * @retval false                                  - No answer was obtained; failureDetail says why
  *
- * @warning An "ERR " reply is a SUCCESSFUL EXCHANGE and reports true. Whether the host's answer
+ * @warning An "ERR " reply is a successful exchange and reports true. Whether the host's answer
  *          is acceptable is the calling test's judgement, not this function's, and collapsing
  *          the two would deny a test the ability to assert on an expected refusal.
  *
@@ -1462,9 +1472,9 @@ bool performHostControlRequest(const std::string &command, std::string &reply,
     /*
      * The command is validated before a byte is written, because every way it can be
      * malformed breaks the framing rather than producing a refusal. An embedded newline would
-     * send TWO commands and read the first of two replies, leaving every subsequent request
+     * send two commands and read the first of two replies, leaving every subsequent request
      * one reply behind - a desynchronisation that presents as unrelated cases failing later.
-     * An empty or whitespace-only line produces NO reply at all by the host's own contract,
+     * An empty or whitespace-only line produces no reply at all by the host's own contract,
      * so a bounded wait would expire on a command that was accepted. Both are caller
      * mistakes, and both are reported here as such.
      */
@@ -1644,18 +1654,18 @@ bool waitForChildExitViaPipeEof(int pipeReadFd, int timeoutMs)
 /**
  * @brief Signals a child, waits for it within a bound, escalates if it stays, and reaps it.
  *
- * THE WHOLE OF THE TERMINATE-AND-REAP CONTRACT, IN ONE PLACE AND FREE OF MODULE-SCOPE STATE, so
+ * The whole of the terminate-and-reap contract, in one place and free of module-scope state, so
  * that every child this harness creates ends the same way and the guarantee "nothing this run
  * started outlives it" has exactly one implementation. terminateAndReapFakeServiceHost() below
  * is one caller and cecL2ProveEpipeDiagnosticAndChildReaping() is the other; the second exists
- * so that the reaping the SIGPIPE disposition is installed to make reachable is DRIVEN by a
- * test rather than asserted about in a comment, and it drives THIS function rather than a copy
- * of it, because a copy would prove nothing about the path teardown actually takes.
+ * so that the reaping the SIGPIPE disposition is installed to make reachable is driven by a
+ * test rather than asserted about in a comment, and it drives this very function rather than a
+ * copy of it, because a copy would prove nothing about the path teardown actually takes.
  *
  * SIGTERM first, because a child that installs a handler for it - the fake service host does -
  * gets to run its own clean shutdown. SIGKILL only after the bounded wait expires, so that a
  * child wedged somewhere this harness cannot reach still cannot survive: an orphaned host would
- * hold the production service name and make the NEXT run fail on a stale registration, turning
+ * hold the production service name and make the next run fail on a stale registration, turning
  * one failure into a series of them.
  *
  * @param [in]  childPid                  - Pid of the child to end. Must be positive
@@ -1728,7 +1738,7 @@ bool terminateAndReapChildProcess(pid_t childPid, const std::string &description
     }
 
     /*
-     * WITHOUT AN OBSERVATION DESCRIPTOR the blocking reap below is the wait, and that is sound
+     * Without an observation descriptor the blocking reap below is the wait, and that is sound
      * for the one child that has none: the seam's child installs SIG_DFL for SIGTERM itself
      * before it blocks, so the signal above terminates it rather than depending on whatever
      * disposition it inherited. A future child that could ignore SIGTERM must be given a death
@@ -1751,7 +1761,7 @@ bool terminateAndReapChildProcess(pid_t childPid, const std::string &description
  * no-op instead of a signal sent to a pid this process no longer owns - a pid the operating
  * system is free to have reused.
  *
- * WHAT IS HOST-SPECIFIC STAYS HERE AND THE REST IS terminateAndReapChildProcess(): the polite
+ * What is host-specific stays here and the rest is terminateAndReapChildProcess()'s: the polite
  * `shutdown` request, the channel close and the readiness descriptor belong to this host and to
  * no other child, while signalling, the bounded wait, the escalation and the reap are the same
  * for every child this harness creates and are therefore implemented once, above. The host's
@@ -1786,16 +1796,16 @@ std::string terminateAndReapFakeServiceHost()
     const long hostPid = static_cast<long>(g_hostPid);
 
     /*
-     * THE POLITE STEP, AND IT IS ONLY A STEP: the host's own `shutdown` command performs
+     * The polite step, and it is only a step: the host's own `shutdown` command performs
      * exactly the teardown its signal path performs, so asking first lets the host exit
      * through its documented path with its own trace rather than being signalled out of a
-     * poll(). It is attempted only where the host reached readiness AND the channel is open,
+     * poll(). It is attempted only where the host reached readiness and the channel is open,
      * because on the readiness-failure path the host is already dead or wedged and a request
      * there would spend its whole bound learning what the signal below establishes at once.
      *
-     * NOTHING RESTS ON IT. A failed or unanswered `shutdown` is traced and the signal path
+     * Nothing rests on it. A failed or unanswered `shutdown` is traced and the signal path
      * runs regardless: SIGTERM, then a bounded wait, then SIGKILL. The guarantee that no host
-     * outlives the run is the SIGNAL escalation and the reap, never the request - a request
+     * outlives the run is the signal escalation and the reap, never the request - a request
      * can only be sent to a host that is still serving, which is the one case that never
      * needed a guarantee.
      */
@@ -1853,44 +1863,44 @@ std::string terminateAndReapFakeServiceHost()
 }
 
 /* ---------------------------------------------------------------------------------------------
- * THE BROKEN-PIPE PROBE: the harness's own control-channel write and its own reaping, DRIVEN.
+ * The broken-pipe probe: the harness's own control-channel write and its own reaping, driven.
  *
- * WHAT IT IS FOR. Ignoring SIGPIPE buys this harness two things and nothing else: the EPIPE arm of
+ * What it is for. Ignoring SIGPIPE buys this harness two things and nothing else: the EPIPE arm of
  * writeControlCommand() becomes reachable, and the teardown that signals and reaps the host still
  * gets to run. Both are claims about code that only executes when a pipe's reader has gone, so
  * neither is established by anything the ordinary invocations do - a healthy host reads its control
- * descriptor until teardown closes it, and the arm never runs. A test that constructed a LOOK-ALIKE
+ * descriptor until teardown closes it, and the arm never runs. A test that constructed a look-alike
  * instead - its own pipe, its own raw ::write(), its own errno - would establish the kernel's
  * behaviour and the process's signal disposition, which are not in doubt, while leaving the function
  * whose diagnostic the install exists to make reachable completely unexercised, and leaving the reap
  * unexercised with it.
  *
- * SO THIS DRIVES THE REAL CODE. writeControlCommand() takes its descriptor as a parameter, so it can
+ * So this drives the real code. writeControlCommand() takes its descriptor as a parameter, so it can
  * be called against a pipe the probe owns; terminateAndReapChildProcess() takes its pid as a
  * parameter, so it can end a child the probe owns. Neither is a copy and neither is reached through a
  * test-only branch: they are the same functions performHostControlRequest() and
  * terminateAndReapFakeServiceHost() call, and a change that broke either would break this probe.
  *
- * WHAT IT NEEDS FROM THE PLATFORM: nothing. No fake service host, no /dev/binder, no service
+ * What it needs from the platform: nothing. No fake service host, no /dev/binder, no service
  * manager, no back-end, and no network. close() on the last read end of a pipe and then write() to
- * its write end returns -1 with EPIPE SYNCHRONOUSLY, and SIGTERM to a child at SIG_DFL terminates it,
+ * its write end returns -1 with EPIPE synchronously, and SIGTERM to a child at SIG_DFL ends it,
  * so the probe behaves identically under invocation D on a host with no binder support - which is
  * where it ordinarily runs - and under invocation E on the binder-capable guest.
  *
- * WHY THERE IS A CHILD AT ALL, and not simply a pipe with its read end closed. Two reasons, and the
+ * Why there is a child at all, and not simply a pipe with its read end closed. Two reasons, and the
  * first is the one that makes the probe deterministic rather than nearly deterministic:
  *
- *   THE READER HAS TO BE PROVABLY GONE. A pipe's write end reports EPIPE only when NO read end
+ *   The reader has to be provably gone. A pipe's write end reports EPIPE only when no read end
  *   remains open anywhere. A fork duplicates every descriptor, so the child holds a copy of the read
  *   end from the moment it exists; if the probe wrote before the child had closed that copy, the
- *   write would SUCCEED into the pipe buffer and the probe would fail for a reason that has nothing
+ *   write would succeed into the pipe buffer and the probe would fail for a reason that has nothing
  *   to do with the property under test. That is a race, and it is removed rather than narrowed: the
- *   child closes both probe ends FIRST and only then writes one byte to a handshake pipe, and the
+ *   child closes both probe ends first and only then writes one byte to a handshake pipe, and the
  *   parent does not write until it has read that byte. The parent's own copy of the read end is
  *   closed before the write for the same reason, and it is closed by the parent because nothing else
  *   can - a descriptor is closed only by the process that holds it.
  *
- *   THERE HAS TO BE SOMETHING TO REAP. The second half of what the disposition buys is the reap, and
+ *   There has to be something to reap. The second half of what the disposition buys is the reap, and
  *   a reap needs a real child that a real waitpid() collects. The probe's child is that child, and
  *   terminateAndReapChildProcess() is what ends it, so the probe's evidence covers both halves.
  *
@@ -1900,7 +1910,7 @@ std::string terminateAndReapFakeServiceHost()
  * terminateAndReapChildProcess() so that its bounded wait and its SIGKILL escalation are the ones a
  * teardown uses rather than a degenerate path.
  *
- * WHAT IT NEVER TOUCHES: g_hostControlWriteFd, g_hostObserveReadFd, g_hostPid,
+ * What it never touches: g_hostControlWriteFd, g_hostObserveReadFd, g_hostPid,
  * g_hostReadinessReadFd, g_hostReportedReady and the SIGPIPE disposition itself. Under invocation E
  * a live host is on the other end of the first two and a live session depends on all of them, so the
  * probe owns four descriptors and one child of its own and reads the disposition without altering
@@ -1911,7 +1921,7 @@ std::string terminateAndReapFakeServiceHost()
 /**
  * @brief The command line the probe writes to its reader-less descriptor.
  *
- * Recognisable on purpose, and NOT a command in the host's vocabulary: this line is never written to
+ * Recognisable on purpose, and not a command in the host's vocabulary: this line is never written to
  * a live channel, and a reader of a diagnostic that quotes it should be able to tell at once that it
  * came from the probe rather than from an observation a case asked for. The probe requires this exact
  * text to appear in writeControlCommand()'s failure sentence, which is what proves the diagnostic
@@ -1922,7 +1932,7 @@ const char *const EPIPE_PROBE_COMMAND = "epipe-probe";
 /**
  * @brief One bound for every wait the probe makes, in milliseconds.
  *
- * Two seconds, and it is a BACKSTOP rather than an expected duration. Each of the three waits it
+ * Two seconds, and it is a backstop rather than an expected duration. Each of the three waits it
  * governs - the handshake byte from a child whose only job is to close two descriptors and write it,
  * the write that a reader-less pipe rejects synchronously, and the exit of a child that is at
  * SIG_DFL for SIGTERM - completes in microseconds when the mechanism is sound, and none of them can
@@ -1975,11 +1985,11 @@ void closeIfOpen(int &fd)
  * this guard every return - success, any failure, or an exception escaping a std::string operation -
  * passes through the same release.
  *
- * THE CHILD IS A BACKSTOP AND NOT THE MECHANISM. On the successful path the probe ends its child
+ * The child is a backstop and not the mechanism. On the successful path the probe ends its child
  * through terminateAndReapChildProcess() and clears the pid, so this destructor does nothing at all;
  * that is deliberate, because the reap is part of what the probe exists to establish and a reap that
  * only happened in a destructor would prove nothing about the code a teardown runs. The destructor's
- * SIGKILL exists for the paths that failed BEFORE that step, where a child is alive, unwanted, and
+ * SIGKILL exists for the paths that failed before that step, where a child is alive, unwanted, and
  * about to be forgotten.
  *
  * @warning Non-copyable deliberately: a copy would duplicate descriptor numbers and a pid, and the
@@ -2002,6 +2012,44 @@ public:
     EpipeProbeResources(const EpipeProbeResources &) = delete;
     EpipeProbeResources &operator=(const EpipeProbeResources &) = delete;
 
+    /**
+     * @brief Releases whatever the probe still holds, on every path out of it.
+     *
+     * Runs over the same five members every explicit cleanup step in the probe runs over,
+     * and every release is idempotent: closeIfOpen() resets each descriptor as it closes
+     * it, and the successful path clears the pid, so a descriptor already released is not
+     * closed a second time and a child already reaped is not signalled again. That matters
+     * because a descriptor number closed twice can by then belong to something else
+     * entirely, and a pid signalled after it has been reaped can have been reused by the
+     * operating system.@n
+     * The four descriptors go first and the child last. Their order among themselves does
+     * not matter, since each release is independent of the others, but ending the child is
+     * the only step here that can block, so doing it last means no descriptor is held open
+     * across that wait. A surviving child is killed rather than asked to stop, because this
+     * path is reached only where the probe gave up partway through and the orderly ending
+     * is what it gave up on.@n
+     * On the successful path there is nothing left to do, and that is deliberate: the probe
+     * ends its child through terminateAndReapChildProcess() and closes its remaining
+     * descriptors explicitly, because the reap is part of what the probe establishes and a
+     * reap that only ever happened in a destructor would say nothing about the path a
+     * teardown takes.
+     *
+     * @return None
+     *
+     * @post No descriptor and no child the probe created outlives the guard, so nothing it
+     *       opened leaks into the rest of the run and nothing it forked becomes a zombie
+     *       that outlives the suite.
+     *
+     * @warning Does not raise, and nothing that could raise may be added to it. A
+     *          destructor is implicitly noexcept, so an exception escaping this one while
+     *          the stack unwound from a failed probe step would terminate the process
+     *          instead of failing one case. The calls it makes are close(), kill(),
+     *          waitpid() and one trace line, none of which raises short of allocation
+     *          failure, and a child it could not collect is reported through that trace
+     *          rather than by raising.
+     *
+     * @see closeIfOpen(), reapChildBlocking(), proveEpipeDiagnosticAndChildReaping()
+     */
     ~EpipeProbeResources()
     {
         closeIfOpen(handshakeReadFd);
@@ -2035,13 +2083,13 @@ public:
 /**
  * @brief Waits, bounded, for the probe child's "both probe ends are closed" byte.
  *
- * THE STEP THAT MAKES THE PROBE DETERMINISTIC. Until this byte arrives the child may still hold its
+ * The step that makes the probe deterministic. Until this byte arrives the child may still hold its
  * inherited copy of the probe pipe's read end, and a write to a pipe that still has a reader
  * succeeds. Waiting for the byte turns "the child has probably closed it by now" into an observed
  * fact, and it is a real wait on the real event rather than a sleep: poll() is given the time
  * remaining until one monotonic deadline and returns the moment the byte is there.
  *
- * End of file is a DIFFERENT outcome from the bound expiring and is reported as such. It means the
+ * End of file is a different outcome from the bound expiring and is reported as such. It means the
  * child exited before reporting - it could not make SIGTERM fatal to itself, or it was killed - and
  * that is a fault in the probe rather than in the property under test, so it must not be described
  * as a timeout.
@@ -2140,7 +2188,7 @@ bool awaitProbeChildClosedProbePipe(int handshakeReadFd, std::string &failureDet
  *                                          call, and empty when the call unexpectedly succeeded,
  *                                          because writeControlCommand() leaves its out-parameter
  *                                          untouched on success
- * @param [out] failureDetail             - Receives a sentence naming the STEP that failed and what
+ * @param [out] failureDetail             - Receives a sentence naming the step that failed and what
  *                                          its failure means. Untouched on success
  *
  * @return bool                                   - Whether every step held
@@ -2161,7 +2209,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     observedDiagnostic.clear();
 
     /*
-     * STEP 0. The disposition, read out of the process rather than assumed from the fact that
+     * Step 0. The disposition, read out of the process rather than assumed from the fact that
      * SetUp installed it. This is a refusal and not an assertion: under SIG_DFL the write in step 7
      * would not return at all, and a probe that killed the runner while checking that the runner
      * cannot be killed would be the worst possible outcome. The caller checks the same thing and
@@ -2191,7 +2239,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     EpipeProbeResources probe;
 
     /*
-     * STEP 1. The handshake pipe, which carries the child's "I have closed both probe ends" byte and
+     * Step 1. The handshake pipe, which carries the child's "I have closed both probe ends" byte and
      * then serves as its death channel. O_CLOEXEC on both ends at creation, atomically, exactly as
      * every other pipe in this file: nothing here execs, but a descriptor that would survive an exec
      * for no reason is the kind of difference that later becomes a bug.
@@ -2208,7 +2256,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     probe.handshakeWriteFd = handshakePipe[1];
 
     /*
-     * STEP 2. The probe pipe: the descriptor pair the real write is aimed at. It is the probe's own
+     * Step 2. The probe pipe: the descriptor pair the real write is aimed at. It is the probe's own
      * so that nothing here can disturb the live control channel, whose reader on invocation E is a
      * host serving a session the rest of the invocation depends on.
      */
@@ -2223,7 +2271,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     probe.probeWriteFd = probePipe[1];
 
     /*
-     * STEP 3. The child. Its entire job is to release both probe descriptors, say so, and then stay
+     * Step 3. The child. Its entire job is to release both probe descriptors, say so, and then stay
      * alive until it is signalled, so that the reaping in step 9 has a real child to collect.
      */
     const pid_t child = ::fork();
@@ -2237,14 +2285,14 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
 
     if (child == 0) {
         /*
-         * CHILD. Every call from here on is one that may be made after a fork: close(), sigaction(),
-         * a raw write() and _exit(). Nothing allocates and nothing takes a lock, which matters
-         * because this process may have a binder threadpool running when the fork happens - on
-         * invocation E it does - and a fork copies a lock's state as it stood, so a child that took
-         * one could deadlock against a lock no thread of its own will ever release. std::memset is
-         * pure computation over a local and takes nothing.
+         * In the child. Every call from here on is one that may be made after a fork: close(),
+         * sigaction(), a raw write() and _exit(). Nothing allocates and nothing takes a lock,
+         * which matters because this process may have a binder threadpool running when the fork
+         * happens - on invocation E it does - and a fork copies a lock's state as it stood, so a
+         * child that took one could deadlock against a lock no thread of its own will ever
+         * release. std::memset is pure computation over a local and takes nothing.
          *
-         * BOTH probe ends go, not just the read end. The read end is the one that must go for the
+         * Both probe ends go, not just the read end. The read end is the one that must go for the
          * parent's write to report EPIPE; the write end goes with it because a child that kept it
          * would hold open a descriptor it has no use for, and a descriptor nobody needs and nobody
          * watches is how a leak starts.
@@ -2254,7 +2302,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
         ::close(probe.handshakeReadFd);
 
         /*
-         * SIGTERM IS MADE FATAL TO THIS CHILD EXPLICITLY, so that step 9's terminate-and-reap does
+         * SIGTERM is made fatal to this child explicitly, so that step 9's terminate-and-reap does
          * not depend on what disposition the child happened to inherit. The parent ignores SIGPIPE
          * and nothing in this binary touches SIGTERM, so the inherited disposition is already the
          * default - but "already correct by accident" is not a property to build a bounded wait on,
@@ -2272,7 +2320,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
         }
 
         /*
-         * AND ONLY NOW THE BYTE, because its whole meaning is "the closes above have happened". A
+         * And only now the byte, because its whole meaning is "the closes above have happened". A
          * byte written before them would license the parent's write while a reader still existed,
          * which is the race this handshake exists to remove. writeRawFully() is used because it is
          * this file's post-fork write and tolerates a short or interrupted one; a failure here is
@@ -2293,11 +2341,11 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
         }
     }
 
-    /* PARENT from here on. */
+    /* The parent from here on. */
     probe.childPid = child;
 
     /*
-     * STEP 4. The parent's copy of the handshake write end goes, and this is the close that makes
+     * Step 4. The parent's copy of the handshake write end goes, and this is the close that makes
      * end of file on the read end mean "the child has exited". While the parent holds a write end
      * open, a dead child produces no end of file, and the death channel step 9 relies on would sit
      * out its whole bound diagnosing the wrong thing.
@@ -2305,8 +2353,8 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     closeIfOpen(probe.handshakeWriteFd);
 
     /*
-     * STEP 5. THE PARENT'S READ END OF THE PROBE PIPE GOES, AND THIS IS THE STEP THAT CREATES THE
-     * HAZARD. A pipe reports EPIPE to a writer only when NO read end remains open in ANY process:
+     * Step 5. The parent's read end of the probe pipe goes, and this is the step that creates the
+     * hazard. A pipe reports EPIPE to a writer only when no read end remains open in any process:
      * the child released its inherited copy above, and this releases the parent's, so after this
      * line the pipe has a writer and no reader at all. Leaving it open - the single easiest mistake
      * to make here - would leave the parent itself as a reader, the write in step 7 would succeed
@@ -2316,7 +2364,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     closeIfOpen(probe.probeReadFd);
 
     /*
-     * STEP 6. The child's report, waited for rather than assumed. Without it the probe would be
+     * Step 6. The child's report, waited for rather than assumed. Without it the probe would be
      * racing its own child for the read end - see awaitProbeChildClosedProbePipe().
      */
     std::string handshakeFailure;
@@ -2327,7 +2375,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     }
 
     /*
-     * STEP 7. THE REAL CALL, against the real function, with a bounded deadline. It must fail, and
+     * Step 7. The real call, against the real function, with a bounded deadline. It must fail, and
      * it must fail from the write rather than from the deadline: a reader-less pipe rejects the
      * write synchronously, so the bound is a backstop that a sound mechanism never approaches.
      */
@@ -2347,9 +2395,9 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     }
 
     /*
-     * STEP 8. The diagnostic itself, which is the half of the property a bare errno cannot establish.
+     * Step 8. The diagnostic itself, which is the half of the property a bare errno cannot establish.
      * Two substrings are required and each rules out a different wrong answer: the command text
-     * proves the sentence names WHICH command failed, and "EPIPE" proves it took the broken-pipe arm
+     * proves the sentence names which command failed, and "EPIPE" proves it took the broken-pipe arm
      * rather than the deadline arm - the deadline arm also names the command, so the command alone
      * would not distinguish them.
      */
@@ -2373,7 +2421,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     }
 
     /*
-     * STEP 9. THE REAL REAPING, through the same function a teardown uses, with the handshake pipe
+     * Step 9. The real reaping, through the same function a teardown uses, with the handshake pipe
      * as the death channel so that its bounded wait and its escalation are exercised rather than
      * bypassed. This is the second half of what ignoring SIGPIPE buys: a runner killed by the signal
      * would never have reached it.
@@ -2398,7 +2446,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
     probe.childPid = -1;
 
     /*
-     * STEP 10. What is left goes now rather than at the guard's destructor, so that the ordinary
+     * Step 10. What is left goes now rather than at the guard's destructor, so that the ordinary
      * path releases its own resources explicitly and the guard is visibly a backstop. Both calls are
      * idempotent, so the destructor that follows finds nothing to do.
      */
@@ -2416,7 +2464,7 @@ bool proveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
 /**
  * @brief Launches the fake service host and blocks until it reports ready.
  *
- * The whole of the remote mode's preparation, and it must complete BEFORE anything resolves
+ * The whole of the remote mode's preparation, and it must complete before anything resolves
  * the back-end selection. Every failure below fails the run: a launch that did not happen,
  * or happened and never became ready, means the AIDL invocation cannot be performed at all,
  * and the alternative to failing is a suite that silently exercises the legacy back-end and
@@ -2456,7 +2504,7 @@ void launchHostAndWaitUntilReady()
                   "resolved" << std::endl;
 
         /*
-         * THE CHANNEL IS PROVED HERE, ONCE, BEFORE ANY CASE DEPENDS ON IT. `ping` touches
+         * The channel is established here, once, before any case depends on it. `ping` touches
          * nothing in the fake and answers from the host's command loop, so it establishes
          * exactly the property the cases need - that a command written here is read there and
          * its reply comes back - and nothing else.
@@ -2503,7 +2551,7 @@ void launchHostAndWaitUntilReady()
     }
 
     /*
-     * Reaped BEFORE the failure is raised, for two reasons: a fatal GoogleTest failure
+     * Reaped before the failure is raised, for two reasons: a fatal GoogleTest failure
      * returns from this function immediately, so anything after it would not run, and the
      * reap is what supplies the host's exit status - the single most informative thing
      * about why no token arrived.
@@ -2561,7 +2609,7 @@ void launchHostAndWaitUntilReady()
  *
  * @return None
  *
- * @warning An unrecognised value is a fatal failure and NEVER a quiet fall back to the
+ * @warning An unrecognised value is a fatal failure and never a quiet fall back to the
  *          legacy mode. Unset is the single permissive case, because a bare ./run_L2Tests
  *          legitimately means "run the legacy arm"; a typo does not, and a typo that
  *          silently downgraded the run would report a green result for an invocation that
@@ -2615,38 +2663,38 @@ void applyAidlModeBeforeInit()
 
 
 /* =============================================================================================
- * THE CROSS-TRANSLATION-UNIT SEAM: the three functions the case file uses - two to drive and observe
+ * The cross-translation-unit seam: the three functions the case file uses - two to drive and observe
  * the out-of-process fake service, and one to drive this harness's own control-channel write and its
  * own child reaping.
  *
- * WHY THEY LIVE HERE. Every descriptor and every child process in this binary is owned by this
+ * Why they live here. Every descriptor and every child process in this binary is owned by this
  * harness - it creates the pipes, hands their far ends to a child, signals, reaps and closes - and
  * its lifecycle is the only place that knows whether a host exists at all. The case file needs to
- * USE all of that and must own no part of it, so the ownership stays here and only these three entry
+ * use all of that and must own no part of it, so the ownership stays here and only these three entry
  * points cross. The third is the same arrangement applied to the harness's own machinery: the case
  * that has to prove a reader-less control write reports EPIPE, and that the child which made it
  * reader-less is still reaped, cannot own the pipes or the child either.
  *
- * WHY THERE IS NO HEADER, WHICH IS DELIBERATE AND NOT AN OMISSION. A header for three functions used
+ * Why there is no header, which is deliberate and not an omission. A header for three functions used
  * by one file in one directory would be a new file in the build, and the migration's own rule is
  * that nothing test-scope reaches a production or installed surface. These are declared in the case
  * file by an identical extern declaration instead, with the same contract text above it.
  *
- * HOW DRIFT IS PREVENTED, since two declarations of the same thing is exactly the shape that
+ * How drift is prevented, since two declarations of the same thing is exactly the shape that
  * usually rots: the parameter types are std::string and the return type is bool, so the C++ name
  * these definitions export encodes the whole signature. A change on either side that the other does
- * not match is an UNDEFINED SYMBOL AT LINK TIME - `make -C tests/L2Tests` fails and names the
+ * not match is an undefined symbol at link time - `make -C tests/L2Tests` fails and names the
  * function - not a silent difference in behaviour. Semantics are kept in step by the contract being
  * written out in full in both places; if either is edited, both are.
  *
- * WHAT A CASE MAY ASSUME AND WHAT IT MAY NOT. It may assume that a true return from the request
+ * What a case may assume and what it may not. It may assume that a true return from the request
  * function means one command was written to the host and one reply line was read back, and that the
- * reply is classifiable - it begins "OK " or "ERR ". It may NOT assume the reply is a success: an
+ * reply is classifiable - it begins "OK " or "ERR ". It may not assume the reply is a success: an
  * "ERR " line is a successful exchange and reports true, because whether the host's refusal is
  * expected is the case's judgement and not this seam's. And it may not assume a channel exists - on
  * the legacy invocation there is no host, so cecL2HostControlChannelIsOpen() reports false and every
  * request fails with a diagnostic saying so rather than blocking. The broken-pipe seam is the one
- * entry point that depends on NONE of that: it brings its own pipes and its own child, so it means
+ * entry point that depends on none of that: it brings its own pipes and its own child, so it means
  * the same thing on both invocations.
  * ============================================================================================= */
 
@@ -2663,7 +2711,7 @@ void applyAidlModeBeforeInit()
  * @retval false                                  - No host was launched, the launch failed, or the
  *                                                  channel has been closed by teardown
  *
- * @warning A case whose assertions depend on the channel must FAIL rather than pass when this is
+ * @warning A case whose assertions depend on the channel must fail rather than pass when this is
  *          false. Skipping on it would hide a broken handoff behind a green run, which is the exact
  *          failure this tier exists to rule out.
  *
@@ -2683,7 +2731,7 @@ bool cecL2HostControlChannelIsOpen()
  * `close-count`, `deliver <hex>` and `shutdown`.
  *
  * Bounded in every direction and on every path. The write waits for the pipe to accept bytes, the
- * read waits for one newline, both against ONE monotonic deadline of
+ * read waits for one newline, both against one monotonic deadline of
  * HOST_CONTROL_REPLY_TIMEOUT_MS from entry, and an interrupted call resumes against that same
  * deadline rather than restarting it. There is no path on which this blocks indefinitely: a host
  * that has exited is reported from EPIPE or end of file at once, and a host that is alive and silent
@@ -2691,7 +2739,7 @@ bool cecL2HostControlChannelIsOpen()
  * harness that could hang would be killed from outside with no result recorded, which is strictly
  * worse than any failed assertion.
  *
- * @param [in]  command                   - Command text WITHOUT a terminator, e.g. "sent-count".
+ * @param [in]  command                   - Command text without a terminator, e.g. "sent-count".
  *                                          Must be non-blank and contain no newline or carriage
  *                                          return; both are rejected here rather than sent, because
  *                                          either would desynchronise the one-reply-per-command
@@ -2710,12 +2758,12 @@ bool cecL2HostControlChannelIsOpen()
  *
  * @pre The caller is on the AIDL invocation, i.e. cecL2HostControlChannelIsOpen() reports true.
  *
- * @warning THE OBSERVATION TRAVELS OVER A PIPE AND NOT OVER BINDER, AND THAT IS THE WHOLE POINT.
+ * @warning The observation travels over a pipe and not over binder, and that is the whole point.
  *          Binder is the transport under test; evidence carried over it would be attesting to the
  *          transport with the transport, and a fault could then corrupt the evidence invisibly. This
  *          channel is two inherited pipes and works identically whether the driver is healthy,
  *          degraded or absent.
- * @warning An "ERR " reply reports TRUE. Check the reply text.
+ * @warning An "ERR " reply reports true. Check the reply text.
  *
  * @see cecL2HostControlChannelIsOpen()
  */
@@ -2728,7 +2776,7 @@ bool cecL2HostControlRequest(const std::string &command, std::string &reply,
 /**
  * @brief Drives this harness's own control-channel write and its own reaping against a broken pipe.
  *
- * THE THIRD ENTRY POINT THIS FILE PUBLISHES, and the only one that is not about the fake service
+ * The third entry point this file publishes, and the only one that is not about the fake service
  * host. It exists because ignoring SIGPIPE buys exactly two things - writeControlCommand()'s EPIPE
  * arm becomes reachable, and the teardown that reaps the host still runs - and neither is exercised
  * by any ordinary invocation, since a healthy host reads its control descriptor until teardown closes
@@ -2741,17 +2789,17 @@ bool cecL2HostControlRequest(const std::string &command, std::string &reply,
  * function the global environment's TearDown uses on the host. Neither is a copy and neither has a
  * test-only branch.
  *
- * WHAT IT DOES, in order. It creates a handshake pipe and a probe pipe; forks a child whose entire
+ * What it does, in order. It creates a handshake pipe and a probe pipe; forks a child whose entire
  * job is to close both ends of the probe pipe, report that it has done so over the handshake pipe,
  * make SIGTERM fatal to itself and then block; closes the parent's copy of the handshake write end
  * and the parent's read end of the probe pipe, so that no reader of the probe pipe remains anywhere;
  * waits, bounded, for the child's report, because until it arrives the child may still hold the
  * inherited read end and a write would succeed; calls writeControlCommand() on the probe pipe's write
- * end and requires it to fail with a sentence that names the command AND reports EPIPE; ends the
+ * end and requires it to fail with a sentence that names the command and reports EPIPE; ends the
  * child through terminateAndReapChildProcess() and requires the reap to succeed; and releases every
  * descriptor it opened.
  *
- * DETERMINISTIC WITH NO PLATFORM SUPPORT OF ANY KIND. It needs no fake service host, no
+ * Deterministic with no platform support of any kind. It needs no fake service host, no
  * /dev/binder, no service manager and no back-end: close() on a pipe's last read end followed by
  * write() to its write end returns -1 with EPIPE synchronously, and SIGTERM to a child at SIG_DFL
  * ends it. Nothing is slept on, no wall clock is polled, and each of its three waits is a real wait
@@ -2763,7 +2811,7 @@ bool cecL2HostControlRequest(const std::string &command, std::string &reply,
  *                                          rather than trusting this function's check. Empty if the
  *                                          probe never reached that call, and empty if the call
  *                                          unexpectedly succeeded
- * @param [out] failureDetail             - Receives a sentence naming the STEP that failed and what
+ * @param [out] failureDetail             - Receives a sentence naming the step that failed and what
  *                                          its failure means. Untouched on success
  *
  * @return bool                                   - Whether every step held
@@ -2772,7 +2820,7 @@ bool cecL2HostControlRequest(const std::string &command, std::string &reply,
  *                                                  reap collected the probe's child
  * @retval false                                  - One step did not hold; failureDetail names which
  *
- * @pre SIGPIPE is not at its default disposition. This is VERIFIED rather than assumed as the
+ * @pre SIGPIPE is not at its default disposition. This is verified rather than assumed as the
  *      function's first act, and reported as a failure instead of being written into - a probe that
  *      terminated the runner while establishing that the runner cannot be terminated would be the
  *      worst available outcome.
@@ -2782,7 +2830,7 @@ bool cecL2HostControlRequest(const std::string &command, std::string &reply,
  *       g_hostObserveReadFd, not g_hostPid, not g_hostReadinessReadFd - so it is safe to call while
  *       a real host session is open, which under invocation E it is.
  *
- * @warning It does NOT and CANNOT establish what happens without the disposition installed, because
+ * @warning It does not and cannot establish what happens without the disposition installed, because
  *          establishing that would mean terminating this process. The caller reads the disposition
  *          back and fails fatally on SIG_DFL before calling; that assertion and this function are
  *          two halves of one property.
@@ -2813,7 +2861,7 @@ public:
      *       selection is resolved and fixed for the lifetime of the process, and the
      *       requested back-end is the one that was selected.
      *
-     * @warning THE ORDER OF THE FOUR STEPS BELOW IS THE POINT OF THIS TIER. The init call
+     * @warning The order of the four steps below is the point of this tier. The init call
      *          is the first thing in this binary that forces Driver::getInstance(), which
      *          resolves the selection once and for all; a service that becomes reachable
      *          after it is a service the middleware never looks for. Moving the mode handling
@@ -2826,7 +2874,7 @@ public:
      */
     void SetUp() override {
         /*
-         * FIRST, AND BEFORE ANY DESCRIPTOR EXISTS TO WRITE TO. A control channel whose write can
+         * First, and before any descriptor exists to write to. A control channel whose write can
          * terminate this process is not a channel to proceed with: the failure it is supposed to
          * report would be recorded nowhere, and the teardown that reaps the host would not run.
          * This is the one step that has to precede everything rather than merely come early, and
@@ -2857,12 +2905,11 @@ public:
                   << std::endl;
 
         /*
-         * NOT SWALLOWED. The L1 template this file derives from wrapped this in catch (...)
-         * and discarded whatever came out, under the claim that a second initialization
-         * could be ignored - but this environment's SetUp runs exactly once per process, so
-         * that condition cannot arise and nothing here can legitimately be ignored. What
+         * Asserted rather than wrapped, because nothing init() raises here can legitimately
+         * be ignored. This environment's SetUp runs exactly once per process, so the one
+         * condition that would make a second initialization harmless cannot arise, and what
          * init() does raise is real: Driver::getInstance().open() refused by the selected
-         * HAL, or Bus::start() failing. Swallowing either reported a green suite for a
+         * HAL, or Bus::start() failing. Swallowing either reports a green suite for a
          * process that never initialized, with every case then asserting against an unopened
          * stack.
          */
@@ -2880,17 +2927,17 @@ public:
      *       including the two ends of the control and observation channel, and the SIGPIPE
      *       disposition that was in force before the run is back in force.
      *
-     * @warning THE ORDER MATTERS HERE TOO, in the opposite direction. term() reaches
-     *          Driver::close(), which on the AIDL back-end is a TRANSACTION TO THE HOST, so
+     * @warning The order matters here too, in the opposite direction. term() reaches
+     *          Driver::close(), which on the AIDL back-end is a transaction to the host, so
      *          the host must still be serving when it runs. Reaping first would turn an
      *          orderly shutdown into a failed close against a process that had already gone.
      *          The same applies to the channel: it is closed inside the host teardown below,
-     *          AFTER term(), so a case's last observation and the library's own close both
+     *          after term(), so a case's last observation and the library's own close both
      *          happen while the host is alive.
      * @warning Runs even when SetUp failed, so every step tolerates never having happened:
      *          term() raises when the library was never initialized, and the host reap is a
      *          no-op when no host was launched or one was already reaped on the failure path.
-     *          Failures are reported NON-fatally, so that a first problem cannot hide the
+     *          Failures are reported non-fatally, so that a first problem cannot hide the
      *          cleanup that follows it.
      *
      * @see terminateAndReapFakeServiceHost()
@@ -2919,7 +2966,7 @@ public:
         terminateAndReapFakeServiceHost();
 
         /*
-         * AND ONLY NOW THE SIGNAL DISPOSITION, because the host teardown above closes the control
+         * And only now the signal disposition, because the host teardown above closes the control
          * channel and makes its own last request over it - every one of which needs the protection
          * that this call removes. A disposition is process-wide and outlives this environment, so
          * putting the original back is what keeps the change scoped to the window that needed it
@@ -2949,3 +2996,7 @@ int main(int argc, char **argv) {
     ::testing::AddGlobalTestEnvironment(new CecL2TestEnvironment);
     return RUN_ALL_TESTS();
 }
+
+
+/** @} */
+/** @} */

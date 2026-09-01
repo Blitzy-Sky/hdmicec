@@ -103,23 +103,24 @@ AM_CPPFLAGS = -I$(top_srcdir)/ccec/include \
               @AIDL_ABI_CPPFLAGS@
 
 # C++17 from the outset, and it is a hard requirement of the dependency rather than a
-# preference or a style choice.  halcompat.h opens a NESTED-NAMESPACE DEFINITION -
+# preference or a style choice.  halcompat.h opens a nested-namespace definition -
 # `namespace com::rdk::hal::halcompat {` - which is C++17 syntax that does not compile at
-# c++14 at all, so this tier could not be built in the dialect the L1 suite originally
-# used.  Two further reasons, each sufficient on its own: the generated IHdmiCec.h includes
-# <optional> and declares getProperty(Property, std::optional<PropertyValue>*), and the
-# AIDL snapshot these headers come from is itself built at CMAKE_CXX_STANDARD 17.
+# c++14 at all.  Two further reasons, each sufficient on its own: the generated IHdmiCec.h
+# includes <optional> and declares getProperty(Property, std::optional<PropertyValue>*),
+# and the AIDL snapshot these headers come from is itself built at CMAKE_CXX_STANDARD 17.
 #
 # It is spelled explicitly rather than inherited from the compiler default for the same
-# reason configure.ac probes for it explicitly: the default happens to be gnu++17 on some
+# reason configure.ac settles it explicitly: the default happens to be gnu++17 on some
 # hosts, and that is precisely what would keep the requirement invisible until a SOC
 # toolchain with an older default failed part-way through the build.  @AIDL_CXXFLAGS@
-# carries the explicit dialect flag configure compiled its C++17 probe with, and configure
-# probes exactly this spelling and no other - it fails outright rather than settling for an
-# alternative - so the substitution is never empty and is always the same -std=c++17 that
-# precedes it here.  The two together are belt-and-braces, not duplication: the literal pins
-# the dialect even if the substitution were ever lost, and the substituted copy is
-# configure's proof that this compiler accepts it.
+# follows it and carries the dialect flag configure accepted, which is C++17 or newer and
+# need not be this spelling: a -std= supplied in CXXFLAGS is probed as given and adopted
+# verbatim, and configuration stops instead when it is older than C++17, because Automake
+# places CXXFLAGS after AM_CXXFLAGS and the package cannot override it; with none supplied,
+# -std=c++17, -std=gnu++17 and -std=c++1z are tried in that order and the first that
+# compiles is adopted.  Both flags reach the compile command and the substitution lands
+# last, so the substitution is the one that governs - the literal states what this tier
+# requires, and the substituted flag is the spelling this compiler was measured to accept.
 AM_CXXFLAGS = -Wall -std=c++17 -g @AIDL_CXXFLAGS@
 
 # Define test programs

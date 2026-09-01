@@ -72,7 +72,12 @@
 #        temporary directory it creates is registered and released by an
 #        EXIT/INT/TERM/HUP trap, in reverse order, whether the run succeeded, failed or was
 #        cancelled.  A leaked loop device or a leaked bind mount wedges the runner for every
-#        job after it.  In the output directory it creates exactly three things: the image
+#        job after it.  Every mount is ADDITIONALLY made inside a mount namespace of this
+#        run's own, with private propagation, so no mount is ever visible outside this
+#        process and none can survive it even when no trap can run -- a SIGKILL, an OOM kill
+#        or a panic.  The trap is still what releases them in order; the namespace is what
+#        makes a leak impossible rather than merely unlikely.  See THE ISOLATED MOUNT
+#        NAMESPACE.  In the output directory it creates exactly three things: the image
 #        and the manifest at the caller's paths, and <image>.lock -- the advisory lock that
 #        stops two builders from interleaving, deliberately left behind.  The image and the
 #        manifest are STAGED under private mktemp names in that same directory and renamed
@@ -115,13 +120,13 @@
 # ==============================================================================
 # TWO SEPARATE AXES: ELF BITNESS AND BINDER WIRE PROTOCOL
 # ==============================================================================
-#   THESE ARE NOT THE SAME QUESTION, AND CONFLATING THEM IS WHAT AN EARLIER REVISION OF
-#   THIS FILE GOT WRONG.  It took "all-32-bit" to fix the wire protocol at 7 and said so in
-#   its help text, its architecture log, the value it wrote into the image and its manifest,
-#   with nothing anywhere comparing that text against what the SDK it shipped had actually
-#   been built with.  Text cannot be checked, and for a while the text was wrong.  The two
-#   axes are therefore stated separately here and kept separate everywhere below, and the
-#   protocol is DERIVED from build artefacts rather than written down.
+#   These are not the same question, and nothing here treats them as one.  Taking
+#   "all-32-bit" to fix the wire protocol at 7 -- in the help text, the architecture log, the
+#   value written into the image and the manifest -- would put the same claim in four places
+#   with nothing anywhere comparing it against what the SDK shipped alongside was actually
+#   built with.  Prose cannot be checked, so the two axes are stated separately here and kept
+#   separate everywhere below, and the protocol is DERIVED from build artefacts rather than
+#   written down.
 #
 #   The job that drives this script is a protocol-7 all-32-bit job, and it is one because the
 #   plan requires it (AAP 0.6.6.4 and 0.9.5.1: CONFIG_ANDROID_BINDER_IPC_32BIT=y).  That
@@ -167,10 +172,10 @@
 #   32-bit binder interface".  CONFIG_ANDROID_BINDERFS, which the in-guest init this script
 #   writes REQUIRES, first appears in 5.0.  So on a stock kernel the two are mutually
 #   exclusive and a binderfs guest cannot be a protocol-7 guest -- which is why asking
-#   olddefconfig for the option on a 5.x tree silently produces nothing, and why an earlier
-#   revision of the workflow concluded that protocol 8 was the only reachable value.
+#   olddefconfig for the option on a 5.x tree silently produces nothing, and why the pairing
+#   reads as unreachable until the removal is looked at closely.
 #
-#   What that conclusion missed is that the REMOVAL was 13 lines of Kconfig and 4 lines of
+#   What that reading misses is that the REMOVAL is 13 lines of Kconfig and 4 lines of
 #   binder.c and nothing else: include/uapi/linux/android/binder.h still carries both
 #   branches to this day -- "#ifdef BINDER_IPC_32BIT" still selects __u32 binder_size_t and
 #   BINDER_CURRENT_PROTOCOL_VERSION 7 -- as does the copy vendored inside the Binder SDK
@@ -210,7 +215,7 @@
 #       -std=c++17, which this script probes for rather than assuming.
 #     * glib-2.0 development files.  A HARD configure dependency: configure.ac:65 runs
 #       PKG_CHECK_MODULES([GLIB], [glib-2.0 >= 0.10.28]) and there is no way past it.
-#     * GoogleTest/GoogleMock WITH A DISCOVERABLE gtest.pc.  configure.ac:435's
+#     * GoogleTest/GoogleMock WITH A DISCOVERABLE gtest.pc.  configure.ac's
 #       PKG_CHECK_MODULES([GTEST], [gtest >= 1.10.0]) consults pkg-config ONLY and ignores
 #       -I/-L entirely, so headers and libraries on their own are not enough.  Either the
 #       image's own packaging provides gtest.pc or --gtest-prefix names a prefix whose
@@ -481,10 +486,10 @@ STAGED_MANIFEST_LEAF=''
 # image and the previous manifest aside and then renames the new pair onto their names.  While
 # that is in flight the caller's good image exists ONLY under a private aside name, so anything
 # that ends the process between the first aside and the last rename leaves the published path
-# empty and the previous image hidden under a name nobody knows.  An earlier revision held those
-# names in function locals, so the EXIT trap -- the one thing that runs on every path -- could
-# not see them and could not put anything back.  They are globals now, they are set BEFORE the
-# rename that makes them necessary, and cleanup() rolls the transaction back from them.
+# empty and the previous image hidden under a name nobody knows.  Held in function locals these
+# names would be invisible to the EXIT trap -- the one thing that runs on every path -- which
+# would therefore have nothing to put back.  They are globals, they are set BEFORE the rename
+# that makes them necessary, and cleanup() rolls the transaction back from them.
 #
 # PUBLISH_IN_PROGRESS is the flag that says a rollback is owed.  It is raised before the first
 # rename and lowered only once the pair is committed.
@@ -497,17 +502,18 @@ PUBLISH_IN_PROGRESS=0
 # WHETHER EACH ASIDE ACTUALLY HOLDS THE PREVIOUS CONTENT -- which is NOT the same question as
 # "does a file exist at the aside name".
 #
-# THE DEFECT THIS CLOSES.  mktemp mints the aside names by CREATING THEM, so between minting and
-# the `mv` there is a real, EMPTY, regular file at each aside name.  publish_restore_one used
-# `[ -f "$aside" ]` as its whole precondition, so if the old leaf's rename failed -- the one case
-# in which the aside is still the empty placeholder -- the rollback would move that ZERO-BYTE
-# PLACEHOLDER over the caller's still-good published image or manifest.  The failure that was
-# supposed to preserve the previous pair would have destroyed it.
+# WHY EXISTENCE CANNOT BE THE TEST.  mktemp mints the aside names by CREATING THEM, so between
+# minting and the `mv` there is a real, EMPTY, regular file at each aside name.  With
+# `[ -f "$aside" ]` as its whole precondition, publish_restore_one would treat that placeholder
+# as content: if the old leaf's rename failed -- the one case in which the aside is still the
+# empty placeholder -- the rollback would move that ZERO-BYTE PLACEHOLDER over the caller's
+# still-good published image or manifest, and the failure that exists to preserve the previous
+# pair would destroy it instead.
 #
-# So existence is not the test.  Each flag is raised ONLY after that leaf's own `mv` returned
-# success, and restoration is conditional on the flag.  The recorded size is belt and braces on
-# top of it: an aside of zero bytes is refused when the original was not zero bytes, so a
-# placeholder cannot be restored even if a future edit sets the flag in the wrong place.
+# So each flag is raised ONLY after that leaf's own `mv` returned success, and restoration is
+# conditional on the flag.  The recorded size is belt and braces on top of it: an aside of zero
+# bytes is refused when the original was not zero bytes, so a placeholder cannot be restored
+# even if a future edit sets the flag in the wrong place.
 PUBLISH_ASIDE_IMAGE_HOLDS_OLD=0
 PUBLISH_ASIDE_MANIFEST_HOLDS_OLD=0
 PUBLISH_OLD_IMAGE_BYTES=''
@@ -523,18 +529,18 @@ PUBLISH_OLD_MANIFEST_BYTES=''
 PUBLISH_IMAGE_RENAMED=0
 PUBLISH_MANIFEST_RENAMED=0
 
-# WRITE-AHEAD INTENT, AND IDENTITY BY INODE.  Both exist to close ONE defect, and it is the one
-# that mattered most of all of them.
+# WRITE-AHEAD INTENT, AND IDENTITY BY INODE.  Both exist to close ONE hole, and it is the widest
+# of all of them.
 #
-# THE DEFECT.  Every flag above is raised AFTER its own `mv` returns, and the journal was
-# rendered from those flags -- so the durable record was a write-AFTER-move record.  A SIGKILL in
-# the window between a completed rename and the journal update that would have recorded it leaves
-# a journal on the disk saying the move did NOT happen, and the recovery TRUSTED it.  Measured on
-# the previous revision: kill immediately after the previous image's own `mv`, and
-# MOVED_ASIDE_IMAGE is still 0, so publish_restore_one() takes its "nothing was ever moved into
-# this aside" arm and skips the restoration -- and the discard pass that follows then removes the
-# journal-named aside, which at that instant is the ONLY copy of the caller's previous image.
-# The mechanism built to preserve the previous generation destroyed it.
+# THE HOLE.  Every flag above is raised AFTER its own `mv` returns, so a journal rendered from
+# those flags alone would be a write-AFTER-move record.  A SIGKILL in the window between a
+# completed rename and the journal update that would have recorded it leaves a journal on the
+# disk saying the move did NOT happen, and a recovery that TRUSTS it destroys the generation it
+# exists to preserve.  MEASURED with a write-after-move record: kill immediately after the
+# previous image's own `mv`, and MOVED_ASIDE_IMAGE is still 0, so publish_restore_one() takes
+# its "nothing was ever moved into this aside" arm and skips the restoration -- and the discard
+# pass that follows then removes the journal-named aside, which at that instant is the ONLY copy
+# of the caller's previous image.
 #
 # SO THE RECORD IS WRITTEN TWICE PER MOVE.  INTENT_<step> is written and flushed BEFORE the
 # rename; DONE_<step> is written and flushed after it.  (INTENT=1, DONE=0) therefore means
@@ -582,14 +588,14 @@ readonly PUBLISH_ASIDE_MANIFEST_PREFIX='.cec-l2-previous-manifest.'
 # same-directory renames.  A SIGKILL, an OOM kill or a power loss between them runs no handler at
 # all, so nothing in this process can record what happened -- and the state it leaves is
 # genuinely ambiguous from the outside: a new image at its published path, no manifest, and BOTH
-# asides still sitting there.  The aside-scan recovery read that state one file at a time and
-# reached the worst possible conclusion: an image exists, so the old-image aside is "superseded"
-# and gets DELETED; no manifest exists, so the old manifest is restored.  The result is a NEW
-# image beside an OLD manifest, cemented permanently, with the old image destroyed.  The manifest
-# names the image's size, architecture and derived binder protocol, so that pair is not merely
-# stale -- it is a pair whose two halves describe different builds, and it looks complete.
+# asides still sitting there.  A recovery that reads that state one file at a time reaches the
+# worst possible conclusion from it: an image exists, so the old-image aside is "superseded" and
+# gets DELETED; no manifest exists, so the old manifest is restored.  The result is a NEW image
+# beside an OLD manifest, cemented permanently, with the old image destroyed.  The manifest names
+# the image's size, architecture and derived binder protocol, so that pair is not merely stale --
+# it is a pair whose two halves describe different builds, and it looks complete.
 #
-# WHAT REPLACES IT.  A journal leaf in the publication directory, written and made durable
+# WHAT IS DONE INSTEAD.  A journal leaf in the publication directory, written and made durable
 # BEFORE the first move and updated after each one, carrying the run identity, a generation
 # identity, both aside leaf names and one completion record per move.  The next run reads it
 # UNDER THE LOCK and drives the pair to ONE consistent state -- fully the previous generation, or
@@ -598,8 +604,8 @@ readonly PUBLISH_ASIDE_MANIFEST_PREFIX='.cec-l2-previous-manifest.'
 #
 # WHY A JOURNAL RATHER THAN A GENERATION DIRECTORY.  A generation directory with one atomically
 # switched symlink is the other correct shape, and it is smaller to reason about -- but it changes
-# the PATHS the workflow consumes, which would move this change into every step that reads the
-# image or the manifest.  The journal keeps the caller's two fixed paths exactly as they are.
+# the PATHS the workflow consumes, which would propagate into every step that reads the image or
+# the manifest.  The journal keeps the caller's two fixed paths exactly as they are.
 #
 # WHY THE LEAF NAME IS DERIVED FROM THE IMAGE LEAF.  Two builders publishing DIFFERENT --output
 # names into the same directory hold different locks (the lock is <image>.lock) and may therefore
@@ -613,7 +619,7 @@ readonly PUBLISH_ASIDE_MANIFEST_PREFIX='.cec-l2-previous-manifest.'
 # if it happened anyway, refused rather than interpreted.
 #
 # WHY THE RECORD IS WRITTEN AHEAD OF EACH MOVE AND NOT AFTER IT.  See the block at
-# PUBLISH_INTENT_ASIDE_IMAGE for the defect this closes and the measurement that found it.  The
+# PUBLISH_INTENT_ASIDE_IMAGE for the window this closes and the evidence for it.  The
 # consequence for the shape of the record is that every move has TWO fields rather than one --
 # INTENT_<step>, flushed before the rename, and DONE_<step>, flushed after -- and that the pair
 # (INTENT=1, DONE=0) is a legitimate, expected, terminal state of the record which the reader
@@ -727,14 +733,14 @@ assert_loop_backs() { # $1=loop device  $2=expected backing file  $3=what is abo
 # ------------------------------------------------------------------------------------
 # CLEANUP FAILURES ARE COUNTED, NOT NARRATED.
 #
-# WHAT WAS WRONG BEFORE.  Every release step warned on failure and the trap then returned the
-# incoming status unchanged, so a build that succeeded and then failed to unmount the image,
-# failed to detach the loop device or failed to remove its temporary directory exited 0.  The
-# workflow read that 0, uploaded the image and moved on, and the next job on the runner
-# inherited a busy loop device and a mounted image tree.  A warning in a log nobody reads is
-# not a failure; only a non-zero status is.
+# WHY A WARNING IS NOT ENOUGH.  Were every release step to warn on failure and the trap to
+# return the incoming status unchanged, a build that succeeded and then failed to unmount the
+# image, failed to detach the loop device or failed to remove its temporary directory would
+# exit 0.  The workflow would read that 0, upload the image and move on, and the next job on
+# the runner would inherit a busy loop device and a mounted image tree.  A warning in a log
+# nobody reads is not a failure; only a non-zero status is.
 #
-# WHAT REPLACES IT.  Every step VERIFIES ITS POSTCONDITION -- the mount is gone from the
+# WHAT IS DONE INSTEAD.  Every step VERIFIES ITS POSTCONDITION -- the mount is gone from the
 # tree, the loop device reports no backing file, our backing file is not attached to any loop
 # device, the temporary directory does not exist, the staged file does not exist -- and each
 # unmet postcondition is counted.  A non-zero count turns an otherwise-successful run into a
@@ -745,7 +751,7 @@ assert_loop_backs() { # $1=loop device  $2=expected backing file  $3=what is abo
 # `return 7` on a script that had run `exit 0` still produced 0 -- while `exit N` inside the
 # trap does set it, and `exit "$status"` with the saved incoming value preserves an original
 # failure exactly.  So the accounting is expressed as an explicit `exit`, and the ordinary
-# path keeps `return "$status"` for the same reason it always did: it changes nothing.
+# path uses `return "$status"` precisely because it changes nothing.
 readonly CLEANUP_LEAK_EXIT_STATUS=70
 CLEANUP_FAILURES=0
 
@@ -820,17 +826,17 @@ cleanup() {
         # device whose detach would interrupt THAT process's build.  A mismatch is reported
         # and left alone; it is not our resource to release.
         #
-        # WHAT A MISMATCH DOES *NOT* EXCUSE, and this is the correction: it suppresses THE
-        # DETACH OF THAT NODE and nothing else.  An earlier revision issued `continue` here,
-        # which also skipped the independent postcondition at the end of this loop body -- the
-        # all-loop scan for OUR OWN backing file.  Those two are about different things.  The
-        # node check asks "is this node still ours to release"; the backing-file scan asks "is
-        # this run's image still open through ANY loop device", which is precisely the question
-        # a re-used node makes urgent: the kernel may have moved our file to a different node,
-        # or a second attachment of it may exist, and either way the image is not a finished
-        # artefact and must not be published or replaced.  Skipping the scan turned the one
-        # case where it matters most into the one case where it never ran.  So the detach is
-        # gated by a flag and the scan below runs unconditionally.
+        # WHAT A MISMATCH DOES *NOT* EXCUSE: it suppresses THE DETACH OF THAT NODE and nothing
+        # else.  A `continue` here would also skip the independent postcondition at the end of
+        # this loop body -- the all-loop scan for OUR OWN backing file -- and those two are
+        # about different things.  The node check asks "is this node still ours to release";
+        # the backing-file scan asks "is this run's image still open through ANY loop device",
+        # which is precisely the question a re-used node makes urgent: the kernel may have
+        # moved our file to a different node, or a second attachment of it may exist, and
+        # either way the image is not a finished artefact and must not be published or
+        # replaced.  Skipping the scan would turn the one case where it matters most into the
+        # one case where it never runs.  So the detach is gated by a flag and the scan below
+        # runs unconditionally.
         skip_detach=0
         expected_backing="${LOOP_BACKING_FILES[index]-}"
         if [ -n "$expected_backing" ] && loop_still_attached "$loop_device"; then
@@ -904,10 +910,10 @@ cleanup() {
     # publish_outputs() masks INT, TERM and HUP across its renames and rolls back from its own
     # failure arms, so this arm is for the paths that reach the teardown WITHOUT passing through
     # those arms: a `die` raised from a function it calls, an unexpected non-zero under `set -e`,
-    # or an unmaskable signal.  Everything it needs is in globals for exactly this reason -- the
-    # revision this replaces held the aside names in function locals, and this trap could
-    # therefore see nothing to put back, which is how a caller's good image ended up hidden
-    # under a private name with nothing at the published path.
+    # or an unmaskable signal.  Everything it needs is in globals for exactly this reason -- aside
+    # names held in function locals would be invisible to this trap, which would then have nothing
+    # to put back, leaving a caller's good image hidden under a private name with nothing at the
+    # published path.
     #
     # It runs BEFORE the staged-file removal below, and that order is deliberate: the rollback
     # may move this run's image back onto its staging name, and the removal below is then what
@@ -924,11 +930,11 @@ cleanup() {
 
     # A HALF-BUILT IMAGE IS REMOVED -- BUT ONLY THE STAGED ONE, NEVER THE PUBLISHED PAIR.
     #
-    # This is the correction that makes a failed run non-destructive.  An earlier revision
-    # formatted the image directly at --output and removed THAT path on failure, so a build
-    # that failed anywhere after `truncate` destroyed whatever good image the caller already
-    # had: a rerun of a flaky job left the runner with no bootable image at all, and a
-    # concurrent second builder could have its published output deleted from under it.
+    # This is what makes a failed run non-destructive.  Formatting the image directly at
+    # --output and removing THAT path on failure would mean a build failing anywhere after
+    # `truncate` destroys whatever good image the caller already has: a rerun of a flaky job
+    # would leave the runner with no bootable image at all, and a concurrent second builder
+    # could have its published output deleted from under it.
     #
     # The staged path is a private mktemp file in the output directory and is nobody else's
     # artefact, so removing it is always safe.  An incomplete image is not a smaller version
@@ -1057,6 +1063,16 @@ APT_MIRROR=''
 # immediately before the apt phase and removed immediately after, and it is never logged,
 # never digested and never recorded.  See install_image_packages.
 APT_AUTH_FILE=''
+# The route every later use of that credential goes through: /proc/<this pid>/fd/<n> for the
+# descriptor custody was established on, which vet_private_file leaves open for the lifetime of
+# the run.  Reading through it reaches the object that was vetted rather than whatever the
+# caller's name resolves to at the instant of each use, and holding the descriptor pins that
+# object so it cannot be replaced underneath.  Set by hold_private_file; empty until then, and
+# empty for good when --apt-auth-file was not given.
+APT_AUTH_CUSTODY=''
+# Published by hold_private_file, overwritten by each call, and copied by callers that need the
+# value to outlive the next one.  Declared here so `set -u` cannot make a read of it fatal.
+VETTED_FD_PROC=''
 IMAGE_SIZE_MIB="$DEFAULT_IMAGE_SIZE_MIB"
 READINESS_TIMEOUT_SECONDS="$DEFAULT_READINESS_TIMEOUT_SECONDS"
 
@@ -1108,10 +1124,17 @@ REQUIRED
                            otherwise credential-bearing URL goes through --base-url-file,
                            which never enters any command line.
       --base-url-file FILE Same as --base-url, but the URL is READ FROM FILE, one line, so it
-                           never appears in this script's argv or in any child's.  The file's
-                           mode is checked: any group or other read bit is fatal, since a
-                           world-readable file defeats the point of using one.  Every check
-                           --base-url applies is applied to the value read (control
+                           never appears in this script's argv or in any child's.  It is opened
+                           once and every custody check is made on that descriptor, which is
+                           also what the value is read from: it must be a regular file, owned
+                           by this account or by root, with exactly one hard link and no group
+                           or other permission bit at all; it must not be a symbolic link; its
+                           name must still resolve to that descriptor's own device and inode;
+                           and no directory it sits under may be owned by a third account, nor
+                           group- or other-writable unless it is sticky.  A world-readable file
+                           defeats the point of using one, and a directory somebody else can
+                           write lets them replace the file whatever its own mode says.  Every
+                           check --base-url applies is applied to the value read (control
                            characters, userinfo, quote, backslash), and a QUERY STRING IS
                            ACCEPTED here -- this is the one form in which a presigned URL is
                            permitted.  Transport is identical: the value is written to a
@@ -1189,9 +1212,13 @@ OPTIONAL
                            credential store (/etc/apt/auth.conf, /etc/apt/auth.conf.d/*,
                            /etc/apt/apt.conf.d/*, /root/.netrc, /home/*/.netrc), so this
                            option cannot leave a credential in the artefact even if the
-                           removal is somehow defeated.  The file's mode is checked on the
-                           way in: any group or other read bit is fatal.  Its CONTENT is
-                           never logged, never digested into the manifest and never echoed.
+                           removal is somehow defeated.  On the way in it is put through the
+                           same one-descriptor custody check as --base-url-file -- regular
+                           file, owned by this account or root, one hard link, no group or
+                           other permission bit, not a symbolic link, name still resolving to
+                           the descriptor, and no unsafe directory above it -- and any of
+                           those failing is fatal.  Its CONTENT is never logged, never
+                           digested into the manifest and never echoed.
       --size MIB           Image size in MiB (default $DEFAULT_IMAGE_SIZE_MIB).  It holds the
                            toolchain, the payload, the staged SDK, a full build tree and the
                            coverage artifacts, so it is not a place to economise.
@@ -1205,9 +1232,16 @@ OPTIONAL
                            exercises the two dpkg package-status parsers against a table of
                            literal records -- every partial dpkg state that a naive parser
                            accepts, malformed and short records, name mismatches and Provides
-                           prefixes -- and then the confined I/O primitive's positive and
-                           refusal cases, so it also answers whether openat2 with
-                           RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS is in force on this host.  One
+                           prefixes -- then the confined I/O primitive's positive and refusal
+                           cases, so it also answers whether openat2 with
+                           RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS is in force on this host, and
+                           then the custody chain the seven privileged mount and chroot
+                           operations consume a descriptor through: the anchor open, the
+                           fstat-on-descriptor identity check and every refusal, including the
+                           chroot's reserved custody status.  The mount and chroot syscalls
+                           themselves are NOT among the cases -- performing one is precisely
+                           what this mode promises not to do -- and each is instead fatal at its
+                           own call site.  One
                            line per case; a non-zero exit on any mismatch.  The AIDL-path
                            workflow runs it as an early mandatory step, before the expensive
                            provisioning, so a broken parser fails the job in seconds.
@@ -1424,28 +1458,179 @@ require_sha256_hex() { # $1=value  $2=what it is
     esac
 }
 
-# A FILE THAT CARRIES A SECRET MUST NOT BE READABLE BY ANYONE ELSE.
+# ------------------------------------------------------------------------------------
+# PRIVATE INPUT FILES -- ONE DESCRIPTOR, CHECKED AND READ.
 #
 # Both --base-url-file and --apt-auth-file exist so that a credential reaches this script
-# WITHOUT passing through a command line.  A caller who then leaves the file mode 0644 has
+# without passing through a command line.  A caller who then leaves the file mode 0644 has
 # moved the exposure rather than removed it: on a shared build host every local user can read
 # it, which is the same disclosure the argv route had, just with a longer window.  So the mode
-# is CHECKED and a group or other READ bit is fatal.
+# is checked and a group or other read bit is fatal.  Write bits are fatal for a second
+# reason: a file another account can write is a file whose bytes can be changed under this
+# script, which would have it fetch from -- or authenticate against -- an endpoint the caller
+# did not name.
 #
-# Write bits are checked too, and for a different reason: a file another user can write is a
-# file another user can substitute between this check and the read, which would have this
-# script fetch from -- or authenticate against -- an endpoint the caller did not name.
+# Every check below is made on one open descriptor, and every use of the value is made through
+# that same descriptor.  That is what makes the checks describe the bytes this script actually
+# reads rather than whatever the name happened to resolve to at the instant each check ran.  The
+# order is: refuse a symbolic link outright, open once, judge the descriptor, confirm the name
+# still reaches it, vet the directories it sits under, then read.
 #
-# The mode is read with `stat -c %a`, which needs no octal parsing on our side: the two
-# low digits are group and other, and any of the six bits below 0700 that is set is refused.
-# The value is masked arithmetically rather than matched as text, because 0644, 644 and 0000644
-# are all forms `stat` or a caller can produce.
-require_private_file() { # $1=path  $2=what it is
-    local path="$1" what="$2" mode masked
+# THE TWO FORMS DIFFER ONLY IN HOW LONG THE DESCRIPTOR LIVES, and both end at the same place --
+# no use of either file ever resolves the caller's pathname a second time.
+#
+#   * --base-url-file reduces to one value on the spot.  read_private_line reads that value from
+#     the descriptor and closes it, and nothing afterwards refers to the file at all.
+#   * --apt-auth-file does not reduce to a value: it is copied into the image and searched for
+#     twice before publication, and this script does not interpret its content.  hold_private_file
+#     therefore keeps the descriptor open for the lifetime of the run and every one of those uses
+#     reads it through /proc/<pid>/fd/<n>.  Holding it also pins the inode, so a rename or an
+#     unlink at the caller's path afterwards cannot reach the bytes that were vetted.
+#
+# What is enforced on the descriptor, with `stat -L` on /proc/self/fd/<n> -- which reads the
+# open file rather than resolving a pathname, and is this shell's equivalent of fstat:
+#
+#   * it is a regular file, not a directory, a fifo, a socket or a device.  The type comes
+#     from the raw mode masked against S_IFMT rather than from `stat %F`, because %F prints
+#     "regular empty file" for an empty one and an empty credential file has its own refusal
+#     below that says something far more useful than "wrong type".
+#   * its owner is this process's effective uid or root.  Mode 0600 makes a file private to
+#     its owner, so somebody else's 0600 file is private to somebody else; without this test a
+#     run as root accepts any local account's 0600 file, which is the very disclosure the mode
+#     test exists to prevent.
+#   * it has exactly one hard link.  The mode is a property of the inode and not of the name it
+#     was reached by, so a second link in a directory another account can read hands them the
+#     same bytes at the same mode.
+#   * no group or other permission bit is set at all -- mode & 077 == 0.
+#
+# What is enforced on the name, and why it takes two tests rather than one:
+#
+#   * the name is not a symbolic link, tested explicitly; and
+#   * the device and inode the name resolves to are the device and inode behind the descriptor.
+#
+#   Bash cannot open a file with O_NOFOLLOW and has no openat2, so no single operation here
+#   both refuses a link and yields the descriptor.  Those two tests are what stands in for it.
+#   The link test refuses the ordinary case.  The device/inode comparison is what detects a
+#   name re-pointed -- at a link, or at another file -- between the test and the open, because
+#   `stat` on a symbolic link reports the link itself rather than its target and so cannot
+#   match the descriptor.  The window is therefore closed by detection rather than by the open,
+#   and that is stated plainly instead of being dressed up as O_NOFOLLOW.
+#
+# And the directories the file sits under are walked from it up to /, because a directory
+# another account can write is a directory in which they can replace the file whatever the
+# file's own mode says: renaming a directory entry is governed by the directory, not by the
+# file.  Each ancestor must be owned by this process's effective uid or by root, and must not
+# be group- or other-writable unless it is sticky -- sticky restricts rename and unlink to each
+# entry's owner, which is what makes a shared temp directory usable for this at all.
+#
+# One residue, named rather than left for a reader to find: the walk judges each ancestor after
+# symbolic links in the path have been resolved, so it covers the directory that actually holds
+# the file, and it does not separately vet the parents of a symlinked path component.  An owner
+# of one of those unvetted parents could replace the resolved directory after the walk.
+#
+# What that residue can and cannot reach, exactly, because the answer differs by form.  It is a
+# window between the walk and a LATER RESOLUTION OF THE NAME, so it needs one to matter -- and
+# neither form performs one.  --base-url-file has read its value before the walk's answer could
+# go stale, and --apt-auth-file holds the descriptor, so the replacement changes what the name
+# reaches while every use continues to read the pinned inode.  The residue therefore bears on a
+# caller who resolves the path itself for some other purpose, not on the bytes this script reads.
+# A caller who wants it gone outright should pass a path with no symlinked component.
+#
+# The mode is read with `stat -L -c %a` on the descriptor, which needs no octal parsing on our
+# side: the two low digits are group and other, and any of the six bits below 0700 that is set
+# is refused.  The value is masked arithmetically rather than matched as text, because 0644, 644
+# and 0000644 are all forms `stat` or a caller can produce.
+# ------------------------------------------------------------------------------------
 
-    # -L before -f: -f follows a symlink, so a link pointing at a world-readable file would
-    # pass a mode check performed on the TARGET while the caller believes their own file was
-    # checked.  Refused rather than resolved, for the same reason the image scan refuses one.
+# One ancestor chain, from the directory holding $1 up to / inclusive.  Refuses any directory
+# through which another account could replace the file.
+assert_private_ancestry() { # $1=path  $2=what it is
+    local path="$1" what="$2" dir mode owner sticky writable
+
+    dir="$(dirname -- "$path")"
+    while : ; do
+        mode="$(pad_four_digit_mode "$(stat -L -c '%a' -- "$dir" 2>/dev/null || printf '')")"
+        owner="$(stat -L -c '%u' -- "$dir" 2>/dev/null || printf '')"
+        case "$owner" in
+            ''|*[!0-9]*) owner='' ;;
+        esac
+        if [ -z "$mode" ] || [ -z "$owner" ]; then
+            die "the owner and permissions of a directory $what sits under could not be read:
+           $dir
+       They decide whether another account can replace the file, so the value is not read."
+        fi
+
+        # High digit carries sticky; the group and other digits carry the write bit.
+        sticky=$(( ${mode:0:1} & 1 ))
+        writable=$(( (${mode:2:1} & 2) | (${mode:3:1} & 2) ))
+        if [ "$writable" -ne 0 ] && [ "$sticky" -eq 0 ]; then
+            die "a directory $what sits under is writable by group or other and is not sticky:
+           $dir  (mode $mode)
+       Any account that can write that directory can rename this file away and put one of its
+       own in its place, whatever mode the file itself carries -- renaming a directory entry is
+       governed by the directory, not by the file.  Restrict it
+           chmod go-w '$dir'
+       or make it sticky, which restricts rename and unlink to each entry's owner
+           chmod +t '$dir'
+       or move the file somewhere private."
+        fi
+        if [ "$owner" != "$EUID" ] && [ "$owner" != '0' ]; then
+            die "a directory $what sits under is owned by uid $owner, which is neither this
+       process's effective uid ($EUID) nor root:
+           $dir
+       Its owner can replace the file regardless of that directory's mode, so a credential is
+       not read through a path another account controls.  Move the file under a directory this
+       account or root owns."
+        fi
+
+        [ "$dir" != '/' ] || break
+        dir="$(dirname -- "$dir")"
+    done
+}
+
+# The one place a private file is opened and judged.  The checks are identical in all three
+# modes; $3 selects only what happens once they pass, and how long the descriptor lives:
+#
+#   'check'  establishes custody and prints nothing.  The descriptor is closed before return,
+#            so a caller that afterwards opens the path again is back to trusting the name.
+#   'read'   establishes the same custody and prints the single value the file carries, read
+#            from that descriptor.  Closed before return; nothing afterwards refers to the file.
+#   'hold'   establishes the same custody and DELIBERATELY LEAVES THE DESCRIPTOR OPEN, for a
+#            caller whose uses are repeated and lie far from here.  It publishes the route to it
+#            in VETTED_FD_PROC and returns without closing, so the descriptor lives for the rest
+#            of the run and the open file pins the inode the checks were made on.  This is the
+#            one mode that outlives the function, and it exists precisely so that no later use
+#            has to resolve the caller's pathname a second time.
+#
+# The descriptor is opened exactly once on every path.  Every refusal goes through `die`, which
+# exits, so a refusal releases it through process teardown whichever mode asked.
+vet_private_file() { # $1=path  $2=what it is  $3=check|read|hold  -> the value on stdout when 'read'
+    local path="$1" what="$2" want="$3"
+    local fd='' proc='' raw='' mode='' owner='' links='' masked=0
+    local fd_device='' fd_inode='' path_device='' path_inode=''
+    local line='' extra='' seen=0
+
+    case "$want" in
+        check|read|hold) ;;
+        *) die "internal error: vet_private_file was asked for '$want' rather than 'check',
+       'read' or 'hold' on $path.  This is a defect in $SCRIPT_NAME." ;;
+    esac
+    # 'hold' leaves the descriptor open and publishes it, so it must not run where the shell
+    # would discard it.  A command substitution, a pipeline element and an explicit subshell all
+    # fork, and the descriptor would then be closed with that child while the caller kept a
+    # variable naming a number it no longer holds -- which would read as custody while providing
+    # none.  BASH_SUBSHELL is non-zero in exactly those cases.
+    if [ "$want" = 'hold' ] && [ "${BASH_SUBSHELL:-0}" -ne 0 ]; then
+        die "internal error: vet_private_file was asked to hold a descriptor on $path from
+       inside a subshell (BASH_SUBSHELL=$BASH_SUBSHELL), where it would be closed again the
+       moment that subshell ended.  Call hold_private_file directly.  This is a defect in
+       $SCRIPT_NAME."
+    fi
+
+    # Before the open, and cheap: a link is refused outright rather than resolved, because the
+    # mode that matters is the one on the bytes this script reads and a link lets those bytes
+    # live somewhere with a different mode entirely.  The device/inode comparison further down
+    # is what covers a link substituted after this test.
     [ ! -L "$path" ] || die "$what is a symbolic link: $path
        It carries a credential, so it is refused rather than followed: the mode that matters is
        the one on the bytes this script reads, and a link lets those bytes live somewhere with
@@ -1453,7 +1638,57 @@ require_private_file() { # $1=path  $2=what it is
     [ -f "$path" ] || die "$what is not a regular file (or does not exist): $path
        A credential is read from a plain file, not from a directory, a fifo or a device."
 
-    mode="$(stat -c '%a' -- "$path" 2>/dev/null || printf '')"
+    # THE OPEN, ONCE.  Bash allocates the descriptor, so this cannot collide with the two
+    # fixed descriptors this script holds elsewhere.
+    exec {fd}<"$path" || die "$what could not be opened for reading: $path
+       Its custody is established on the open descriptor rather than on its name, so with no
+       descriptor there is nothing to establish it on and the value is not read."
+    proc="/proc/self/fd/$fd"
+
+    # 1. THE DESCRIPTOR.  Read as separate values so a refusal can say which one was wrong.
+    raw="$(stat -L -c '%f' -- "$proc" 2>/dev/null || printf '')"
+    case "$raw" in
+        ''|*[!0-9a-fA-F]*) die "the type of $what could not be read from the descriptor this
+       script holds open on it: $path
+       Its confidentiality cannot be established, so it is not read." ;;
+    esac
+    [ "$(( 16#$raw & 8#170000 ))" -eq "$(( 8#100000 ))" ] || die "$what is not a regular file:
+       $path
+       A credential is read from a plain file, not from a directory, a fifo, a socket or a
+       device.  The type is read from the open descriptor, so this is the object this script
+       would actually have read and not merely what its name pointed at a moment ago."
+
+    owner="$(stat -L -c '%u' -- "$proc" 2>/dev/null || printf '')"
+    case "$owner" in
+        ''|*[!0-9]*) die "the owner of $what could not be read from the descriptor this script
+       holds open on it: $path
+       Its confidentiality cannot be established, so it is not read." ;;
+    esac
+    if [ "$owner" != "$EUID" ] && [ "$owner" != '0' ]; then
+        die "$what is owned by uid $owner, which is neither this process's effective uid
+       ($EUID) nor root: $path
+       Mode 0600 makes a file private to its owner, so a file owned by somebody else is
+       private to somebody else -- and a run as root would otherwise accept any local
+       account's 0600 file, which is the disclosure the mode check exists to prevent.  Pass a
+       file this account or root owns:
+           install -m 0600 /dev/null '$path'
+       and write the value into it."
+    fi
+
+    links="$(stat -L -c '%h' -- "$proc" 2>/dev/null || printf '')"
+    case "$links" in
+        ''|*[!0-9]*) die "the hard-link count of $what could not be read from the descriptor
+       this script holds open on it: $path
+       Its confidentiality cannot be established, so it is not read." ;;
+    esac
+    [ "$links" -eq 1 ] || die "$what has $links hard links: $path
+       Every one of those names reaches these bytes, and the mode just checked is a property of
+       the inode rather than of the name it was reached by -- so a second link in a directory
+       another account can read hands them the same bytes at the same mode.  Give the
+       credential a file of its own:
+           cp -- '$path' <new path> && chmod 600 <new path>"
+
+    mode="$(stat -L -c '%a' -- "$proc" 2>/dev/null || printf '')"
     case "$mode" in
         ''|*[!0-7]*) die "the permission mode of $what could not be read: $path
        Its confidentiality cannot be established, so it is not read." ;;
@@ -1462,46 +1697,129 @@ require_private_file() { # $1=path  $2=what it is
     masked=$(( 8#$mode & 8#77 ))
     [ "$masked" -eq 0 ] || die "$what is accessible to group or other (mode $mode): $path
        This option exists so that a credential never appears in a command line; a file other
-       local users can read gives back exactly that exposure, and one they can WRITE lets them
-       substitute the value between this check and the read.  Restrict it first:
+       local users can read gives back exactly that exposure, and one they can write lets them
+       change the value under this script.  Restrict it first:
            chmod 600 $path"
+
+    # 2. THE NAME STILL REACHES THE DESCRIPTOR.  Read without -L on the path, so a name that
+    # has become a symbolic link reports the link's own inode and cannot match.
+    fd_device="$(stat -L -c '%d' -- "$proc" 2>/dev/null || printf '')"
+    fd_inode="$(stat -L -c '%i' -- "$proc" 2>/dev/null || printf '')"
+    path_device="$(stat -c '%d' -- "$path" 2>/dev/null || printf '')"
+    path_inode="$(stat -c '%i' -- "$path" 2>/dev/null || printf '')"
+    if [ -z "$fd_inode" ] || [ -z "$path_inode" ]; then
+        die "the device and inode of $what could not be read from both its name and the
+       descriptor this script holds open on it: $path
+       That comparison is what establishes that the bytes checked are the bytes read, so
+       without it the value is not read."
+    fi
+    if [ "$fd_device" != "$path_device" ] || [ "$fd_inode" != "$path_inode" ]; then
+        die "$what is not the file this script opened: $path
+           opened     device $fd_device inode $fd_inode
+           that name  device ${path_device:-unreadable} inode ${path_inode:-unreadable}
+       The name was re-pointed between the checks above and this comparison, which is the
+       substitution those checks exist to catch (CWE-367).  This script reads the descriptor
+       rather than the name, so the two disagreeing means the caller and this script no longer
+       mean the same file; the value is not read."
+    fi
+
+    # 3. THE DIRECTORIES IT SITS UNDER, which is where a replacement would be performed.
+    assert_private_ancestry "$path" "$what"
+
+    # 4. THE VALUE, FROM THE SAME DESCRIPTOR EVERY CHECK ABOVE WAS MADE ON.
+    #
+    # The read is deliberately strict about shape.  A trailing newline is normal and is dropped
+    # by the read; a second non-empty line is refused rather than ignored, because the two
+    # readings ("the first line is the value" and "the caller made a mistake") are too far
+    # apart to guess between, and because a value that silently loses part of itself fails
+    # later as a fetch error that names nothing useful.  A leading or trailing blank is
+    # stripped, since an editor adding one is far more likely than a URL that means it.
+    if [ "$want" = 'read' ]; then
+        while IFS= read -r extra || [ -n "$extra" ]; do
+            # Blank lines anywhere are tolerated: they carry nothing and an editor may add one.
+            case "$extra" in ''|[[:space:]]) continue ;; esac
+            [ -n "${extra//[[:space:]]/}" ] || continue
+            if [ "$seen" -eq 0 ]; then
+                line="$extra"
+                seen=1
+            else
+                die "$what contains more than one value: $path
+       Exactly one line is expected.  Rather than guessing which line was meant, this is
+       refused -- a value silently truncated to the first line fails later as an unexplained
+       fetch error."
+            fi
+        done <&"$fd"
+    fi
+
+    # THE DESCRIPTOR IS RELEASED HERE FOR EVERY MODE BUT ONE.  'hold' is the exception: its
+    # caller uses the credential more than once and at points far from this function, so the
+    # descriptor stays open for the lifetime of the run and VETTED_FD_PROC names the route to it.
+    # Nothing reopens the caller's pathname afterwards, which is what makes the checks above
+    # describe every later use and not merely this one.
+    if [ "$want" = 'hold' ]; then
+        # $$ rather than 'self', because a child -- awk, or a shell in a pipeline -- resolves
+        # /proc/self to itself.  $$ stays the script's own pid inside a subshell too, so the
+        # route names the process that actually holds the descriptor from wherever it is read.
+        VETTED_FD_PROC="/proc/$$/fd/$fd"
+        return 0
+    fi
+
+    exec {fd}<&-
+
+    if [ "$want" = 'read' ]; then
+        [ "$seen" -eq 1 ] || die "$what is empty: $path
+       It was given, so something was meant to be in it; an empty file is a mistake rather than
+       an instruction to fall back to anything."
+
+        # Trim surrounding whitespace only; the interior is the caller's business and every
+        # character class that matters is refused by the validators that follow.
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        printf '%s' "$line"
+    fi
+}
+
+# Establishes that a file carrying a secret is in this account's custody, and nothing else.
+# Used as a fail-fast check before read_private_line, and for any caller that needs the checks
+# without either the value or a held descriptor.  The descriptor is closed before this returns,
+# so a caller that then opens the path again is back to trusting the name -- which is why
+# --apt-auth-file uses hold_private_file instead.
+require_private_file() { # $1=path  $2=what it is
+    vet_private_file "$1" "$2" 'check'
+}
+
+# Establishes the same custody and KEEPS THE DESCRIPTOR, for a credential this script uses more
+# than once and does not reduce to a single value on the spot.  --apt-auth-file is that case: it
+# is tested for emptiness, copied into the image, and searched for twice before publication, and
+# its content is apt's business rather than something this script parses.
+#
+# Publishes VETTED_FD_PROC -- /proc/<pid>/fd/<n> -- rather than printing anything, because
+# printing would require a command substitution and the descriptor would be closed along with
+# that subshell.  A path is published rather than the bare descriptor number because the uses
+# are repeated: a redirection from the descriptor itself could be consumed only once, a shell
+# having no way to rewind it, while opening that path reads the same object from offset 0 as
+# often as the caller likes.
+#
+# It is overwritten by the next call, so a caller with a use that outlives this statement copies
+# it immediately; APT_AUTH_CUSTODY is that copy.
+#
+# WHAT HOLDING IT BUYS, precisely.  The open descriptor pins the inode: a rename or an unlink at
+# the caller's path afterwards leaves the bytes this script reads untouched, so the object every
+# later use reaches is the object the checks were made on.  That is what closes the window the
+# ancestry residue below would otherwise leave -- the parents of a symlinked path component are
+# not vetted, but with no later pathname open there is no later resolution for a change there to
+# affect.
+hold_private_file() { # $1=path  $2=what it is  -> sets VETTED_FD_PROC
+    vet_private_file "$1" "$2" 'hold'
 }
 
 # Reads a single-line value from a private file.  Prints it and nothing else.
 #
-# The read is deliberately strict about shape.  A trailing newline is normal and is dropped by
-# the read; a SECOND non-empty line is refused rather than ignored, because the two readings
-# ("the first line is the value" and "the caller made a mistake") are too far apart to guess
-# between, and because a value that silently loses part of itself fails later as a fetch error
-# that names nothing useful.  A leading or trailing blank is stripped, since an editor adding
-# one is far more likely than a URL that means it.
+# Custody is established exactly as require_private_file establishes it, and on the same
+# descriptor the value is then read from, so the bytes returned here are the bytes those
+# checks were made on.
 read_private_line() { # $1=path  $2=what it is
-    local path="$1" what="$2" line='' extra='' seen=0
-
-    while IFS= read -r extra || [ -n "$extra" ]; do
-        # Blank lines anywhere are tolerated: they carry nothing and an editor may add one.
-        case "$extra" in ''|[[:space:]]) continue ;; esac
-        [ -n "${extra//[[:space:]]/}" ] || continue
-        if [ "$seen" -eq 0 ]; then
-            line="$extra"
-            seen=1
-        else
-            die "$what contains more than one value: $path
-       Exactly one line is expected.  Rather than guessing which line was meant, this is
-       refused -- a value silently truncated to the first line fails later as an unexplained
-       fetch error."
-        fi
-    done < "$path"
-
-    [ "$seen" -eq 1 ] || die "$what is empty: $path
-       It was given, so something was meant to be in it; an empty file is a mistake rather than
-       an instruction to fall back to anything."
-
-    # Trim surrounding whitespace only; the interior is the caller's business and every
-    # character class that matters is refused by the validators that follow.
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    printf '%s' "$line"
+    vet_private_file "$1" "$2" 'read'
 }
 
 
@@ -1512,14 +1830,14 @@ read_private_line() { # $1=path  $2=what it is
 # rather than a limitation of this script: the guest userspace is 32-bit throughout, so a
 # 64-bit staged library could not be loaded into any process the guest starts.
 #
-# THIS FUNCTION DECIDES NOTHING ABOUT THE BINDER WIRE PROTOCOL, and an earlier revision
-# that said it did is the defect this separation corrects.  The protocol is a separate axis
-# -- linux_binder_idl CMakeLists.txt:209-217 at tag 2.6.0 states so, and a 32-bit process
-# can speak protocol 8 -- and it is derived from the kernel configuration and the staged
-# SDK's cache by derive_binder_protocol() below, never inferred from --arch.
+# THIS FUNCTION DECIDES NOTHING ABOUT THE BINDER WIRE PROTOCOL, and the separation is the
+# point: the protocol is a separate axis -- linux_binder_idl CMakeLists.txt:209-217 at tag
+# 2.6.0 states so, and a 32-bit process can speak protocol 8 -- and it is derived from the
+# kernel configuration and the staged SDK's cache by derive_binder_protocol() below, never
+# inferred from --arch.
 #
 # The expected ELF properties are expressed as REGULAR EXPRESSIONS rather than as literal
-# strings, and that is a correction rather than a flourish: the two tools that can answer the
+# strings, and that is a requirement rather than a flourish: the two tools that can answer the
 # question spell the machine differently, and both spellings have to be accepted or a correct
 # binary is rejected.  MEASURED on this host -- file 5.46 describes an i386 object as
 # "ELF 32-bit LSB shared object, Intel i386" while binutils readelf calls the same object's
@@ -1583,11 +1901,24 @@ require_host_tools() {
     # with RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV, through which every privileged
     # operation on a BASE-TARBALL-NAMED file or directory inside the mounted image is performed
     # (the exact boundary is enumerated in the confined privileged I/O block below).  There is no
-    # fallback to an ordinary open, because that fallback is the defect the mechanism replaced --
-    # so its absence is a named failure here rather than a defence that quietly does not happen.
+    # fallback to an ordinary open, because an ordinary open is exactly what the mechanism exists
+    # to avoid -- so its absence is a named failure here rather than a defence that quietly does
+    # not happen.
+    # unshare is required, not optional, and for the same reason: the whole privileged section of
+    # this script runs in a MOUNT NAMESPACE OF ITS OWN, entered by re-executing this file under
+    # `unshare --mount --propagation private`, and that namespace is what bounds the four
+    # mount(2) calls and the chroot(2) -- the two operations the per-file primitive cannot carry,
+    # because neither takes a target the way openat2 does.  They are separately confined by the
+    # pinned privileged-operation helper, which makes each of them CONSUME a descriptor it opened
+    # and fstat-verified; the namespace remains the bound on where a mistake could reach if that
+    # mechanism were ever removed.  There is no un-namespaced fallback,
+    # so its absence is a named failure rather than a defence that quietly does not happen.  It
+    # is listed here so the host prerequisite set is complete in ONE place; the namespace entry
+    # itself checks for it earlier still (it runs before this function on the first pass), so a
+    # host without it is refused before any path is validated rather than mid-run.
     for tool in tar mkfs.ext4 losetup mount umount mountpoint chroot file readelf sha256sum \
                 truncate mktemp install cp find rm sync ldconfig flock stat realpath \
-                python3 awk; do
+                python3 awk unshare; do
         command -v -- "$tool" >/dev/null 2>&1 || missing="$missing $tool"
     done
     [ -z "$missing" ] || die "missing host tooling:$missing.
@@ -1595,8 +1926,8 @@ require_host_tools() {
        verifies what it copies in.  On a Debian/Ubuntu build host:
            sudo apt-get install -y e2fsprogs util-linux coreutils tar file binutils libc-bin \
                                   python3 mawk
-       'chroot' ships with coreutils, 'mountpoint'/'losetup' with util-linux and 'readelf'
-       with binutils."
+       'chroot' ships with coreutils, 'mountpoint'/'losetup'/'unshare' with util-linux and
+       'readelf' with binutils."
 
     # A URL base needs a fetcher, and only then: an offline run that supplies the tarball
     # must not be failed for a tool it never uses.
@@ -1614,16 +1945,439 @@ require_host_tools() {
 }
 
 # ==============================================================================
+# THE ISOLATED MOUNT NAMESPACE -- THE OUTERMOST CONFINEMENT, AND THE ONE THAT COVERS mount(2)
+# ==============================================================================
+# WHAT THIS ONE COVERS, AND WHERE IT SITS AMONG THE THREE.  Every privileged operation this
+# script performs on an individual file inside the image goes through openat2 with
+# RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV, and every recursive one runs inside the
+# chroot; both boundaries are enumerated in the block below this one.  Two kinds of operation fit
+# neither, and they are the two the finding is about: the four mount(2) calls that put /proc,
+# /sys, /dev and /dev/pts into the image, and the chroot(2) that enters it -- to which the
+# nosymfollow remount makes seven privileged operations in total.  Neither syscall takes a target
+# the way openat2 does, so for a long time the only shape available to them was "validate the
+# name, then use the name", which is check-then-use (CWE-367) with root on the far side of it and
+# is not closed by any amount of re-checking.
+#
+# THAT SHAPE IS NOW GONE, AND THIS NAMESPACE IS NO LONGER WHAT STANDS IN FOR IT.  All seven of
+# those operations CONSUME A DESCRIPTOR this script opened and verified by fstat(2) -- the mounts
+# with their target given as /proc/self/fd/N, the chroot as fchdir(fd) followed by chroot(".").
+# The mechanism, its proof and its refusals are in the pinned privileged-operation block further
+# down.  What the namespace provides is the outer bound that was always its job and remains
+# valuable on its own terms: it is DEFENCE IN DEPTH beneath a boundary rather than a substitute
+# for one.  Two things it does NOT do, said plainly because an earlier revision of this block
+# leaned on it as though it did: a private mount namespace does not freeze directory entries, and
+# it does not make the host filesystem unreachable from inside -- a chroot target substituted for
+# a directory that reaches the host tree would still have been a chroot onto the host tree,
+# inside the namespace.  Closing that needed the descriptor, not the namespace.
+#
+# WHAT THE NAMESPACE ITSELF BUYS.  THE WHOLE PRIVILEGED SECTION OF THIS SCRIPT RUNS IN A MOUNT
+# NAMESPACE OF ITS OWN, with propagation set to private throughout it, entered by re-executing
+# this file under `unshare --mount --propagation private` at the point where argument parsing ends
+# and filesystem work begins -- before this run has created a directory, a mount, a loop device or
+# a temporary file.  Three properties follow, and all three are worth having in their own right:
+#
+#   * NOTHING THIS SCRIPT MOUNTS IS VISIBLE OUTSIDE ITS OWN NAMESPACE.  The image mount, the
+#     four pseudo-filesystems and the nosymfollow remount exist for this process and its
+#     children and for nothing else on the host.  The worst case the old comments described --
+#     a pseudo-filesystem landing at the wrong place because a target was substituted between
+#     the check and the mount -- can no longer reach the build host at all, because there is no
+#     path from this namespace's mount table to the host's.
+#   * NOTHING MOUNTED OUTSIDE CAN REDIRECT A TARGET INSIDE.  Private propagation is symmetric:
+#     a mount or an unmount performed on the host does not propagate in, so a target this
+#     script has validated cannot be OVERMOUNTED from outside in the window before the
+#     privileged use.  That window is what a shared-propagation mount table leaves open, and
+#     closing it is why the propagation is private rather than merely new.  Note the precise
+#     scope, because it is narrower than it reads: this closes substitution BY MOUNT, and says
+#     nothing about substitution by rename or by a new symbolic link, which is a directory-entry
+#     change the namespace does not affect.  Those are what the descriptor closes.
+#   * THE MOUNTS CANNOT LEAK, EVEN WHEN THIS SCRIPT DIES WITHOUT RUNNING ITS TRAP.  A mount
+#     namespace is destroyed when its last member exits and the kernel releases every mount in
+#     it.  SIGKILL, an OOM kill and a kernel panic run no trap at all, and before this each of
+#     those left the image mount and four pseudo-filesystems on the host for the next job to
+#     trip over.
+#
+# IT IS DEFENCE IN DEPTH ADDED TO EVERY CHECK THAT WAS ALREADY THERE, AND IT REPLACES NONE OF
+# THEM.  Stated plainly because the tempting next edit is to delete a check the namespace now
+# covers: the confined I/O primitive is still mandatory and still proven at start-up, all seven
+# privileged mount and chroot operations still consume a descriptor opened and fstat-verified by
+# the pinned privileged-operation helper, the four mount targets are still created and
+# type-checked through the primitive before anything is mounted, the recursive operations still
+# run inside the chroot, the device-and-inode identity of a tree is still re-verified immediately
+# before it is deleted, and the trap still unmounts and detaches everything in reverse order.
+# The namespace bounds the BLAST RADIUS of a lost race; the checks are what stop the race being
+# lost in the first place, and a blast radius is not a substitute for a boundary.
+#
+# AND THE TARGETS ARE STILL PINNED BY IDENTITY INSIDE IT.  A namespace of one's own says nothing
+# about WHICH object a pathname resolves to inside that namespace, so the anchor everything else
+# hangs off -- the image mount point, and then the image root once the loop device is mounted on
+# it -- has its device and inode recorded at the moment it is created.  pin_directory_identity()
+# records; assert_pinned_directory() and its one-argument wrapper assert_image_root_pinned() are
+# checked immediately before every mount(2) and every chroot(2), and a mismatch is fatal and
+# names both identities.
+#
+# WHAT THOSE TWO FUNCTIONS ARE FOR NOW THAT THE OPERATIONS CONSUME A DESCRIPTOR, because it has
+# changed and the distinction matters to anyone tempted to delete them.  The RECORDING is
+# load-bearing: the device and inode it captures are exactly the numbers the pinned
+# privileged-operation helper compares its own descriptor against by fstat, so without it there
+# is nothing for the custody check to check.  The pathname-side ASSERTION is a DIAGNOSTIC: it
+# names the path, says which object moved and stops the run at the earliest point, from the same
+# pathname the operator sees in the log.  It is no longer the thing standing between a
+# substitution and the syscall -- the descriptor is -- and it is kept because a precise message
+# is worth having and because a future edit that removed the helper would then not silently fall
+# back to an unchecked name.
+#
+# WHY A RE-EXEC RATHER THAN A HELPER PROCESS PER MOUNT.  unshare(2) affects the calling process,
+# so a namespace created in a subshell dies with the subshell and takes the image mount with it;
+# `unshare -- mount ...` once per mount would put each mount in a namespace of its own, where
+# the chroot could not see any of them.  The whole privileged section therefore has to be ONE
+# process in ONE namespace, and re-executing this file under unshare is how a shell script gets
+# that.  The re-exec happens after parse_args so that --help and an option error still work for
+# an unprivileged caller, and before every path validation, so that everything which touches the
+# filesystem does so inside the namespace.
+#
+# FAIL CLOSED, LOUDLY, AND NEVER BACK TO THE UN-NAMESPACED PATH.  A namespace that could not be
+# created, propagation that could not be made private, or a re-exec that came back into the same
+# namespace it started in are all fatal here.  There is no fallback, because a fallback would
+# mean this block describes a confinement the run does not have -- the same failure the confined
+# I/O primitive refuses to make, for the same reason.
+#
+# THE HANDSHAKE IS INTERNAL AND IS NOT A CONFIGURATION KNOB.  CEC_L2_ROOTFS_MOUNT_NS_PARENT is
+# set by this script, for this script, in the instant before it replaces itself, and it carries
+# the mount-namespace identity of the process that did the re-exec.  It exists so the process
+# that comes back can PROVE the namespace changed instead of taking unshare's exit status as
+# evidence, and it is unset immediately afterwards.  A caller who sets it cannot use it to skip
+# the namespace: the second pass additionally compares this process's mount namespace with its
+# PARENT's, which no environment variable can influence, and refuses when they are the same.
+# ==============================================================================
+
+# The mount namespace this run's privileged work happens in, as the kernel identifies it.  Empty
+# until enter_private_mount_namespace() has proven the second pass is in a namespace of its own.
+MOUNT_NS_ID=''
+# The image mount POINT -- the ordinary directory the loop device is mounted onto -- as it was
+# the moment make_work_dir() created it.
+IMAGE_MOUNT_POINT_DEVICE=''
+IMAGE_MOUNT_POINT_INODE=''
+# The image ROOT -- the root directory of the mounted filesystem -- as it was the moment
+# create_and_mount_image() mounted it and made it private.  This is the pin every later mount(2)
+# and chroot(2) is checked against.
+IMAGE_ROOT_DEVICE=''
+IMAGE_ROOT_INODE=''
+
+# The kernel's identity for one process's mount namespace: the inode of the nsfs object the
+# magic link points at.  `stat -L` follows the link, which is what makes the number the
+# NAMESPACE's identity rather than the link's.  Prints nothing when it cannot be read, so every
+# caller decides for itself whether that is fatal.
+#
+# stat rather than readlink deliberately: stat is already a hard host prerequisite and readlink
+# is not, and the two answer the same question here.
+mount_namespace_identity() { # $1=path to a /proc/<pid>/ns/mnt link -> the namespace inode
+    stat -Lc '%i' -- "$1" 2>/dev/null || printf ''
+}
+
+# THE PROPAGATION OF ONE MOUNT POINT, MEASURED FROM /proc/self/mountinfo RATHER THAN ASSUMED
+# FROM THE COMMAND THAT MADE IT.
+#
+# mountinfo's optional fields -- everything between field 7 and the '-' separator -- are exactly
+# the propagation state: `shared:N` means mount events propagate to a peer group, `master:N`
+# means they propagate IN from one, `propagate_from:N` and `unbindable` are the remaining
+# spellings.  A PRIVATE mount has none of them, so "no optional fields" is the kernel's own
+# answer to the question this script needs answered, and a `mount --make-rprivate` that returned
+# 0 without taking effect cannot survive it.
+#
+# Prints one word: 'none' for a private mount, the tags themselves when it is not private,
+# 'absent' when the path is not a mount point in this namespace at all, and 'stacked' when more
+# than one mount is present at that exact path -- which for the paths this script checks means
+# something has been mounted over one of ours and is refused rather than interpreted.
+#
+# THE MOUNT POINT FIELD IS UNESCAPED BEFORE IT IS COMPARED.  The kernel writes space, tab,
+# newline and backslash in a mount point as \040, \011, \012 and \134, so a comparison against
+# the raw field would silently fail to match a scratch directory under a TMPDIR containing a
+# space -- and "no entry found" is a fatal answer here, so a false negative would be a broken
+# run rather than a missed check.  The backslash is unescaped last so an already-decoded
+# sequence is not decoded twice.
+mount_propagation_tags() { # $1=absolute mount point -> none|<tags>|absent|stacked
+    awk -v want="$1" '
+        function unescape(text) {
+            gsub(/\\040/, " ", text)
+            gsub(/\\011/, "\t", text)
+            gsub(/\\012/, "\n", text)
+            gsub(/\\134/, "\\\\", text)
+            return text
+        }
+        unescape($5) == want {
+            seen++
+            tags = ""
+            for (field = 7; field <= NF; field++) {
+                if ($field == "-") break
+                tags = (tags == "" ? $field : tags " " $field)
+            }
+            last = (tags == "" ? "none" : tags)
+        }
+        END {
+            if (seen == 0) { print "absent"; exit 0 }
+            if (seen > 1)  { print "stacked"; exit 0 }
+            print last
+        }
+    ' /proc/self/mountinfo
+}
+
+# Refuse to go on unless one mount point is private in this namespace.  Every mount this script
+# makes is checked with this immediately after it is made, so a mount that could propagate out
+# of the namespace -- and therefore onto the host -- is caught at the statement that made it
+# rather than by its consequences an hour later.
+assert_mount_is_private() { # $1=absolute mount point  $2=what it is  $3=what is about to happen
+    local point="$1" what="$2" operation="$3" tags
+    tags="$(mount_propagation_tags "$point")"
+    case "$tags" in
+        none) return 0 ;;
+        absent)
+            die "refusing to $operation: $what is not a mount point in this run's mount
+       namespace immediately after this script mounted it
+           $point
+       so its propagation cannot be established.  Nothing further is mounted or run inside the
+       image: every guarantee below rests on that mount being ours and being private." ;;
+        stacked)
+            die "refusing to $operation: more than one mount is present at
+           $point
+       immediately after this script made exactly one there.  Something has been mounted over
+       $what inside this run's own mount namespace, so the object beneath is not the one this
+       script mounted.  Refused rather than interpreted." ;;
+        *)
+            die "refusing to $operation: $what at
+           $point
+       is NOT a private mount -- the kernel reports propagation '$tags'.  A shared or slave
+       mount propagates out of this run's mount namespace, which is precisely what the
+       namespace exists to prevent: a mount landing at a substituted target would then reach
+       the build host as root.  The run stops rather than proceeding with the propagation the
+       namespace was supposed to have removed.  If this host's unshare does not implement
+       --propagation, upgrade util-linux; there is no un-namespaced fallback." ;;
+    esac
+}
+
+# Record one DIRECTORY's device and inode immediately after this run created it or mounted it.
+# The two globals named by $2 and $3 are set through a nameref, so the mount point and the image
+# root share one implementation.
+#
+# WHY A SEPARATE PAIR FROM record_leaf_identity/assert_leaf_identity.  Those two are about the
+# two PUBLISHED FILES: they require a regular file and refuse a second hard link, neither of
+# which is meaningful for a directory or a mount point.  The question here is the same question
+# -- is this still the object this run made -- asked of a different kind of object.
+pin_directory_identity() { # $1=path  $2=device variable name  $3=inode variable name  $4=what it is
+    local path="$1" what="$4"
+    local -n device_ref="$2"
+    local -n inode_ref="$3"
+    [ ! -L "$path" ] || die "$what is a SYMBOLIC LINK at
+           $path
+       immediately after this script created it as a directory.  Nothing is mounted or written
+       through it: this run's whole confinement is anchored on that path."
+    [ -d "$path" ] || die "$what is not a directory at
+           $path
+       immediately after this script created it.  Nothing is mounted or written through it."
+    device_ref="$(stat -c '%d' -- "$path" 2>/dev/null || printf '')"
+    inode_ref="$(stat -c '%i' -- "$path" 2>/dev/null || printf '')"
+    if [ -z "$device_ref" ] || [ -z "$inode_ref" ]; then
+        die "$what exists at
+           $path
+       but its device and inode could not be read, so its identity cannot be re-checked before
+       the privileged mount and chroot operations that name it.  The run stops rather than
+       proceeding without that check."
+    fi
+}
+
+# Refuse to go on unless a pinned directory is still the object whose identity was recorded.
+# The path checked is the same path the privileged operation that follows will name -- checking
+# through a different name from the one the operation uses is the mistake this exists to close.
+assert_pinned_directory() { # $1=path  $2=expected device  $3=expected inode  $4=what it is
+                           # $5=what is about to happen
+    local path="$1" expected_device="$2" expected_inode="$3" what="$4" operation="$5"
+    local device inode
+
+    if [ -z "$expected_device" ] || [ -z "$expected_inode" ]; then
+        die "internal error: '$operation' was attempted before the identity of $what had been
+       pinned, so the target could not be checked against the object this run created.  This is
+       a defect in $SCRIPT_NAME."
+    fi
+    [ ! -L "$path" ] || die "refusing to $operation: $what is now a SYMBOLIC LINK at
+           $path
+       This run created a directory at that name.  mount(2) and chroot(2) resolve a pathname in
+       the ordinary way and would follow it, so the operation is refused rather than performed
+       through the link."
+    [ -d "$path" ] || die "refusing to $operation: $what is no longer a directory that exists at
+           $path
+       This run created it; something removed or replaced it while the build was running."
+
+    device="$(stat -c '%d' -- "$path" 2>/dev/null || printf '')"
+    inode="$(stat -c '%i' -- "$path" 2>/dev/null || printf '')"
+    if [ "$device" != "$expected_device" ] || [ "$inode" != "$expected_inode" ]; then
+        die "refusing to $operation: $what is not the object this run pinned.
+           was  device $expected_device inode $expected_inode
+           now  device ${device:-unreadable} inode ${inode:-unreadable}
+       The name was re-pointed at a different object after this run created it.  The mount or
+       chroot that follows would have CONSUMED A DESCRIPTOR checked against those same recorded
+       numbers and would have refused as well; this check runs first so the refusal names the
+       pathname the log shows and the object that moved.  Nothing further is done through it."
+    fi
+}
+
+# The pin every mount(2) and chroot(2) below is checked against, as one argument, because the
+# target is always the same one and six call sites repeating four globals is six chances to
+# repeat them wrongly.
+assert_image_root_pinned() { # $1=what is about to happen
+    assert_pinned_directory "$IMAGE_MOUNT" "$IMAGE_ROOT_DEVICE" "$IMAGE_ROOT_INODE" \
+        'the image root' "$1"
+}
+
+# Enter the private mount namespace, or die saying why the run cannot safely proceed without
+# one.  Called once, from main(), with this run's own arguments so they can be forwarded across
+# the re-exec unchanged.
+#
+# TWO PASSES, ONE FUNCTION.  The first pass is the caller's process: it establishes that the
+# re-exec can work, records its own namespace identity in the handshake variable and replaces
+# itself with `unshare`.  The second pass is the same pid, back in a new namespace, and its
+# whole job is to PROVE that -- three ways, all measured -- before anything privileged happens.
+enter_private_mount_namespace() { # "$@"=this run's arguments, forwarded across the re-exec
+    local self parent root_tags
+    local -a reexec
+
+    self="$(mount_namespace_identity /proc/self/ns/mnt)"
+    [ -n "$self" ] || die "this process's mount namespace could not be read from
+           /proc/self/ns/mnt
+       The privileged section of this script runs in a mount namespace of its own and proves it
+       is in one by comparing that identity before and after the re-exec, so a /proc that cannot
+       answer means the proof cannot be taken.  The run stops rather than mounting and chrooting
+       with a confinement it cannot establish.  Check that /proc is mounted on this host."
+
+    if [ -z "${CEC_L2_ROOTFS_MOUNT_NS_PARENT:-}" ]; then
+        # ---- FIRST PASS.  Still the caller's namespace; this run has created nothing. ----
+        #
+        # Root is checked HERE as well as in require_host_tools, and not because the check is
+        # duplicated for its own sake: unshare(2) with CLONE_NEWNS needs CAP_SYS_ADMIN, this
+        # function runs before require_host_tools on the first pass, and an unprivileged caller
+        # must get the named refusal this script has always given rather than unshare's bare
+        # "Operation not permitted".
+        [ "$(id -u)" -eq 0 ] || die "this script must run as root.  Before it attaches a loop
+       device, mounts a filesystem and populates it through a chroot, it puts all of that in a
+       MOUNT NAMESPACE OF ITS OWN so that none of it is visible to the rest of this host and
+       none of it can leak if the run is killed -- and creating a mount namespace needs
+       CAP_SYS_ADMIN.  Re-run it under sudo:
+           sudo $SCRIPT_PATH ..."
+        command -v -- unshare >/dev/null 2>&1 || die "'unshare' is not on PATH, so the
+       privileged section of this script cannot be placed in a mount namespace of its own.
+       That namespace is the outer bound on the four mount(2) calls that put /proc, /sys, /dev
+       and /dev/pts into the image, the chroot(2) that enters it and the nosymfollow remount:
+       none of them can be confined by the openat2 primitive every per-file privileged operation
+       here goes through, so each instead CONSUMES a descriptor this script opened and
+       fstat-verified, with the namespace beneath that as defence in depth.  THERE IS NO
+       UN-NAMESPACED FALLBACK -- a run
+       without it would mount and chroot through pathnames whose targets could be substituted,
+       as root, on the build host.  Install util-linux:
+           sudo apt-get install -y util-linux"
+        [ -r "$SCRIPT_PATH" ] || die "this script cannot re-execute itself: $SCRIPT_PATH is not
+       readable.  The privileged section runs in a mount namespace entered by re-executing this
+       file under unshare, so an unreadable path means the confinement cannot be established.
+       Invoke the script by its own path rather than through a pipe or a deleted temporary copy."
+
+        export CEC_L2_ROOTFS_MOUNT_NS_PARENT="$self"
+        # `--propagation private` is what makes the namespace an isolation boundary rather than
+        # merely a copy: unshare applies MS_REC|MS_PRIVATE to the whole inherited tree, so no
+        # mount made below propagates out and no mount made outside propagates in.  Passed
+        # explicitly even though it is unshare's default, because a default is not a contract.
+        reexec=(unshare --mount --propagation private -- "${BASH:-/bin/bash}")
+        # A caller debugging with `bash -x` keeps their trace across the re-exec; losing it at
+        # the exact point the privileged work starts is where it is least affordable.
+        case "$-" in
+            *x*) reexec+=(-x) ;;
+        esac
+        reexec+=("$SCRIPT_PATH")
+        log "entering a private mount namespace for the privileged section"
+        log "  leaving  mnt:[$self]  (every mount made below is invisible to it)"
+        # THERE IS NO STATEMENT AFTER THIS ONE, AND THAT IS THE FAIL-CLOSED PROPERTY RATHER THAN
+        # an omission.  A successful exec never returns; a FAILED exec does not return either,
+        # because a non-interactive bash without `shopt -s execfail` -- which this script never
+        # sets -- exits the shell itself.  MEASURED on this host with bash 5.2: `exec` on a
+        # program that does not exist printed bash's own diagnostic and exited 127 without
+        # reaching the next line, and `unshare` refusing an option it does not implement exited
+        # 1 the same way.  So there is no path from a re-exec that did not happen into the
+        # un-namespaced work below, and nothing is leaked when it happens: this runs before the
+        # run has created a mount, a loop device or a temporary directory, which is the other
+        # reason the re-exec is placed exactly here.  Also measured, and stated because it looks
+        # like a gap: bash does NOT run the EXIT trap on a failed exec -- which costs nothing
+        # here, because there is nothing yet for the teardown to release.  The
+        # `command -v -- unshare` check above is what turns the one likely cause of that failure
+        # into a named refusal instead of bash's one-line diagnostic.
+        exec "${reexec[@]}" "$@"
+    fi
+
+    # ---- SECOND PASS.  unshare says it made a namespace; prove it three ways. ----
+    #
+    # 1. IT IS NOT THE NAMESPACE WE LEFT.  The handshake carries the first pass's identity, so
+    #    an unshare that succeeded without creating anything is caught rather than believed.
+    [ "$self" != "$CEC_L2_ROOTFS_MOUNT_NS_PARENT" ] || die "the re-execution under
+       'unshare --mount' came back into the SAME mount namespace it started in
+       (mnt:[$self]), so the privileged section has no isolation at all.  unshare reported
+       success, which is why this is checked rather than assumed.  The run stops here: every
+       mount below would be visible on the build host and would outlive a killed run."
+
+    # 2. IT IS NOT OUR PARENT'S NAMESPACE EITHER, WHICH IS THE CHECK NO ENVIRONMENT VARIABLE CAN
+    #    INFLUENCE.  unshare does not fork, so this process kept its pid and its parent is the
+    #    process that invoked the script -- still in the old namespace.  A forged handshake
+    #    therefore cannot skip the namespace: it would leave us in our parent's namespace and
+    #    this comparison refuses.  An unreadable parent (it exited, or the process was
+    #    reparented) is reported and not fatal: the structural proof is unavailable, the
+    #    handshake proof above still holds, and failing a legitimate run for a parent that went
+    #    away would be a worse answer than saying so.
+    parent="$(mount_namespace_identity "/proc/$PPID/ns/mnt")"
+    if [ -n "$parent" ]; then
+        [ "$self" != "$parent" ] || die "this process shares its mount namespace (mnt:[$self])
+       with its parent process $PPID, so it is NOT in a namespace of its own -- whatever the
+       handshake variable claims.  CEC_L2_ROOTFS_MOUNT_NS_PARENT is internal to this script and
+       must not be set by a caller; unset it and let the script re-execute itself.  The run
+       stops rather than mounting and chrooting on the build host's own mount table."
+    else
+        warn "the parent process's mount namespace could not be read from /proc/$PPID/ns/mnt,"
+        warn "  so the structural half of the namespace proof was not taken.  The handshake"
+        warn "  half was: this process's namespace is not the one the re-exec left.  Stated"
+        warn "  rather than passed over silently."
+    fi
+
+    # 3. PROPAGATION IS ACTUALLY PRIVATE, READ FROM THE KERNEL RATHER THAN INFERRED FROM THE
+    #    OPTION WE PASSED.  '/' is where unshare applies MS_REC|MS_PRIVATE, so it is where the
+    #    absence of propagation tags proves the option took effect for the whole inherited tree.
+    root_tags="$(mount_propagation_tags /)"
+    [ "$root_tags" = 'none' ] || die "the root mount of this run's new mount namespace is not
+       private -- the kernel reports '$root_tags' for '/' in /proc/self/mountinfo -- so
+       'unshare --propagation private' did not take effect and mount events still propagate
+       between this namespace and the build host.  A new namespace without private propagation
+       is not the confinement this script's comments describe, and there is no fallback: the run
+       stops here.  Check the util-linux version on this host."
+
+    MOUNT_NS_ID="$self"
+    readonly MOUNT_NS_ID
+    # Unset immediately: the handshake has done its one job, and an internal variable has no
+    # business in the environment of the apt, compiler and chroot invocations below.  (They are
+    # invoked through `env -i` in any case, so this is hygiene rather than a mechanism.)
+    unset CEC_L2_ROOTFS_MOUNT_NS_PARENT
+
+    log "private mount namespace established: mnt:[$MOUNT_NS_ID], propagation private"
+    log "  every mount this run makes -- the image, /proc, /sys, /dev, /dev/pts and the"
+    log "  nosymfollow remount -- is made here.  None of it is visible to the rest of this"
+    log "  host, none of it can be redirected by a mount made outside it, and all of it is"
+    log "  released by the kernel when this process exits even if the teardown cannot run."
+    log "  It is DEFENCE IN DEPTH: the confined I/O primitive, the descriptor every mount and"
+    log "  chroot below consumes, the chroot itself and the identity checks all carry their own"
+    log "  guarantees and none of them is replaced by this namespace."
+}
+
+# ==============================================================================
 # CONFINED PRIVILEGED I/O -- THE MECHANISM THAT CARRIES THE CONFINEMENT GUARANTEE
 # ==============================================================================
-# WHAT WAS WRONG WITH THE PREVIOUS MODEL, STATED PLAINLY BECAUSE THE COMMENTS ELSEWHERE IN
-# THIS FILE USED TO CLAIM OTHERWISE.
+# WHY A PATHNAME CHECK CANNOT CARRY THIS GUARANTEE ON ITS OWN.
 #
 # Every privileged read, rewrite and removal this script performs INSIDE THE MOUNTED IMAGE
-# used to be authorised by assert_confined_to_image(): it validated a PATHNAME -- no symlinked
-# component from the mount point down, a regular file, one link, the image's own st_dev, a
-# realpath still inside the image -- and the caller then reopened THE SAME PATHNAME with an
-# ordinary redirection (`< "$file"`, `cat "$tmp" > "$file"`, `rm -f -- "$path"`).
+# could be authorised the obvious way: validate a PATHNAME -- no symlinked component from the
+# mount point down, a regular file, one link, the image's own st_dev, a realpath still inside
+# the image -- and then reopen THE SAME PATHNAME with an ordinary redirection (`< "$file"`,
+# `cat "$tmp" > "$file"`, `rm -f -- "$path"`).
 #
 # That is check-then-open, and the object the kernel opens is not the object that was checked.
 # The gap between the two is the vulnerability (CWE-367), not the absence of a check, and no
@@ -1632,7 +2386,7 @@ require_host_tools() {
 # on the build host, so the consequence of losing that race is root truncating, rewriting or
 # deleting a HOST file named by an absolute symlink target.
 #
-# WHAT REPLACES IT: ONE PRIMITIVE, AND THE PATHNAME IS NEVER RE-DERIVED AFTER THE OPEN.
+# WHAT IS DONE INSTEAD: ONE PRIMITIVE, AND THE PATHNAME IS NEVER RE-DERIVED AFTER THE OPEN.
 #
 # openat2(2) with RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV resolves a RELATIVE path
 # against a DIRECTORY DESCRIPTOR and hands back a descriptor, and the kernel -- not this script
@@ -1646,9 +2400,9 @@ require_host_tools() {
 #   RESOLVE_BENEATH      the resolution may not leave the anchor directory, so '..' and an
 #                        absolute path are refused with EXDEV.
 #   RESOLVE_NO_XDEV      no mount point is traversed, which is the kernel-enforced form of the
-#                        st_dev comparison the old model did by hand: /proc, /sys, /dev and
-#                        /dev/pts are bind/pseudo mounts INSIDE the image tree and a path
-#                        through one of them is refused rather than measured afterwards.
+#                        st_dev comparison a pathname check can only do by hand: /proc, /sys,
+#                        /dev and /dev/pts are bind/pseudo mounts INSIDE the image tree and a
+#                        path through one of them is refused rather than measured afterwards.
 #
 # Every operation is then performed THROUGH THAT DESCRIPTOR: the file's type is read with
 # fstat() on an O_PATH descriptor, and read, write, chmod and chown go through
@@ -1660,8 +2414,8 @@ require_host_tools() {
 #
 # WHY IT IS A python3 HELPER AND NOT SHELL.  openat2 has no shell binding.  Neither has any
 # other *at-family call with resolve flags, and no coreutils tool exposes RESOLVE_BENEATH.  The
-# alternatives were to keep check-then-open (which is the finding) or to accept a dependency on
-# an interpreter that is present on every Debian/Ubuntu build host and on every GitHub-hosted
+# alternatives are to keep check-then-open, with the race above unclosed, or to accept a
+# dependency on an interpreter present on every Debian/Ubuntu build host and every GitHub-hosted
 # runner.  The helper is WRITTEN ONCE into this run's private 0700 scratch directory at mode
 # 0600 and reused for every call, so there is a single copy of the source and a single copy on
 # disk; it is invoked with `python3 -I -B`, which ignores PYTHON* environment variables, the
@@ -1671,53 +2425,202 @@ require_host_tools() {
 # back to an ordinary open would be worse than no helper at all, because every comment in this
 # file would then describe a defence that was not there.  So each condition has its own exit
 # status, the shell turns each into a `die` that NAMES which condition it was, and
-# probe_confined_io() proves at start-up -- with a positive case AND four negative cases -- that
+# probe_confined_io() proves at start-up -- with a positive case AND five negative cases -- that
 # the refusals actually happen on this host before one privileged byte is written.
 #
-# WHAT assert_confined_to_image() IS FOR NOW.  It is retained as a PRE-CHECK because it produces
-# far better diagnostics than an errno: it can say which component of which path is a symbolic
-# link, and it can distinguish a hard-linked file from a substituted one.  It no longer carries
+# WHAT assert_confined_to_image() IS FOR.  It is a PRE-CHECK, kept because it produces far
+# better diagnostics than an errno: it can say which component of which path is a symbolic
+# link, and it can distinguish a hard-linked file from a substituted one.  It does not carry
 # the guarantee, and its own comment block says so.
 #
 # ==============================================================================
 # EXACTLY WHICH OPERATIONS GO THROUGH IT, AND WHICH DO NOT.  STATED, NOT IMPLIED.
 # ==============================================================================
 # A claim of "everything is confined" would be the same kind of overstatement this mechanism was
-# introduced to correct, so here is the boundary.
+# introduced to correct, so here is the boundary.  It has three parts, because there are three
+# confinements with different shapes -- and, since the seven privileged mount and chroot
+# operations were converted to consume descriptors, no part of it ends in an unbounded residual.
 #
-# THROUGH THE PRIMITIVE -- every operation that reads, rewrites, creates, changes the mode or
-# ownership of, enumerates or removes an INDIVIDUAL file or directory whose NAME COMES FROM THE
-# BASE TARBALL rather than from this script.  Those are the operations an adversarial base can
-# aim, and they are:
-#     install_image_apt_auth() / remove_image_apt_auth()   /etc/apt/auth.conf.d/<leaf>
-#     install_image_packages()                             /etc/apt/sources.list and
-#                                                          /etc/apt/apt.conf.d/99cec-l2-snapshot
-#     scrub_and_assert_image_apt_credentials()             /etc/apt/sources.list{,.d/*}
-#     scrub_and_assert_image_credential_stores()           auth.conf{,.d/*}, apt.conf{,.d/*},
-#                                                          /etc/environment, every .netrc
-#     nosymfollow_is_in_force()                            its own probe directory
+# THE THREE MECHANISMS, EACH WITH THE OPERATIONS IT CARRIES:
 #
-# NOT THROUGH THE PRIMITIVE, deliberately, with the reason for each:
-#     `tar --extract --directory "$IMAGE_MOUNT"` in extract_base_rootfs(), and the `cp -a` and
-#     `tar --extract` bulk copies in copy_guest_payload() and install_lcov_2x().  These are
-#     WHOLE-TREE operations over thousands of paths, they are what CREATES the filesystem the
-#     primitive later resolves against, and a per-file descriptor primitive cannot express them.
-#     What bounds them instead: the base archive is verified against a pinned SHA-256 before it
-#     is extracted (acquire_base_rootfs), the payload and SDK trees are verified before they are
-#     copied (verify_payload_tree, verify_sdk_tree), and their destinations are paths THIS SCRIPT
-#     names -- $GUEST_WORKSPACE and below -- not paths the base chooses.
-#     The `mkdir -p`, `chmod`, `>` and `rm` operations on those same script-named guest paths
-#     (/tmp, $GUEST_WORKSPACE, $GUEST_CONF_DIR and the records written into them), and on
-#     /etc/resolv.conf and /etc/network/interfaces in
-#     neutralise_image_network_configuration().  These are not confined, and that is a residual
-#     rather than a defence: a base tarball that ships /etc, /opt or /tmp as an absolute symbolic
-#     link would redirect them onto the build host in the same way the apt paths used to be
-#     redirected.  They were left as they are because converting them is a change to six
-#     functions that no finding in this pass covers and that nothing available here can
-#     end-to-end test, and because their exposure is narrower: they write content this script
-#     authored to names this script chose, so nothing a caller supplied is disclosed by them.
-#     THE PRIMITIVE AND ITS WRAPPERS ARE READY FOR THEM -- converting one is a two-line change --
-#     and doing so is the obvious next step for whoever next touches this file.
+#   1. THE PER-FILE PRIMITIVE, openat2 with
+#      RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV, carrying the 60 root-owned
+#      operations on an INDIVIDUAL file or directory inside the image.  Enumerated in the
+#      "THROUGH THE PRIMITIVE" list below.
+#   2. THE CHROOT, carrying the whole-tree operations a per-descriptor primitive cannot express.
+#      Enumerated in the "THROUGH THE CHROOT" list below.
+#   3. THE PINNED PRIVILEGED OPERATIONS, carrying the SEVEN operations that are neither per-file
+#      nor whole-tree because they ARE the mount and the chroot: each opens its target with
+#      O_DIRECTORY|O_NOFOLLOW beneath the pinned anchor, verifies THAT DESCRIPTOR by fstat(2)
+#      against the identity this run recorded, and then performs the syscall THROUGH the
+#      descriptor -- the mounts with their target given as /proc/self/fd/N, the chroot as
+#      fchdir(fd) then chroot(".").  Enumerated in the "THROUGH THE PINNED OPERATIONS" list
+#      below.  install_pinned_op_helper() writes the mechanism and probe_pinned_op() proves it,
+#      fatally, before the first of the seven runs.
+#
+# AND ALL OF IT HAPPENS INSIDE AN OUTERMOST BOUND, which is defence in depth beneath the three
+# rather than a fourth confinement: the whole privileged section runs in this run's own mount
+# namespace with private propagation, established and proven by enter_private_mount_namespace()
+# before any of these operations exists.  It does not weaken anything below; every check named
+# here is still in force.
+#
+# THROUGH THE PRIMITIVE -- every operation this script performs on an INDIVIDUAL file or
+# directory inside the mounted image, from the moment the image exists onward.  Note what that
+# is NOT limited to: it is not only the paths the base tarball names.  It is also every path
+# THIS SCRIPT chose, because "we chose the name" bounds nothing when a COMPONENT of that name
+# can be a symbolic link the base shipped -- /tmp, /opt, /etc and /usr are all names the base
+# gets to define the type of.  The full list, in the order main() reaches them:
+#     extract_base_rootfs()                       the post-extraction /etc, /usr and /bin layout
+#                                                 checks, which `[ -d ]` would have answered by
+#                                                 measuring the BUILD HOST's directories
+#     mount_chroot_pseudo_filesystems()           the four mount points, created and type-checked
+#                                                 before anything is mounted on any of them
+#     install_image_apt_auth() /
+#       remove_image_apt_auth()                   /etc/apt/auth.conf.d/<leaf>
+#     install_image_packages()                    /etc/apt/sources.list and
+#                                                 /etc/apt/apt.conf.d/99cec-l2-snapshot
+#     scrub_and_assert_image_apt_credentials()    /etc/apt/sources.list{,.d/*}
+#     scrub_and_assert_image_credential_stores()  auth.conf{,.d/*}, apt.conf{,.d/*},
+#                                                 /etc/environment, every .netrc
+#     record_installed_packages()                 the package manifest, its mode, and the
+#                                                 SHA-256 taken OF IT -- read back through the
+#                                                 primitive, because a digest computed through a
+#                                                 substituted name is a false provenance claim
+#                                                 rather than merely a wrong number
+#     neutralise_image_network_configuration()    /etc/resolv.conf, /etc/network/interfaces, and
+#                                                 the enumerate-and-delete of
+#                                                 /etc/network/interfaces.d
+#     install_lcov_2x()                           the in-image source staging directory, and the
+#                                                 device/inode identity re-checked before it is
+#                                                 deleted
+#     copy_guest_payload()                        $GUEST_WORKSPACE, $GUEST_ARTIFACT_DIR (0700),
+#                                                 $GUEST_CONF_DIR (0755) and /tmp (1777)
+#     register_guest_library_paths()              /etc/ld.so.conf.d/<fragment>
+#     build_guest_helpers()                       the helper sources it writes, the two installed
+#                                                 binaries it proves executable afterwards, and
+#                                                 the identity of the source tree before deletion
+#     assert_image_toolchain()                    the C++ dialect probe source -- written into a
+#                                                 directory that is 1777 by the time it runs --
+#                                                 and both of its cleanups
+#     write_kernel_expectation() /
+#       write_sdk_build_flags_record() /
+#       write_image_conf() / write_guest_init()   every record written into the image and its
+#                                                 mode, plus the `bash -n` of the generated
+#                                                 init, which now parses the primitive's stdout
+#                                                 instead of reopening the pathname
+#     nosymfollow_is_in_force()                   its own probe directory
+#
+# THROUGH THE SECOND CONFINEMENT -- the RECURSIVE operations, which the per-file primitive cannot
+# express because openat2 confines one lookup and these walk thousands.  They are not performed
+# on the host against an "$IMAGE_MOUNT/..." pathname.  They run under chroot_run, whose
+# resolution root IS the image: a command invoked that way cannot NAME a host path at all, so
+# the confinement is structural rather than checked.  Each is preceded by a confined_mkdir plus
+# confined_directory of the destination, so the directory the recursion starts from is one this
+# script opened under RESOLVE_NO_SYMLINKS and not a name it hoped was a directory:
+#     stream_tree_into_image()   `tar -C <host source> -cf - . | chroot_run tar -C <dest> -xf -`,
+#                                which replaces the host-side `cp -a` and `tar --extract` in
+#                                copy_guest_payload() and install_lcov_2x().  Metadata parity
+#                                with `cp -a` -- mode, mtime, symlink targets, numeric owner --
+#                                was MEASURED against a tree built for the purpose, not assumed.
+#                                What the tar carries is trusted independently: the base archive
+#                                and the lcov tarball are verified against pinned SHA-256 digests
+#                                by verify_sha256(), and the payload and SDK trees by
+#                                verify_payload_tree() and verify_sdk_tree(), so only the
+#                                DESTINATION pathname ever needed confining.
+#     remove_tree_in_image()     `chroot_run rm -rf -- <in-image path>`, which replaces the
+#                                host-side `rm -rf -- "$IMAGE_MOUNT..."` in install_lcov_2x() and
+#                                build_guest_helpers(), and re-verifies the device and inode
+#                                recorded when the tree was created immediately before deleting
+#                                anything, refusing with a named diagnostic if either changed.
+#                                A recursive delete that can be redirected is the worst operation
+#                                in this script, which is why it is the one that carries an
+#                                identity check and a post-delete confined_absent proof.
+#
+# THROUGH THE PINNED OPERATIONS -- the SEVEN privileged mount and chroot calls, each of which
+# CONSUMES a descriptor this script opened beneath the pinned anchor and verified by fstat(2) on
+# that descriptor.  None of them resolves a pathname a second time, and none of them has a
+# fallback that does.  Every one is additionally inside the mount namespace described above, and
+# every one keeps the checks it had before this mechanism existed -- the point of listing them is
+# that the descriptor is what carries the guarantee now, and those checks are what produce a
+# precise diagnosis when it refuses.
+#     mount -t proc, in                 the target is `proc` beneath the image root.  Its
+#       mount_chroot_pseudo_filesystems() identity is measured by confined_identity through
+#                                       openat2, and the helper resolves the same target the same
+#                                       way, fstat-compares its descriptor against that
+#                                       recording, and mounts onto /proc/self/fd/N.  RETAINED
+#                                       around it: confined_mkdir created the target and
+#                                       confined_directory type-checked it; the image root's pin
+#                                       is re-checked immediately before; register_mount arms the
+#                                       trap first; and the resulting mount's propagation is read
+#                                       back from /proc/self/mountinfo and refused unless private.
+#     mount -t sysfs, same function     `sys`, identically.
+#     mount --bind /dev, same function  `dev`, identically.  The bind of the HOST's /dev is the
+#                                       mount that would hurt most if it propagated, which is why
+#                                       the propagation read-back is not optional.
+#     mount --bind /dev/pts,            `dev/pts`, and the ONE target openat2 cannot resolve:
+#       same function                   by the time it is mounted, `dev` is a mount point, which
+#                                       RESOLVE_NO_XDEV refuses to resolve through, and resolving
+#                                       it earlier would name the directory the bind then
+#                                       shadows.  The helper walks the two components by
+#                                       descriptor with O_NOFOLLOW on each instead, fstat-checks
+#                                       `dev` against the identity of the SOURCE bound there and
+#                                       the leaf as a directory on the same st_dev as its parent,
+#                                       and mounts onto the leaf's descriptor.  The reasoning is
+#                                       on resolve_under_mount() in the helper.
+#     chroot(2), in chroot_run() and    performed as fchdir(fd) then chroot(".") on a descriptor
+#       chroot_run_with_libs()          opened on the image root and fstat-verified against its
+#                                       pin, so "." resolves against the directory the descriptor
+#                                       established and no name is looked up.  The custody check
+#                                       is inside these two functions rather than at their ~20
+#                                       call sites, because a check a caller can forget is a
+#                                       check that will be forgotten.  A custody failure reports
+#                                       one reserved status -- execve leaves no other channel --
+#                                       and is fatal.  What the chroot itself provides is the
+#                                       SECOND mechanism listed above, so it appears on both
+#                                       sides of this boundary: as a mechanism that confines, and
+#                                       as an operation that needed confining.
+#     mount(NULL, fd, NULL,             in try_nosymfollow_remount(), the last privileged mount(2)
+#       MS_REMOUNT|MS_NOSYMFOLLOW)      this script makes, on the anchor itself.  Remounted
+#                                       through the anchor's own verified descriptor.  This is
+#                                       also where the mechanism earns its separate statuses: a
+#                                       CUSTODY failure is fatal, while mount(2) refusing
+#                                       MS_NOSYMFOLLOW is the legitimate "this kernel does not
+#                                       offer it" case that function reports and proceeds
+#                                       without, and before the helper existed both arrived as
+#                                       one exit status from mount(8).  Propagation is not
+#                                       re-measured after it because a remount does not change it.
+#
+# NOT CONFINED BY ANY OF THE THREE, WITH THE REASON AND THE BOUND FOR EACH.  FOUR operations,
+# every one of them structural rather than left over, and the reason DIFFERS BETWEEN THEM rather
+# than being one blanket claim.  Two have no prior object to open, because they are what makes the
+# object exist: the mkdir, and the loop mount that brings the mounted root into existence.  Two act
+# on an object that ALREADY EXISTS -- the propagation change, and the extraction -- so for those the
+# bound is what surrounds them, stated per operation below.  Every one of the four is inside the
+# mount namespace described above:
+#     mkdir -p -- "$IMAGE_MOUNT"        in make_work_dir(), and the two mounts in
+#     mount -- "$LOOP_DEVICE" ...       create_and_mount_image().  The first two MAKE the anchor
+#     mount --make-rprivate ...         exist; the third changes propagation on it.  All three
+#                                       operate inside this run's own 0700 root-owned scratch
+#                                       directory, before one untrusted byte exists anywhere
+#                                       beneath it.  The mkdir's result is IDENTITY-PINNED the
+#                                       moment it exists and re-checked immediately before the
+#                                       mount; the propagation change's RESULT is read back from
+#                                       /proc/self/mountinfo rather than inferred from its exit
+#                                       status; and the mounted root is then pinned in turn -- so
+#                                       the anchor every descriptor below is opened on is itself
+#                                       an object whose device and inode this run recorded.
+#     tar --extract --directory         in extract_base_rootfs().  This POPULATES the
+#       "$IMAGE_MOUNT"                  ALREADY-MOUNTED image root -- the filesystem exists,
+#                                       its CONTENT is what this brings into being.
+#                                       Bounded by the pinned SHA-256 that acquire_base_rootfs()
+#                                       requires before it is reached, and followed immediately
+#                                       by the confined /etc, /usr and /bin checks listed above
+#                                       -- so an archive whose top-level layout is a set of links
+#                                       is caught on the next statement.
+# One further pathname operation is unconfined ON PURPOSE and is not a residual at all: the `cat`
+# on the probe symlink in nosymfollow_is_in_force(), whose entire purpose is that reading THROUGH
+# THE PATHNAME must fail.  Confining it would measure this primitive instead of the mount option
+# the probe exists to measure, and the comment there says so.
 # ==============================================================================
 
 # The helper's leaf name inside this run's scratch directory, and the descriptor-anchored
@@ -2359,8 +3262,9 @@ confined_io_die() { # $1=status  $2=relative path  $3=what it is  $4=what was ab
             die "refusing to $operation ($what): the confined I/O primitive is NOT AVAILABLE on
        this host.  openat2(2) with RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV is what
        makes a privileged write inside the image safe against a symbolic link substituted under
-       it, and this script does not fall back to an ordinary open -- the fallback is precisely
-       the defect this mechanism replaced.  It needs a Linux 5.6-or-newer kernel and python3.
+       it, and this script does not fall back to an ordinary open -- an ordinary open is
+       precisely what this mechanism exists to avoid.  It needs a Linux 5.6-or-newer kernel
+       and python3.
        The in-image path was: $relative" ;;
         "$CONFINED_IO_REFUSED")
             die "refusing to $operation ($what): THE CONFINEMENT REFUSED the in-image path
@@ -2500,17 +3404,52 @@ confined_rmdir() { # $1=relative  $2=what it is  $3=what is about to happen
     [ "$status" -eq 0 ] || confined_io_die "$status" "$1" "$2" "$3"
 }
 
+# `rm -f` SEMANTICS THROUGH THE PRIMITIVE, AND THE ONE OPERATION THAT MUST ACCEPT A SYMLINK AS
+# ITS TARGET RATHER THAN REFUSE IT.
+#
+# WHY IT EXISTS AT ALL.  Several of the files this script replaces inside the image are files
+# the base tarball legitimately ships as SYMBOLIC LINKS -- /etc/resolv.conf is the standing
+# example, because debootstrap on a systemd-resolved host leaves it pointing into /run.  The
+# whole point of removing it is that writing THROUGH it would write outside the image's /etc,
+# and on this build host that means writing to the HOST's /run.  So the operation needed here is
+# "remove whatever entry sits at this name, link or not", and the wrappers that ask a question
+# about the object -- confined_absent, confined_regular_file, confined_directory -- all `die` on
+# a symbolic link, correctly, because for THEIR callers a link is a substituted object.
+#
+# WHY IT IS SAFE, WHICH IS NOT THE SAME QUESTION.  op_unlink resolves only the PARENT components
+# under RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV and then calls unlinkat() on a single
+# leaf relative to that descriptor.  unlinkat never follows a symbolic link: it removes the
+# DIRECTORY ENTRY, so a link at the leaf is deleted rather than followed, and the object its
+# target names -- on the host or anywhere else -- is untouched.  That is exactly `rm -f`'s
+# behaviour on a link, with the leading components confined, which `rm -f` on an
+# $IMAGE_MOUNT-prefixed pathname is not.
+#
+# ABSENCE IS NOT AN ERROR, and that is the other half of `rm -f`: status 13 (ABSENT) returns 0.
+# Every other non-zero status is still fatal through confined_io_die, so "the confinement refused
+# the path" can never be mistaken for "there was nothing there".
+confined_unlink_if_present() { # $1=relative  $2=what it is  $3=what is about to happen
+    local status=0
+    confined_io_ready "$3"
+    confined_io "$1" unlink 2>/dev/null || status=$?
+    [ "$status" -ne 0 ] || return 0
+    [ "$status" -ne "$CONFINED_IO_ABSENT" ] || return 0
+    # Re-issued once, unsuppressed, so the kernel's own errno reaches the log beside the
+    # explanation.  This arm ends the run, so the second call costs nothing.
+    confined_io "$1" unlink >/dev/null || true
+    confined_io_die "$status" "$1" "$2" "$3"
+}
+
 # The one wrapper that does NOT die on a non-zero status: presence is a question this script
 # asks, and "not there" is one of the answers it acts on.  Prints the stat record on stdout and
 # RETURNS the helper's status, so a caller writes
 #     record="$(confined_stat "$rel" '...')" || status=$?
 # and gets the status even though the substitution ran in a subshell.
 #
-# THAT IS WHY IT IS NOT A GLOBAL.  An earlier form of this wrapper published the status in a
-# variable, which silently produced 0 at every call site that captured the record with $( ) --
-# the subshell set the variable and the parent never saw it, so a refusal and a success were
-# indistinguishable and the diagnosis said "exited 0, which this script has no reading for".
-# The status is a return value here precisely so a subshell cannot lose it.
+# THAT IS WHY IT IS NOT A GLOBAL.  A wrapper publishing the status in a variable would silently
+# produce 0 at every call site that captures the record with $( ): the subshell sets the variable
+# and the parent never sees it, so a refusal and a success would be indistinguishable and the
+# diagnosis would read "exited 0, which this script has no reading for".  The status is a return
+# value here precisely so a subshell cannot lose it.
 #
 # stderr is suppressed because absence is routine and its diagnostic is noise; the fatal arms in
 # confined_directory and confined_regular_file re-issue the call unsuppressed so the kernel's own
@@ -2563,8 +3502,8 @@ confined_search() { # $1=relative dir  $2=what it is  $3=what is about to happen
 # Is a path a usable DIRECTORY beneath the anchor?  0 when it is, 1 when it is simply not there,
 # and a `die` for every other answer -- a symbolic link at that name is refused rather than
 # reported absent, and a regular file, fifo or device node at it means the base filesystem is not
-# what it claims to be.  This replaces the old `[ -L ] / [ -e ] / [ -d ]` triple, whose -e and -d
-# both FOLLOWED links and so could not distinguish an image directory from a host one.
+# what it claims to be.  An `[ -L ]` / `[ -e ]` / `[ -d ]` triple cannot answer this: -e and -d
+# both FOLLOW links, so they cannot distinguish an image directory from a host one.
 confined_directory() { # $1=relative  $2=path as shown  $3=what is about to happen
     local record type_field status=0
     record="$(confined_stat "$1" "$3")" || status=$?
@@ -2644,7 +3583,121 @@ confined_stat_field() { # $1=the stat record  $2=1-based field index
 }
 
 # ------------------------------------------------------------------------------------
-# THE START-UP PROOF.  One positive case and four negative cases, in a private directory,
+# IDENTITY, CAPTURED AT CREATION AND RE-VERIFIED BEFORE A RECURSIVE DELETE.
+#
+# WHY A DELETE NEEDS MORE THAN THE CONFINEMENT.  Two of the directories this script builds
+# inside the image are scratch: the lcov source staging tree and the in-guest helpers' source
+# tree.  Both are created, used through the chroot, and then removed RECURSIVELY -- and a
+# recursive delete is the single worst operation in this file to have redirected, because it
+# destroys rather than corrupts and it does so as root.
+#
+# The confinement bounds WHERE a delete can land: routed through the chroot (see
+# remove_tree_in_image below) it cannot name a host path at all, and routed through the primitive
+# it cannot traverse a link.  Neither of them answers a different question -- IS THIS STILL THE
+# DIRECTORY I MADE?  A directory swapped for another directory is not a symbolic link and is not
+# outside the image, so nothing above notices it; only its identity does.
+#
+# So the identity is captured the moment the directory is created and compared immediately before
+# the delete.  st_dev and st_ino together name an object uniquely on a mounted filesystem, they
+# are read through the descriptor the confinement opened rather than by a second pathname lookup,
+# and a mismatch is fatal with a diagnostic that says which field moved.  This is the
+# "verify device/inode ownership before cleanup" half of the finding this addresses, and it is
+# the same technique make_work_dir() already applies to the host-side scratch directory.
+# ------------------------------------------------------------------------------------
+
+# The identity of an in-image directory, as the confinement sees it, on stdout.  Fatal when the
+# path is absent, refused or not a directory: an identity that cannot be read is not an identity
+# that can be compared later, and recording an empty one would make the comparison below pass
+# vacuously.
+confined_identity() { # $1=relative  $2=what it is  $3=what is about to happen  -> record on stdout
+    local record status=0
+    record="$(confined_stat "$1" "$3")" || status=$?
+    [ "$status" -eq 0 ] || confined_io_die "$status" "$1" "$2" "$3"
+    local type_field device inode
+    type_field="$(confined_stat_field "$record" 1)"
+    device="$(confined_stat_field "$record" 2)"
+    inode="$(confined_stat_field "$record" 3)"
+    [ "$type_field" = 'directory' ] || die "refusing to $3 ($2): the in-image path
+           $1
+       is a $type_field rather than a directory at the moment its identity was recorded.  This
+       script created it as a directory, so something else is at that name.  Inspect the base
+       tarball."
+    case "${device:-x}${inode:-x}" in
+        *[!0-9]*) die "refusing to $3 ($2): the device and inode of the in-image path
+           $1
+       came back as '${device:-<empty>}'/'${inode:-<empty>}', which are not numbers, so its
+       identity cannot be recorded and a later delete could not be checked against it.  This is
+       a defect in $SCRIPT_NAME." ;;
+    esac
+    printf '%s\n' "$record"
+}
+
+# The comparison.  Called immediately before the delete, never earlier: the value of this check
+# is entirely in how little happens between it and the operation it guards.
+assert_confined_identity_unchanged() { # $1=relative  $2=recorded record  $3=what it is  $4=doing
+    local relative="$1" recorded="$2" what="$3" doing="$4" now status=0
+    now="$(confined_stat "$relative" "$doing")" || status=$?
+    if [ "$status" -ne 0 ]; then
+        confined_io "$relative" stat >/dev/null || true
+        die "refusing to $doing ($what): the in-image path
+           $relative
+       can no longer be inspected through the confinement, so it cannot be established that it
+       is still the directory this script created and is about to delete RECURSIVELY AS ROOT.
+       Refused rather than deleted; the helper's own diagnosis is on the line above."
+    fi
+    local was_type was_device was_inode now_type now_device now_inode
+    was_type="$(confined_stat_field "$recorded" 1)"
+    was_device="$(confined_stat_field "$recorded" 2)"
+    was_inode="$(confined_stat_field "$recorded" 3)"
+    now_type="$(confined_stat_field "$now" 1)"
+    now_device="$(confined_stat_field "$now" 2)"
+    now_inode="$(confined_stat_field "$now" 3)"
+    if [ "$was_type" != "$now_type" ] || [ "$was_device" != "$now_device" ] \
+       || [ "$was_inode" != "$now_inode" ]; then
+        die "REFUSING TO $doing ($what): the in-image path
+           $relative
+       CHANGED IDENTITY between the moment this script created it and now.  It was a $was_type on
+       device $was_device with inode $was_inode; it is a $now_type on device $now_device with
+       inode $now_inode.  Something replaced the object at that name while this image was being
+       built, and the operation about to run is a RECURSIVE DELETE AS ROOT -- so it is refused
+       rather than aimed at whatever is there instead.  The image is NOT published."
+    fi
+}
+
+# The confined replacement for `[ -x "$IMAGE_MOUNT$path" ]`, which followed symbolic links and
+# tested a HOST file's executability whenever a component of the in-image path was a link.
+#
+# "Executable" is read from the mode field of the record the confinement opened: any of the three
+# execute bits satisfies it, because everything that runs these files -- the chroot here and the
+# guest's init later -- runs as root, and root needs only one.  A non-regular object at the name
+# is refused rather than measured, and a symbolic link never gets that far: confined_regular_file
+# refuses it first, which is the whole reason this is not a `[ -x ]`.
+assert_installed_executable() { # $1=relative  $2=path as shown  $3=what it is  $4=doing
+    local relative="$1" shown="$2" what="$3" doing="$4" record mode
+    if ! confined_regular_file "$relative" "$shown" "$doing"; then
+        die "$what was not installed at $shown inside the image: nothing exists at that path
+       after the step that builds it reported success.  The image is NOT published."
+    fi
+    record="$(confined_stat "$relative" "$doing")" \
+        || die "$what exists at $shown inside the image but its mode could not be read, so it
+       cannot be established that it is executable.  The image is NOT published."
+    mode="$(confined_stat_field "$record" 6)"
+    case "$mode" in
+        ''|*[!0-7]*) die "the mode of $what at $shown inside the image came back as
+           '${mode:-<empty>}'
+       which is not an octal mode, so its executability cannot be established.  This is a defect
+       in $SCRIPT_NAME." ;;
+    esac
+    case "$mode" in
+        *[1357]|*[1357][0-7]|*[1357][0-7][0-7]) : ;;
+        *) die "$what was installed at $shown inside the image but its mode is $mode, which
+       carries no execute bit.  The guest's init runs it directly, so an unexecutable file there
+       is a boot-time failure with no diagnosis.  The image is NOT published." ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------------
+# THE START-UP PROOF.  One positive case and five negative cases, in a private directory,
 # before one privileged byte is written.  A primitive that silently degraded to an ordinary open
 # would leave every claim in this file false, so the degradation is what this proves cannot have
 # happened -- and it proves it on THIS host and THIS kernel rather than from a version number.
@@ -2750,10 +3803,1028 @@ probe_confined_io_refusal() { # $1=relative  $2=operation  $3=required status  $
     log "  confined I/O: refused $what (status $status)"
 }
 
+# ==============================================================================
+# PINNED PRIVILEGED OPERATIONS -- THE MECHANISM THAT MAKES mount(2) AND chroot(2) CONSUME AN
+# OBJECT RATHER THAN A NAME
+# ==============================================================================
+# WHAT WAS STILL WRONG AFTER THE OTHER TWO MECHANISMS LANDED, STATED PLAINLY BECAUSE THE
+# COMMENTS IN THIS FILE USED TO CONCEDE IT AND CALL IT UNAVOIDABLE.
+#
+# The per-file primitive removed the second name lookup from every operation on an individual
+# file inside the image, and the private mount namespace bounded where a lost race could reach.
+# Neither of them changed the shape of the six privileged operations that name a DIRECTORY:
+# pin_directory_identity() recorded a directory's device and inode, assert_pinned_directory()
+# re-stat'ed THE SAME PATHNAME, and the syscall that followed then resolved that pathname a
+# THIRD time, independently.  That is still "validate the name, then use the name" -- and the
+# earlier revision of this block said so in terms, on the reasoning that there is no mount_at()
+# and no fchroot(), so no other shape was available.
+#
+# THE NAMESPACE DOES NOT CLOSE IT, WHICH IS THE PART WORTH BEING PRECISE ABOUT.  A private mount
+# namespace stops mount events propagating to the parent; it does not freeze directory entries
+# and it does not make the host filesystem unreachable from inside.  A chroot target substituted
+# for a directory that reaches the host tree is still a chroot onto the host tree, inside the
+# namespace, as root.
+#
+# WHAT REPLACES IT: THE DESCRIPTOR IS RETAINED, VERIFIED AND THEN CONSUMED.
+#
+#   * chroot.  The image root is opened O_DIRECTORY|O_RDONLY|O_NOFOLLOW, its identity is checked
+#     by FSTAT ON THAT DESCRIPTOR against the pin, and the entry is then fchdir(fd) followed by
+#     chroot(".").  "." resolves against the working directory the descriptor established, so
+#     between the check and the use there is no name for anything to re-point.  There is no
+#     fchroot(), but there did not need to be one.
+#   * mount.  mount(2) takes no descriptor, but a mount whose TARGET is /proc/self/fd/N consumes
+#     the object that descriptor already refers to: the kernel resolves the magic link straight
+#     to the pinned (mount, dentry) pair instead of walking the components of a name again.
+#     Every one of the four pseudo-filesystem mounts and the nosymfollow remount is performed
+#     that way, in the same process that opened and verified the descriptor.
+#   * IDENTITY IS VERIFIED ON THE DESCRIPTOR AND NEVER ON THE PATHNAME AGAIN.  That is the whole
+#     point: a further stat by name would reintroduce exactly what this removes.  The values it
+#     is checked against are the ones pin_directory_identity() recorded and the ones the
+#     confined primitive read through its own descriptor -- so both ends of the comparison come
+#     from an fstat.
+#
+# IT IS DEFENCE IN DEPTH ADDED TO EVERYTHING THAT WAS ALREADY THERE, AND IT REPLACES NOTHING.
+# The private mount namespace, the openat2 confinement with its no-symlink and no-cross-device
+# refusals, the four mount points created and type-checked through the primitive, the propagation
+# measured back from /proc/self/mountinfo, and the pathname identity checks
+# (assert_pinned_directory / assert_image_root_pinned) are all still in force and still called at
+# the same places.  What they are now is the PRE-CHECKS: they produce the diagnostic that names
+# the object and the field that moved, which an errno cannot, and the descriptor below is what
+# carries the guarantee.
+#
+# FAIL CLOSED, LOUDLY, AND NEVER BACK TO THE PATHNAME FORM.  A descriptor that cannot be opened,
+# an fstat that disagrees with the pin, a target the confinement refuses, a kernel without
+# openat2 and a helper that is not installed are all fatal, each with its own exit status and its
+# own message naming what failed.  There is no arm anywhere below that falls back to
+# `mount ... "$IMAGE_MOUNT/proc"` or to `chroot "$IMAGE_MOUNT"`, because that fallback is the
+# defect this mechanism replaced.  And it is PROVEN on this host before one privileged byte is
+# written: probe_pinned_op() runs two positive cases and seven refusals in a private directory
+# during make_work_dir(), exactly as probe_confined_io() does for the per-file primitive.
+#
+# WHY A SECOND HELPER RATHER THAN MORE OPERATIONS IN THE FIRST.  confined-io.py is proven by a
+# 55-case self-test and every privileged in-image write in this script goes through it; the two
+# operations here are not file operations, they change this PROCESS (its root) and the MOUNT
+# TABLE, and one of them deliberately never returns.  Keeping them apart leaves that helper
+# byte-identical and gives each mechanism its own proof.  The conventions are the same ones --
+# anchored open, one exit status per condition, a dieing shell wrapper per operation -- because a
+# reader who has understood one has then understood both.
+# ==============================================================================
+
+# The helper's leaf name inside this run's scratch directory, the descriptor-anchored location it
+# was written to, and the interpreter that runs it.  Empty until install_pinned_op_helper() has
+# run.
+readonly PINNED_OP_HELPER_LEAF='pinned-op.py'
+PINNED_OP_HELPER=''
+# RESOLVED TO AN ABSOLUTE PATH, DELIBERATELY.  The two chroot entry points invoke this helper
+# under `env -i`, which replaces PATH with the one the in-image command needs -- so a bare
+# `python3` there would be looked up on the IMAGE's search path rather than the build host's.
+# The interpreter is therefore resolved once, on the host, and named absolutely at every call.
+PINNED_OP_PYTHON=''
+# Raised only by probe_pinned_op() once the mechanism has been proven to refuse what it must.
+PINNED_OP_PROVEN=0
+
+# THE HELPER'S EXIT STATUSES.  One per condition, for the same reason the per-file helper has
+# them: "it failed" is not an answer a privileged mount or chroot may act on.  They are
+# deliberately a different range from the confined I/O statuses so that a status crossing between
+# the two mechanisms cannot be misread as the wrong condition.
+readonly PINNED_OP_USAGE=20
+readonly PINNED_OP_UNAVAILABLE=21
+readonly PINNED_OP_REFUSED=22
+readonly PINNED_OP_ABSENT=23
+readonly PINNED_OP_WRONG_TYPE=24
+readonly PINNED_OP_IDENTITY=25
+readonly PINNED_OP_FAILED=26
+readonly PINNED_OP_ANCHOR_BAD=27
+# THE ONE RESERVED STATUS.  chroot-exec replaces the helper process with the command, so the
+# shell reads the COMMAND's exit status and cannot also be handed one of the granular values
+# above without the two being indistinguishable.  Every custody failure on that operation
+# therefore collapses to this single value -- which no command this script runs inside the image
+# uses -- and the wrapper treats it as fatal.  The granular reason still reaches stderr.
+readonly PINNED_OP_CUSTODY_REFUSED=120
+
+# Write the helper into $1 at mode 0600 and record where it went, along with the interpreter that
+# will run it.  Called with this run's scratch directory in the normal path and with a private
+# probe directory by --self-test, so the source exists in exactly one place in this file and on
+# disk in exactly one place per caller.
+install_pinned_op_helper() { # $1=directory to write the helper into
+    local dir="$1" target interpreter
+    [ -n "$dir" ] || die "internal error: install_pinned_op_helper was called without a
+       directory.  This is a defect in $SCRIPT_NAME."
+    [ -d "$dir" ] || die "internal error: install_pinned_op_helper was given '$dir', which is not
+       a directory.  This is a defect in $SCRIPT_NAME."
+    interpreter="$(command -v -- python3 2>/dev/null || printf '')"
+    case "$interpreter" in
+        /*) : ;;
+        *) die "python3 could not be resolved to an absolute path on this host
+           ${interpreter:-<not found on PATH>}
+       and it is what performs this script's privileged mounts and chroots: both consume a
+       descriptor this helper opens and verifies, and neither has a shell form that could do it.
+       There is no pathname fallback.  Install python3 (it is already a hard prerequisite of the
+       confined I/O primitive) and re-run." ;;
+    esac
+    target="$dir/$PINNED_OP_HELPER_LEAF"
+    rm -f -- "$target" || die "could not clear the pinned privileged-operation helper's path at
+       $target."
+    cat > "$target" <<'PINNED_OP_PY'
+# Pinned privileged-operation helper -- the descriptor-consuming form of mount(2) and chroot(2).
+#
+# GENERATED FILE.  Written by .github/workflows/aidl-path-tests-rootfs.sh in the hdmicec
+# submodule; edit that script, not this copy, which is recreated on every run.
+#
+#   usage: pinned-op.py <anchor-directory> <anchor-dev> <anchor-inode> \
+#                       <target-relative|.> <target-dev|-> <target-inode|-> \
+#                       <operation> [operation arguments]
+#
+# WHAT THIS EXISTS TO REMOVE.  mount(2) and chroot(2) take a pathname, so a caller that
+# validates a pathname and then hands the SAME pathname to the syscall has validated one object
+# and used whatever the name resolves to at the instant of the call -- check-then-use (CWE-367),
+# with root on the far side of it.  Re-stating the check closer to the syscall narrows the
+# window; it does not close it, because the syscall performs its own independent resolution.
+#
+# WHAT REPLACES IT: THE OBJECT, NOT THE NAME, IS WHAT GETS USED.
+#
+#   * The anchor is opened O_DIRECTORY|O_RDONLY|O_NOFOLLOW and its identity is verified by
+#     fstat ON THAT DESCRIPTOR against the device and inode the calling script pinned when it
+#     created or mounted it.  A pathname is never stat'ed again.
+#   * A target beneath the anchor is resolved with openat2(2) under
+#     RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV -- the same confinement the per-file
+#     helper uses -- and its identity is verified by fstat on the resulting descriptor.
+#   * chroot CONSUMES the descriptor: fchdir(fd) then chroot(".").  "." resolves against the
+#     working directory the descriptor established, so no pathname lookup can be redirected
+#     between the check and the use.
+#   * mount(2) has no descriptor-taking form, but a mount whose TARGET is given as
+#     /proc/self/fd/N consumes the object that descriptor already refers to: the kernel
+#     resolves the magic link to the pinned (mount, dentry) pair directly instead of walking
+#     the components of a name again.  Every mount here is performed that way, in the same
+#     process that holds and verified the descriptor.
+#
+# THERE IS NO FALLBACK TO THE PATHNAME FORM.  Every failure below -- an anchor that cannot be
+# opened, a target the confinement refuses, an fstat that disagrees with the pin, a kernel
+# without openat2 -- exits non-zero with the status that names it and performs nothing.
+#
+# Operations:
+#   verify                              nothing; proves the anchor and the target are the pinned
+#                                       objects and that the chain above works on this host
+#   mount-fs <fstype> <source>          mount(source, /proc/self/fd/N, fstype, 0, NULL)
+#   mount-bind <source>                 mount(source, /proc/self/fd/N, NULL, MS_BIND, NULL)
+#   mount-bind-under <source> <parent-dev> <parent-inode>
+#                                       the one target that CANNOT be resolved by openat2 --
+#                                       see the comment on resolve_under_mount()
+#   remount-nosymfollow                 mount(NULL, /proc/self/fd/N, NULL,
+#                                       MS_REMOUNT|MS_NOSYMFOLLOW, NULL)
+#   chroot-exec <command> [arguments]   fchdir(fd), chroot("."), chdir("/"), execvp(command)
+#
+# Exit statuses are a contract with the calling shell; see the block above
+# install_pinned_op_helper in that script.
+import ctypes
+import errno
+import os
+import stat
+import sys
+
+USAGE = 20
+UNAVAILABLE = 21
+REFUSED = 22
+ABSENT = 23
+WRONG_TYPE = 24
+IDENTITY = 25
+FAILED = 26
+ANCHOR_BAD = 27
+# THE ONE RESERVED STATUS.  chroot-exec replaces this process with the command, so the shell
+# reads the COMMAND's status and cannot be handed one of the granular values above without it
+# being indistinguishable from that command's own exit code.  Every custody failure on that
+# operation therefore collapses to this single value, which no command this script runs inside
+# the image uses, and the calling wrapper treats it as fatal.  The granular reason is still
+# printed to stderr.
+CUSTODY_REFUSED = 120
+
+SYS_OPENAT2 = 437
+RESOLVE_NO_XDEV = 0x01
+RESOLVE_NO_SYMLINKS = 0x04
+RESOLVE_BENEATH = 0x08
+# RESOLVE_NO_SYMLINKS implies RESOLVE_NO_MAGICLINKS, so a /proc magic link cannot be used as a
+# path component either.  These three together are the whole confinement, and they are the same
+# three the per-file helper uses.
+RESOLVE_FLAGS = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV
+
+MS_REMOUNT = 0x20
+MS_NOSYMFOLLOW = 0x100
+MS_BIND = 0x1000
+
+DIRECTORY_FLAGS = os.O_DIRECTORY | os.O_RDONLY | os.O_CLOEXEC
+
+# Raised for the whole of the pre-chroot phase of chroot-exec; see CUSTODY_REFUSED.
+EXEC_MODE = False
+
+
+class OpenHow(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_uint64),
+        ("mode", ctypes.c_uint64),
+        ("resolve", ctypes.c_uint64),
+    ]
+
+
+_libc = ctypes.CDLL(None, use_errno=True)
+_libc.syscall.restype = ctypes.c_long
+_libc.mount.restype = ctypes.c_int
+_libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                        ctypes.c_ulong, ctypes.c_void_p]
+
+
+def fail(status, message):
+    sys.stderr.write("pinned-op: %s\n" % message)
+    if EXEC_MODE:
+        sys.stderr.write("pinned-op: the chroot was NOT entered; reported as status %d "
+                         "(custody refused) because this operation replaces the process and "
+                         "cannot return a distinguishable one.\n" % CUSTODY_REFUSED)
+        sys.exit(CUSTODY_REFUSED)
+    sys.exit(status)
+
+
+def errno_name(err):
+    return errno.errorcode.get(err, str(err))
+
+
+def describe(st):
+    if stat.S_ISREG(st.st_mode):
+        return "regular file"
+    if stat.S_ISDIR(st.st_mode):
+        return "directory"
+    if stat.S_ISLNK(st.st_mode):
+        return "symbolic link"
+    if stat.S_ISFIFO(st.st_mode):
+        return "fifo"
+    if stat.S_ISSOCK(st.st_mode):
+        return "socket"
+    if stat.S_ISBLK(st.st_mode):
+        return "block device"
+    if stat.S_ISCHR(st.st_mode):
+        return "character device"
+    return "object of an unknown type"
+
+
+def openat2_raw(dirfd, relative, flags):
+    """openat2() beneath dirfd with the confinement flags.  Returns (fd, 0) or (-1, errno)."""
+    how = OpenHow(flags, 0, RESOLVE_FLAGS)
+    ctypes.set_errno(0)
+    fd = _libc.syscall(
+        ctypes.c_long(SYS_OPENAT2),
+        ctypes.c_int(dirfd),
+        ctypes.c_char_p(relative.encode("utf-8", "surrogateescape")),
+        ctypes.byref(how),
+        ctypes.c_size_t(ctypes.sizeof(how)),
+    )
+    if fd >= 0:
+        return int(fd), 0
+    return -1, ctypes.get_errno()
+
+
+def openat2(dirfd, relative, flags):
+    """openat2_raw(), with every failure turned into the exit status that names it."""
+    fd, err = openat2_raw(dirfd, relative, flags)
+    if fd >= 0:
+        return fd
+    name = errno_name(err)
+    where = "%s (relative to the anchor)" % relative
+    if err in (errno.ENOSYS, errno.EOPNOTSUPP):
+        fail(UNAVAILABLE,
+             "this kernel does not implement openat2 (%s on %s). The privileged target cannot "
+             "be resolved under the confinement, and this helper does not fall back to an "
+             "ordinary pathname mount or chroot." % (name, where))
+    if err == errno.EINVAL:
+        fail(UNAVAILABLE,
+             "openat2 refused the resolve flags RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|"
+             "RESOLVE_NO_XDEV with EINVAL on %s. The kernel has the syscall but not the "
+             "confinement this helper requires." % where)
+    if err in (errno.ELOOP, errno.EXDEV):
+        fail(REFUSED,
+             "the confinement REFUSED %s with %s: the path is a symbolic link, passes through "
+             "one, leaves the anchor directory, or crosses a mount point." % (where, name))
+    if err == errno.ENOENT:
+        fail(ABSENT, "%s does not exist beneath the anchor." % where)
+    if err == errno.ENOTDIR:
+        fail(WRONG_TYPE,
+             "%s uses a non-directory as a path component, or is not a directory." % where)
+    fail(REFUSED, "the confined open of %s failed with %s." % (where, name))
+
+
+def fstat_or_fail(fd, shown):
+    try:
+        return os.fstat(fd)
+    except OSError as exc:
+        fail(FAILED, "the identity of %s could not be read from its descriptor (%s)."
+             % (shown, errno_name(exc.errno)))
+
+
+def verify_identity(fd, expected_dev, expected_ino, shown):
+    """The whole point of this helper: the identity is taken from an fstat ON THE DESCRIPTOR
+    that the privileged operation is about to consume, never from a second lookup of the
+    pathname.  A directory is required because every operation here mounts onto one or chroots
+    into one."""
+    st = fstat_or_fail(fd, shown)
+    if not stat.S_ISDIR(st.st_mode):
+        fail(WRONG_TYPE, "%s is a %s rather than a directory, so nothing is mounted onto it and "
+                         "nothing is chrooted into it." % (shown, describe(st)))
+    if st.st_dev != expected_dev or st.st_ino != expected_ino:
+        fail(IDENTITY,
+             "%s is NOT the object this run pinned: the descriptor just opened is device %d "
+             "inode %d, where device %d inode %d was recorded. The name was re-pointed at a "
+             "different object, so the privileged operation is refused rather than performed "
+             "through it." % (shown, st.st_dev, st.st_ino, expected_dev, expected_ino))
+    return st
+
+
+def open_anchor(anchor, expected_dev, expected_ino):
+    """The anchor is opened O_NOFOLLOW so that an anchor which is ITSELF a symbolic link is
+    refused rather than resolved, and its identity is then verified on the descriptor."""
+    try:
+        fd = os.open(anchor, DIRECTORY_FLAGS | os.O_NOFOLLOW)
+    except OSError as exc:
+        fail(ANCHOR_BAD,
+             "the anchor directory %s could not be opened as a directory that is not itself a "
+             "symbolic link (%s). Every target below is resolved against that descriptor, so "
+             "without it nothing is pinned." % (anchor, errno_name(exc.errno)))
+    verify_identity(fd, expected_dev, expected_ino, "the anchor directory %s" % anchor)
+    return fd
+
+
+def resolve_target(anchor_fd, anchor, relative, expected_dev, expected_ino):
+    """A descriptor on the object the privileged operation will consume.
+
+    '.' means the anchor itself, whose identity open_anchor() has already verified.  Anything
+    else is resolved beneath the anchor by openat2 under the confinement and verified on its own
+    descriptor."""
+    if relative == ".":
+        return anchor_fd, "the anchor directory %s" % anchor
+    fd = openat2(anchor_fd, relative, DIRECTORY_FLAGS)
+    shown = "%s/%s" % (anchor.rstrip("/"), relative)
+    verify_identity(fd, expected_dev, expected_ino, shown)
+    return fd, shown
+
+
+def resolve_under_mount(anchor_fd, anchor, relative, parent_dev, parent_ino):
+    """The one target that openat2 CANNOT resolve, and why it is a separate route rather than an
+    exception to the rule.
+
+    The fourth pseudo-filesystem target is <anchor>/dev/pts, and by the time it is mounted the
+    caller has already bind-mounted the host's /dev onto <anchor>/dev -- so resolving 'dev' now
+    CROSSES A MOUNT POINT, which RESOLVE_NO_XDEV refuses by design.  Resolving it before that
+    bind would name a different object: the image's own dev/pts directory, which the bind then
+    shadows, so a mount there would be invisible inside the chroot.  The target has to be the
+    pts directory AS IT IS REACHED THROUGH THE BIND, and that object cannot be identified in
+    advance because on the host it is hidden under the host's own devpts mount.
+
+    So the chain is walked by descriptor instead, one component at a time, with O_NOFOLLOW on
+    each so no symbolic link is ever followed, and what is verified is what CAN be verified:
+      * the anchor, by fstat, against the identity the caller pinned (done by open_anchor);
+      * the 'dev' component, by fstat, against the identity of the source the caller bound
+        there -- which proves the component resolved into that bind and not into anything else;
+      * the leaf, by fstat, as a directory on the SAME st_dev as its parent -- which proves the
+        last step did not cross into a further mount.
+    Nothing is resolved by a pathname the kernel walks again, and the mount consumes the leaf
+    descriptor."""
+    parts = [p for p in relative.split("/") if p not in ("", ".")]
+    if len(parts) != 2:
+        fail(USAGE, "'mount-bind-under' takes a two-component relative target such as "
+                    "'dev/pts'; '%s' is not one." % relative)
+    try:
+        parent_fd = os.open(parts[0], DIRECTORY_FLAGS | os.O_NOFOLLOW, dir_fd=anchor_fd)
+    except OSError as exc:
+        status = {errno.ENOENT: ABSENT, errno.ENOTDIR: WRONG_TYPE,
+                  errno.ELOOP: REFUSED}.get(exc.errno, FAILED)
+        fail(status, "the '%s' component of %s/%s could not be opened as a directory that is "
+                     "not a symbolic link (%s)." % (parts[0], anchor.rstrip("/"), relative,
+                                                    errno_name(exc.errno)))
+    parent_st = verify_identity(parent_fd, parent_dev, parent_ino,
+                                "%s/%s" % (anchor.rstrip("/"), parts[0]))
+    try:
+        leaf_fd = os.open(parts[1], DIRECTORY_FLAGS | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as exc:
+        status = {errno.ENOENT: ABSENT, errno.ENOTDIR: WRONG_TYPE,
+                  errno.ELOOP: REFUSED}.get(exc.errno, FAILED)
+        fail(status, "the '%s' component of %s/%s could not be opened as a directory that is "
+                     "not a symbolic link (%s)." % (parts[1], anchor.rstrip("/"), relative,
+                                                    errno_name(exc.errno)))
+    shown = "%s/%s" % (anchor.rstrip("/"), relative)
+    leaf_st = fstat_or_fail(leaf_fd, shown)
+    if not stat.S_ISDIR(leaf_st.st_mode):
+        fail(WRONG_TYPE, "%s is a %s rather than a directory, so nothing is mounted onto it."
+             % (shown, describe(leaf_st)))
+    if leaf_st.st_dev != parent_st.st_dev:
+        fail(REFUSED,
+             "%s is on device %d while its parent is on device %d, so resolving the last "
+             "component crossed a mount point. Refused rather than mounted onto: the target "
+             "is meant to be a plain directory of the filesystem bound at the parent."
+             % (shown, leaf_st.st_dev, parent_st.st_dev))
+    return leaf_fd, shown
+
+
+def mount_through_descriptor(source, target_fd, fstype, flags, shown, what):
+    """mount(2) with the target given as the magic link of a descriptor this process opened and
+    verified.  The kernel resolves that link to the exact (mount, dentry) pair the descriptor
+    refers to, so the target is the object that was checked and not the result of a second walk
+    of its name.  The SOURCE is still a pathname -- mount(2) has no other form for it -- and
+    every source this script passes is one of four fixed values it chose itself ('proc',
+    'sysfs', '/dev', '/dev/pts'), never a name anything untrusted can define."""
+    target = ("/proc/self/fd/%d" % target_fd).encode("ascii")
+    ctypes.set_errno(0)
+    rc = _libc.mount(None if source is None else source.encode("utf-8", "surrogateescape"),
+                     target,
+                     None if fstype is None else fstype.encode("ascii"),
+                     ctypes.c_ulong(flags),
+                     None)
+    if rc != 0:
+        err = ctypes.get_errno()
+        fail(FAILED, "%s failed: mount(2) returned %s onto the descriptor held on %s."
+             % (what, errno_name(err), shown))
+
+
+def op_verify(target_fd, shown, args):
+    """Nothing further: reaching here means the anchor and the target were opened and their
+    identities verified on their descriptors, which is exactly what the caller asked to prove."""
+    if args:
+        fail(USAGE, "'verify' takes no arguments.")
+    del target_fd, shown
+
+
+def op_mount_fs(target_fd, shown, args):
+    if len(args) != 2:
+        fail(USAGE, "'mount-fs' takes exactly two arguments: the filesystem type and the "
+                    "source.")
+    mount_through_descriptor(args[1], target_fd, args[0], 0, shown,
+                             "mounting the %s filesystem '%s'" % (args[0], args[1]))
+
+
+def op_mount_bind(target_fd, shown, args):
+    if len(args) != 1:
+        fail(USAGE, "'mount-bind' takes exactly one argument: the source directory.")
+    mount_through_descriptor(args[0], target_fd, None, MS_BIND, shown,
+                             "bind-mounting '%s'" % args[0])
+
+
+def op_mount_bind_under(target_fd, shown, args):
+    # The parent identity in args[1]/args[2] was consumed during resolution; it is validated
+    # there and re-checked for shape here so a malformed call cannot reach mount(2).
+    if len(args) != 3:
+        fail(USAGE, "'mount-bind-under' takes exactly three arguments: the source directory and "
+                    "the device and inode of the directory its parent component must turn out "
+                    "to be.")
+    mount_through_descriptor(args[0], target_fd, None, MS_BIND, shown,
+                             "bind-mounting '%s'" % args[0])
+
+
+def op_remount_nosymfollow(target_fd, shown, args):
+    if args:
+        fail(USAGE, "'remount-nosymfollow' takes no arguments.")
+    mount_through_descriptor(None, target_fd, None, MS_REMOUNT | MS_NOSYMFOLLOW, shown,
+                             "remounting with MS_NOSYMFOLLOW")
+
+
+def op_chroot_exec(target_fd, shown, args):
+    """THE DESCRIPTOR-CONSUMING chroot.  fchdir() moves this process's working directory to the
+    object the descriptor refers to -- no pathname is involved -- and chroot(".") then resolves
+    against that working directory, so there is no name for anything to redirect between the
+    fstat above and the chroot here.  chdir("/") afterwards is what chroot(8) does too: it
+    leaves the working directory at the new root by its new name rather than by the old one."""
+    global EXEC_MODE
+    if not args:
+        fail(USAGE, "'chroot-exec' takes the command to run inside the image, and its "
+                    "arguments.")
+    try:
+        os.fchdir(target_fd)
+    except OSError as exc:
+        fail(FAILED, "fchdir onto the verified descriptor for %s failed (%s), so the chroot "
+                     "cannot consume it." % (shown, errno_name(exc.errno)))
+    try:
+        os.chroot(".")
+    except OSError as exc:
+        fail(FAILED, "chroot(\".\") onto the verified descriptor for %s failed (%s)."
+             % (shown, errno_name(exc.errno)))
+    try:
+        os.chdir("/")
+    except OSError as exc:
+        fail(FAILED, "the working directory could not be set to the new root after chroot (%s)."
+             % errno_name(exc.errno))
+    # Past this point the process is inside the image and no host path is reachable by name, so
+    # a failure here is the command's own and is reported with chroot(8)'s own conventions
+    # rather than as a custody refusal.
+    EXEC_MODE = False
+    exec_in_image(list(args))
+
+
+def exec_in_image(argv):
+    """execvp(3)'s search, done with os.execv and nothing else.
+
+    WHY NOT os.execvp.  This process has already chrooted, so the python installation that is
+    running it is no longer reachable by name -- and CPython's os.execvp resolves PATH in python,
+    through a helper that imports a module LAZILY (measured on this host: 'No module named
+    warnings', then an exit status of 1 that says nothing about the command).  os.execv performs
+    no lookup and imports nothing, so the search is done here, over os.environ, exactly as
+    execvp(3) documents it: a name containing a slash is used as it stands, an empty PATH element
+    means the working directory, and an unset PATH falls back to the confstr default that
+    os.defpath already holds.
+
+    The status conventions are chroot(8)'s, because that is what this operation replaced: 127
+    when the command could not be found anywhere on the search path, 126 when it was found and
+    could not be invoked.  ENOEXEC is reported as 126 rather than retried through a shell --
+    every command this script runs inside the image is a real executable and a silent shell
+    fallback would hide a corrupt one."""
+    command = argv[0]
+    if "/" in command:
+        candidates = [command]
+    else:
+        search = os.environ.get("PATH", os.defpath)
+        candidates = [(element if element else ".") + "/" + command
+                      for element in search.split(":")]
+    not_invocable = None
+    for candidate in candidates:
+        try:
+            os.execv(candidate, argv)
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ENOTDIR):
+                not_invocable = exc.errno
+    if not_invocable is not None:
+        sys.stderr.write("pinned-op: '%s' was found inside the image but could not be invoked "
+                         "(%s).\n" % (command, errno_name(not_invocable)))
+        sys.exit(126)
+    sys.stderr.write("pinned-op: '%s' could not be found inside the image on the search path "
+                     "the chroot environment supplies.\n" % command)
+    sys.exit(127)
+
+
+OPERATIONS = {
+    "verify": op_verify,
+    "mount-fs": op_mount_fs,
+    "mount-bind": op_mount_bind,
+    "mount-bind-under": op_mount_bind_under,
+    "remount-nosymfollow": op_remount_nosymfollow,
+    "chroot-exec": op_chroot_exec,
+}
+# The operations for which the target identity is carried by the operation's own arguments
+# rather than by the target-dev/target-inode fields; see resolve_under_mount().
+PARENT_IDENTIFIED = ("mount-bind-under",)
+
+
+def parse_identity(text, what):
+    try:
+        value = int(text, 10)
+    except ValueError:
+        fail(USAGE, "the %s must be a decimal number, not '%s'." % (what, text))
+    if value < 0:
+        fail(USAGE, "the %s must not be negative ('%s')." % (what, text))
+    return value
+
+
+def main(argv):
+    global EXEC_MODE
+    if len(argv) < 8:
+        fail(USAGE, "usage: pinned-op.py <anchor-directory> <anchor-dev> <anchor-inode> "
+                    "<target-relative|.> <target-dev|-> <target-inode|-> <operation> "
+                    "[arguments]")
+    anchor, anchor_dev, anchor_ino = argv[1], argv[2], argv[3]
+    relative, target_dev, target_ino = argv[4], argv[5], argv[6]
+    operation, args = argv[7], argv[8:]
+    handler = OPERATIONS.get(operation)
+    if handler is None:
+        fail(USAGE, "unknown operation '%s'; known operations are %s."
+             % (operation, ", ".join(sorted(OPERATIONS))))
+    if operation == "chroot-exec":
+        # Raised BEFORE anything is opened, so every custody failure on this operation reports
+        # the reserved status rather than one the exec'd command could also have produced.
+        EXEC_MODE = True
+    if not anchor.startswith("/"):
+        fail(USAGE, "the anchor directory must be an absolute path.")
+    if relative.startswith("/"):
+        fail(USAGE, "the target must be relative to the anchor, or '.' for the anchor itself.")
+    if not relative:
+        fail(USAGE, "the target must be non-empty; use '.' for the anchor itself.")
+    anchor_dev = parse_identity(anchor_dev, "anchor device")
+    anchor_ino = parse_identity(anchor_ino, "anchor inode")
+
+    # THE IDENTITY FIELDS ARE NOT OPTIONAL, AND THERE IS NO ARM THAT SKIPS THE CHECK.  '-' is
+    # accepted in exactly two cases and required in both: the target IS the anchor, whose
+    # identity has just been verified, or the operation carries the identity it verifies in its
+    # own arguments.  Any other combination is a caller defect and is refused here.
+    if relative == "." or operation in PARENT_IDENTIFIED:
+        if target_dev != "-" or target_ino != "-":
+            fail(USAGE, "the target device and inode must both be '-' for '%s' on target '%s': "
+                        "the identity that is verified comes from the anchor pin or from the "
+                        "operation's own arguments." % (operation, relative))
+    else:
+        target_dev = parse_identity(target_dev, "target device")
+        target_ino = parse_identity(target_ino, "target inode")
+
+    anchor_fd = open_anchor(anchor, anchor_dev, anchor_ino)
+    if operation in PARENT_IDENTIFIED:
+        if len(args) != 3:
+            fail(USAGE, "'%s' takes exactly three arguments: the source and the device and "
+                        "inode of its parent component." % operation)
+        target_fd, shown = resolve_under_mount(anchor_fd, anchor, relative,
+                                              parse_identity(args[1], "parent device"),
+                                              parse_identity(args[2], "parent inode"))
+    else:
+        target_fd, shown = resolve_target(anchor_fd, anchor, relative, target_dev, target_ino)
+    handler(target_fd, shown, args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+PINNED_OP_PY
+    [ -s "$target" ] || die "the pinned privileged-operation helper could not be written to
+       $target.  Every mount and chroot this script performs consumes a descriptor it opens and
+       verifies, so the run stops rather than falling back to a pathname mount or chroot."
+    chmod 0600 -- "$target" || die "could not set mode 0600 on the pinned privileged-operation
+       helper at $target."
+    PINNED_OP_HELPER="$target"
+    PINNED_OP_PYTHON="$interpreter"
+}
+
+# Turn one helper exit status into a `die` that names WHICH condition it was.  Never called for
+# status 0, and never called for chroot-exec: after a successful execve the status on the wire
+# belongs to the command that ran, not to the helper, which is exactly why that one operation
+# has a single reserved status of its own (see pinned_op_custody_die).
+pinned_op_die() { # $1=status  $2=path as shown  $3=what it is  $4=what was about to happen
+    local status="$1" shown="$2" what="$3" operation="$4"
+    case "$status" in
+        "$PINNED_OP_UNAVAILABLE")
+            die "refusing to $operation ($what): the descriptor-consuming form of this privileged
+       operation is NOT AVAILABLE on this host.  It needs openat2(2) -- Linux 5.6 or newer -- and
+       a python3 that can reach libc, because that is what lets the mount or chroot consume a
+       descriptor this script opened and verified instead of a pathname the kernel walks again.
+       There is NO fallback to the pathname form: the fallback is precisely the check-then-use
+       defect this mechanism exists to remove.  The target was: $shown" ;;
+        "$PINNED_OP_REFUSED")
+            die "refusing to $operation ($what): THE CONFINEMENT REFUSED the target
+           $shown
+       The kernel would not resolve it beneath the image mount point without following a symbolic
+       link, without leaving the image and without crossing a mount point.  Some component of it
+       -- leading or trailing -- is a link, or points out of the image, or a further filesystem
+       has been mounted at it.  Refused rather than resolved: this operation runs as root on the
+       BUILD HOST, so a link naming an absolute path would have it act on a HOST directory.  The
+       errno is on the line above." ;;
+        "$PINNED_OP_ABSENT")
+            die "refusing to $operation ($what): the target
+           $shown
+       does not exist.  This script created it a moment ago through the confinement, so something
+       is changing the image's contents while it is being built.  Nothing is mounted or chrooted
+       there." ;;
+        "$PINNED_OP_WRONG_TYPE")
+            die "refusing to $operation ($what): the target
+           $shown
+       is not a directory.  A privileged mount or chroot is not performed on the strength of a
+       filename, and a symbolic link never gets this far -- the descriptor is opened O_NOFOLLOW.
+       Inspect the base tarball." ;;
+        "$PINNED_OP_IDENTITY")
+            die "REFUSING TO $operation ($what): the descriptor opened on
+           $shown
+       IS NOT THE OBJECT THIS RUN PINNED.  The identity was compared by fstat(2) ON THE
+       DESCRIPTOR the operation was about to consume -- not by re-stat'ing a name -- and it
+       disagreed with the device and inode recorded when this script created or mounted that
+       directory.  The name has been re-pointed at a different object.  The comparison and the
+       numbers are on the line above.  Nothing is mounted or chrooted; the image is NOT
+       published." ;;
+        "$PINNED_OP_ANCHOR_BAD")
+            die "refusing to $operation ($what): the anchor directory
+           ${IMAGE_MOUNT:-<unset>}
+       could not be opened as a directory that is not itself a symbolic link, or the descriptor
+       opened on it is not the object this run pinned.  Every target is resolved against that
+       descriptor, so without it nothing below is pinned.  The diagnosis is on the line above." ;;
+        "$PINNED_OP_USAGE")
+            die "internal error while trying to $operation ($what): the pinned privileged-operation
+       helper was called with arguments it refused (target '$shown').  This is a defect in
+       $SCRIPT_NAME." ;;
+        "$PINNED_OP_FAILED")
+            die "could not $operation ($what): the operation on
+           $shown
+       failed after the descriptor was opened and its identity verified, so this is the syscall
+       itself reporting a fault rather than the confinement refusing anything.  The errno is on
+       the line above.  The image is NOT published." ;;
+        "$PINNED_OP_CUSTODY_REFUSED")
+            pinned_op_custody_die "$shown" "$what" "$operation" ;;
+        *)
+            die "could not $operation ($what): the pinned privileged-operation helper exited
+       $status on
+           $shown
+       which this script has no reading for.  Refused rather than interpreted; this is a defect
+       in $SCRIPT_NAME." ;;
+    esac
+}
+
+# The chroot arm, separate because its status is a RESERVED one rather than a descriptive one.
+# execve replaces the helper, so after a successful chroot every status on the wire is the
+# command's own; a granular contract would therefore be indistinguishable from the command's
+# exit codes.  The helper raises its exec-mode flag BEFORE it opens anything, so every custody
+# failure on that operation -- anchor, confinement, type, identity, missing openat2 -- reports
+# exactly this one status and performs nothing.
+#
+# THE ONE AMBIGUITY, STATED RATHER THAN HIDDEN.  A command inside the image that itself exited
+# $PINNED_OP_CUSTODY_REFUSED would be read here as a custody failure and stop the run.  No
+# command this script runs in the image uses that status (they are apt-get, dpkg, dpkg-query,
+# tar, rm, gcc, g++, make, ldconfig, lcov, ldd, sh -c and /bin/true), and the trade is
+# deliberate: mistaking a command's exit code for a custody failure stops a build that would
+# have succeeded, while the converse would let a substituted chroot target through.
+pinned_op_custody_die() { # $1=path as shown  $2=what it is  $3=what was about to happen
+    local shown="$1" what="$2" operation="$3"
+    die "REFUSING TO $operation ($what): CUSTODY OF THE CHROOT TARGET COULD NOT BE ESTABLISHED at
+           $shown
+       The chroot here consumes a descriptor -- fchdir(fd) then chroot(\".\") -- so it cannot be
+       redirected by a name lookup, and it is not performed at all unless the descriptor opened
+       O_NOFOLLOW beneath the anchor fstat's equal to the device and inode this run pinned for
+       the image root.  One of those steps failed and the helper's own diagnosis is on the line
+       above.  There is no fallback to \`chroot <pathname>\`.  If this appears where a command
+       inside the image was expected to run, note that a command exiting
+       $PINNED_OP_CUSTODY_REFUSED of its own accord is indistinguishable from this condition;
+       nothing this script runs inside the image does so."
+}
+
+# The guard every wrapper shares.  Like confined_io_ready this is an internal-consistency check
+# rather than a runtime condition: it catches a future edit that moves a privileged mount or a
+# chroot ahead of the helper's installation and proof, which would otherwise perform it through
+# a pathname with nothing pinned.
+pinned_op_ready() { # $1=what is about to happen, for the message
+    local operation="$1"
+    [ "$PINNED_OP_PROVEN" -eq 1 ] || die "internal error: '$operation' was attempted before
+       probe_pinned_op() had PROVEN, on this host and this kernel, that the descriptor-consuming
+       form of mount and chroot works and that it refuses a substituted target.  Refused rather
+       than attempted: an unproven mechanism is indistinguishable from the pathname form it
+       replaced, and every comment in $SCRIPT_NAME about the mounts and the chroot consuming a
+       descriptor would be false.  This is a defect in $SCRIPT_NAME."
+    [ -n "$PINNED_OP_HELPER" ] || die "internal error: '$operation' was attempted before the
+       pinned privileged-operation helper was installed, so it would have run through a
+       pathname.  This is a defect in $SCRIPT_NAME."
+    [ -f "$PINNED_OP_HELPER" ] || die "the pinned privileged-operation helper has disappeared
+       from $PINNED_OP_HELPER.  Every mount and chroot this script performs goes through it, so
+       '$operation' is refused."
+    [ -n "$PINNED_OP_PYTHON" ] || die "internal error: '$operation' was attempted before the
+       interpreter that runs the pinned privileged-operation helper had been resolved to an
+       absolute path.  It is invoked under \`env -i\` with the IMAGE's PATH, so a bare name would
+       be looked up on the wrong search path.  This is a defect in $SCRIPT_NAME."
+    [ -x "$PINNED_OP_PYTHON" ] || die "the interpreter that runs the pinned
+       privileged-operation helper is no longer executable at
+           $PINNED_OP_PYTHON
+       so '$operation' is refused rather than performed through a pathname."
+}
+
+# The raw call.  Returns the helper's status; the caller decides what it means.  `-I -B` for the
+# same reason confined_io uses them: no PYTHON* variable, user site directory or PYTHONPATH from
+# the environment reaches a privileged helper, and no bytecode is written beside it.
+pinned_op() { # $1=anchor  $2=anchor device  $3=anchor inode  $4=target|.  $5=device|-
+              # $6=inode|-  $7=operation  [$8..]=operation arguments
+    "$PINNED_OP_PYTHON" -I -B "$PINNED_OP_HELPER" "$@"
+}
+
+# The same, anchored on the image root and checked against the identity create_and_mount_image()
+# pinned for it.  Every privileged mount and chroot below goes through this, so the anchor and
+# its pin appear once rather than at seven call sites.
+pinned_image_op() { # $1=target|.  $2=device|-  $3=inode|-  $4=operation  [$5..]=arguments
+    pinned_op "$IMAGE_MOUNT" "$IMAGE_ROOT_DEVICE" "$IMAGE_ROOT_INODE" "$@"
+}
+
+# --- The dieing wrappers.  $what and $operation appear only in messages. ------------------
+
+# Prove a target is the pinned object by opening it and fstat'ing the descriptor, without
+# performing anything through it.  Used by the start-up proof and available to any caller that
+# wants the custody check without the operation.
+pinned_image_verify() { # $1=target|.  $2=device|-  $3=inode|-  $4=what it is  $5=doing
+    local status=0
+    pinned_op_ready "$5"
+    pinned_image_op "$1" "$2" "$3" verify || status=$?
+    [ "$status" -eq 0 ] || pinned_op_die "$status" "$IMAGE_MOUNT/$1" "$4" "$5"
+}
+
+# mount(2) of a pseudo-filesystem onto a descriptor this helper opened and verified.  The
+# identity is supplied as the RECORD confined_identity produced for that target, so the value
+# compared by fstat is the one the confinement measured through openat2 rather than one read
+# back from a pathname.
+pinned_image_mount_fs() { # $1=target  $2=identity record  $3=fstype  $4=source  $5=what  $6=doing
+    local status=0
+    pinned_op_ready "$6"
+    pinned_image_op "$1" "$(confined_stat_field "$2" 2)" "$(confined_stat_field "$2" 3)" \
+        mount-fs "$3" "$4" || status=$?
+    [ "$status" -eq 0 ] || pinned_op_die "$status" "$IMAGE_MOUNT/$1" "$5" "$6"
+}
+
+# The same for a bind mount.  The SOURCE is still a pathname because mount(2) has no other form
+# for it; every source this script passes is one of two fixed values it chose itself.
+pinned_image_mount_bind() { # $1=target  $2=identity record  $3=source  $4=what  $5=doing
+    local status=0
+    pinned_op_ready "$5"
+    pinned_image_op "$1" "$(confined_stat_field "$2" 2)" "$(confined_stat_field "$2" 3)" \
+        mount-bind "$3" || status=$?
+    [ "$status" -eq 0 ] || pinned_op_die "$status" "$IMAGE_MOUNT/$1" "$4" "$5"
+}
+
+# The one target that openat2 cannot resolve, walked by descriptor a component at a time; the
+# reasoning is on resolve_under_mount() in the helper.  The parent's identity is that of the
+# SOURCE already bound at it, which is what proves the component resolved into that bind.
+pinned_image_mount_bind_under() { # $1=target  $2=parent device  $3=parent inode  $4=source
+                                  # $5=what  $6=doing
+    local status=0
+    pinned_op_ready "$6"
+    pinned_image_op "$1" - - mount-bind-under "$4" "$2" "$3" || status=$?
+    [ "$status" -eq 0 ] || pinned_op_die "$status" "$IMAGE_MOUNT/$1" "$5" "$6"
+}
+
+# The remount, whose target is the anchor itself -- so the identity checked is the image-root pin
+# open_anchor() already verified on the descriptor.
+#
+# THIS ONE RETURNS A STATUS RATHER THAN DYING ON EVERY NON-ZERO ONE, and the split is the point:
+# a CUSTODY failure is fatal here exactly as it is everywhere else, while mount(2) itself
+# refusing MS_NOSYMFOLLOW is the legitimate "this kernel or filesystem does not offer it" case
+# that try_nosymfollow_remount() reports and proceeds without.  Distinguishing them is why the
+# helper has a separate status for a syscall fault.
+pinned_image_remount_nosymfollow() { # $1=what it is  $2=doing   -> 0 on success, 1 if mount(2) refused
+    local status=0
+    pinned_op_ready "$2"
+    pinned_image_op . - - remount-nosymfollow 2>/dev/null || status=$?
+    [ "$status" -ne 0 ] || return 0
+    if [ "$status" -eq "$PINNED_OP_FAILED" ]; then
+        return 1
+    fi
+    pinned_op_die "$status" "$IMAGE_MOUNT" "$1" "$2"
+}
+
+# ------------------------------------------------------------------------------------
+# THE START-UP PROOF FOR THE PINNED OPERATIONS.  Two positive cases, eight negative cases and the
+# exec path's reserved refusal, in a private directory, before one privileged mount or chroot is
+# performed.
+#
+# WHY THE MOUNT AND CHROOT OPERATIONS THEMSELVES ARE NOT AMONG THE CASES, STATED RATHER THAN
+# LEFT AS AN OMISSION.  What can fail silently here is the CUSTODY CHAIN -- the anchor open, the
+# openat2 resolution, the descriptor walk and the fstat comparison -- because a helper that
+# skipped any of those would still report success and every claim in this file would be false.
+# That chain is identical for all six operations: they differ only in which syscall consumes the
+# descriptor at the end, and `verify` is that chain with no syscall at the end, so exercising it
+# exercises exactly what could degrade.  The syscalls themselves cannot be rehearsed in a scratch
+# directory without mounting or chrooting there, which would be a privileged operation performed
+# before the proof that licenses it; they are instead exercised once, for real, at the seven call
+# sites, each of which is fatal on failure.  The exec path IS proven, because its refusal uses a
+# reserved status that nothing else produces and a silent success there is unrecoverable.
+#
+# It is fatal on every arm: a positive case that fails means the mechanism does not work, and a
+# negative case that SUCCEEDS means it is not pinning anything.
+# ------------------------------------------------------------------------------------
+probe_pinned_op() { # $1=a private directory to probe in
+    local root="$1" anchor outside device inode wrong_inode status=0
+
+    if [ -z "$root" ] || [ ! -d "$root" ]; then
+        die "internal error: probe_pinned_op was given '${root:-<empty>}', which is not a
+       directory.  This is a defect in $SCRIPT_NAME."
+    fi
+    pinned_op_ready_for_probe
+
+    anchor="$root/pinned-op-probe"
+    outside="$root/pinned-op-outside"
+    rm -rf -- "$anchor" "$outside" || die "could not clear the pinned-operation probe directory
+       under $root."
+    mkdir -p -- "$anchor/beneath" || die "could not create the pinned-operation probe directory
+       $anchor/beneath."
+    mkdir -p -- "$outside/target" || die "could not create the pinned-operation probe's control
+       directory $outside/target."
+    ln -sfn "$outside/target" "$anchor/absolute-link" || die "could not create the
+       pinned-operation probe's absolute symbolic link."
+    ln -sfn 'beneath' "$anchor/relative-link" || die "could not create the pinned-operation
+       probe's relative symbolic link."
+
+    device="$(stat -c '%d' -- "$anchor" 2>/dev/null || printf '')"
+    inode="$(stat -c '%i' -- "$anchor" 2>/dev/null || printf '')"
+    if [ -z "$device" ] || [ -z "$inode" ]; then
+        die "the pinned-operation probe's own anchor directory $anchor could not be measured, so
+       the mechanism that pins every privileged mount and chroot cannot be proven.  The run
+       stops rather than proceeding on an unproven mechanism."
+    fi
+    wrong_inode=$((inode + 1))
+
+    # POSITIVE, twice.  The anchor is openable and its descriptor fstat's to the pinned identity;
+    # so does a directory resolved beneath it through openat2.
+    pinned_op "$anchor" "$device" "$inode" . - - verify >/dev/null 2>&1 \
+        || die "the pinned-operation helper could NOT open its own probe anchor directory and
+       verify its identity on the descriptor during the start-up proof.  Every privileged mount
+       and chroot in this script consumes a descriptor obtained and checked exactly that way, so
+       the run stops here rather than falling back to a pathname mount or chroot."
+    local beneath_device beneath_inode
+    beneath_device="$(stat -c '%d' -- "$anchor/beneath" 2>/dev/null || printf '')"
+    beneath_inode="$(stat -c '%i' -- "$anchor/beneath" 2>/dev/null || printf '')"
+    pinned_op "$anchor" "$device" "$inode" beneath "$beneath_device" "$beneath_inode" verify \
+        >/dev/null 2>&1 || die "the pinned-operation helper could NOT resolve a plain directory
+       beneath its own probe anchor through openat2 and verify the resulting descriptor's
+       identity during the start-up proof.  The run stops rather than proceeding on an unproven
+       mechanism."
+
+    # NEGATIVE, eight of them, each of which MUST be refused with the status that names it.  A
+    # success on any of them means the custody chain is not checking what it claims to check.
+    probe_pinned_op_refusal "$anchor" "$device" "$wrong_inode" . - - verify \
+        "$PINNED_OP_IDENTITY" \
+        'an ANCHOR whose descriptor does not fstat to the pinned inode'
+    probe_pinned_op_refusal "$anchor/relative-link" "$device" "$inode" . - - verify \
+        "$PINNED_OP_ANCHOR_BAD" \
+        'an ANCHOR that is itself a symbolic link (opened O_DIRECTORY|O_NOFOLLOW)'
+    probe_pinned_op_refusal "$anchor" "$device" "$inode" beneath "$beneath_device" \
+        "$((beneath_inode + 1))" verify "$PINNED_OP_IDENTITY" \
+        'a TARGET whose descriptor does not fstat to the pinned inode'
+    probe_pinned_op_refusal "$anchor" "$device" "$inode" absolute-link - - verify \
+        "$PINNED_OP_USAGE" \
+        'a target given without the identity it must be checked against'
+    probe_pinned_op_refusal "$anchor" "$device" "$inode" absolute-link "$beneath_device" \
+        "$beneath_inode" verify "$PINNED_OP_REFUSED" \
+        'a symbolic link whose target is an absolute path outside the anchor'
+    probe_pinned_op_refusal "$anchor" "$device" "$inode" relative-link "$beneath_device" \
+        "$beneath_inode" verify "$PINNED_OP_REFUSED" \
+        'a symbolic link whose target is inside the anchor (refused too: no link is followed)'
+    probe_pinned_op_refusal "$anchor" "$device" "$inode" ../pinned-op-outside/target \
+        "$beneath_device" "$beneath_inode" verify "$PINNED_OP_REFUSED" \
+        'a target that climbs out of the anchor with .. (RESOLVE_BENEATH, not a check of ours)'
+    probe_pinned_op_refusal "$anchor" "$device" "$inode" beneath/absent "$beneath_device" \
+        "$beneath_inode" verify "$PINNED_OP_ABSENT" \
+        'a target that is not there at all'
+
+    # THE EXEC PATH, PROVEN SEPARATELY.  chroot-exec reports every custody failure as one
+    # reserved status because execve leaves no other channel, so what has to be established is
+    # that the reserved status really is raised BEFORE anything is opened -- otherwise a
+    # substituted chroot target would be entered and the command run inside it.  /bin/true is
+    # named rather than a shell so that nothing but execve can affect the outcome.
+    status=0
+    pinned_op "$anchor" "$device" "$wrong_inode" . - - chroot-exec /bin/true \
+        >/dev/null 2>&1 || status=$?
+    if [ "$status" -eq 0 ]; then
+        die "THE PINNED-OPERATION HELPER DID NOT REFUSE A CHROOT ONTO AN ANCHOR WHOSE DESCRIPTOR
+       DOES NOT FSTAT TO THE PINNED IDENTITY during the start-up proof: it reported success.  A
+       chroot that is entered on the strength of a name rather than a verified descriptor is the
+       whole defect this mechanism removes, and every comment in $SCRIPT_PATH about it would be
+       false.  The run stops here; nothing privileged is done through it."
+    fi
+    [ "$status" -eq "$PINNED_OP_CUSTODY_REFUSED" ] || die "the pinned-operation helper returned
+       status $status when a chroot was attempted onto an anchor whose descriptor does not fstat
+       to the pinned identity, where $PINNED_OP_CUSTODY_REFUSED was required.  That status is
+       reserved for a custody refusal on the exec path and is raised before anything is opened,
+       so any other value means the refusal came from somewhere else and the custody check itself
+       was not exercised.  The run stops rather than proceeding on an unproven mechanism."
+    log "  pinned operations: refused a chroot onto an anchor that does not fstat to the pinned"
+    log "    identity (status $status, the reserved custody refusal)"
+
+    rm -rf -- "$anchor" "$outside" || die "could not remove the pinned-operation probe directory
+       under $root."
+    PINNED_OP_PROVEN=1
+    log "pinned privileged operations proven on this host: a descriptor is opened O_NOFOLLOW on"
+    log "  the anchor, its identity is verified by fstat ON THAT DESCRIPTOR, a target beneath it"
+    log "  is resolved by openat2 under RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV and"
+    log "  verified the same way, and a bad anchor, a bad target, a missing identity, an"
+    log "  absolute link, a relative link, a '..' escape and an absent target are all refused."
+    log "  Every mount(2) and chroot(2) below CONSUMES one of those descriptors -- the mounts"
+    log "  through /proc/self/fd/N, the chroot through fchdir(fd) then chroot(\".\") -- so no"
+    log "  pathname is resolved a second time between the check and the use.  There is no"
+    log "  fallback to the pathname form."
+}
+
+# The one part of pinned_op_ready that applies before the mechanism has been proven: the helper
+# and its interpreter must be installed, or the proof itself would report the wrong thing.
+pinned_op_ready_for_probe() {
+    [ -n "$PINNED_OP_HELPER" ] || die "internal error: the start-up proof of the pinned
+       privileged operations ran before the helper's path was recorded.  This is a defect in
+       $SCRIPT_NAME."
+    [ -f "$PINNED_OP_HELPER" ] || die "internal error: the start-up proof of the pinned
+       privileged operations ran before the helper was installed at
+           $PINNED_OP_HELPER
+       This is a defect in $SCRIPT_NAME."
+    [ -n "$PINNED_OP_PYTHON" ] || die "internal error: the start-up proof of the pinned
+       privileged operations ran before its interpreter had been resolved to an absolute path.
+       This is a defect in $SCRIPT_NAME."
+    [ -x "$PINNED_OP_PYTHON" ] || die "internal error: the start-up proof of the pinned
+       privileged operations ran with an interpreter that is not executable at
+           $PINNED_OP_PYTHON
+       This is a defect in $SCRIPT_NAME."
+}
+
+# One negative case of the start-up proof.  Separate so each refusal reports its own name.
+probe_pinned_op_refusal() { # $1..$6=anchor,dev,ino,target,dev,ino  $7=operation
+                            # $8=required status  $9=what the case is
+    local required="$8" what="$9" status=0
+    pinned_op "$1" "$2" "$3" "$4" "$5" "$6" "$7" >/dev/null 2>&1 || status=$?
+    if [ "$status" -eq 0 ]; then
+        die "THE PINNED-OPERATION HELPER DID NOT REFUSE $what during the start-up proof: it
+       resolved
+           $4
+       against $1 and reported success.  A mechanism that silently accepts an object it was
+       meant to refuse is worse than none at all, because every comment in $SCRIPT_PATH about
+       the mounts and the chroot consuming a verified descriptor would then be false.  The run
+       stops here; nothing privileged is done through it."
+    fi
+    [ "$status" -eq "$required" ] || die "the pinned-operation helper returned status $status for
+       $what during the start-up proof, where $required was required.  Each refusal has to come
+       from the condition it names -- the kernel's path resolution, the fstat comparison or the
+       argument contract -- so any other status means something else failed and the check itself
+       was not exercised.  The run stops rather than proceeding on an unproven mechanism."
+    log "  pinned operations: refused $what (status $status)"
+}
+
+
+
 # ------------------------------------------------------------------------------------
 # ENDPOINTS ARE VALIDATED, THEN SANITISED BEFORE THEY ARE SHOWN OR RECORDED.
 #
-# TWO SEPARATE PROBLEMS, AND CONFLATING THEM IS WHY AN EARLIER REVISION HAD NEITHER.
+# TWO SEPARATE PROBLEMS, AND EACH NEEDS ITS OWN DEFENCE; CONFLATING THEM LEAVES BOTH OPEN.
 #
 # The first is INJECTION. --apt-mirror is written verbatim into the image's
 # /etc/apt/sources.list, so a value carrying a newline does not configure one archive, it
@@ -2764,24 +4835,24 @@ probe_confined_io_refusal() { # $1=relative  $2=operation  $3=required status  $
 # because a sources.list line legitimately contains them ("deb <url> <suite> <components>").
 #
 # The second is DISCLOSURE.  A URL is a documented place to put a credential -
-# https://user:token@host/path is a form apt and curl both accept - and this script put both
-# values, unaltered, into its own log, into the image's build record and into the MANIFEST,
-# which the workflow uploads as an artifact.  A token that reaches an artifact has left the
-# machine.  Query strings are treated the same way, because signed-URL schemes carry their
-# signature there.
+# https://user:token@host/path is a form apt and curl both accept - and either value would
+# otherwise reach this script's own log, the image's build record and the MANIFEST, which the
+# workflow uploads as an artifact.  A token that reaches an artifact has left the machine.
+# Query strings are treated the same way, because signed-URL schemes carry their signature
+# there.
 #
 # WHAT IS RECORDED INSTEAD: scheme, host and path.  That is enough to answer "which archive
 # was this built from", which is the whole reason the value is recorded, and it carries no
 # secret.  The fact that something was redacted is stated rather than hidden, so a reader is
 # never left believing they are looking at the value that was used.
 #
-# SANITISING IS FOR THE LOG AND THE MANIFEST, AND IT IS NOT A CONTAINMENT STRATEGY.  An
-# earlier revision of this script relied on it as one: the unsanitised --apt-mirror was written
-# into the image's sources.list, the caller was WARNED that their token was now inside the
-# artifact it had just built, and that was called an informed decision.  It is not - a warning
-# is what you emit when you have decided to do the dangerous thing anyway, and the image is
-# handed to a guest, copied between machines and kept as a build output.  So a credential is
-# now REFUSED at the boundary rather than carried and described:
+# SANITISING IS FOR THE LOG AND THE MANIFEST, AND IT IS NOT A CONTAINMENT STRATEGY.  Relying on
+# it as one would mean writing the unsanitised --apt-mirror into the image's sources.list and
+# WARNING the caller that their token is now inside the artifact they just built, as though that
+# were an informed decision.  It is not - a warning is what you emit when you have decided to do
+# the dangerous thing anyway, and the image is handed to a guest, copied between machines and
+# kept as a build output.  So a credential is REFUSED at the boundary rather than carried and
+# described:
 #
 #   * validate_inputs rejects userinfo in either value, rejects a query and a fragment in
 #     --apt-mirror because that value is published with the image, and rejects the two
@@ -2885,27 +4956,28 @@ url_authority() {
 # image is released, and an authenticated base fetch goes through --base-url-file or is done
 # separately with --base-tarball.
 #
-# NOTE ON WHAT THIS MESSAGE USED TO SAY.  It used to advise putting an auth.conf.d entry or a
-# netrc INSIDE THE BASE TARBALL.  That was advice to bake a permanent credential into the
-# published image -- the same exposure by a different route, and one the pre-publication scan
-# did not look for.  The advice is gone, not softened, and --apt-auth-file replaces it.
+# AND THE MESSAGE DOES NOT OFFER THE BASE TARBALL AS AN ALTERNATIVE.  Putting an auth.conf.d
+# entry or a netrc INSIDE THE BASE TARBALL would bake a permanent credential into the published
+# image -- the same exposure by a different route, and one a scan of the caller's own archive
+# cannot be relied on to find.  --apt-auth-file is the supported route precisely because its
+# lifetime is bounded by this script.
 #
 # The message never echoes the value.  It names the option and the sanitised form only,
 # because a die message reaches the same log the sanitising exists for.
 # ------------------------------------------------------------------------------------
 # A SECRET INPUT MUST NOT LIVE INSIDE ANYTHING THIS SCRIPT COPIES INTO THE IMAGE.
 #
-# THE DEFECT THIS CLOSES.  --base-url-file and --apt-auth-file exist so that a confidential
-# value is read from a caller-owned private file instead of arriving in this script's argv,
-# where /proc/<pid>/cmdline exposes it to every user on the build host.  That protects the
-# value on the HOST.  It said nothing about the IMAGE -- and copy_guest_payload() copies
-# --payload, --sdk-dir and --gtest-prefix into the image WHOLESALE with `cp -a`, so
+# WHY A PRIVATE FILE IS NOT ENOUGH BY ITSELF.  --base-url-file and --apt-auth-file exist so
+# that a confidential value is read from a caller-owned private file instead of arriving in this
+# script's argv, where /proc/<pid>/cmdline exposes it to every user on the build host.  That
+# protects the value on the HOST and says nothing about the IMAGE -- and copy_guest_payload()
+# copies --payload, --sdk-dir and --gtest-prefix into the image WHOLESALE with `cp -a`, so
 #
 #     --base-url-file "$PAYLOAD_DIR/.base-url"
 #
-# took a file whose entire purpose was confidentiality and published it inside an artefact
-# that outlives the run and is uploaded by the workflow.  The credential-store scan did not
-# see it: that scan looks at apt's and root's credential locations, and this file is neither.
+# would take a file whose entire purpose is confidentiality and publish it inside an artefact
+# that outlives the run and is uploaded by the workflow.  The credential-store scan cannot see
+# it either: that scan looks at apt's and root's credential locations, and this file is neither.
 #
 # THIS IS A POLICY CHECK, AND IT RUNS AT VALIDATION TIME -- before a byte is copied, so the
 # refusal costs the caller nothing but a re-invocation.  It is deliberately paired with a
@@ -3143,9 +5215,9 @@ validate_inputs() {
     fi
 
     # THE TWO ENDPOINT VALUES, CHECKED BEFORE ANYTHING USES, LOGS OR RECORDS THEM.  --apt-mirror
-    # had no validation at all before this: it was written straight into the image's
-    # sources.list, where a newline configures a second archive.  Neither is a path, so neither
-    # goes through absolutise_and_check; what they need is the control-character refusal above.
+    # is written straight into the image's sources.list, where a newline configures a second
+    # archive, so it cannot go unvalidated.  Neither value is a path, so neither goes through
+    # absolutise_and_check; what they need is the control-character refusal above.
     #
     # AND CREDENTIALS ARE REFUSED HERE RATHER THAN CARRIED AND SANITISED.  Sanitising protects
     # the log and the manifest; it does not protect the IMAGE, which is where --apt-mirror ends
@@ -3219,15 +5291,33 @@ validate_inputs() {
         KERNEL_CONFIG_SRC="$(absolutise_and_check "$KERNEL_CONFIG_SRC" '--kernel-config')"
         require_existing_file "$KERNEL_CONFIG_SRC" 'the --kernel-config guest kernel configuration'
     fi
-    # --apt-auth-file.  Checked for confidentiality the same way --base-url-file is, and for
-    # nothing else: its CONTENT is apt's business, this script never parses it, never logs it
-    # and never digests it into the manifest.  What this script guarantees is the LIFETIME --
-    # installed immediately before the apt phase, removed immediately after, and independently
-    # refused by the pre-publication credential-store scan if it somehow survives.
+    # --apt-auth-file.  Checked for confidentiality the same way --base-url-file is.  Its
+    # CONTENT is apt's business in the sense that this script does not interpret it: nothing here
+    # parses a record into fields it acts on, nothing logs it and nothing digests it into the
+    # manifest.  It IS read, three times -- copied into the image, and searched for twice before
+    # publication -- and every one of those reads goes through the descriptor custody was
+    # established on rather than through this name again.
+    #
+    # WHY THE DESCRIPTOR IS HELD RATHER THAN THE PATH RECHECKED.  Custody established on a
+    # descriptor describes the object behind it, and only for as long as nothing reopens the
+    # name.  Four uses that each resolved $APT_AUTH_FILE afresh would be four objects checked
+    # once between them, and the one this script copied into the image need not be the one it
+    # vetted: replacing a directory entry is governed by its parent, and the ancestry walk
+    # expressly does not vet the parents of a symlinked path component.  So the descriptor stays
+    # open for the run and APT_AUTH_CUSTODY names the route to it; the open descriptor pins the
+    # inode, so a substitution at the name afterwards cannot reach the bytes.
+    #
+    # What this script guarantees beyond confidentiality is the LIFETIME -- installed immediately
+    # before the apt phase, removed immediately after, and independently refused by the
+    # pre-publication credential-store scan if it somehow survives.
     if [ -n "$APT_AUTH_FILE" ]; then
         APT_AUTH_FILE="$(absolutise_and_check "$APT_AUTH_FILE" '--apt-auth-file')"
-        require_private_file "$APT_AUTH_FILE" 'the --apt-auth-file apt credential file'
-        [ -s "$APT_AUTH_FILE" ] || die "the --apt-auth-file apt credential file is empty:
+        hold_private_file "$APT_AUTH_FILE" 'the --apt-auth-file apt credential file'
+        APT_AUTH_CUSTODY="$VETTED_FD_PROC"
+        # Emptiness is asked of the held descriptor too.  Asking it of the name would answer for
+        # whatever that name reaches now, which is the substitution this whole arrangement exists
+        # to remove -- and would answer it about a different object from the one installed.
+        [ -s "$APT_AUTH_CUSTODY" ] || die "the --apt-auth-file apt credential file is empty:
        $APT_AUTH_FILE
        It was given, so it was meant to authenticate something; an empty one would install a
        credential file that authenticates nothing and then be removed again."
@@ -3529,15 +5619,15 @@ assert_payload_carries_no_credentials() {
 # ------------------------------------------------------------------------------------
 # THE BINDER WIRE PROTOCOL: DERIVED FROM TWO ARTEFACTS, NEVER DECLARED.
 #
-# This function exists because an earlier revision of this script HARD-CODED protocol 7 --
-# in its help text, its architecture log, the value it wrote into the image and its
-# manifest -- while nothing compared that text against the SDK it was shipping alongside.
-# For a while the SDK was built BINDER_IPC_32BIT=OFF, which is protocol 8, and the two claims
-# could not both be true.  Text cannot be checked.  So nothing here states a protocol, not even
-# now that the job's intended value and the SDK's build flag agree on 7: two build-time
-# artefacts DECIDE it, this function reads both, and a disagreement fails the build by name.
-# That is also the check that catches the workflow's kernel patch silently failing to apply,
-# which is the one plausible way the intended 7 turns into a running 8.
+# This function exists because a HARD-CODED protocol -- in the help text, the architecture log,
+# the value written into the image and the manifest -- is a claim in four places that nothing
+# compares against the SDK shipped alongside it.  An SDK built BINDER_IPC_32BIT=OFF is protocol
+# 8, and against a declared 7 the two claims cannot both be true while nothing detects it.
+# Prose cannot be checked.  So nothing here states a protocol, even though the job's intended
+# value and the SDK's build flag agree on 7: two build-time artefacts DECIDE it, this function
+# reads both, and a disagreement fails the build by name.  That is also the check that catches
+# the workflow's kernel patch silently failing to apply, which is the one plausible way the
+# intended 7 turns into a running 8.
 #
 #   THE KERNEL HALF.  CONFIG_ANDROID_BINDER_IPC_32BIT in the configuration the guest kernel
 #   was built with, supplied by --kernel-config.  Explicitly =y means protocol 7.  Unset, or
@@ -3690,7 +5780,7 @@ derive_binder_protocol() {
        BINDER_IPC_32BIT passed as a CMake CACHE entry so the value survives in its
        CMakeCache.txt.  Without one of the two there is nothing for the guest to cross-check
        the driver's own BINDER_VERSION answer against, and an unverifiable protocol claim is
-       exactly the defect this derivation replaces."
+       exactly what this derivation exists to prevent."
 
     if [ -z "$PROTOCOL_FROM_KERNEL_CONFIG" ] || [ -z "$PROTOCOL_FROM_SDK_CACHE" ]; then
         warn "only ONE of the two build-time artefacts could answer, so the derived protocol"
@@ -3757,19 +5847,19 @@ OUTPUT_LOCK_HELD=0
 # a wrong write: two builders holding locks on two different inodes both believe they have
 # exclusive access.
 #
-# WHY STAT-THEN-OPERATE CANNOT CLOSE THIS ON ITS OWN, WHICH IS THE CORRECTION.
+# WHY STAT-THEN-OPERATE CANNOT CLOSE THIS ON ITS OWN.
 #
-# An earlier revision recorded the directory's owner, mode, device and inode once and re-compared
-# them immediately before each privileged operation.  That is worth keeping and it is kept below
-# -- but it cannot be the whole answer, because every one of those operations then named the
-# CALLER'S PATHNAME, and a pathname is resolved afresh by the kernel at the instant the operation
-# runs.  Between the last stat and the rename there is a window, however small, in which any
-# account that may rename an entry in an ANCESTOR directory can move the validated directory away
-# and put a different one at its name.  Narrowing that window is not closing it (CWE-367), and no
-# number of extra stats changes the shape of the problem.
+# Recording the directory's owner, mode, device and inode once and re-comparing them immediately
+# before each privileged operation is worth doing, and it is done below -- but it cannot be the
+# whole answer if those operations then name the CALLER'S PATHNAME, because a pathname is
+# resolved afresh by the kernel at the instant the operation runs.  Between the last stat and the
+# rename there is a window, however small, in which any account that may rename an entry in an
+# ANCESTOR directory can move the validated directory away and put a different one at its name.
+# Narrowing that window is not closing it (CWE-367), and no number of extra stats changes the
+# shape of the problem.
 #
-# The revision also PERMITTED an output directory owned by the unprivileged account that invoked
-# sudo, on the reasoning that a caller who may pass --output is already trusted with the path.
+# NOR IS AN OUTPUT DIRECTORY OWNED BY THE UNPRIVILEGED ACCOUNT THAT INVOKED sudo PERMITTED, on
+# the tempting reasoning that a caller who may pass --output is already trusted with the path.
 # That reasoning is about the PATH and does not carry to the DIRECTORY ENTRY: a directory's owner
 # may rename or unlink a root-owned entry inside it regardless of the entry's mode or owner, so
 # an unprivileged owner can substitute the staged image, the destination or the lock leaf between
@@ -3812,8 +5902,8 @@ OUTPUT_LOCK_HELD=0
 # mktemp creates it and re-compared before it is written to, attached to a loop device or
 # renamed; the lock leaf is additionally compared against the inode actually behind the OPEN
 # DESCRIPTOR (stat -L /proc/self/fd/N), which is the only way to establish that the lock is
-# held on the file at that path rather than on an inode that used to be there -- and that
-# comparison now runs inside the custody assertion, at EVERY call site, rather than only at
+# held on the file at that path rather than on an inode that has since been replaced -- and that
+# comparison runs inside the custody assertion, at EVERY call site rather than only at
 # acquisition, because the leaf can be replaced after the lock has been taken.
 # ------------------------------------------------------------------------------------
 OUTPUT_DIR_DEVICE=''
@@ -3859,14 +5949,14 @@ four_digit_mode() { # $1=path
 # Is this directory's mode acceptable for a PUBLICATION directory?  No group or other write bit,
 # full stop -- there is no sticky-bit exemption here.
 #
-# WHY THE EXEMPTION IS GONE.  Sticky restricts rename and unlink to the ENTRY's owner, which is
-# the right rule for a SHARED TEMP directory (resolve_temp_parent still applies it to TMPDIR, and
-# that is deliberate: /tmp is mode 2777 on this container).  It is the wrong rule for a directory
-# root publishes two artefacts into, for two reasons.  A group- or world-writable directory can
-# still be filled, and more to the point sticky says nothing about the directory's OWN OWNER --
-# and the owner is precisely who can rename a root-owned entry out from under this script.  The
-# owner is now required to be root, so permitting other accounts to write the directory as well
-# would give back with the mode what the ownership requirement just took away.
+# WHY NO STICKY-BIT EXEMPTION APPLIES HERE.  Sticky restricts rename and unlink to the ENTRY's
+# owner, which is the right rule for a SHARED TEMP directory (resolve_temp_parent applies it to
+# TMPDIR, and that is deliberate: /tmp is mode 2777 on this container).  It is the wrong rule for
+# a directory root publishes two artefacts into, for two reasons.  A group- or world-writable
+# directory can still be filled, and more to the point sticky says nothing about the directory's
+# OWN OWNER -- and the owner is precisely who can rename a root-owned entry out from under this
+# script.  The owner is required to be root, so permitting other accounts to write the directory
+# as well would give back with the mode what the ownership requirement takes away.
 publication_dir_mode_is_safe() { # $1=four-digit mode
     local mode="$1" group_write other_write
     [ "${#mode}" -eq 4 ] || return 1
@@ -3885,13 +5975,13 @@ publication_dir_mode_is_safe() { # $1=four-digit mode
 #      operation actually goes through, and stat -L on /proc/self/fd/<n> reads the OPEN FILE
 #      rather than resolving a pathname.
 #   2. THE CALLER'S PATHNAME still resolves to that same directory.  Not because the operations
-#      depend on it -- they do not any more -- but so that a substitution is REPORTED instead of
-#      silently tolerated: an ancestor swapped mid-build means something on this host is doing
-#      something this run should not proceed alongside.
-#   3. THE LOCK, if held, is still on the inode the lock leaf resolves to.  This used to be
-#      checked only around acquisition, which left the leaf replaceable for the rest of the run
-#      -- and a second builder that then opened the new leaf would take an exclusive lock on a
-#      different inode and proceed alongside this one.
+#      depend on it -- they go through the descriptor -- but so that a substitution is REPORTED
+#      instead of silently tolerated: an ancestor swapped mid-build means something on this host
+#      is doing something this run should not proceed alongside.
+#   3. THE LOCK, if held, is still on the inode the lock leaf resolves to.  Checked here rather
+#      than only around acquisition, because a leaf left replaceable for the rest of the run is
+#      a leaf a second builder can open afresh -- taking an exclusive lock on a different inode
+#      and proceeding alongside this one.
 assert_output_dir_custody() { # $1=what is about to happen
     local operation="$1" device inode owner mode
     local fd_type fd_device fd_inode fd_owner fd_mode
@@ -3992,13 +6082,13 @@ assert_output_dir_custody() { # $1=what is about to happen
 
     # 3. THE LOCK, RE-VERIFIED AT EVERY CALL SITE RATHER THAN ONLY AT ACQUISITION.
     #
-    # THE GAP THIS CLOSES.  The path-versus-descriptor comparison ran twice, both times around
-    # flock, and then never again.  Nothing stopped the lock LEAF from being replaced afterwards:
-    # a second builder opening the new leaf would take an exclusive lock on a different inode,
-    # get it, and build the same --output alongside this run -- both of them believing they were
-    # alone, which is worse than no lock at all.  Since every privileged operation already calls
-    # this function, checking here means exclusivity is re-established immediately before each
-    # one rather than assumed to have survived the hour since it was taken.
+    # WHY ONE CHECK AT ACQUISITION IS NOT ENOUGH.  A path-versus-descriptor comparison made only
+    # around flock leaves the lock LEAF replaceable for the rest of the run: a second builder
+    # opening the new leaf would take an exclusive lock on a different inode, get it, and build
+    # the same --output alongside this run -- both of them believing they were alone, which is
+    # worse than no lock at all.  Since every privileged operation already calls this function,
+    # checking here means exclusivity is re-established immediately before each one rather than
+    # assumed to have survived the hour since it was taken.
     #
     # Gated on the lock being HELD so that lock_publication_targets can call this function before
     # the descriptor exists, which is the one legitimate order.
@@ -4126,15 +6216,14 @@ resolve_publication_targets() {
     # CUSTODY, ESTABLISHED HERE AND RE-CHECKED BEFORE EVERY PRIVILEGED OPERATION.  The reasoning
     # is in the block above this function; what follows is the decision.
     #
-    # ROOT, AND ONLY ROOT.  The previous revision also accepted the unprivileged account that
-    # invoked sudo, on the reasoning that a caller who may pass --output is already trusted with
-    # the path.  That permission is REMOVED: it conflates trust over the PATHNAME with authority
-    # over the DIRECTORY ENTRY, and those are not the same thing.  A directory's owner may rename
-    # or unlink a root-owned entry inside it whatever the entry's own mode and owner say, so an
-    # unprivileged owner can substitute the staged image, the destination or the lock leaf in the
-    # window between any check and the privileged operation that follows it.  The descriptor
-    # opened below removes the ancestor half of that exposure; this requirement removes the half
-    # that lives in the directory itself.
+    # ROOT, AND ONLY ROOT.  The unprivileged account that invoked sudo is NOT accepted, even
+    # though a caller who may pass --output is already trusted with the path: that reasoning
+    # conflates trust over the PATHNAME with authority over the DIRECTORY ENTRY, and those are
+    # not the same thing.  A directory's owner may rename or unlink a root-owned entry inside it
+    # whatever the entry's own mode and owner say, so an unprivileged owner can substitute the
+    # staged image, the destination or the lock leaf in the window between any check and the
+    # privileged operation that follows it.  The descriptor opened below removes the ancestor
+    # half of that exposure; this requirement removes the half that lives in the directory itself.
     OUTPUT_DIR_OWNER="$(stat -c '%u' -- "$OUTPUT_DIR" 2>/dev/null || printf '')"
     [ -n "$OUTPUT_DIR_OWNER" ] || die "the ownership of the directory holding --output could not
        be read: $OUTPUT_DIR
@@ -4321,8 +6410,8 @@ assert_lock_descriptor_identity() { # $1=when, for the message
         die "the inode behind the publication lock could not be read $when
        (descriptor-relative: ${rel_inode:-unreadable}, caller pathname: ${path_inode:-unreadable},
        descriptor: ${fd_inode:-unreadable}).  Without all three there is no way to establish
-       that this run holds the lock on the file at $OUTPUT_LOCK rather than on an inode that
-       used to be there, so the run stops."
+       that this run holds the lock on the file at $OUTPUT_LOCK rather than on an inode that has
+       since been replaced, so the run stops."
     fi
     if [ "$rel_device" != "$fd_device" ] || [ "$rel_inode" != "$fd_inode" ]; then
         die "the publication lock file was SUBSTITUTED INSIDE the publication directory $when:
@@ -4552,7 +6641,15 @@ make_work_dir() {
 
     IMAGE_MOUNT="$WORK_DIR/mnt"
     mkdir -p -- "$IMAGE_MOUNT"
+    # PINNED THE MOMENT IT EXISTS.  mount(2) takes a pathname, so the only thing that can say
+    # the directory the loop device is mounted ONTO is the directory this script created is its
+    # device and inode, recorded here and re-checked immediately before that mount.  The private
+    # mount namespace this run is already inside means nothing can be mounted over it from
+    # outside; this is the other half -- nothing can be substituted for it from inside either.
+    pin_directory_identity "$IMAGE_MOUNT" IMAGE_MOUNT_POINT_DEVICE IMAGE_MOUNT_POINT_INODE \
+        'the image mount point'
     log "scratch directory: $WORK_DIR (0700, root-owned, inode $final_inode)"
+    log "  image mount point: $IMAGE_MOUNT (pinned: device $IMAGE_MOUNT_POINT_DEVICE inode $IMAGE_MOUNT_POINT_INODE)"
 
     # THE CONFINED I/O PRIMITIVE IS ESTABLISHED AND PROVEN HERE, WHICH IS THE EARLIEST POINT IT
     # CAN BE.  It needs a directory that is root-owned, mode 0700 and verified not to have been
@@ -4568,6 +6665,17 @@ make_work_dir() {
     # each call site so there is one place that decides what "inside the image" means; nothing
     # is mounted there yet, and the wrappers refuse to run until it is a real directory.
     CONFINED_IO_ANCHOR="$IMAGE_MOUNT"
+
+    # THE SECOND MECHANISM, ESTABLISHED AND PROVEN IN THE SAME PLACE AND FOR THE SAME REASONS.
+    # The confined I/O primitive above carries every per-file operation inside the image; this one
+    # carries the seven privileged operations that are not per-file -- the four pseudo-filesystem
+    # mounts, the two chroot entry points and the nosymfollow remount -- by making each of them
+    # CONSUME a descriptor this script opened and verified rather than resolve a pathname the
+    # kernel walks again.  It must be in force before create_and_mount_image() for exactly the
+    # reason the first one must: the first privileged mount whose target this script chose comes
+    # immediately after.  Its proof is fatal on every arm too.
+    install_pinned_op_helper "$WORK_DIR"
+    probe_pinned_op "$WORK_DIR"
 }
 
 # ------------------------------------------------------------------------------------
@@ -4734,10 +6842,44 @@ create_and_mount_image() {
     # file must not be mounted -- as root -- into our image tree.
     assert_loop_backs "$LOOP_DEVICE" "$STAGED_IMAGE" "mount $LOOP_DEVICE at $IMAGE_MOUNT"
 
+    # THE TARGET IS THE DIRECTORY make_work_dir() CREATED, RE-ESTABLISHED IMMEDIATELY BEFORE THE
+    # MOUNT.  mount(2) resolves a pathname in the ordinary way, so this is the check that stands
+    # between it and a substituted mount point; the private mount namespace this run is inside
+    # covers the other direction, where the substitution would be an overmount from the host.
+    assert_pinned_directory "$IMAGE_MOUNT" "$IMAGE_MOUNT_POINT_DEVICE" \
+        "$IMAGE_MOUNT_POINT_INODE" 'the image mount point' \
+        "mount $LOOP_DEVICE at $IMAGE_MOUNT"
     register_mount "$IMAGE_MOUNT"
     mount -- "$LOOP_DEVICE" "$IMAGE_MOUNT" \
         || die "could not mount $LOOP_DEVICE at $IMAGE_MOUNT."
+
+    # PRIVATE BEFORE ANYTHING IS MOUNTED INTO IT, AND THEN MEASURED.
+    #
+    # The namespace's root was made recursively private when it was created, so a mount made
+    # beneath it inherits private propagation from its parent and this is belt to that braces --
+    # but it is the belt that matters at exactly this point: the four pseudo-filesystems and the
+    # nosymfollow remount all land INSIDE this mount, and if this one were shared or a slave
+    # they would propagate to its peer group, which is to say back onto the build host.  So the
+    # image root is made recursively private explicitly, and the kernel is then asked whether it
+    # is -- because `mount --make-rprivate` returning 0 is not the same statement as
+    # /proc/self/mountinfo showing no propagation tags, and it is the second one this script's
+    # comments claim.
+    mount --make-rprivate -- "$IMAGE_MOUNT" \
+        || die "could not make the image mount at $IMAGE_MOUNT private.  Every mount this
+       script makes below lands inside it, so a shared or slave mount here would propagate them
+       out of this run's mount namespace and onto the build host -- which is the whole of what
+       the namespace exists to prevent.  The run stops rather than mounting into a mount whose
+       propagation it could not set."
+    assert_mount_is_private "$IMAGE_MOUNT" 'the image mount' \
+        "populate the image at $IMAGE_MOUNT"
+
+    # THE PIN EVERY LATER mount(2) AND chroot(2) IS CHECKED AGAINST.  It is taken AFTER the
+    # mount deliberately: before it, the path resolves to an ordinary directory of the scratch
+    # tree, and afterwards it resolves to the root of the image's own filesystem -- a different
+    # object, on a different device, and the one all the privileged work below actually names.
+    pin_directory_identity "$IMAGE_MOUNT" IMAGE_ROOT_DEVICE IMAGE_ROOT_INODE 'the image root'
     log "image mounted at $IMAGE_MOUNT"
+    log "  in mount namespace mnt:[$MOUNT_NS_ID], propagation private, pinned as device $IMAGE_ROOT_DEVICE inode $IMAGE_ROOT_INODE"
 }
 
 extract_base_rootfs() {
@@ -4749,52 +6891,335 @@ extract_base_rootfs() {
         || die "could not extract $BASE_ARCHIVE into the image.  If the archive is not a root
        filesystem tarball -- a container image manifest, for instance -- this is where that
        shows."
-    require_existing_dir "$IMAGE_MOUNT/etc" "the extracted base's /etc.  The archive does not
-       look like a root filesystem: expected /etc, /usr and /bin at its top level"
-    require_existing_dir "$IMAGE_MOUNT/usr" 'the extracted base'"'"'s /usr'
+    # THE FIRST TWO POST-EXTRACTION CHECKS, AND THE FIRST TWO THAT MUST NOT BE `[ -d ]`.
+    # require_existing_dir uses `[ -d ]`, which FOLLOWS symbolic links -- so on a base tarball
+    # that ships /etc or /usr as an absolute link both checks would pass by measuring the BUILD
+    # HOST's directories, and every step below would then be operating on a tree whose top-level
+    # layout was never established.  confined_directory asks the kernel instead: a link, a
+    # non-directory or anything that leaves the image is refused here, at the earliest moment the
+    # question can be asked, rather than surfacing as a host-side write later on.
+    confined_directory 'etc' "the extracted base's /etc" \
+        'establish that the extracted archive is a root filesystem' \
+        || die "missing directory -- the extracted base's /etc.  The archive does not look like a
+       root filesystem: expected /etc, /usr and /bin at its top level.
+       Expected it at: $IMAGE_MOUNT/etc
+       Check the path, or the step that was supposed to stage it."
+    confined_directory 'usr' "the extracted base's /usr" \
+        'establish that the extracted archive is a root filesystem' \
+        || die "missing directory -- the extracted base's /usr
+       Expected it at: $IMAGE_MOUNT/usr
+       Check the path, or the step that was supposed to stage it."
 }
 
 # ------------------------------------------------------------------------------------
 # THE CHROOT.  The pseudo-filesystems are bind-mounted so the package manager and the
 # compiler behave, and every one is registered with the trap before it is made.
+#
+# THE FOUR MOUNT POINTS ARE CREATED AND CONFIRMED THROUGH THE CONFINEMENT, AND ALL FOUR BEFORE
+# ANY OF THEM IS MOUNTED.  The order is load-bearing and is not a matter of taste:
+# RESOLVE_NO_XDEV refuses to resolve a path that crosses a mount point, so `dev/pts` can only be
+# created and inspected while /dev is still an ordinary directory of the image.  Doing it
+# afterwards would be refused -- correctly, by the primitive working as designed -- so it is done
+# first.
+#
+# THE FOUR mount(2) CALLS CONSUME A DESCRIPTOR RATHER THAN A NAME, WHICH IS WHAT REMOVED THE LAST
+# CHECK-THEN-USE WINDOW IN THIS FUNCTION.  mount(2) has no descriptor-taking target parameter, so
+# for a long time the shape here was "confirm the pathname, then hand the same pathname to the
+# syscall", and the kernel then resolved that name a third time, independently of both checks.  A
+# mount whose TARGET IS GIVEN AS /proc/self/fd/N consumes the object that descriptor already
+# refers to -- the kernel resolves the magic link to the pinned (mount, dentry) pair instead of
+# walking the components of a name again -- so every mount below is performed that way, in the
+# same process that opened the descriptor and verified it.  FIVE THINGS BOUND IT, AND ALL FIVE
+# ARE IN FORCE HERE:
+#
+#   1. THE TARGET THE SYSCALL ACTS ON IS THE OBJECT THAT WAS CHECKED.  The helper opens the image
+#      root O_DIRECTORY|O_NOFOLLOW, fstat-verifies THAT DESCRIPTOR against the pin, resolves the
+#      target beneath it with openat2 under RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV,
+#      fstat-verifies the resulting descriptor against the identity confined_identity recorded a
+#      few lines below, and mounts onto that descriptor.  If any step fails, nothing is mounted:
+#      there is no fallback to `mount ... <pathname>`.  probe_pinned_op() proves the chain, and
+#      proves it refuses a bad anchor, a bad target, a link and a '..' escape, before this
+#      function runs.
+#   2. THE MOUNTS ARE MADE IN THIS RUN'S OWN PRIVATE MOUNT NAMESPACE.  The privileged section
+#      re-executed itself under `unshare --mount --propagation private` before it created
+#      anything, and enter_private_mount_namespace() proved -- three ways, all measured -- that
+#      the namespace is new and that propagation really is private.  This is now defence in depth
+#      beneath point 1 rather than the thing standing in for it: it bounds where a mistake could
+#      reach, and it is worth keeping for the leak property alone -- a mount namespace is
+#      destroyed when its last member exits, so nothing survives a SIGKILL that runs no trap.
+#   3. THE IMAGE ROOT IS IDENTITY-PINNED, AND RE-CHECKED IMMEDIATELY BEFORE EACH OF THE FOUR
+#      MOUNTS.  The recorded device and inode are the numbers point 1 fstat-compares against, so
+#      the recording is load-bearing; the pathname-side re-check that precedes each mount is a
+#      diagnostic that names the path and the object that moved, from the same pathname the log
+#      shows.
+#   4. EACH TARGET WAS CREATED AND TYPE-CHECKED THROUGH THE CONFINEMENT.  confined_mkdir created
+#      each of the four beneath the image mount point with a symlinked or out-of-image component
+#      refused at every level, and confined_directory confirmed each is a real directory of the
+#      image.  This is UNCHANGED: it is what says the target is the directory this script meant.
+#      Note why the per-target re-check cannot be moved to just before each mount:
+#      RESOLVE_NO_XDEV refuses a path that crosses a mount point, so once /dev is mounted,
+#      `dev/pts` can no longer be resolved through the primitive at all -- which is why all four
+#      are established first, as the paragraph above says, and why `dev/pts` takes the separate
+#      descriptor-walk route described on resolve_under_mount() in the helper.
+#   5. EACH MOUNT'S PROPAGATION IS MEASURED AFTER IT IS MADE.  A mount inherits propagation from
+#      its parent, and the parent here is the image mount that create_and_mount_image() made
+#      private and verified -- but "inherits" is a claim about the kernel, so the kernel is
+#      asked.  assert_mount_is_private() reads /proc/self/mountinfo and refuses a mount carrying
+#      any propagation tag, which is the only way a mount made here could reach the host.
 # ------------------------------------------------------------------------------------
 mount_chroot_pseudo_filesystems() {
-    local point
+    local point proc_id sys_id dev_id host_dev_device host_dev_inode
     for point in proc sys dev dev/pts; do
-        mkdir -p -- "$IMAGE_MOUNT/$point"
+        confined_mkdir "$point" 0755 "the image's /$point mount point" \
+            'mount the pseudo-filesystems into the image'
+        confined_directory "$point" "/$point" \
+            'mount the pseudo-filesystems into the image' \
+            || die "the image's /$point is not there immediately after this script created it
+       through the confinement.  Something is changing the image's contents while it is being
+       built; nothing is mounted into it."
     done
+
+    # THE IDENTITY OF EACH TARGET, MEASURED THROUGH THE CONFINEMENT AND CARRIED TO THE SYSCALL AS
+    # A NUMBER RATHER THAN RE-READ FROM A NAME.  confined_identity resolves each of the three
+    # openat2-reachable targets under RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV and
+    # reports the device and inode of the object it actually opened.  Those numbers are what the
+    # mount below compares its OWN descriptor against by fstat, so the comparison is
+    # descriptor-to-recording rather than name-to-name.  All three are recorded before any mount
+    # for the same RESOLVE_NO_XDEV reason the creation loop above runs first.
+    proc_id="$(confined_identity 'proc' "the image's /proc mount point" \
+        'mount /proc into the image')"
+    sys_id="$(confined_identity 'sys' "the image's /sys mount point" \
+        'mount /sys into the image')"
+    dev_id="$(confined_identity 'dev' "the image's /dev mount point" \
+        'bind-mount /dev into the image')"
+    # The fourth target's identity cannot be recorded in advance -- the object mounted onto is the
+    # pts directory AS REACHED THROUGH the /dev bind, which does not exist yet -- so what is
+    # pinned instead is the SOURCE this script is about to bind there.  The descriptor walk then
+    # proves the 'dev' component it opened is that source and that the leaf did not cross a
+    # further mount; the reasoning is on resolve_under_mount() in the helper.  /dev is a fixed
+    # host pathname this script chose itself, not a name anything untrusted can define.
+    pin_directory_identity /dev host_dev_device host_dev_inode 'the host /dev directory'
+
+    # THE PIN IS STILL RE-CHECKED BEFORE EACH MOUNT, and it is now a PRE-CHECK rather than the
+    # thing the syscall relies on: it produces a precise diagnosis from the pathname the operator
+    # sees in the log, while the guarantee comes from the descriptor the mount consumes.  Each
+    # mount is registered with the trap before it is made, because a mount that succeeded and was
+    # not registered is a mount left behind.
+    assert_image_root_pinned 'mount /proc into the image'
     register_mount "$IMAGE_MOUNT/proc"
-    mount -t proc proc "$IMAGE_MOUNT/proc" || die "could not mount /proc into the image."
+    pinned_image_mount_fs 'proc' "$proc_id" proc proc "the image's /proc" \
+        'mount /proc into the image'
+    assert_mount_is_private "$IMAGE_MOUNT/proc" "the image's /proc" \
+        'run commands inside the image'
+    assert_image_root_pinned 'mount /sys into the image'
     register_mount "$IMAGE_MOUNT/sys"
-    mount -t sysfs sysfs "$IMAGE_MOUNT/sys" || die "could not mount /sys into the image."
+    pinned_image_mount_fs 'sys' "$sys_id" sysfs sysfs "the image's /sys" \
+        'mount /sys into the image'
+    assert_mount_is_private "$IMAGE_MOUNT/sys" "the image's /sys" \
+        'run commands inside the image'
+    assert_image_root_pinned 'bind-mount /dev into the image'
     register_mount "$IMAGE_MOUNT/dev"
-    mount --bind /dev "$IMAGE_MOUNT/dev" || die "could not bind-mount /dev into the image."
+    pinned_image_mount_bind 'dev' "$dev_id" /dev "the image's /dev bind mount" \
+        'bind-mount /dev into the image'
+    # THE ONE THAT WOULD HURT MOST IF IT PROPAGATED.  This is a bind of the HOST's /dev, which on
+    # a systemd host is a shared mount: without private propagation an unmount here could
+    # propagate back to the host's own /dev.  It comes out private because its parent -- the
+    # image mount -- is private, and that is measured rather than assumed.
+    assert_mount_is_private "$IMAGE_MOUNT/dev" "the image's /dev bind mount" \
+        'run commands inside the image'
+    assert_image_root_pinned 'bind-mount /dev/pts into the image'
     register_mount "$IMAGE_MOUNT/dev/pts"
-    mount --bind /dev/pts "$IMAGE_MOUNT/dev/pts" || die "could not bind-mount /dev/pts into the image."
+    pinned_image_mount_bind_under 'dev/pts' "$host_dev_device" "$host_dev_inode" /dev/pts \
+        "the image's /dev/pts bind mount" 'bind-mount /dev/pts into the image'
+    assert_mount_is_private "$IMAGE_MOUNT/dev/pts" "the image's /dev/pts bind mount" \
+        'run commands inside the image'
+    log "the image's /proc, /sys, /dev and /dev/pts are mounted, all private to mnt:[$MOUNT_NS_ID],"
+    log "  each onto a descriptor this script opened beneath the image root and fstat-verified"
+    log "  against the identity it recorded for that directory -- no pathname was resolved again"
 }
 
 # Run a command inside the image.  DEBIAN_FRONTEND keeps the package manager from trying to
 # open a dialogue nobody can answer; LC_ALL keeps its messages parseable.
+#
+# THE CHROOT CONSUMES A DESCRIPTOR, NOT A PATHNAME.  Neither of these functions hands a name to
+# chroot(2) any more.  Both run the pinned privileged-operation helper, which opens $IMAGE_MOUNT
+# with O_DIRECTORY|O_NOFOLLOW, verifies that descriptor by fstat(2) against the device and inode
+# create_and_mount_image() recorded for the image root, then performs `fchdir(fd)` followed by
+# `chroot(".")` and execs the command.  "." resolves against the working directory the descriptor
+# established, so there is no name for anything to redirect between the check and the use -- the
+# check-then-use window that an identity check on a pathname could only narrow is gone rather
+# than made smaller.  If the descriptor cannot be opened or does not fstat to the pin, nothing is
+# chrooted and nothing is executed: there is NO fallback to `chroot <pathname>`.
+#
+# THE PATHNAME PIN IS STILL CHECKED FIRST, AND IT IS NOW A DIAGNOSTIC RATHER THAN THE GUARANTEE.
+# assert_image_root_pinned names the path, says what changed about it and stops the run
+# immediately; the helper's refusal is what makes the operation impossible.  Keeping both means an
+# operator reading the log sees which object moved, and a future edit that removed the helper
+# would not silently fall back to a bare name.  The check goes here, once, rather than at each of
+# the ~20 call sites, because a check a caller can forget is a check that will be forgotten.
+#
+# THE OTHER TWO BOUNDS ARE UNCHANGED AND STILL LOAD-BEARING.  The private mount namespace bounds
+# where a mistake can reach, and the chroot itself is what makes every in-image pathname the
+# command resolves -- including an absolute one, and including the target of any link it meets --
+# resolve beneath the image.
+#
+# ONE NUANCE, STATED BECAUSE IT IS A REAL LIMIT.  Four call sites run chroot_run inside a command
+# substitution (`$(chroot_run dpkg-query ...)`), where `die` exits the SUBSHELL rather than the
+# script -- two of those four then tolerate a failure with `|| true`.  The privileged operation
+# is still refused in every case, which is the property that matters: the chroot does not happen
+# unless the descriptor fstat's to the pinned image root, and that refusal is made by the helper
+# in its own process rather than by any check the shell could skip.  What such a site loses is
+# only the immediacy of the exit, and the next chroot entry -- the very next privileged step in
+# main()'s order -- is not in a subshell and stops the run there.  The diagnostic is on stderr
+# either way.
 chroot_run() {
+    local status=0
+    pinned_op_ready "run '${1:-a command}' inside the image"
+    assert_image_root_pinned "run '${1:-a command}' inside the image"
     env -i \
         PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
         HOME=/root \
         LC_ALL=C \
         DEBIAN_FRONTEND=noninteractive \
-        chroot "$IMAGE_MOUNT" "$@"
+        "$PINNED_OP_PYTHON" -I -B "$PINNED_OP_HELPER" \
+            "$IMAGE_MOUNT" "$IMAGE_ROOT_DEVICE" "$IMAGE_ROOT_INODE" . - - \
+            chroot-exec "$@" || status=$?
+    if [ "$status" -eq "$PINNED_OP_CUSTODY_REFUSED" ]; then
+        pinned_op_custody_die "$IMAGE_MOUNT" 'the image root' \
+            "run '${1:-a command}' inside the image"
+    fi
+    return "$status"
 }
 
 # The same, with the staged libraries reachable.  GNU ld does not search -L for a shared
 # library's own DT_NEEDED entries and the staged libbinder carries no RUNPATH, so the search
 # path is needed when the in-guest helpers are LINKED, not only when they are run.
+#
+# The chroot target is consumed as a descriptor here too, for the reasons set out on chroot_run
+# above.  The two functions deliberately do not delegate to one another -- their environments
+# differ and the duplication is a few lines -- so the custody chain has to appear in both, and a
+# future edit that adds a third entry point has to add it there as well.
 chroot_run_with_libs() {
+    local status=0
+    pinned_op_ready "run '${1:-a command}' inside the image with the staged libraries"
+    assert_image_root_pinned "run '${1:-a command}' inside the image with the staged libraries"
     env -i \
         PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
         HOME=/root \
         LC_ALL=C \
         DEBIAN_FRONTEND=noninteractive \
         LD_LIBRARY_PATH="$GUEST_SDK_DIR/$SDK_REL_BINDER_TARGET/lib/binder:$GUEST_SDK_DIR/$SDK_REL_HALIF_LIB" \
-        chroot "$IMAGE_MOUNT" "$@"
+        "$PINNED_OP_PYTHON" -I -B "$PINNED_OP_HELPER" \
+            "$IMAGE_MOUNT" "$IMAGE_ROOT_DEVICE" "$IMAGE_ROOT_INODE" . - - \
+            chroot-exec "$@" || status=$?
+    if [ "$status" -eq "$PINNED_OP_CUSTODY_REFUSED" ]; then
+        pinned_op_custody_die "$IMAGE_MOUNT" 'the image root' \
+            "run '${1:-a command}' inside the image with the staged libraries"
+    fi
+    return "$status"
+}
+
+# ==============================================================================
+# THE FOUR RECURSIVE OPERATIONS, AND THE SECOND CONFINEMENT THEY GO THROUGH.
+# ==============================================================================
+# WHAT THE PER-FILE PRIMITIVE CANNOT DO.  openat2 with
+# RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV hands back a descriptor on ONE object, and
+# every operation the confined I/O helper performs is a single call through it.  Four of this
+# script's operations are whole-tree: copying the payload, the staged SDK and the GoogleTest
+# prefix in; extracting the lcov source tarball; deleting the two scratch trees again.  A
+# per-descriptor primitive cannot express any of them without reimplementing cp, tar and rm in
+# python, which would replace a proven mechanism with an unproven one.
+#
+# WHAT THEY GO THROUGH INSTEAD, AND WHY IT IS A CONFINEMENT RATHER THAN A HOPE.  chroot_run
+# already exists in this file and its resolution root IS THE IMAGE: every pathname the command
+# inside it resolves -- including an absolute one, and including the target of any symbolic link
+# it meets -- is resolved beneath $IMAGE_MOUNT by the kernel.  A command run through it therefore
+# CANNOT NAME A HOST PATH AT ALL.  That is the structural property the per-file primitive gets
+# from RESOLVE_BENEATH, obtained a different way, and it is what makes `chroot_run tar -xf -` and
+# `chroot_run rm -rf` safe where `tar --directory "$IMAGE_MOUNT$dir"` and
+# `rm -rf -- "$IMAGE_MOUNT$dir"` on the build host are not: those two run OUTSIDE the chroot, so
+# an absolute symbolic link at any component of the in-image path resolves on the HOST and the
+# operation lands there, as root.
+#
+# THE DESTINATION IS STILL ESTABLISHED THROUGH THE PER-FILE PRIMITIVE FIRST.  chroot_run bounds
+# the operation to the image; it does not say that the destination is the directory this script
+# meant.  So each destination is created with confined_mkdir -- which refuses a symlinked or
+# out-of-image component at every level and creates missing parents through descriptors it
+# obtained itself -- and then confirmed with confined_directory before the recursive step runs.
+# Between that confirmation and the tar there is a residual window, and it is stated rather than
+# glossed: nothing else executes inside the image at that moment (every in-image command this
+# script runs is synchronous and this script is the only writer), and the worst case if the window
+# were ever lost is a misplaced write INSIDE the image, which the chroot bounds and which
+# publication-time verification would surface -- not the host write the finding is about.
+#
+# WHY A TAR PIPE RATHER THAN cp -a.  cp -a's destination is a host pathname, which is the defect.
+# `tar -cf -` on the source and `tar -xf -` inside the chroot moves the same bytes with the same
+# metadata: --numeric-owner on both ends keeps uid/gid exactly as cp -a's --preserve=ownership
+# did rather than remapping them through either passwd database, and tar preserves permissions,
+# timestamps and symbolic links as members rather than following them.  The source trees are
+# verified before they are copied (verify_payload_tree, verify_sdk_tree) and the lcov tarball is
+# verified against its pinned SHA-256 (verify_sha256), so their CONTENT is trusted here and only
+# the destination pathname needed confining.
+# ==============================================================================
+
+# tar has to exist INSIDE the image for the two operations above, and a missing one must say so
+# rather than surface as an unreadable tar diagnostic from a shell that found nothing to run.
+# Checked once per run and remembered, because it is asked four times.
+IMAGE_TAR_CHECKED=0
+assert_image_tar() { # $1=what is about to happen, for the message
+    [ "$IMAGE_TAR_CHECKED" -eq 0 ] || return 0
+    chroot_run sh -c 'command -v -- tar >/dev/null 2>&1' \
+        || die "refusing to $1: the image has no 'tar' of its own.  Whole-tree copies into the
+       image run as 'chroot_run tar', inside the image, precisely so that no host-side command
+       resolves an in-image pathname -- a symbolic link at any component of one would send a
+       root-owned write to the BUILD HOST.  Add the package that provides tar to the image's
+       package set, or use a base tarball that carries it (it is Essential on every
+       Debian-derived base)."
+    IMAGE_TAR_CHECKED=1
+}
+
+# Copy a host directory tree to an in-image destination, with the destination created and
+# confirmed through the confined primitive and the copy itself performed inside the chroot.
+stream_tree_into_image() { # $1=host source dir  $2=in-image relative dest  $3=octal mode
+                           # $4=what it is  $5=what is about to happen  $6=extra die guidance
+    local source="$1" relative="$2" mode="$3" what="$4" doing="$5" guidance="$6"
+
+    [ -d "$source" ] || die "internal error: stream_tree_into_image was given '$source' as the
+       source of $what, which is not a directory.  This is a defect in $SCRIPT_NAME."
+    assert_image_tar "$doing"
+
+    confined_mkdir "$relative" "$mode" "$what" "$doing"
+    confined_directory "$relative" "/$relative" "$doing" \
+        || die "refusing to $doing ($what): the in-image directory
+           /$relative
+       is not there immediately after this script created it through the confinement.  Something
+       is changing the image's contents while it is being built; nothing is copied into it."
+
+    # Both ends numeric-owner, so uid/gid cross unchanged rather than being remapped through
+    # either passwd database -- which is what cp -a did and what the guest's build expects.
+    # `tar -cf -` writes to the pipe; the extracting tar runs INSIDE the image, so "/$relative"
+    # is resolved beneath $IMAGE_MOUNT by the kernel and cannot name a host path.
+    tar --create --numeric-owner --file - --directory "$source" . \
+        | chroot_run tar --extract --numeric-owner --preserve-permissions --file - \
+              --directory "/$relative" \
+        || die "could not copy $what into the image at /$relative.  $guidance"
+}
+
+# Remove an in-image tree this script created, after proving it is still the object it created.
+# The delete runs INSIDE the chroot for the same reason the copy does, and the removal is
+# verified rather than assumed -- this runs while the image is still being built, and a leftover
+# scratch tree would be published.
+remove_tree_in_image() { # $1=in-image relative  $2=recorded identity  $3=what it is  $4=doing
+    local relative="$1" recorded="$2" what="$3" doing="$4"
+
+    assert_confined_identity_unchanged "$relative" "$recorded" "$what" "$doing"
+    chroot_run rm -rf -- "/$relative" \
+        || die "could not $doing ($what): removing /$relative inside the image failed.  The
+       image is NOT published: it would carry a scratch tree this script created and could not
+       clean up."
+    confined_absent "$relative" "$what" "$doing" \
+        || die "$what is still present at /$relative inside the image after this script removed
+       it.  The image is NOT published: something is recreating it."
 }
 
 assert_chroot_executable() {
@@ -4888,12 +7313,12 @@ readonly IMAGE_PACKAGES_OPTIONAL=(
 # ------------------------------------------------------------------------------------
 # BUILD-TIME-ONLY APT AUTHENTICATION.
 #
-# WHAT THIS REPLACES.  Three places in this script used to tell a caller with an authenticated
-# archive to put /etc/apt/auth.conf.d or a .netrc INTO THE BASE TARBALL.  Following that advice
-# put a permanent credential file inside an image that is uploaded as a workflow artifact and
-# copied between machines, and the pre-publication scan did not look at those paths at all --
-# so the script's own advice defeated the script's own protection.  The advice is deleted and
-# this is what replaces it.
+# WHY THIS OPTION EXISTS AT ALL.  The obvious alternative -- telling a caller with an
+# authenticated archive to put /etc/apt/auth.conf.d or a .netrc INTO THE BASE TARBALL -- puts a
+# permanent credential file inside an image that is uploaded as a workflow artifact and copied
+# between machines, in paths a scan of the caller's own archive cannot be relied on to reach.
+# Advice of that shape defeats the protection the rest of this script provides, so the supported
+# route is this one, whose lifetime this script controls.
 #
 # THE LIFETIME IS THE WHOLE GUARANTEE.  The file exists inside the image only between
 # install_image_apt_auth() and remove_image_apt_auth(), which bracket the apt phase and nothing
@@ -4912,22 +7337,22 @@ readonly IMAGE_PACKAGES_OPTIONAL=(
 # 0600 AND root:root, stated rather than inherited: apt reads auth.conf.d as root and REFUSES a
 # world-readable entry, so the mode is functional as well as protective.
 #
-# EVERY FILESYSTEM OPERATION BELOW IS CONFINED, AND THAT REPLACES A REAL HOLE.  An earlier
-# revision of this pair checked only whether the COMPLETE pathname
-# $IMAGE_MOUNT/etc/apt/auth.conf.d was a symbolic link, and then did an ordinary host-root
-# `mkdir -p`, `chmod`, create, `chown` and `cat >` through it.  A base filesystem whose /etc or
-# /etc/apt is an ABSOLUTE symbolic link -- neither of which that check looked at -- redirected
-# all five onto the host, at which point this script wrote a caller's credential to a
-# host-chosen path as root and set that path's mode and ownership.  The pre-publication scan
-# cannot help: it runs thousands of lines later, and the damage is already outside the image.
+# EVERY FILESYSTEM OPERATION BELOW IS CONFINED, AND THE HOLE THAT CLOSES IS A REAL ONE.
+# Checking only whether the COMPLETE pathname $IMAGE_MOUNT/etc/apt/auth.conf.d is a symbolic
+# link, and then doing an ordinary host-root `mkdir -p`, `chmod`, create, `chown` and `cat >`
+# through it, leaves every intermediate component unexamined.  A base filesystem whose /etc or
+# /etc/apt is an ABSOLUTE symbolic link would redirect all five onto the host, at which point
+# this script would write a caller's credential to a host-chosen path as root and set that
+# path's mode and ownership.  The pre-publication scan cannot help: it runs thousands of lines
+# later, and the damage would already be outside the image.
 #
 # So the directory creation, the mode, the exclusive create, the ownership and the content write
 # all go through the confined I/O primitive, anchored on the image mount point: openat2 with
 # RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV resolves each component, the kernel
 # refuses a link at ANY position rather than following it, and the operation is performed
 # through the descriptor that resolution produced.  A base tarball with a symlinked /etc, a
-# symlinked /etc/apt or a symlinked auth.conf.d is now a fatal refusal naming the path, and no
-# host file is touched on the way to it.
+# symlinked /etc/apt or a symlinked auth.conf.d is a fatal refusal naming the path, and no host
+# file is touched on the way to it.
 readonly IMAGE_APT_AUTH_LEAF='99cec-l2-build-auth'
 
 # The in-image paths, RELATIVE to the image mount point, because that is what the confined
@@ -4986,9 +7411,12 @@ install_image_apt_auth() {
     # The content goes in through the descriptor the confinement produced.  The caller's file is
     # read on the host side by the redirection; the only thing crossing into the image is bytes
     # on stdin, so there is no in-image pathname to substitute between the create and the write.
+    # And the host side of that redirection is APT_AUTH_CUSTODY -- the descriptor validate_inputs
+    # vetted and still holds -- rather than the caller's name, so the bytes written here are the
+    # bytes those checks were made on however the name has since been re-pointed.
     confined_write "$rel" 'the temporary apt credential file' \
         'copy the --apt-auth-file credential into the image for the apt phase' \
-        < "$APT_AUTH_FILE"
+        < "$APT_AUTH_CUSTODY"
 
     # A FINAL CONFINED RE-READ of what was actually created, by descriptor: type, mode and link
     # count.  It costs one syscall and it is the difference between "the calls returned 0" and
@@ -5065,10 +7493,11 @@ install_image_packages() {
         # THE VALUE WRITTEN HERE CANNOT CARRY A CREDENTIAL, and that is enforced at the
         # boundary rather than described here.  validate_inputs refuses userinfo and refuses a
         # query string in --apt-mirror precisely because this line is written into the
-        # PUBLISHED image: an earlier revision wrote the value verbatim and then REPORTED that
-        # the caller's token was now inside the artifact, which is a warning where a refusal
-        # belongs.  So the sanitised form and the verbatim form are the same value now, and the
-        # log prints the sanitised one because that is what the rest of the script prints.
+        # PUBLISHED image: writing the value verbatim and REPORTING that the caller's token is
+        # now inside the artifact would be a warning where a refusal belongs.  Because the
+        # boundary refuses those forms, the sanitised form and the verbatim form are the same
+        # value here, and the log prints the sanitised one because that is what the rest of the
+        # script prints.
         #
         # scrub_and_assert_image_apt_credentials(), run before the image is unmounted, verifies
         # this on the FINISHED filesystem - including anything the base tarball brought with it.
@@ -5194,16 +7623,16 @@ install_image_packages() {
 # side can see that it exists, how large it is and whether two images resolved to the same set
 # without carrying the list itself.
 #
-# AND IT IS A PRECONDITION OF PUBLICATION, NOT A COURTESY.  An earlier revision caught a failed
-# dpkg-query, warned, wrote "# UNAVAILABLE" into the record, set the count to the string
-# 'unavailable' and RETURNED SUCCESS -- and a malformed count was coerced to zero the same way.
-# The image then published with no exact resolved package/version set, which is the single piece
-# of evidence this function exists to produce: "reproducible" is a claim about a set nobody can
-# read back, and a manifest whose count says 'unavailable' documents an audit gap rather than an
-# image.  The reasoning that made it advisory -- that the toolchain, pkg-config and lcov
-# assertions still run -- answers a different question: those prove the image can BUILD, not
-# what is IN it.  So every way this can fail to produce a concrete record is fatal here, an hour
-# before publication and while the image is still mounted:
+# AND IT IS A PRECONDITION OF PUBLICATION, NOT A COURTESY.  Catching a failed dpkg-query,
+# warning, writing "# UNAVAILABLE" into the record, setting the count to the string 'unavailable'
+# and RETURNING SUCCESS -- or coercing a malformed count to zero -- would publish an image with
+# no exact resolved package/version set, which is the single piece of evidence this function
+# exists to produce: "reproducible" is a claim about a set nobody can read back, and a manifest
+# whose count says 'unavailable' documents an audit gap rather than an image.  The reasoning that
+# would make it advisory -- that the toolchain, pkg-config and lcov assertions still run --
+# answers a different question: those prove the image can BUILD, not what is IN it.  So every way
+# this can fail to produce a concrete record is fatal here, an hour before publication and while
+# the image is still mounted:
 #
 #   * dpkg-query failing inside the chroot,
 #   * an empty listing,
@@ -5230,21 +7659,21 @@ PACKAGE_RECORD_REQUIRED_ACCOUNTED='unknown'
 #
 #     install ok installed
 #
-# Both of these functions used to match the regular expression /installed$/ against the record,
-# which is a test on the LAST WORD ONLY and therefore accepts, among others:
+# Matching the regular expression /installed$/ against the record is a test on the LAST WORD
+# ONLY, and therefore accepts, among others:
 #
 #     purge     ok        not-installed     the package is GONE; the entry is a tombstone
 #     install   reinstreq half-installed    unpacking failed part way through
 #     deinstall ok        config-files      removed, only its conffiles remain
 #
 # The first and third end in "installed" and "config-files" respectively -- and the first ends
-# in the literal text "installed" because "not-installed" does.  So a required package that had
-# been purged, or whose unpack died, still incremented `accounted` and still published
+# in the literal text "installed" because "not-installed" does.  Under a suffix test a required
+# package that had been purged, or whose unpack died, would increment `accounted` and publish
 # REQUIRED_PACKAGES_ACCOUNTED as though it were present.  That is the exact drift this record
-# exists to catch, reported as its own absence of drift.
+# exists to catch, so it cannot be the drift the record's own parser introduces.
 #
-# The fix is to compare the three fields POSITIONALLY and exactly, on both listings.  The two
-# listings need different field arithmetic and the difference is not cosmetic:
+# So the three fields are compared POSITIONALLY and exactly, on both listings.  The two listings
+# need different field arithmetic and the difference is not cosmetic:
 #
 #   the direct listing   '${Package} ${Version} ${Architecture} ${Status}'  -- default FS, so
 #                        $1 package, $2 version, $3 architecture, and the status triple lands
@@ -5266,8 +7695,8 @@ PACKAGE_RECORD_REQUIRED_ACCOUNTED='unknown'
 # surface: the chroot is built from a base tarball into an empty package set and nothing here
 # ever holds anything, so the state is unreachable by this script's own actions.  Second, the
 # failure direction is the safe one -- an unaccounted required name is FATAL and names the file
-# to inspect, whereas the defect being corrected here published an image while claiming a purged
-# package was present.  The count of installed packages a few hundred lines below asks the other
+# to inspect, whereas a looser test here would publish an image while claiming a purged package
+# was present.  The count of installed packages a few hundred lines below asks the other
 # question and deliberately uses the looser ' installed$' test, which does keep a held package;
 # the comment on that line explains why the two differ rather than one of them being wrong.
 # ------------------------------------------------------------------------------------
@@ -5315,12 +7744,12 @@ package_provided_by_installed() { # $1=provides listing  $2=package name
 #
 # WHY IT IS IN THIS FILE AND NOT IN A TEST FILE OF ITS OWN.  The two package-status parsers
 # above are the whole of the package accounting's correctness, and they are pure functions of a
-# string -- so they are exactly the kind of code a regression gate belongs on.  They previously
-# had none: the only way to exercise them was to build an image, which needs root, a binder-
-# capable kernel and half an hour.  This repository's change set is a fixed allowlist of paths,
-# so a new test file cannot be added; putting the cases in the script itself is not a
-# compromise on that constraint but a better fit for it -- the gate travels with the code it
-# guards, cannot drift out of sync with it, and needs no harness.
+# string -- so they are exactly the kind of code a regression gate belongs on.  Without one the
+# only way to exercise them is to build an image, which needs root, a binder-capable kernel and
+# half an hour.  This repository's change set is a fixed allowlist of paths, so a new test file
+# cannot be added; putting the cases in the script itself is not a compromise on that constraint
+# but a better fit for it -- the gate travels with the code it guards, cannot drift out of sync
+# with it, and needs no harness.
 #
 # WHAT IT GUARANTEES, PRECISELY.
 #
@@ -5335,8 +7764,8 @@ package_provided_by_installed() { # $1=provides listing  $2=package name
 #     fails the job on any regression.
 #
 # WHY THE PACKAGE CASES ARE THE ONES THEY ARE.  Every rejected status below is a real dpkg
-# state that a naive parser accepts, and the two the earlier revision of these functions
-# actually accepted are the first two:
+# state that a naive parser accepts, and the first two are the ones an unanchored suffix test
+# accepts in practice:
 #
 #   purge ok not-installed       -- a PURGE TOMBSTONE.  An unanchored /installed$/ matches it,
 #                                   because the tombstone's own status ends in the TEXT
@@ -5363,6 +7792,16 @@ package_provided_by_installed() { # $1=provides listing  $2=package name
 # three direct calls whose outcomes are printed individually -- so the self-test also answers
 # "is openat2 with RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS actually in force on this host", which
 # is the one environmental question the rest of the script depends on absolutely.
+#
+# The confined-WRAPPER cases after them answer the question that one does not: the primitive
+# being in force says nothing about whether the wrappers every privileged operation in this
+# script goes THROUGH still refuse what they must.  A wrapper that swallowed a refusal would
+# leave the primitive working and the operation unconfined, so each of the properties the
+# converted call sites rely on -- rm -f semantics on a symlinked leaf, a refused redirected
+# write or chmod with the host file PROVED unchanged afterwards, a refused mkdir and
+# enumeration, the [ -x ] replacement's four arms, and the identity guard on the two recursive
+# deletes -- is its own case.  Their own block comment above them says which call site each one
+# is standing in for.
 # ------------------------------------------------------------------------------------
 SELF_TEST_CASES=0
 SELF_TEST_FAILURES=0
@@ -5471,6 +7910,349 @@ self_test_confined_io() {
     return 0
 }
 
+# ------------------------------------------------------------------------------------
+# THE WRAPPERS THE CONVERSIONS DEPEND ON, PROVED SEPARATELY FROM THE PRIMITIVE.
+#
+# probe_confined_io() above proves the PRIMITIVE refuses a substituted path.  It says nothing
+# about the WRAPPERS, and the wrappers are where every privileged operation in this script
+# actually enters the confinement -- so a wrapper that accepted a status it should have died on
+# would leave the primitive intact and the operation unconfined, which is precisely the shape of
+# the defect this mechanism exists to close.  Each case below is a property that one of the
+# converted call sites relies on:
+#
+#   confined_unlink_if_present   the `rm -f` replacement.  It has to REMOVE a symlinked leaf
+#                                rather than follow it OR refuse it, because /etc/resolv.conf on
+#                                a systemd-resolved base IS a symbolic link and removing it is
+#                                the entire point of that call; and it has to treat absence as
+#                                an answer rather than an error, because `rm -f` did.  Both arms
+#                                are proved, and so is the third: a symlink at a DIRECTORY
+#                                component is still refused, since unlinkat's not-following
+#                                applies to the leaf alone and nothing else.
+#   confined_write / _chmod      the `>` and `chmod` replacements in nine functions.  Proved to
+#                                refuse a symlinked leaf AND to leave that link's target
+#                                untouched -- which is the actual claim.  "It reported an error"
+#                                is not the property; "the host file did not change" is.
+#   confined_mkdir / _list       the `mkdir -p` and `find`-and-delete replacements.  Proved to
+#                                refuse a symlinked directory component.
+#   assert_installed_executable  the `[ -x ]` replacement.  Proved to accept a real executable,
+#                                reject one carrying no execute bit, reject absence, and reject
+#                                a symbolic link pointing at a perfectly good executable --
+#                                which is the one case `[ -x ]` answered wrongly, and the reason
+#                                it was replaced.
+#   confined_identity and        the guard on the two RECURSIVE DELETES.  Proved to accept an
+#     assert_confined_identity_unchanged   unchanged directory and to REFUSE one that was
+#                                swapped for a different directory between the record and the
+#                                check.  THE SWAP IS DONE WITH `mv`, NOT rmdir-then-mkdir: the
+#                                inode of a just-removed directory is routinely handed straight
+#                                back by the filesystem, so a rmdir/mkdir swap can produce the
+#                                SAME device and inode and would make this case pass for a
+#                                reason that has nothing to do with the check working.
+#
+# Every wrapper here except confined_identity DIES on refusal -- that is the property under test
+# -- so each is called in a SUBSHELL and its exit status turned into one line.  Stdin comes from
+# /dev/null for all of them, because confined_write reads its content from stdin and an
+# unredirected call would BLOCK the self-test indefinitely rather than fail it.
+# ------------------------------------------------------------------------------------
+
+# One wrapper case.  $1 says which outcome the case requires: 'dies' for an operation that must
+# be refused, 'survives' for one that must be allowed.
+self_test_wrapper_case() { # $1=dies|survives  $2=case name  $3..=the command and its arguments
+    local expected="$1" name="$2" status=0 actual
+    shift 2
+    ( "$@" ) >/dev/null 2>&1 </dev/null || status=$?
+    if [ "$status" -eq 0 ]; then actual='survives'; else actual='dies'; fi
+    if [ "$actual" = "$expected" ]; then
+        self_test_report ok 'confined-wrappers' "$name" "$actual (status $status)"
+    else
+        self_test_report not-ok 'confined-wrappers' "$name" \
+            "$actual (status $status), expected $expected"
+    fi
+}
+
+# The other half of a refusal case: the filesystem fact the refusal was supposed to preserve.
+# A refusal that reported an error and wrote anyway would pass the case above and fail this one.
+self_test_fact_case() { # $1=case name  $2=detail  $3..=the condition, as a command
+    local name="$1" detail="$2"
+    shift 2
+    if "$@" >/dev/null 2>&1; then
+        self_test_report ok 'confined-wrappers' "$name" "$detail"
+    else
+        self_test_report not-ok 'confined-wrappers' "$name" "$detail -- DID NOT HOLD"
+    fi
+}
+
+# ------------------------------------------------------------------------------------
+# THE PINNED PRIVILEGED OPERATIONS, AS SELF-TEST CASES.
+#
+# WHAT THESE COVER AND WHAT THEY DELIBERATELY DO NOT, so the count is not read as more than it
+# is.  Every case here exercises the CUSTODY CHAIN -- the anchor open, the openat2 resolution and
+# the fstat comparison -- which is the part that could silently degrade and take every claim in
+# this file with it.  The mount and chroot syscalls at the end of that chain are NOT exercised
+# here, because --self-test runs before anything privileged and mounting or chrooting in a scratch
+# directory to test it would be exactly the privileged operation this mode promises not to
+# perform.  Those are exercised for real at their seven call sites, each fatal on failure.  The
+# exec path IS covered, by its custody refusal, which needs no chroot to happen.
+# ------------------------------------------------------------------------------------
+self_test_pinned_op_case() { # $1=case name  $2=required status  $3..=the pinned_op arguments
+    local name="$1" required="$2" status=0
+    shift 2
+    pinned_op "$@" >/dev/null 2>&1 </dev/null || status=$?
+    if [ "$status" -eq "$required" ]; then
+        self_test_report ok 'pinned-op' "$name" "status $status"
+    else
+        self_test_report not-ok 'pinned-op' "$name" "status $status, expected $required"
+    fi
+}
+
+# The wrapper-level equivalent of self_test_wrapper_case, duplicated rather than shared for one
+# reason: that function hard-codes the 'confined-wrappers' subject, and reusing it here would
+# file these cases under the mechanism they are not testing.  Editing it instead would change the
+# label on the existing confined-wrapper cases, which is not this change's business.
+self_test_pinned_op_wrapper_case() { # $1=dies|survives  $2=case name  $3..=command and arguments
+    local expected="$1" name="$2" status=0 actual
+    shift 2
+    ( "$@" ) >/dev/null 2>&1 </dev/null || status=$?
+    if [ "$status" -eq 0 ]; then actual='survives'; else actual='dies'; fi
+    if [ "$actual" = "$expected" ]; then
+        self_test_report ok 'pinned-op' "$name" "$actual (status $status)"
+    else
+        self_test_report not-ok 'pinned-op' "$name" \
+            "$actual (status $status), expected $expected"
+    fi
+}
+
+self_test_pinned_op() {
+    local scratch anchor device inode beneath_device beneath_inode saved_inode
+
+    scratch="$(mktemp -d)" || {
+        self_test_report not-ok 'pinned-op' 'a scratch directory could be created' \
+            'mktemp -d failed'
+        return 0
+    }
+    register_tempdir "$scratch"
+    chmod 0700 -- "$scratch" 2>/dev/null || true
+
+    # The SHIPPED start-up proof: two positive cases, eight refusals and the exec path's reserved
+    # custody refusal.  It dies on failure, which is right in a build and wrong in a test run that
+    # should report every case, so it runs in a subshell and its outcome becomes one line.
+    if ( install_pinned_op_helper "$scratch"; probe_pinned_op "$scratch" ) >/dev/null 2>&1; then
+        self_test_report ok 'pinned-op' 'probe_pinned_op: 2 positive and 9 refusals' \
+            'the descriptor-consuming custody chain is in force'
+    else
+        self_test_report not-ok 'pinned-op' 'probe_pinned_op: 2 positive and 9 refusals' \
+            'the shipped start-up proof FAILED; re-run below, unsuppressed'
+        ( install_pinned_op_helper "$scratch"; probe_pinned_op "$scratch" ) || true
+        return 0
+    fi
+
+    # The proof ran in a subshell, so the helper is on disk but the globals it set are not.
+    install_pinned_op_helper "$scratch" >/dev/null 2>&1 || true
+    anchor="$scratch/pinned-op-anchor"
+    mkdir -p -- "$anchor/beneath" || true
+    mkdir -p -- "$scratch/outside-target" || true
+    ln -sfn "$scratch/outside-target" "$anchor/absolute-link" || true
+    ln -sfn 'beneath' "$anchor/relative-link" || true
+    device="$(stat -c '%d' -- "$anchor" 2>/dev/null || printf '')"
+    inode="$(stat -c '%i' -- "$anchor" 2>/dev/null || printf '')"
+    beneath_device="$(stat -c '%d' -- "$anchor/beneath" 2>/dev/null || printf '')"
+    beneath_inode="$(stat -c '%i' -- "$anchor/beneath" 2>/dev/null || printf '')"
+    if [ -z "$device" ] || [ -z "$inode" ] || [ -z "$beneath_inode" ]; then
+        self_test_report not-ok 'pinned-op' 'the fixture could be measured' \
+            'stat on the self-test anchor failed'
+        return 0
+    fi
+
+    # POSITIVE: the anchor's own descriptor, and a target resolved beneath it, both fstat to the
+    # recorded identity.
+    self_test_pinned_op_case 'the ANCHOR verifies on its descriptor' 0 \
+        "$anchor" "$device" "$inode" . - - verify
+    self_test_pinned_op_case 'a TARGET beneath the anchor verifies' 0 \
+        "$anchor" "$device" "$inode" beneath "$beneath_device" "$beneath_inode" verify
+
+    # NEGATIVE: one line per condition, each with the status that names it.  A wrong inode on the
+    # ANCHOR is an IDENTITY refusal rather than ANCHOR_BAD, because the open succeeded and it was
+    # the fstat that disagreed; ANCHOR_BAD is for an anchor that cannot be opened as a
+    # non-symlink directory at all.  Both are asserted, because conflating them would hide which
+    # half of the chain was exercised.
+    self_test_pinned_op_case 'a wrong ANCHOR inode is REFUSED' "$PINNED_OP_IDENTITY" \
+        "$anchor" "$device" "$((inode + 1))" . - - verify
+    self_test_pinned_op_case 'a SYMLINKED anchor is REFUSED' "$PINNED_OP_ANCHOR_BAD" \
+        "$anchor/relative-link" "$device" "$inode" . - - verify
+    self_test_pinned_op_case 'a wrong TARGET inode is REFUSED' "$PINNED_OP_IDENTITY" \
+        "$anchor" "$device" "$inode" beneath "$beneath_device" "$((beneath_inode + 1))" verify
+    self_test_pinned_op_case 'a SYMLINKED target is REFUSED' "$PINNED_OP_REFUSED" \
+        "$anchor" "$device" "$inode" absolute-link "$beneath_device" "$beneath_inode" verify
+    self_test_pinned_op_case "a '..' escape is REFUSED" "$PINNED_OP_REFUSED" \
+        "$anchor" "$device" "$inode" ../outside-target "$beneath_device" "$beneath_inode" verify
+    self_test_pinned_op_case 'an ABSENT target is REFUSED' "$PINNED_OP_ABSENT" \
+        "$anchor" "$device" "$inode" beneath/absent "$beneath_device" "$beneath_inode" verify
+    self_test_pinned_op_case 'a target with NO identity is REFUSED' "$PINNED_OP_USAGE" \
+        "$anchor" "$device" "$inode" beneath - - verify
+    self_test_pinned_op_case 'an ABSOLUTE target is REFUSED' "$PINNED_OP_USAGE" \
+        "$anchor" "$device" "$inode" /etc "$beneath_device" "$beneath_inode" verify
+
+    # THE EXEC PATH.  Its custody refusal is a single reserved status because execve leaves no
+    # other channel, and it is raised before anything is opened -- so this case establishes that
+    # a chroot onto an anchor that does not fstat to the pin is not entered.  /bin/true is named
+    # rather than a shell so nothing but execve can affect the outcome.
+    self_test_pinned_op_case 'a CHROOT onto a wrong pin is REFUSED' \
+        "$PINNED_OP_CUSTODY_REFUSED" \
+        "$anchor" "$device" "$((inode + 1))" . - - chroot-exec /bin/true
+
+    # THE WRAPPER LAYER, through the image-root globals the production call sites use, so the
+    # fail-closed behaviour is asserted where the seven operations actually enter it.
+    IMAGE_MOUNT="$anchor"
+    IMAGE_ROOT_DEVICE="$device"
+    IMAGE_ROOT_INODE="$inode"
+    PINNED_OP_PROVEN=1
+    self_test_pinned_op_wrapper_case survives \
+        'pinned_image_verify ACCEPTS the pinned image root' \
+        pinned_image_verify . - - 'the image root' 'prove the accepting arm'
+    saved_inode="$IMAGE_ROOT_INODE"
+    IMAGE_ROOT_INODE="$((saved_inode + 1))"
+    self_test_pinned_op_wrapper_case dies \
+        'pinned_image_verify REFUSES a moved image root' \
+        pinned_image_verify . - - 'the image root' 'prove the refusing arm'
+    IMAGE_ROOT_INODE="$saved_inode"
+
+    # AND THE GUARD ITSELF.  An operation attempted before the mechanism has been proven must
+    # die, because an unproven mechanism is indistinguishable from the pathname form it replaced.
+    PINNED_OP_PROVEN=0
+    self_test_pinned_op_wrapper_case dies \
+        'pinned_op_ready REFUSES an unproven mechanism' \
+        pinned_image_verify . - - 'the image root' 'prove the unproven-mechanism guard'
+
+    IMAGE_MOUNT=''
+    IMAGE_ROOT_DEVICE=''
+    IMAGE_ROOT_INODE=''
+    PINNED_OP_HELPER=''
+    PINNED_OP_PYTHON=''
+    PINNED_OP_PROVEN=0
+    return 0
+}
+
+self_test_confined_wrappers() {
+    local scratch anchor record mode
+    scratch="$(mktemp -d)" || {
+        self_test_report not-ok 'confined-wrappers' 'a scratch directory could be created' \
+            'mktemp -d failed'
+        return 0
+    }
+    register_tempdir "$scratch"
+    chmod 0700 -- "$scratch" 2>/dev/null || true
+
+    if ! install_confined_io_helper "$scratch" >/dev/null 2>&1; then
+        self_test_report not-ok 'confined-wrappers' 'the confined I/O helper installed' \
+            'install_confined_io_helper failed'
+        return 0
+    fi
+
+    # THE FIXTURE.  An anchor with the four shapes the converted call sites meet in a hostile
+    # base tarball -- a symlinked leaf pointing outside, a symlinked directory pointing outside,
+    # a symlink pointing at something legitimate inside, and ordinary files at two modes -- plus
+    # the objects outside the anchor whose survival is what the refusals are for.  Everything is
+    # inside one mktemp directory registered with the EXIT trap, so a failure leaves nothing.
+    anchor="$scratch/wrapper-anchor"
+    mkdir -p -- "$anchor/staging" "$scratch/outside-dir" "$scratch/replacement" || true
+    printf 'OUTSIDE CONTENT\n' > "$scratch/outside-target" || true
+    chmod 0600 -- "$scratch/outside-target" || true
+    printf 'victim\n' > "$scratch/outside-dir/victim" || true
+    printf 'x\n' > "$anchor/exec-file" || true
+    chmod 0755 -- "$anchor/exec-file" || true
+    printf 'x\n' > "$anchor/plain-file" || true
+    chmod 0644 -- "$anchor/plain-file" || true
+    ln -sfn "$scratch/outside-target" "$anchor/link-to-outside" || true
+    ln -sfn "$scratch/outside-target" "$anchor/doomed-link" || true
+    ln -sfn "$scratch/outside-dir" "$anchor/link-to-dir" || true
+    ln -sfn 'exec-file' "$anchor/link-to-exec" || true
+
+    # CONFINED_IO_PROVEN is raised by hand here for the same reason self_test_confined_io raises
+    # it: the shipped proof ran in a subshell one case ago and the globals it set did not
+    # survive.  This is the self-test entry point and nothing privileged happens in this
+    # directory; the production path still raises the flag only from probe_confined_io().
+    CONFINED_IO_ANCHOR="$anchor"
+    CONFINED_IO_PROVEN=1
+
+    # --- confined_unlink_if_present: the `rm -f` replacement -----------------------------
+    self_test_wrapper_case survives 'unlink_if_present REMOVES a symlinked leaf' \
+        confined_unlink_if_present 'doomed-link' 'a self-test symbolic link' \
+        'prove rm -f semantics on a link'
+    self_test_fact_case 'the link ENTRY is gone' 'doomed-link no longer exists' \
+        test '!' -L "$anchor/doomed-link"
+    self_test_fact_case 'its target OUTSIDE the anchor survives' \
+        'outside-target still holds its content' \
+        test "$(cat -- "$scratch/outside-target" 2>/dev/null)" = 'OUTSIDE CONTENT'
+    self_test_wrapper_case survives 'unlink_if_present accepts an ABSENT leaf' \
+        confined_unlink_if_present 'never-existed' 'nothing at all' \
+        'prove absence is an answer'
+    self_test_wrapper_case dies 'unlink_if_present REFUSES a symlinked parent' \
+        confined_unlink_if_present 'link-to-dir/victim' 'a file beyond a linked directory' \
+        'prove the parent components stay confined'
+    self_test_fact_case 'the file beyond that link survives' 'outside-dir/victim still exists' \
+        test -f "$scratch/outside-dir/victim"
+
+    # --- confined_write and confined_chmod: the `>` and `chmod` replacements -------------
+    self_test_wrapper_case dies 'confined_write REFUSES a symlinked leaf' \
+        confined_write 'link-to-outside' 'a host file behind a link' \
+        'prove a redirected write is refused'
+    self_test_fact_case 'the host file was NOT rewritten' \
+        'outside-target still holds its content' \
+        test "$(cat -- "$scratch/outside-target" 2>/dev/null)" = 'OUTSIDE CONTENT'
+    self_test_wrapper_case dies 'confined_chmod REFUSES a symlinked leaf' \
+        confined_chmod 'link-to-outside' 0777 'a host file behind a link' \
+        'prove a redirected chmod is refused'
+    mode="$(stat -c '%a' -- "$scratch/outside-target" 2>/dev/null || printf '')"
+    self_test_fact_case 'the host file mode is UNCHANGED' "still $mode, not 777" \
+        test "$mode" = '600'
+
+    # --- confined_mkdir and confined_list -----------------------------------------------
+    self_test_wrapper_case dies 'confined_mkdir REFUSES a symlinked component' \
+        confined_mkdir 'link-to-dir/created' 0755 'a directory beyond a linked directory' \
+        'prove mkdir -p cannot be redirected'
+    self_test_fact_case 'nothing was created outside the anchor' \
+        'outside-dir/created does not exist' \
+        test '!' -e "$scratch/outside-dir/created"
+    self_test_wrapper_case dies 'confined_list REFUSES a symlinked directory' \
+        confined_list 'link-to-dir' 'a linked directory' \
+        'prove an enumeration cannot be redirected'
+
+    # --- assert_installed_executable: the `[ -x ]` replacement ---------------------------
+    self_test_wrapper_case survives 'installed_executable ACCEPTS mode 0755' \
+        assert_installed_executable 'exec-file' '/exec-file' 'the probe executable' \
+        'prove the accepting arm'
+    self_test_wrapper_case dies 'installed_executable REJECTS mode 0644' \
+        assert_installed_executable 'plain-file' '/plain-file' 'the probe executable' \
+        'prove the no-execute-bit arm'
+    self_test_wrapper_case dies 'installed_executable REJECTS an absent path' \
+        assert_installed_executable 'never-built' '/never-built' 'the probe executable' \
+        'prove the absence arm'
+    self_test_wrapper_case dies 'installed_executable REJECTS a link to one' \
+        assert_installed_executable 'link-to-exec' '/link-to-exec' 'the probe executable' \
+        'prove the case [ -x ] answered wrongly'
+
+    # --- the identity guard on the recursive deletes -------------------------------------
+    self_test_wrapper_case dies 'confined_identity REFUSES a symlinked directory' \
+        confined_identity 'link-to-dir' 'a linked directory' \
+        'prove an identity cannot be recorded through a link'
+    record="$(confined_identity 'staging' 'the self-test staging tree' \
+        'record an identity to compare against' 2>/dev/null)" || record=''
+    self_test_fact_case 'an identity RECORD was produced' \
+        "record='${record:-<empty>}'" test -n "$record"
+    self_test_wrapper_case survives 'identity_unchanged ACCEPTS the same directory' \
+        assert_confined_identity_unchanged 'staging' "$record" \
+        'the self-test staging tree' 'prove the accepting arm'
+    # THE SWAP, BY `mv`.  See the block comment above for why this must not be rmdir+mkdir.
+    mv -- "$anchor/staging" "$scratch/moved-away" 2>/dev/null || true
+    mv -- "$scratch/replacement" "$anchor/staging" 2>/dev/null || true
+    self_test_wrapper_case dies 'identity_unchanged REFUSES a SWAPPED directory' \
+        assert_confined_identity_unchanged 'staging' "$record" \
+        'the self-test staging tree' 'prove the refusing arm'
+
+    CONFINED_IO_ANCHOR=''
+    CONFINED_IO_PROVEN=0
+    return 0
+}
+
 run_self_test() {
     local installed='build-essential 12.9 i386 install ok installed'
     local provider_ok='pkgconf 1.8.1 i386 install ok installed :: pkg-config (= 1.8.1)'
@@ -5559,6 +8341,12 @@ $provider_ok" 'an installed provider beside a purged one'
     # ---- the confined I/O primitive --------------------------------------------------
     self_test_confined_io
 
+    # ---- the wrappers the privileged conversions enter it through --------------------
+    self_test_confined_wrappers
+
+    # ---- the descriptor-consuming custody chain the seven mount/chroot sites use -----
+    self_test_pinned_op
+
     printf '\n%d case(s), %d failure(s)\n' "$SELF_TEST_CASES" "$SELF_TEST_FAILURES"
     if [ "$SELF_TEST_FAILURES" -gt 0 ]; then
         printf '%s --self-test FAILED.  Each NOT OK line above names the parser, the case and\n' \
@@ -5574,7 +8362,11 @@ $provider_ok" 'an installed provider beside a purged one'
 }
 
 record_installed_packages() {
-    local target="$IMAGE_MOUNT$GUEST_PACKAGE_RECORD"
+    # $target is kept for the DIAGNOSTICS below, which name the record's in-guest path; the
+    # write, the mode change and the digest all go through the confined primitive against
+    # $target_rel, so no host-side operation resolves an in-image pathname here.
+    local target="$GUEST_PACKAGE_RECORD"
+    local target_rel="${GUEST_PACKAGE_RECORD#/}"
     local listing='' provides_listing='' count='' digest='' malformed=''
     local package missing='' accounted=0 provided=''
 
@@ -5615,6 +8407,17 @@ $malformed
        the image is NOT published.  Each such line is a package dpkg holds in a half-configured
        state; run 'chroot $IMAGE_MOUNT dpkg --configure -a' and rebuild."
 
+    # THE RECORD IS WRITTEN THROUGH THE CONFINED PRIMITIVE.  It goes into $GUEST_CONF_DIR, which
+    # is /etc/cec-l2 -- and /etc comes from the BASE TARBALL, so `{ ... } > "$IMAGE_MOUNT$path"`
+    # followed by `chmod` was a root-owned host-side write through a name whose leading component
+    # this script does not author.  The parent is created here as well rather than assumed:
+    # copy_guest_payload has not run yet at this point in main().
+    confined_mkdir "${GUEST_CONF_DIR#/}" 0755 "the image's $GUEST_CONF_DIR" \
+        'record the installed package set in the image'
+    confined_unlink_if_present "$target_rel" "the image's $target" \
+        'record the installed package set in the image'
+    confined_create "$target_rel" 0644 "the image's $target" \
+        'record the installed package set in the image'
     {
         printf '# The exact package set installed into this image, with versions.\n'
         printf '# Written by %s at image-build time.\n' "$SCRIPT_NAME"
@@ -5624,15 +8427,17 @@ $malformed
         printf '# Format: <package> <version> <architecture> <dpkg status>\n'
         printf '#\n'
         printf '%s\n' "$listing" | LC_ALL=C sort
-    } > "$target"
-    chmod 0644 -- "$target"
+    } | confined_write "$target_rel" "the image's $target" \
+            'record the installed package set in the image'
+    confined_chmod "$target_rel" 0644 "the image's $target" \
+        'set the mode of the image package record'
 
     # Only lines whose dpkg status ends in "installed" count; a purged-but-configured entry is
     # present in the database and is not in the image.
     #
     # THE LEADING SPACE IN THIS PATTERN IS LOAD-BEARING, and it is why this line is NOT an
-    # instance of the status-suffix defect corrected above package_directly_installed.  That
-    # defect was an UNANCHORED /installed$/, which "purge ok not-installed" satisfies because
+    # instance of the status-suffix trap the block above package_directly_installed describes.
+    # That trap is an UNANCHORED /installed$/, which "purge ok not-installed" satisfies because
     # the tombstone status itself ends in the text "installed"; ' installed$' requires a SPACE
     # before it, so "ok not-installed" and "install reinstreq half-installed" are both
     # correctly excluded (verified against both forms).  An exact "install ok installed" triple
@@ -5645,10 +8450,9 @@ $malformed
     case "$count" in
         ''|*[!0-9]*)
             die "the number of installed packages in the image could not be counted: the count
-       came back as '${count:-<empty>}', which is not a number.  It used to be coerced to zero
-       and the build continued; it is fatal now, because a count nobody can trust is indis-
-       tinguishable from a record nobody can read, and both are published as fact.  The image
-       is NOT published."
+       came back as '${count:-<empty>}', which is not a number.  It is fatal rather than coerced
+       to zero, because a count nobody can trust is indistinguishable from a record nobody can
+       read, and both would be published as fact.  The image is NOT published."
             ;;
     esac
     [ "$count" -gt 0 ] || die "the image reports ZERO installed packages, immediately after
@@ -5699,7 +8503,14 @@ $malformed
     # A DIGEST OF THE RECORD, so two images can be compared by one line before anybody diffs
     # a few hundred.  Of the record as written, including its header, because that is the file
     # a reader inside the guest will hash.
-    digest="$(sha256sum -- "$target" | awk '{ print $1 }')" \
+    #
+    # Read back through the primitive rather than with `sha256sum -- "$IMAGE_MOUNT$path"`, which
+    # would have hashed whatever a symbolic link at that name pointed at and published the result
+    # as a fingerprint OF THIS IMAGE'S package record.  A digest of the wrong file is worse than
+    # no digest: it is a false provenance claim in the manifest.  The read goes through the same
+    # descriptor-anchored path the write above used, so the bytes hashed are the bytes written.
+    digest="$(confined_read "$target_rel" "the image's $target" \
+                  'hash the package record for the manifest' | sha256sum | awk '{ print $1 }')" \
         || die "the package record at $target was written but could not be hashed, so the
        manifest cannot carry a comparable fingerprint of the resolved set.  The image is NOT
        published."
@@ -5736,14 +8547,43 @@ $malformed
 # not hypothetical: without this step every image would carry the runner's resolver
 # configuration.  The file is REPLACED with a comment rather than deleted, so a reader inside
 # the guest finds the reason instead of an absence.
+#
+# EVERY OPERATION BELOW GOES THROUGH THE CONFINED PRIMITIVE, AND THIS FUNCTION IS WHY THAT
+# MATTERS MORE HERE THAN ANYWHERE ELSE IN THE FILE.  It used to acknowledge the hazard in one
+# line -- "a symlink first, because writing through it would write outside the image's /etc, and
+# on this build host that means writing to the HOST's /run" -- and then perform every sibling
+# operation with an ordinary host-side `rm -f`, `>`, `chmod`, `[ -d ]` and `find -delete` on
+# $IMAGE_MOUNT-prefixed PATHNAMES.  Removing the link first narrows the window; it does not close
+# it, and it does nothing at all for /etc/network.  A base tarball that ships /etc, /etc/network
+# or /etc/network/interfaces as an absolute symbolic link had this script, as root ON THE BUILD
+# HOST, truncate and replace a host file and delete the contents of a host directory.
+#
+# So the pathnames are gone.  openat2 with RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV
+# resolves each in-image path beneath the mount point and every operation runs through the
+# resulting descriptor; the enumeration of interfaces.d goes through it too, because `find`'s
+# STARTING path is resolved normally by the kernel and a symlinked interfaces.d would have had
+# find enumerate -- and delete -- host files.
+#
+# THE ONE PLACE A LINK IS STILL THE TARGET RATHER THAN A REFUSAL is the removal itself, and that
+# is deliberate: /etc/resolv.conf is EXPECTED to be a link on a systemd-resolved base, so
+# confined_unlink_if_present removes the directory ENTRY (unlinkat never follows) and leaves
+# whatever it pointed at alone.  The two files are then created fresh rather than truncated in
+# place, which is the only way to be sure the object written to is the object this script made.
 # ------------------------------------------------------------------------------------
 neutralise_image_network_configuration() {
+    local listing entry entry_type entry_name
+
     log "removing resolver and interface configuration from the image"
 
-    # A symlink first (systemd-resolved leaves /etc/resolv.conf pointing into /run), because
-    # writing through it would write outside the image's /etc -- and on this build host that
-    # means writing to the HOST's /run.
-    rm -f -- "$IMAGE_MOUNT/etc/resolv.conf"
+    # THE ENTRY GOES FIRST, WHATEVER IT IS.  systemd-resolved leaves /etc/resolv.conf as a
+    # symbolic link into /run, and writing through it would write outside the image's /etc --
+    # which on this build host means writing to the HOST's /run.  unlinkat() on a leaf relative
+    # to a confined descriptor removes the entry without following it, so the link's target is
+    # untouched and the name is free for a file this script owns.
+    confined_unlink_if_present 'etc/resolv.conf' "the base's resolver configuration" \
+        'remove the resolver configuration from the image'
+    confined_create 'etc/resolv.conf' 0644 "the image's /etc/resolv.conf" \
+        'write the empty resolver configuration into the image'
     {
         printf '# Deliberately empty: this guest has NO network.\n'
         printf '#\n'
@@ -5754,22 +8594,69 @@ neutralise_image_network_configuration() {
         printf '#\n'
         printf '# Package installation happened on the BUILD HOST at image-build time, which is\n'
         printf '# where the network belongs.  See %s for what was installed.\n' "$GUEST_IMAGE_RECORD"
-    } > "$IMAGE_MOUNT/etc/resolv.conf"
-    chmod 0644 -- "$IMAGE_MOUNT/etc/resolv.conf"
+    } | confined_write 'etc/resolv.conf' "the image's /etc/resolv.conf" \
+            'write the empty resolver configuration into the image'
+    confined_chmod 'etc/resolv.conf' 0644 "the image's /etc/resolv.conf" \
+        'set the mode of the image resolver configuration'
 
     # Loopback only.  The init never brings an interface up, so this file is documentation as
     # much as configuration -- but a base whose interfaces file names eth0 with dhcp would
     # leave a reader guessing whether the guest is meant to have a network.
-    if [ -d "$IMAGE_MOUNT/etc/network" ]; then
-        find "$IMAGE_MOUNT/etc/network/interfaces.d" -mindepth 1 -maxdepth 1 -type f \
-             -delete 2>/dev/null || true
+    #
+    # confined_directory replaces `[ -d ]`, which FOLLOWED links: on an image whose /etc/network
+    # is an absolute symbolic link it reported the HOST's directory as present and everything
+    # below then acted there.  It returns 1 for a genuinely absent directory -- the case this
+    # skips, exactly as before -- and dies on a link or a non-directory rather than proceeding.
+    if confined_directory 'etc/network' '/etc/network' \
+            'write the loopback-only interface configuration into the image'; then
+        # The purge of interfaces.d, enumerated by descriptor.  Only regular files are removed,
+        # which is what `find -type f -delete` did; anything else is NAMED rather than passed
+        # over in silence, because a symbolic link sitting in an interfaces.d this script has
+        # just been asked to empty is worth a reader's attention even though nothing here
+        # follows it.
+        if confined_directory 'etc/network/interfaces.d' '/etc/network/interfaces.d' \
+                'empty the image'"'"'s /etc/network/interfaces.d'; then
+            listing="$WORK_DIR/image-interfaces-d-listing"
+            rm -f -- "$listing"
+            confined_list 'etc/network/interfaces.d' \
+                "the image's /etc/network/interfaces.d" \
+                'empty the image'"'"'s /etc/network/interfaces.d' > "$listing"
+            while IFS= read -r -d '' entry; do
+                entry_type="${entry%% *}"
+                entry_name="${entry#* }"
+                [ -n "$entry_name" ] || continue
+                if [ "$entry_type" = 'regular' ]; then
+                    confined_unlink "etc/network/interfaces.d/$entry_name" \
+                        'an interface configuration fragment from the base' \
+                        'empty the image'"'"'s /etc/network/interfaces.d'
+                else
+                    warn "the base's /etc/network/interfaces.d holds '$entry_name', which is a"
+                    warn "  $entry_type rather than a regular file.  It is LEFT IN PLACE, as"
+                    warn "  the previous 'find -type f' also left it, and nothing here follows"
+                    warn "  it -- but the guest has no NIC, so nothing in that directory has any"
+                    warn "  business existing.  Inspect the base tarball."
+                fi
+            done < "$listing"
+            rm -f -- "$listing"
+        fi
+
+        confined_unlink_if_present 'etc/network/interfaces' \
+            "the base's interface configuration" \
+            'write the loopback-only interface configuration into the image'
+        confined_create 'etc/network/interfaces' 0644 \
+            "the image's /etc/network/interfaces" \
+            'write the loopback-only interface configuration into the image'
         {
             printf '# Loopback only. This guest has no NIC (qemu -nic none) and its init never\n'
             printf '# brings an interface up; the in-guest init refuses to run if one exists.\n'
             printf 'auto lo\n'
             printf 'iface lo inet loopback\n'
-        } > "$IMAGE_MOUNT/etc/network/interfaces"
-        chmod 0644 -- "$IMAGE_MOUNT/etc/network/interfaces"
+        } | confined_write 'etc/network/interfaces' \
+                "the image's /etc/network/interfaces" \
+                'write the loopback-only interface configuration into the image'
+        confined_chmod 'etc/network/interfaces' 0644 \
+            "the image's /etc/network/interfaces" \
+            'set the mode of the image interface configuration'
     fi
 }
 
@@ -5785,24 +8672,62 @@ neutralise_image_network_configuration() {
 #
 # The assertion at the end is the load-bearing part.  Without it a 1.x lcov reaches the
 # guest and surfaces as a confusing coverage failure long after the evidence of why.
+#
+# WHERE THE ARCHIVE IS UNPACKED, AND WHY IT IS NOT UNPACKED STRAIGHT INTO THE IMAGE ANY MORE.
+# It used to be `mkdir -p -- "$IMAGE_MOUNT$staging"` followed by
+# `tar --extract --directory "$IMAGE_MOUNT$staging"` and finally `rm -rf -- "$IMAGE_MOUNT$staging"`
+# -- three root-owned host-side operations on an in-image PATHNAME, the last of them a recursive
+# delete.  A base tarball shipping /root as an absolute symbolic link redirected all three onto
+# the build host.
+#
+# Now the archive is unpacked on the host into a directory THIS SCRIPT owns, under its own 0700
+# scratch directory, and the resulting tree is streamed into the image by a tar running INSIDE
+# the chroot, whose resolution root is the image (see stream_tree_into_image).  The tarball's
+# CONTENT is trusted at this point -- verify_sha256 has just matched it against the pinned digest
+# -- so what needed confining was never the bytes but the destination pathname.  The delete goes
+# through the chroot too, and only after the staging directory's device and inode are confirmed
+# to be the ones this script created.
 # ------------------------------------------------------------------------------------
 install_lcov_2x() {
     if [ -n "$LCOV_TARBALL" ]; then
         verify_sha256 "$LCOV_TARBALL" "$LCOV_SHA256" 'the lcov 2.x source tarball'
         local staging='/root/lcov-src'
+        local staging_rel='root/lcov-src'
+        local host_staging="$WORK_DIR/lcov-src" staging_identity=''
         log "installing lcov from the pinned source tarball"
-        mkdir -p -- "$IMAGE_MOUNT$staging"
-        tar --extract --file "$LCOV_TARBALL" --directory "$IMAGE_MOUNT$staging" \
+
+        # Unpacked here first, on a path this script made: $WORK_DIR is root-owned, mode 0700 and
+        # was verified not to have been substituted (make_work_dir), and the EXIT trap removes it.
+        rm -rf -- "$host_staging" || die "could not clear the host-side lcov staging directory at
+       $host_staging."
+        mkdir -p -- "$host_staging" || die "could not create the host-side lcov staging directory
+       at $host_staging."
+        chmod 0700 -- "$host_staging" || die "could not set the mode of the host-side lcov
+       staging directory at $host_staging."
+        tar --extract --file "$LCOV_TARBALL" --directory "$host_staging" \
             --strip-components=1 \
-            || die "could not extract the lcov tarball into the image.  A tarball without a
-       single top-level directory needs its own layout: extract it yourself and pass a
-       repacked archive."
+            || die "could not extract the lcov tarball.  A tarball without a single top-level
+       directory needs its own layout: extract it yourself and pass a repacked archive."
+
+        stream_tree_into_image "$host_staging" "$staging_rel" 0700 \
+            'the lcov 2.x source tree' 'install lcov from the pinned source tarball' \
+            "If the image ran out of space, raise --size (currently ${IMAGE_SIZE_MIB} MiB)."
+        # Recorded the moment it exists, and compared immediately before the delete below.  A
+        # recursive delete is the one operation in this file that must not be aimed at whatever
+        # happens to be at a name.
+        staging_identity="$(confined_identity "$staging_rel" 'the lcov 2.x source staging tree' \
+                            'install lcov from the pinned source tarball')"
+        rm -rf -- "$host_staging" || warn "could not remove the host-side lcov staging directory
+  at $host_staging; the scratch directory's own cleanup will take it."
+
         chroot_run make -C "$staging" install \
             || die "'make install' failed for the lcov source tree inside the image.  lcov 2.x
        needs perl with Capture::Tiny, DateTime, JSON::XS, PerlIO::gzip and Memory::Process;
        those are in the installed package set, so check the tarball's own README for anything
        further it requires."
-        rm -rf -- "$IMAGE_MOUNT$staging"
+        remove_tree_in_image "$staging_rel" "$staging_identity" \
+            'the lcov 2.x source staging tree' \
+            'remove the lcov source staging tree from the image'
     else
         warn "no --lcov-tarball was given, so the image carries only the distribution's lcov."
         warn "  Stable archives ship lcov 1.x, which run_coverage.sh CANNOT use, so the"
@@ -5843,42 +8768,67 @@ install_lcov_2x() {
 # hdmicec checkout, defaults GTEST_PREFIX to <workspace>/install/usr, and configure falls
 # back to the sibling rdk-halif-aidl checkout beside the submodule.
 #
-# cp -a rather than a tar pipe: ownership, permissions, timestamps and symlinks all matter
-# (the staged SDK is full of versioned symlinks, and a build tree's timestamps decide what
-# make rebuilds).
+# A TAR PIPE THROUGH THE CHROOT RATHER THAN cp -a, AND THE REASON IS NOT PREFERENCE.
+# This function used to run three `mkdir -p` and three `cp -a` on $IMAGE_MOUNT-prefixed
+# PATHNAMES, as root on the build host.  The destinations are names THIS script chooses, which is
+# what an earlier revision of the confinement boundary offered as the reason they were safe -- and
+# it is not one: the LEADING COMPONENTS of those names come from the base tarball.  A base that
+# ships /opt as an absolute symbolic link had `mkdir -p` build a directory tree on the HOST and
+# `cp -a` write the payload, the staged SDK and the GoogleTest prefix into it, then had the
+# artifact and configuration directories created there and chmodded, and /tmp chmodded to 1777 on
+# whatever the link pointed at.
+#
+# What cp -a preserved, the pipe preserves: --numeric-owner on both ends keeps uid and gid
+# exactly as they are rather than remapping them through either passwd database, tar carries
+# permissions and timestamps (a build tree's timestamps decide what make rebuilds), and symbolic
+# links cross as members rather than being followed (the staged SDK is full of versioned links).
+# The extracting tar runs INSIDE the chroot, so no in-image pathname is ever resolved by the
+# build host's kernel view; stream_tree_into_image documents the whole of that boundary.
+#
+# The mkdir/chmod PAIRS below are kept as pairs deliberately.  The confined mkdir creates through
+# mkdirat(), which subtracts the process umask, so a mode that matters -- 0700 for the artifact
+# directory, 1777 for /tmp -- has to be set explicitly afterwards, exactly as it did when these
+# were `mkdir -p` followed by `chmod`.
 # ------------------------------------------------------------------------------------
 copy_guest_payload() {
     log "copying the payload into the image at $GUEST_PAYLOAD_DIR"
-    mkdir -p -- "$IMAGE_MOUNT$GUEST_WORKSPACE"
-    cp -a -- "$PAYLOAD_DIR/." "$IMAGE_MOUNT$GUEST_PAYLOAD_DIR/" 2>/dev/null \
-        || { mkdir -p -- "$IMAGE_MOUNT$GUEST_PAYLOAD_DIR" \
-             && cp -a -- "$PAYLOAD_DIR/." "$IMAGE_MOUNT$GUEST_PAYLOAD_DIR/"; } \
-        || die "could not copy the payload into the image.  If the image ran out of space,
-       raise --size (currently ${IMAGE_SIZE_MIB} MiB)."
+    # The workspace root first and by name, so the layout is this script's rather than a
+    # by-product of whichever child directory was created first.
+    confined_mkdir "${GUEST_WORKSPACE#/}" 0755 "the image's $GUEST_WORKSPACE" \
+        'copy the payload into the image'
+    stream_tree_into_image "$PAYLOAD_DIR" "${GUEST_PAYLOAD_DIR#/}" 0755 \
+        'the payload' 'copy the payload into the image' \
+        "If the image ran out of space, raise --size (currently ${IMAGE_SIZE_MIB} MiB)."
 
     log "copying the staged SDK into the image at $GUEST_SDK_DIR"
-    mkdir -p -- "$IMAGE_MOUNT$GUEST_SDK_DIR"
-    cp -a -- "$SDK_DIR/." "$IMAGE_MOUNT$GUEST_SDK_DIR/" \
-        || die "could not copy the staged SDK into the image.  If the image ran out of space,
-       raise --size (currently ${IMAGE_SIZE_MIB} MiB)."
+    stream_tree_into_image "$SDK_DIR" "${GUEST_SDK_DIR#/}" 0755 \
+        'the staged SDK' 'copy the staged SDK into the image' \
+        "If the image ran out of space, raise --size (currently ${IMAGE_SIZE_MIB} MiB)."
 
     if [ -n "$GTEST_PREFIX_SRC" ]; then
         log "copying the GoogleTest prefix into the image at $GUEST_GTEST_PREFIX"
-        mkdir -p -- "$IMAGE_MOUNT$GUEST_GTEST_PREFIX"
-        cp -a -- "$GTEST_PREFIX_SRC/." "$IMAGE_MOUNT$GUEST_GTEST_PREFIX/" \
-            || die "could not copy the GoogleTest prefix into the image."
+        stream_tree_into_image "$GTEST_PREFIX_SRC" "${GUEST_GTEST_PREFIX#/}" 0755 \
+            'the GoogleTest prefix' 'copy the GoogleTest prefix into the image' \
+            "If the image ran out of space, raise --size (currently ${IMAGE_SIZE_MIB} MiB)."
     fi
 
     # The artifact directory is created here, owner-only, so the init does not have to create
     # it under a umask it did not set -- and so run_coverage.sh's own ancestry check on a
     # caller-named output directory finds a private, root-owned path.
-    mkdir -p -- "$IMAGE_MOUNT$GUEST_ARTIFACT_DIR"
-    chmod 0700 -- "$IMAGE_MOUNT$GUEST_ARTIFACT_DIR"
-    mkdir -p -- "$IMAGE_MOUNT$GUEST_CONF_DIR"
-    chmod 0755 -- "$IMAGE_MOUNT$GUEST_CONF_DIR"
+    confined_mkdir "${GUEST_ARTIFACT_DIR#/}" 0700 "the image's $GUEST_ARTIFACT_DIR" \
+        'create the guest artifact directory in the image'
+    confined_chmod "${GUEST_ARTIFACT_DIR#/}" 0700 "the image's $GUEST_ARTIFACT_DIR" \
+        'set the mode of the guest artifact directory'
+    confined_mkdir "${GUEST_CONF_DIR#/}" 0755 "the image's $GUEST_CONF_DIR" \
+        'create the guest configuration directory in the image'
+    confined_chmod "${GUEST_CONF_DIR#/}" 0755 "the image's $GUEST_CONF_DIR" \
+        'set the mode of the guest configuration directory'
     # /tmp is where run_coverage.sh mints its private lcov HOME and its snapshot directory.
-    mkdir -p -- "$IMAGE_MOUNT/tmp"
-    chmod 1777 -- "$IMAGE_MOUNT/tmp"
+    # It is the one directory here that ends up WORLD-WRITABLE, which is exactly why the mode is
+    # set through a descriptor the confinement opened: a `chmod 1777` on an $IMAGE_MOUNT pathname
+    # whose /tmp was a link would have made a HOST directory world-writable, as root.
+    confined_mkdir 'tmp' 1777 "the image's /tmp" 'create /tmp in the image'
+    confined_chmod 'tmp' 1777 "the image's /tmp" 'set the mode of the image /tmp'
 }
 
 # ------------------------------------------------------------------------------------
@@ -5890,8 +8840,25 @@ copy_guest_payload() {
 # and one that dies before its first test.
 # ------------------------------------------------------------------------------------
 register_guest_library_paths() {
-    local conf="$IMAGE_MOUNT/etc/ld.so.conf.d/cec-l2-binder.conf"
-    mkdir -p -- "$(dirname -- "$conf")"
+    # Through the confined primitive, for the same reason the apt configuration is: the
+    # directory this fragment goes in is /etc/ld.so.conf.d, /etc comes from the BASE TARBALL, and
+    # `mkdir -p` followed by `>` and `chmod` on an $IMAGE_MOUNT pathname would have created a
+    # directory and written a root-owned file on the BUILD HOST if any component of that path
+    # were an absolute symbolic link.  A loader configuration is a particularly bad file to have
+    # written to the wrong root: it names library directories that every process on that system
+    # then searches.
+    #
+    # The optional GoogleTest line, which used to be a separate `>>` append, is folded into the
+    # single stream below.  The primitive has no append operation by design -- an append reopens
+    # a name -- and there is no reason for two writes here when the content is decided before
+    # either of them.
+    local conf_rel='etc/ld.so.conf.d/cec-l2-binder.conf'
+    confined_mkdir 'etc/ld.so.conf.d' 0755 "the image's /etc/ld.so.conf.d" \
+        'register the staged library directories with the image loader'
+    confined_unlink_if_present "$conf_rel" "the image's /$conf_rel" \
+        'register the staged library directories with the image loader'
+    confined_create "$conf_rel" 0644 "the image's /$conf_rel" \
+        'register the staged library directories with the image loader'
     {
         printf '# Written by %s.  The staged Binder and AIDL stub libraries.\n' "$SCRIPT_NAME"
         printf '# libbinder and libutils are direct link edges of libRCEC; liblog, libbase,\n'
@@ -5899,11 +8866,13 @@ register_guest_library_paths() {
         printf '# because they must be LOADABLE, not because the middleware names them.\n'
         printf '%s\n' "$GUEST_SDK_DIR/$SDK_REL_BINDER_TARGET/lib/binder"
         printf '%s\n' "$GUEST_SDK_DIR/$SDK_REL_HALIF_LIB"
-    } > "$conf"
-    chmod 0644 -- "$conf"
-    if [ -n "$GTEST_PREFIX_SRC" ]; then
-        printf '%s\n' "$GUEST_GTEST_PREFIX/lib" >> "$conf"
-    fi
+        if [ -n "$GTEST_PREFIX_SRC" ]; then
+            printf '%s\n' "$GUEST_GTEST_PREFIX/lib"
+        fi
+    } | confined_write "$conf_rel" "the image's /$conf_rel" \
+            'register the staged library directories with the image loader'
+    confined_chmod "$conf_rel" 0644 "the image's /$conf_rel" \
+        'set the mode of the image loader configuration fragment'
     chroot_run ldconfig || die "ldconfig failed inside the image, so the staged libraries would
        not be resolvable at boot."
     log "registered the staged library directories with the image's loader cache"
@@ -5934,10 +8903,30 @@ register_guest_library_paths() {
 # actually compile and link inside this image.
 # ------------------------------------------------------------------------------------
 build_guest_helpers() {
-    local src_dir="$IMAGE_MOUNT/usr/local/src/cec-l2"
-    mkdir -p -- "$src_dir"
+    # THE SOURCE TREE, ITS TWO FILES, THE TWO INSTALLATION CHECKS AND THE CLEANUP ALL GO THROUGH
+    # THE CONFINEMENT NOW.  Every one of them used to be a root-owned host-side operation on an
+    # $IMAGE_MOUNT pathname: `mkdir -p "$src_dir"`, two `cat > "$src_dir/..."` redirections, two
+    # `[ -x "$IMAGE_MOUNT$GUEST_..." ]` tests -- both of which FOLLOWED symbolic links, so they
+    # would happily report a HOST binary as the installed helper -- and a `rm -rf -- "$src_dir"`,
+    # which is the worst of them: a recursive delete as root aimed at a pathname whose /usr came
+    # from the base tarball.
+    #
+    # The compile steps themselves are unchanged and need no conversion: chroot_run and
+    # chroot_run_with_libs resolve every path they are given inside the image.
+    local src_rel='usr/local/src/cec-l2' src_identity=''
+    confined_mkdir "$src_rel" 0755 "the image's /usr/local/src/cec-l2" \
+        'build the in-guest helpers'
+    # Recorded now, compared immediately before the recursive delete at the end of this function.
+    src_identity="$(confined_identity "$src_rel" "the in-guest helpers' source tree" \
+                    'build the in-guest helpers')"
 
-    cat > "$src_dir/binder_protocol_version.c" <<'PROTOCOL_HELPER_EOF'
+    confined_unlink_if_present "$src_rel/binder_protocol_version.c" \
+        "the in-guest protocol helper's source" 'write the in-guest helper sources'
+    confined_create "$src_rel/binder_protocol_version.c" 0644 \
+        "the in-guest protocol helper's source" 'write the in-guest helper sources'
+    confined_write "$src_rel/binder_protocol_version.c" \
+        "the in-guest protocol helper's source" 'write the in-guest helper sources' \
+        <<'PROTOCOL_HELPER_EOF'
 /*
  * cec-binder-protocol-version -- report the binder protocol version the running kernel's
  * driver node speaks.
@@ -5996,7 +8985,13 @@ int main(int argc, char **argv)
 }
 PROTOCOL_HELPER_EOF
 
-    cat > "$src_dir/servicemanager_ready.cpp" <<'READY_PROBE_EOF'
+    confined_unlink_if_present "$src_rel/servicemanager_ready.cpp" \
+        "the in-guest readiness probe's source" 'write the in-guest helper sources'
+    confined_create "$src_rel/servicemanager_ready.cpp" 0644 \
+        "the in-guest readiness probe's source" 'write the in-guest helper sources'
+    confined_write "$src_rel/servicemanager_ready.cpp" \
+        "the in-guest readiness probe's source" 'write the in-guest helper sources' \
+        <<'READY_PROBE_EOF'
 /*
  * cec-servicemanager-ready -- block until the binder context manager answers, then exit 0.
  *
@@ -6068,11 +9063,18 @@ READY_PROBE_EOF
     # no binder driver, so the protocol helper would correctly fail to open the node and the
     # probe would correctly block.  Their behaviour is exercised in the guest, which is the
     # only place either question has an answer.
-    [ -x "$IMAGE_MOUNT$GUEST_PROTOCOL_HELPER" ] || die "the protocol-version helper was not
-       installed at $GUEST_PROTOCOL_HELPER."
-    [ -x "$IMAGE_MOUNT$GUEST_READY_PROBE" ] || die "the readiness probe was not installed at
-       $GUEST_READY_PROBE."
-    rm -rf -- "$src_dir"
+    #
+    # `[ -x ]` is gone from both checks.  It followed symbolic links, so on an image whose
+    # /usr/local/bin was a link it reported whether a HOST binary was executable and said nothing
+    # at all about what the guest would run -- a check that passes for the wrong object is worse
+    # than no check, because the failure then surfaces as a kernel panic at boot.
+    assert_installed_executable "${GUEST_PROTOCOL_HELPER#/}" "$GUEST_PROTOCOL_HELPER" \
+        'the protocol-version helper' 'verify the in-guest helpers were installed'
+    assert_installed_executable "${GUEST_READY_PROBE#/}" "$GUEST_READY_PROBE" \
+        'the readiness probe' 'verify the in-guest helpers were installed'
+    remove_tree_in_image "$src_rel" "$src_identity" \
+        "the in-guest helpers' source tree" \
+        'remove the in-guest helper sources from the image'
     log "both in-guest helpers built and installed"
 }
 
@@ -6110,7 +9112,7 @@ assert_image_toolchain() {
     chroot_run env PKG_CONFIG_PATH="$pkg_config_path" \
         pkg-config --atleast-version=1.10.0 gtest \
         || die "gtest >= 1.10.0 is not discoverable through pkg-config inside the image.
-       configure.ac:435's PKG_CHECK_MODULES([GTEST], [gtest >= 1.10.0]) consults pkg-config
+       configure.ac's PKG_CHECK_MODULES([GTEST], [gtest >= 1.10.0]) consults pkg-config
        ONLY and ignores -I/-L, so headers and libraries on their own cannot satisfy it.
        Either the image's GoogleTest packaging must provide gtest.pc, or pass --gtest-prefix
        naming a $ARCH prefix whose lib/pkgconfig holds one."
@@ -6121,14 +9123,35 @@ assert_image_toolchain() {
   failure -- but a GoogleTest packaging without gmock at all would fail at link time."
 
     # The dialect probe: the smallest program that distinguishes C++14 from C++17 here.
+    #
+    # ITS DESTINATION IS THE ONE DIRECTORY IN THIS IMAGE THAT IS 1777, WHICH MAKES THIS THE
+    # SHARPEST OF THE PATHNAME CASES RATHER THAN THE MOST TRIVIAL.  It used to be
+    # `printf ... > "$IMAGE_MOUNT/tmp/cec-l2-dialect-probe.cpp"` and then
+    # `rm -f -- "$IMAGE_MOUNT/tmp/..."` twice, all host-side and all following symbolic links.
+    # /tmp in the image is world-writable by the time this runs (copy_guest_payload sets 1777
+    # deliberately, because run_coverage.sh needs it), and the base tarball can ship /tmp itself
+    # as a link -- so both the write and the two removals could be aimed at a host path, as root.
+    # The entry is removed first rather than truncated, so what is written is an object this
+    # script created at a name nothing else holds; the compile itself is already confined, being
+    # a chroot_run on in-image absolute paths.
+    local probe_source_rel='tmp/cec-l2-dialect-probe.cpp'
+    local probe_binary_rel='tmp/cec-l2-dialect-probe'
+    confined_unlink_if_present "$probe_source_rel" 'the C++ dialect probe source' \
+        'probe the image toolchain'"'"'s C++17 support'
+    confined_create "$probe_source_rel" 0644 'the C++ dialect probe source' \
+        'probe the image toolchain'"'"'s C++17 support'
     printf '%s\n' '#include <optional>' 'int main() { return std::optional<int>{17}.value() == 17 ? 0 : 1; }' \
-        > "$IMAGE_MOUNT/tmp/cec-l2-dialect-probe.cpp"
+        | confined_write "$probe_source_rel" 'the C++ dialect probe source' \
+              'probe the image toolchain'"'"'s C++17 support'
     chroot_run g++ -std=c++17 -o /tmp/cec-l2-dialect-probe /tmp/cec-l2-dialect-probe.cpp \
         || die "the image's g++ cannot compile a -std=c++17 translation unit that includes
        <optional>.  The generated AIDL headers include it and declare a std::optional
        parameter, and halcompat.h uses C++17 constructs, so the guest could not build the
        middleware.  Install a newer g++ for $ARCH."
-    rm -f -- "$IMAGE_MOUNT/tmp/cec-l2-dialect-probe" "$IMAGE_MOUNT/tmp/cec-l2-dialect-probe.cpp"
+    confined_unlink_if_present "$probe_binary_rel" 'the C++ dialect probe binary' \
+        'remove the C++ dialect probe from the image'
+    confined_unlink_if_present "$probe_source_rel" 'the C++ dialect probe source' \
+        'remove the C++ dialect probe from the image'
     log "in-image toolchain assertions passed (tools, glib, gtest, and -std=c++17 with <optional>)"
 }
 
@@ -6149,8 +9172,24 @@ assert_image_toolchain() {
 #                            absent, not filled in with a plausible value.
 # ------------------------------------------------------------------------------------
 write_kernel_expectation() {
-    local target="$IMAGE_MOUNT$GUEST_KERNEL_EXPECTATION"
-    cat > "$target" <<'KERNEL_EXPECTATION_EOF'
+    # THROUGH THE CONFINED PRIMITIVE, LIKE EVERY OTHER RECORD WRITTEN INTO THE IMAGE.  These three
+    # files live in $GUEST_CONF_DIR (/etc/cec-l2) and /etc comes from the base tarball, so a
+    # `cat > "$IMAGE_MOUNT$path"` here was a root-owned host-side write through a name whose
+    # leading component this script does not author.
+    #
+    # THE APPEND IS GONE, AND THAT IS DELIBERATE.  The record used to be written in two steps --
+    # a heredoc, then a `>>` for the derived protocol clause -- and the primitive has no append
+    # operation because an append reopens a name.  Both halves are produced into one stream and
+    # written once, which is also the only way the file is never observable half-written.
+    local target="$GUEST_KERNEL_EXPECTATION"
+    local target_rel="${GUEST_KERNEL_EXPECTATION#/}"
+    local provenance_rel="${GUEST_KERNEL_PROVENANCE#/}"
+    confined_unlink_if_present "$target_rel" "the image's $target" \
+        'write the kernel expectation into the image'
+    confined_create "$target_rel" 0644 "the image's $target" \
+        'write the kernel expectation into the image'
+    {
+    cat <<'KERNEL_EXPECTATION_EOF'
 # The guest kernel configuration this job requires.  Written into the image by
 # .github/workflows/aidl-path-tests-rootfs.sh; the in-guest init REPORTS the running guest
 # against this list and never asserts a value from it.
@@ -6174,7 +9213,6 @@ KERNEL_EXPECTATION_EOF
     # while the SDK it shipped alongside was built BINDER_IPC_32BIT=OFF.  Now the line below
     # is whatever derive_binder_protocol() read out of the two artefacts, and the evidence for
     # it travels with it so a reader can re-derive rather than trust.
-    {
         printf '#\n'
         printf '# THE BINDER WIRE PROTOCOL FOR THIS IMAGE: %s.  DERIVED, NOT DECLARED.\n' "$DERIVED_BINDER_PROTOCOL"
         printf '#   from the kernel configuration : %s\n' "${PROTOCOL_FROM_KERNEL_CONFIG:-<could not answer>}"
@@ -6203,17 +9241,32 @@ KERNEL_EXPECTATION_EOF
             printf '#     UNPATCHED mainline kernel shows whatever anyone asks for: the option was\n'
             printf '#     removed in the 4.18 era and binderfs starts at 5.0.\n'
         fi
-    } >> "$target"
-    chmod 0644 -- "$target"
+    } | confined_write "$target_rel" "the image's $target" \
+            'write the kernel expectation into the image'
+    confined_chmod "$target_rel" 0644 "the image's $target" \
+        'set the mode of the image kernel expectation'
 
     if [ -n "$KERNEL_CONFIG_SRC" ]; then
+        # $KERNEL_CONFIG_SRC is a HOST path the caller named and validate_inputs checked, so
+        # `cat -- ` on it is correct and stays; it is the DESTINATION that was the in-image
+        # pathname and it is the destination that now goes through the primitive.
+        confined_unlink_if_present "$provenance_rel" \
+            "the image's $GUEST_KERNEL_PROVENANCE" \
+            'copy the caller-supplied kernel configuration into the image'
+        confined_create "$provenance_rel" 0644 \
+            "the image's $GUEST_KERNEL_PROVENANCE" \
+            'copy the caller-supplied kernel configuration into the image'
         {
             printf '# Copied verbatim from %s at image-build time.\n' "$KERNEL_CONFIG_SRC"
             printf '# THIS IS EVIDENCE ABOUT THE BUILD, NOT ABOUT THE RUNNING GUEST.  The init\n'
             printf '# reports what the running guest shows and never substitutes this file for it.\n'
             cat -- "$KERNEL_CONFIG_SRC"
-        } > "$IMAGE_MOUNT$GUEST_KERNEL_PROVENANCE"
-        chmod 0644 -- "$IMAGE_MOUNT$GUEST_KERNEL_PROVENANCE"
+        } | confined_write "$provenance_rel" \
+                "the image's $GUEST_KERNEL_PROVENANCE" \
+                'copy the caller-supplied kernel configuration into the image'
+        confined_chmod "$provenance_rel" 0644 \
+            "the image's $GUEST_KERNEL_PROVENANCE" \
+            'set the mode of the image kernel provenance record'
         log "copied the caller-supplied kernel configuration in as build-time provenance"
     fi
 }
@@ -6222,7 +9275,17 @@ KERNEL_EXPECTATION_EOF
 # line printed was read out of the staging tree, and where the tree records nothing the file
 # says exactly that.
 write_sdk_build_flags_record() {
-    local target="$IMAGE_MOUNT$GUEST_SDK_FLAGS_RECORD"
+    # Same route as every other record written into the image, and for the same reason: the
+    # destination is under /etc, which comes from the base tarball, so the write goes through a
+    # descriptor the confinement opened rather than through an $IMAGE_MOUNT pathname.  Every
+    # value harvested BELOW is read from the staged SDK on the HOST -- $SDK_DIR is a path the
+    # caller named and verify_sdk_tree checked -- so those reads are correct as they are.
+    local target="$GUEST_SDK_FLAGS_RECORD"
+    local target_rel="${GUEST_SDK_FLAGS_RECORD#/}"
+    confined_unlink_if_present "$target_rel" "the image's $target" \
+        'record the staged SDK build provenance in the image'
+    confined_create "$target_rel" 0644 "the image's $target" \
+        'record the staged SDK build provenance in the image'
     {
         printf '# How the staged Binder SDK was built, as recorded BY THE STAGING TREE ITSELF.\n'
         printf '# Harvested at image-build time by %s from %s.\n' "$SCRIPT_NAME" "$SDK_DIR"
@@ -6277,8 +9340,10 @@ write_sdk_build_flags_record() {
         printf 'staged_libbinder=%s\n' "$(file -b -- "$SDK_BINDER_LIB/libbinder.so" 2>/dev/null || printf 'unreadable')"
         printf 'staged_servicemanager=%s\n' "$(file -b -- "$SDK_SERVICEMANAGER" 2>/dev/null || printf 'unreadable')"
         printf 'image_target_architecture=%s\n' "$ARCH"
-    } > "$target"
-    chmod 0644 -- "$target"
+    } | confined_write "$target_rel" "the image's $target" \
+            'record the staged SDK build provenance in the image'
+    confined_chmod "$target_rel" 0644 "the image's $target" \
+        'set the mode of the image SDK provenance record'
     log "recorded the staged SDK's own build provenance in the image"
 }
 
@@ -6286,12 +9351,25 @@ write_sdk_build_flags_record() {
 # configuration is written as single-quoted assignments; every path in it has already been
 # refused if it contained a quote or a newline, so the quoting cannot be broken out of.
 write_image_conf() {
-    local target="$IMAGE_MOUNT$GUEST_IMAGE_CONF"
+    # Both files here go through the confined primitive: they are written into /etc/cec-l2, whose
+    # leading component comes from the base tarball, and a `cat > "$IMAGE_MOUNT$path"` was
+    # therefore a root-owned host-side write through a name this script does not fully author.
+    # This heredoc is the one that IS expanded by this script (the delimiter is unquoted), which
+    # changes nothing about the destination: the expansion happens in this shell and the resulting
+    # bytes go down a pipe to a descriptor, exactly as the quoted ones do.
+    local target="$GUEST_IMAGE_CONF"
+    local target_rel="${GUEST_IMAGE_CONF#/}"
+    local record_rel="${GUEST_IMAGE_RECORD#/}"
     local gtest_prefix_value=''
     if [ -n "$GTEST_PREFIX_SRC" ]; then
         gtest_prefix_value="$GUEST_GTEST_PREFIX"
     fi
-    cat > "$target" <<IMAGE_CONF_EOF
+    confined_unlink_if_present "$target_rel" "the image's $target" \
+        'write the in-guest configuration into the image'
+    confined_create "$target_rel" 0644 "the image's $target" \
+        'write the in-guest configuration into the image'
+    confined_write "$target_rel" "the image's $target" \
+        'write the in-guest configuration into the image' <<IMAGE_CONF_EOF
 # Generated by $SCRIPT_NAME.  Read by $GUEST_INIT_PATH.
 # Every value is a fixed property of this image; nothing here selects a code path, and in
 # particular there is no back-end selection of any kind -- both HDMI CEC HAL back-ends are
@@ -6325,8 +9403,13 @@ EXPECTED_BINDER_PROTOCOL='$DERIVED_BINDER_PROTOCOL'
 PROTOCOL_FROM_KERNEL_CONFIG='$PROTOCOL_FROM_KERNEL_CONFIG'
 PROTOCOL_FROM_SDK_CACHE='$PROTOCOL_FROM_SDK_CACHE'
 IMAGE_CONF_EOF
-    chmod 0644 -- "$target"
+    confined_chmod "$target_rel" 0644 "the image's $target" \
+        'set the mode of the in-guest configuration'
 
+    confined_unlink_if_present "$record_rel" "the image's $GUEST_IMAGE_RECORD" \
+        'write the image build record into the image'
+    confined_create "$record_rel" 0644 "the image's $GUEST_IMAGE_RECORD" \
+        'write the image build record into the image'
     {
         printf '# How this image was built, recorded by %s.\n' "$SCRIPT_NAME"
         printf 'built_at_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -6359,8 +9442,10 @@ IMAGE_CONF_EOF
         printf 'payload_source=%s\n' "$PAYLOAD_DIR"
         printf 'sdk_source=%s\n' "$SDK_DIR"
         printf 'gtest_prefix_source=%s\n' "${GTEST_PREFIX_SRC:-<the image packaging>}"
-    } > "$IMAGE_MOUNT$GUEST_IMAGE_RECORD"
-    chmod 0644 -- "$IMAGE_MOUNT$GUEST_IMAGE_RECORD"
+    } | confined_write "$record_rel" "the image's $GUEST_IMAGE_RECORD" \
+            'write the image build record into the image'
+    confined_chmod "$record_rel" 0644 "the image's $GUEST_IMAGE_RECORD" \
+        'set the mode of the image build record'
 }
 
 
@@ -6377,9 +9462,31 @@ IMAGE_CONF_EOF
 # profile between the kernel and this script.
 # ------------------------------------------------------------------------------------
 write_guest_init() {
-    local target="$IMAGE_MOUNT$GUEST_INIT_PATH"
-    mkdir -p -- "$(dirname -- "$target")"
-    cat > "$target" <<'CEC_L2_INIT_EOF'
+    # WRITTEN THROUGH THE CONFINED PRIMITIVE, AND OF EVERY FILE THIS SCRIPT PUTS INTO THE IMAGE
+    # THIS IS THE ONE THAT MATTERS MOST.  It is installed at /sbin/cec-l2-init and the workflow
+    # boots the kernel with init=<that path>, so it is the whole of what the guest executes.  The
+    # old form -- `mkdir -p "$(dirname "$IMAGE_MOUNT$GUEST_INIT_PATH")"`, then `cat >` and two
+    # `cat >>` on that pathname, then `chmod 0755` -- ran as root on the BUILD HOST through a name
+    # whose /sbin comes from the base tarball: a base shipping /sbin as an absolute symbolic link
+    # had this script create a host directory and write a root-owned, mode-0755 executable script
+    # into it.
+    #
+    # THE THREE PARTS BECOME ONE WRITE.  They were three because a single heredoc of this length
+    # is unreadable, and they still are three heredocs in this source -- but they are produced
+    # into ONE stream now and written once, because the primitive has no append operation: an
+    # append reopens a name, which is the second lookup this whole mechanism exists to remove.
+    # The delimiter is quoted in every part, so the file on disk is still exactly this text.
+    local target="$GUEST_INIT_PATH"
+    local target_rel="${GUEST_INIT_PATH#/}"
+    local target_dir_rel="${target_rel%/*}"
+    confined_mkdir "$target_dir_rel" 0755 "the image's /$target_dir_rel" \
+        'write the in-guest init into the image'
+    confined_unlink_if_present "$target_rel" "the image's $target" \
+        'write the in-guest init into the image'
+    confined_create "$target_rel" 0755 "the image's $target" \
+        'write the in-guest init into the image'
+    {
+    cat <<'CEC_L2_INIT_EOF'
 #!/usr/bin/env bash
 ##########################################################################
 # If not stated otherwise in this file or this component's LICENSE
@@ -6634,10 +9741,11 @@ trap teardown EXIT
 trap 'die "interrupted."' INT
 trap 'die "terminated."' TERM
 CEC_L2_INIT_EOF
-    # PART TWO: the binder bring-up, the platform record and the readiness wait.  Appended
-    # rather than written into one enormous heredoc so that each part stays readable; the
-    # delimiter is quoted in every part, so the file on disk is exactly this text.
-    cat >> "$target" <<'CEC_L2_INIT_EOF'
+    # PART TWO: the binder bring-up, the platform record and the readiness wait.  A separate
+    # heredoc rather than one enormous one so that each part stays readable; all three go into the
+    # same stream and the same single write, and the delimiter is quoted in every part, so the
+    # file on disk is exactly this text.
+    cat <<'CEC_L2_INIT_EOF'
 
 # ------------------------------------------------------------------------------------
 # PSEUDO-FILESYSTEMS.  Mounted defensively: a kernel with CONFIG_DEVTMPFS_MOUNT has already
@@ -6964,11 +10072,11 @@ report_binder_platform() {
 
     printf '================ BINDER PLATFORM RECORD (read from this running guest) ================\n'
     printf 'reported_by: %s\n' "$INIT_NAME"
-    # ELF bitness and the binder wire protocol are two SEPARATE axes, and an earlier revision
-    # of this script printed them as one -- it claimed protocol 7 here purely because the
-    # image is 32-bit, while the workflow was building the SDK for protocol 8.  The two are
-    # now stated apart, and the protocol is the value derived at image-build time from the
-    # kernel configuration and the SDK build cache rather than a consequence of the bitness.
+    # ELF bitness and the binder wire protocol are two SEPARATE axes, and printing them as one
+    # would claim protocol 7 purely because the image is 32-bit -- which says nothing about an
+    # SDK built for protocol 8.  The two are stated apart, and the protocol is the value derived
+    # at image-build time from the kernel configuration and the SDK build cache rather than a
+    # consequence of the bitness.
     printf 'image_target_elf_bitness: %s   (32-bit userland; says nothing about the wire protocol)\n' "$IMAGE_ARCH"
     printf 'image_expected_binder_protocol: %s   (derived at image build; kernel-config half: %s, SDK-cache half: %s)\n' \
         "$EXPECTED_BINDER_PROTOCOL" \
@@ -7034,10 +10142,9 @@ report_binder_platform() {
 # green.  That is a false green about the exact thing this job exists to prove, which is why
 # a disagreement here is fatal rather than a warning.
 #
-# WHY FOUR SOURCES AND NOT ONE.  The defect this replaces was a single hard-coded sentence
-# claiming protocol 7 while the workflow built protocol 8; nothing compared the two, so
-# nothing caught it.  Each source below can be wrong independently and each names a different
-# artefact to correct:
+# WHY FOUR SOURCES AND NOT ONE.  A single hard-coded sentence claiming protocol 7 while the
+# workflow builds protocol 8 is a disagreement nothing compares and therefore nothing catches.
+# Each source below can be wrong independently and each names a different artefact to correct:
 #
 #   (A) the image's expectation      -> derived at image-build time from the kernel
 #                                       configuration and the SDK build cache; wrong means the
@@ -7293,7 +10400,7 @@ wait_for_servicemanager() {
 CEC_L2_INIT_EOF
 
     # PART THREE: the environment, the coverage-runner invocation, the status file and main.
-    cat >> "$target" <<'CEC_L2_INIT_EOF'
+    cat <<'CEC_L2_INIT_EOF'
 
 # ------------------------------------------------------------------------------------
 # THE ENVIRONMENT THE GUEST BUILD AND THE HARNESSES NEED.
@@ -7488,11 +10595,23 @@ main() {
 
 main "$@"
 CEC_L2_INIT_EOF
+    } | confined_write "$target_rel" "the image's $target" \
+            'write the in-guest init into the image'
+    confined_chmod "$target_rel" 0755 "the image's $target" \
+        'make the in-guest init executable'
 
-    chmod 0755 -- "$target"
     # The guest's entry point must parse before the image is declared finished: a syntax error
     # here would only surface as a kernel panic at boot, with no diagnosis.
-    bash -n -- "$target" || die "the generated in-guest init does not parse.  This is a defect
+    #
+    # READ BACK THROUGH THE PRIMITIVE AND PARSED FROM STDIN, rather than `bash -n -- "$path"`.
+    # That form resolved the pathname a second time, so on an image with a symlinked /sbin it
+    # would have syntax-checked a HOST file and reported that THIS image's init parses -- a check
+    # that passes for the wrong object, which is worse than no check at all.  The bytes checked
+    # here are the bytes just written, read through a descriptor obtained under the same
+    # confinement.
+    confined_read "$target_rel" "the image's $target" \
+            'syntax-check the in-guest init' | bash -n \
+        || die "the generated in-guest init does not parse.  This is a defect
        in $SCRIPT_PATH, not in the caller's inputs."
     log "wrote and syntax-checked the in-guest init at $GUEST_INIT_PATH"
 }
@@ -7532,27 +10651,28 @@ CEC_L2_INIT_EOF
 # ==============================================================================
 # AND THE SCAN ITSELF MUST NOT BECOME THE HAZARD IT EXISTS TO REMOVE.  READ THIS.
 # ==============================================================================
-# An earlier revision of this function enumerated its files with a glob and `[ -f "$file" ]`,
-# read them with `< "$file"` and rewrote them with `cat -- "$tmp" > "$file"` -- every one of
-# which FOLLOWS SYMBOLIC LINKS, and all of it running as root on the BUILD HOST.  The base
-# tarball is not this script's to trust: it can ship /etc/apt/sources.list, or any entry under
-# sources.list.d, as an absolute symbolic link to a host pathname.  `[ -f ]` would report that
-# link as a regular file, the read would read the HOST's file, and the redirection would
-# TRUNCATE AND REPLACE THE HOST'S FILE AS ROOT.  That is a host-compromise primitive handed to
-# whoever supplies the base tarball, in the one function whose purpose is to make the artefact
-# safe.
+# TWO SHAPES OF THIS FUNCTION WOULD BE HOST-COMPROMISE PRIMITIVES, AND NEITHER IS USED.
 #
-# THE REVISION AFTER THAT ONE WAS STILL WRONG, AND THIS IS THE PART WORTH READING.  It added
-# assert_confined_to_image(), which validated the PATHNAME thoroughly -- no symlinked component
+# The first enumerates its files with a glob and `[ -f "$file" ]`, reads them with `< "$file"`
+# and rewrites them with `cat -- "$tmp" > "$file"` -- every one of which FOLLOWS SYMBOLIC LINKS,
+# all of it running as root on the BUILD HOST.  The base tarball is not this script's to trust:
+# it can ship /etc/apt/sources.list, or any entry under sources.list.d, as an absolute symbolic
+# link to a host pathname.  `[ -f ]` would report that link as a regular file, the read would
+# read the HOST's file, and the redirection would TRUNCATE AND REPLACE THE HOST'S FILE AS ROOT
+# -- handing that primitive to whoever supplies the base tarball, in the one function whose
+# purpose is to make the artefact safe.
+#
+# THE SECOND SHAPE IS THE ONE WORTH READING, BECAUSE IT LOOKS SUFFICIENT AND IS NOT.  It adds
+# assert_confined_to_image(), which validates the PATHNAME thoroughly -- no symlinked component
 # from the mount point down, a regular file, one link, the image's own st_dev, a realpath still
-# inside the image -- and then the caller REOPENED THE SAME PATHNAME with an ordinary
-# redirection.  Validating a name and then opening the name is check-then-open: the object the
-# kernel opens is not the object that was checked, and the gap between the two IS the
-# vulnerability (CWE-367), not the absence of a check.  Re-checking immediately before the write
-# narrows the window; it does not close it.  An adversary who can create one symlink in the
-# image tree only has to do it after the last check.
+# inside the image -- and then REOPENS THE SAME PATHNAME with an ordinary redirection.
+# Validating a name and then opening the name is check-then-open: the object the kernel opens is
+# not the object that was checked, and the gap between the two IS the vulnerability (CWE-367),
+# not the absence of a check.  Re-checking immediately before the write narrows the window; it
+# does not close it.  An adversary who can create one symlink in the image tree only has to do
+# it after the last check.
 #
-# WHAT CARRIES THE GUARANTEE NOW: THE CONFINED I/O PRIMITIVE, AND NOTHING ELSE.
+# WHAT CARRIES THE GUARANTEE INSTEAD: THE CONFINED I/O PRIMITIVE, AND NOTHING ELSE.
 #
 # Every read, every rewrite, every removal and every directory enumeration this function and
 # scrub_and_assert_image_credential_stores() perform goes through the primitive documented above
@@ -7561,11 +10681,11 @@ CEC_L2_INIT_EOF
 # operation THROUGH THE RESULTING DESCRIPTOR.  There is no second name lookup to lose, so there
 # is no window to race: a symlink substituted at any position, at any instant, is refused by the
 # kernel's own path resolution rather than followed.  RESOLVE_NO_XDEV is the kernel-enforced
-# form of the st_dev comparison this block used to describe, and it also covers /proc, /sys,
-# /dev and /dev/pts, which are bind/pseudo mounts inside the image tree.
+# form of the st_dev comparison a pathname check can only make by hand, and it also covers
+# /proc, /sys, /dev and /dev/pts, which are bind/pseudo mounts inside the image tree.
 #
 # The primitive is PROVEN to refuse, on this host, before one privileged byte is written --
-# probe_confined_io() runs a positive case and four negative cases in a private directory during
+# probe_confined_io() runs a positive case and five negative cases in a private directory during
 # make_work_dir() and dies if any refusal does not happen.  So this block does not have to be
 # believed; it has to be checked, and it is.
 #
@@ -7573,9 +10693,9 @@ CEC_L2_INIT_EOF
 #
 #   assert_confined_to_image()  A PRE-CHECK, retained for its DIAGNOSTICS and for nothing else.
 #      It can say which component of which path is a symbolic link, which is a far better
-#      message than ELOOP, and it can name a hard-linked file.  It no longer carries the
-#      guarantee and it is no longer sufficient on its own -- if it were deleted the confinement
-#      would be unchanged; if the primitive were deleted the confinement would be gone.
+#      message than ELOOP, and it can name a hard-linked file.  It does not carry the guarantee
+#      and it is not sufficient on its own -- if it were deleted the confinement would be
+#      unchanged; if the primitive were deleted the confinement would be gone.
 #   confined_regular_file() / confined_directory()  The type and link-count refusals, taken from
 #      an fstat on the descriptor the confinement produced rather than from a stat on a pathname.
 #      A fifo, socket, device node or directory where configuration is expected is FATAL, not
@@ -7587,8 +10707,9 @@ CEC_L2_INIT_EOF
 #      symlink enumerates the HOST's directory -- and reported host filenames into this script's
 #      own diagnostics.  That is why enumeration moved onto the primitive too.
 #   nosymfollow  DEFENCE IN DEPTH ONLY, and now VERIFIED rather than assumed.  The image is
-#      remounted MS_NOSYMFOLLOW where the kernel supports it (5.10+, util-linux 2.35+ for the
-#      option name), and where the remount reports success this script PROVES it is in force by
+#      remounted MS_NOSYMFOLLOW where the kernel supports it (5.10+) -- through the image root's
+#      own verified descriptor rather than through its pathname, like every other privileged
+#      mount here -- and where the remount reports success this script PROVES it is in force by
 #      creating a symbolic link inside the image and establishing that an ordinary open through
 #      it fails.  A remount that reports success without taking effect is reported as not in
 #      force.  Where the kernel cannot supply it at all, that is logged as an unavailable
@@ -7711,14 +10832,23 @@ assert_confined_to_image() { # $1=path  $2=what it is  $3=what is about to happe
 # because it also covers code paths that do not go through the primitive at all, such as a future
 # edit that reintroduces an ordinary redirection.
 #
-# THE CHANGE FROM THE PREVIOUS REVISION.  That one returned success on every arm, including the
-# arm where the remount FAILED, so a reader of the exit status could not tell the difference
-# between "in force" and "not available", and the log claimed a layer that was not there.  Worse,
-# it took the remount's own exit status as proof: a filesystem or kernel that accepts
-# remount,nosymfollow without honouring it would have been reported as protected.  Now the
-# remount is attempted, and where it reports success it is PROVEN in force behaviourally --
-# a symbolic link is created inside the image and an ordinary open through it must fail.
+# WHY IT IS PROVEN RATHER THAN ATTEMPTED AND ASSUMED.  Returning success on every arm, including
+# the arm where the remount FAILED, would leave a reader of the exit status unable to tell "in
+# force" from "not available", and the log would claim a layer that is not there.  Taking the
+# remount's own exit status as proof is worse still: a filesystem or kernel that accepts
+# remount,nosymfollow without honouring it would be reported as protected.  So the remount is
+# attempted, and where it reports success it is PROVEN in force behaviourally -- a symbolic link
+# is created inside the image and an ordinary open through it must fail.
 # IMAGE_MOUNT_NOSYMFOLLOW is set only when that proof passes.
+#
+# AND THE REMOUNT ITSELF NO LONGER NAMES ITS TARGET.  It goes through
+# pinned_image_remount_nosymfollow(), which passes MS_REMOUNT|MS_NOSYMFOLLOW to mount(2) with the
+# target given as the magic link of a descriptor opened on the image root and fstat-verified
+# against this run's pin -- so the filesystem remounted is the one that was checked.  Two
+# consequences worth stating: util-linux is no longer involved at all, because the flag reaches
+# the syscall directly rather than as a mount(8) option name that needs 2.35 or newer; and a
+# CUSTODY failure is now distinguishable from mount(2) declining the flag, so the first is fatal
+# while the second stays the tolerated "not available here" case this block is about.
 # ------------------------------------------------------------------------------------
 IMAGE_MOUNT_NOSYMFOLLOW=0
 readonly NOSYMFOLLOW_PROBE_REL='.cec-l2-nosymfollow-probe'
@@ -7810,7 +10940,33 @@ try_nosymfollow_remount() {
         log "     guarantee and it is proven in force)"
         return 0
     fi
-    if mount -o remount,nosymfollow -- "$IMAGE_MOUNT" 2>/dev/null; then
+    # THE LAST PRIVILEGED mount(2) IN THIS SCRIPT, AND IT CONSUMES A DESCRIPTOR LIKE THE OTHERS.
+    # This one is a remount rather than a new mount, and its target is the image root itself, so
+    # the helper opens $IMAGE_MOUNT O_DIRECTORY|O_NOFOLLOW, verifies THAT DESCRIPTOR by fstat
+    # against the identity create_and_mount_image() pinned, and performs
+    # mount(NULL, /proc/self/fd/N, NULL, MS_REMOUNT|MS_NOSYMFOLLOW, NULL) -- so the object
+    # remounted is the one that was checked, not whatever the name resolves to at the instant of
+    # the call.  The pathname pin is checked first as a diagnostic, exactly as at the chroot
+    # entries, and there is no fallback to `mount -o remount -- <pathname>`.
+    #
+    # THE TWO FAILURE KINDS ARE DELIBERATELY NOT TREATED ALIKE, AND THE HELPER IS WHAT LETS THEM
+    # BE TOLD APART.  A CUSTODY failure -- the descriptor cannot be opened, or does not fstat to
+    # the pin -- means the thing mounted at that path is not this run's image, which invalidates
+    # the scan around it, and it is FATAL.  mount(2) itself returning an error is the legitimate
+    # "this kernel or filesystem does not offer MS_NOSYMFOLLOW" case, which is defence in depth
+    # this scan can proceed without, and it is reported and tolerated.  Before the helper existed
+    # both arrived as one non-zero exit status from mount(8) and could only be separated by a
+    # preceding check on the pathname; now they are separate statuses from the process that
+    # actually performed the operation.
+    #
+    # It sits AFTER the not-a-mount-point arm above deliberately -- that arm is the legitimate
+    # "there is nothing mounted here" case and stays non-fatal, whereas reaching this line means
+    # something IS mounted at that path.  Propagation is not re-measured here because a remount
+    # does not alter it -- the image mount was made private and verified in
+    # create_and_mount_image(), and propagation is not among the things a remount changes.
+    assert_image_root_pinned 'remount the image with nosymfollow for the credential scan'
+    if pinned_image_remount_nosymfollow 'the image root' \
+            'remount the image with nosymfollow for the credential scan'; then
         if nosymfollow_is_in_force; then
             IMAGE_MOUNT_NOSYMFOLLOW=1
             log "  nosymfollow: IN FORCE on $IMAGE_MOUNT and PROVEN -- a symbolic link created"
@@ -7825,18 +10981,22 @@ try_nosymfollow_remount() {
         fi
         warn "the image mount ACCEPTED remount,nosymfollow but a symbolic link inside the image"
         warn "  can still be opened through its pathname, so MS_NOSYMFOLLOW is NOT in force"
-        warn "  despite the remount reporting success.  Reported rather than trusted, because"
-        warn "  the previous revision of this script took that exit status as proof and would"
-        warn "  have logged a defence that was not there.  This changes nothing about the"
-        warn "  guarantee: every read, rewrite, removal and enumeration this scan performs goes"
-        warn "  through openat2 with RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV, which"
-        warn "  is mandatory, was proven to refuse at start-up, and is what confines this scan."
+        warn "  despite the remount reporting success.  The remount's exit status is reported"
+        warn "  rather than trusted precisely so this case cannot be logged as a defence that"
+        warn "  is not there.  This changes nothing about the scan's guarantee: every read,"
+        warn "  rewrite, removal and enumeration this scan performs goes through openat2 with"
+        warn "  RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV, which is mandatory, was"
+        warn "  proven to refuse at start-up, and is what confines this scan."
         return 0
     fi
     warn "nosymfollow could NOT be enabled on the image mount, so the kernel-level refusal to"
-    warn "  follow symbolic links is NOT in force for this scan.  It needs a 5.10-or-newer"
-    warn "  kernel (MS_NOSYMFOLLOW) and util-linux 2.35 or newer for the option name; one of"
-    warn "  those is missing here.  This is stated rather than glossed over because the log"
+    warn "  follow symbolic links is NOT in force for this scan.  mount(2) refused"
+    warn "  MS_REMOUNT|MS_NOSYMFOLLOW on the image root's own verified descriptor, which needs a"
+    warn "  5.10-or-newer kernel; util-linux plays no part in it any more, because the flag is"
+    warn "  passed to the syscall directly rather than spelled as a mount(8) option name."
+    warn "  The CUSTODY of the target was established either way -- a descriptor that did not"
+    warn "  fstat to this run's image root would have been fatal, not a warning.  This is stated"
+    warn "  rather than glossed over because the log"
     warn "  would otherwise read as though the defence were active.  It is DEFENCE IN DEPTH"
     warn "  ONLY: every read, rewrite, removal and enumeration this scan performs goes through"
     warn "  openat2 with RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV, anchored on the"
@@ -7924,11 +11084,21 @@ assert_image_carries_no_secret_values() {
             esac
             count=$(( count + 1 ))
             labels+=( "apt-auth-record-$count" ); needles+=( "$line" )
-        done < "$APT_AUTH_FILE"
+        done < "$APT_AUTH_CUSTODY"
         count=0
+        # BOTH SCANS READ APT_AUTH_CUSTODY, not the caller's name: the needles have to be the
+        # bytes that were installed, and re-resolving the name here could search for one file's
+        # secrets while the image carries another's.  awk reads it as an ordinary file argument,
+        # which works because /proc/<pid>/fd/<n> re-reads the held descriptor's object from the
+        # start; the published route is all awk needs, and it opens that route itself rather than
+        # being handed a descriptor.  Note that it does INHERIT the held descriptor regardless --
+        # `exec {fd}<` sets no close-on-exec flag, so every child this script spawns has it open.
+        # That is not relied on here and is not claimed as a confinement property: the descriptor
+        # is on a file the caller supplied to be read, and the children are this script's own.
+        #
         # awk without a "--" separator: mawk treats "--" as a filename rather than as an option
-        # terminator, and $APT_AUTH_FILE is a canonical absolute path so it cannot be read as an
-        # option.  tolower() so that apt's case-insensitive keywords are all matched.
+        # terminator, and APT_AUTH_CUSTODY is a canonical absolute path so it cannot be read as
+        # an option.  tolower() so that apt's case-insensitive keywords are all matched.
         while IFS= read -r token; do
             [ -n "$token" ] || continue
             count=$(( count + 1 ))
@@ -7947,7 +11117,7 @@ assert_image_carries_no_secret_values() {
             labels+=( "apt-auth-secret-$count" ); needles+=( "$token" )
         done < <(awk '{ for (i = 1; i < NF; i++) { k = tolower($i);
                             if (k == "login" || k == "password") print $(i + 1) } }' \
-                     "$APT_AUTH_FILE" | sort -u)
+                     "$APT_AUTH_CUSTODY" | sort -u)
     fi
 
     if [ "${#needles[@]}" -eq 0 ]; then
@@ -8137,10 +11307,11 @@ scrub_and_assert_image_apt_credentials() {
         if [ "$rewritten" -gt 0 ]; then
             # THE WRITE, through the confinement.  The file keeps its own inode, owner and mode --
             # the helper truncates and writes THROUGH THE DESCRIPTOR rather than replacing the
-            # name, which is what `cat -- "$tmp" > "$file"` used to achieve by a redirection that
-            # followed symbolic links.  There is no re-check before it and none is needed: the
-            # name is resolved once, by the kernel, with links refused at every position, so there
-            # is no window between a check and this write for anything to be substituted in.
+            # name, and it reaches the same object no matter what the name resolves to, which a
+            # `cat -- "$tmp" > "$file"` redirection cannot promise because it follows symbolic
+            # links.  There is no re-check before it and none is needed: the name is resolved
+            # once, by the kernel, with links refused at every position, so there is no window
+            # between a check and this write for anything to be substituted in.
             confined_write "$rel" 'an apt source file' \
                 "write the scrubbed apt sources back to $shown inside the image" < "$tmp"
             scrubbed_files=$((scrubbed_files + 1))
@@ -8198,9 +11369,9 @@ scrub_and_assert_image_apt_credentials() {
         log "    re-read afterwards and no userinfo or query remains"
     fi
     # WHICH MECHANISM ACTUALLY CONFINED THIS SCAN, recorded beside the result rather than left
-    # for a reader to infer.  The mandatory one is named first and named as mandatory, because an
-    # earlier revision listed four "layers" of which the load-bearing one was a pathname check
-    # that the caller then reopened by name.
+    # for a reader to infer.  The mandatory one is named first and named as mandatory, because a
+    # list of four "layers" reads as depth even when the load-bearing one is only a pathname
+    # check that the caller then reopens by name.
     log "  confinement: MANDATORY -- every read, rewrite, removal and enumeration above went"
     log "    through openat2 with RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV anchored"
     log "    on $IMAGE_MOUNT, operating through the returned descriptor, with no pathname"
@@ -8216,7 +11387,7 @@ scrub_and_assert_image_apt_credentials() {
     fi
 
     # THE SECOND HALF OF THE SAME PRECONDITION.  A source list is not the only place apt keeps a
-    # credential, and it is the only place this function used to look.  The dedicated stores are
+    # credential, and it is the only place the scan above looks.  The dedicated stores are
     # REMOVED and the apt configuration is REWRITTEN; the reasoning for each disposition is on
     # that function.
     scrub_and_assert_image_credential_stores
@@ -8225,15 +11396,15 @@ scrub_and_assert_image_apt_credentials() {
 # ------------------------------------------------------------------------------------
 # THE OTHER PLACES A CREDENTIAL LIVES, AND THE TWO DISPOSITIONS THEY GET.
 #
-# WHY THIS EXISTS AT ALL.  The scan above looked at apt's SOURCE LISTS and nothing else, which
-# left three whole classes of credential store unexamined in an image that is uploaded as a
-# workflow artifact and copied between machines.  Worse, this script's own help text used to
-# RECOMMEND one of them: three places told a caller with an authenticated archive to "use
-# /etc/apt/auth.conf.d in the base tarball, or a netrc".  That is advice to bake a permanent
-# credential into the published artefact -- the same exposure the in-URL-credential refusal
-# exists to prevent, reached by a route nothing checked.  The advice is deleted rather than
-# softened, --apt-auth-file replaces it with a build-time-only transport, and this function is
-# the independent net underneath both.
+# WHY THIS EXISTS AT ALL.  The scan above looks at apt's SOURCE LISTS and nothing else, which on
+# its own would leave three whole classes of credential store unexamined in an image that is
+# uploaded as a workflow artifact and copied between machines.  Worse, one of them is the obvious
+# thing to RECOMMEND: telling a caller with an authenticated archive to "use /etc/apt/auth.conf.d
+# in the base tarball, or a netrc" is advice to bake a permanent credential into the published
+# artefact -- the same exposure the in-URL-credential refusal exists to prevent, reached by a
+# route nothing checks.  So no message or help text here offers it, --apt-auth-file provides a
+# build-time-only transport in its place, and this function is the independent net underneath
+# both.
 #
 # WHAT IS SCANNED, and each is a real store rather than a guess:
 #
@@ -8282,37 +11453,37 @@ scrub_and_assert_image_apt_credentials() {
 #
 # EVERY PATH GOES THROUGH assert_confined_to_image FIRST, for exactly the reason stated in that
 # function's block: this scan reads, rewrites and DELETES files as root on the build host, so a
-# scan that followed a symlink out of the image would be a second instance of the defect the
-# source-list scrub was just corrected for.  A store that is a symlink or a non-regular file is
-# refused FATALLY rather than skipped -- a base filesystem that ships /root/.netrc as a link to
-# a host path is not a filesystem this script publishes an image around, and skipping it would
-# publish the base author's substitution unexamined.
+# scan that followed a symlink out of the image would be exactly the host-write primitive the
+# source-list scrub's confinement exists to remove.  A store that is a symlink or a non-regular
+# file is refused FATALLY rather than skipped -- a base filesystem that ships /root/.netrc as a
+# link to a host path is not a filesystem this script publishes an image around, and skipping it
+# would publish the base author's substitution unexamined.
 # ------------------------------------------------------------------------------------
 
 # ------------------------------------------------------------------------------------
 # THE INVENTORY, RE-DERIVED FROM APT'S OWN CREDENTIAL AND PROXY LOCATIONS.
 #
-# An earlier revision listed /etc/apt/auth.conf, /etc/apt/auth.conf.d, the netrc paths and
-# /etc/apt/apt.conf.d -- and stopped there.  It missed /etc/apt/apt.conf, which is apt's PRIMARY
-# configuration file and takes exactly the same directives as the fragments in apt.conf.d, so an
+# The obvious short list -- /etc/apt/auth.conf, /etc/apt/auth.conf.d, the netrc paths and
+# /etc/apt/apt.conf.d -- omits /etc/apt/apt.conf, which is apt's PRIMARY configuration file and
+# takes exactly the same directives as the fragments in apt.conf.d, so an
 #     Acquire::http::Proxy "http://user:pass@proxy.example:3128/";
-# written there survived publication untouched while the identical line in apt.conf.d/99local was
-# reduced.  The list below is derived from where apt and the libraries it uses actually look,
-# rather than from what the previous list happened to contain:
+# written there would survive publication untouched while the identical line in
+# apt.conf.d/99local was reduced.  The list below is therefore derived from where apt and the
+# libraries it uses actually look, and not from the paths that come to mind first:
 #
 #   REMOVED   /etc/apt/auth.conf            apt_auth.conf(5): apt's own netrc-style store.
 #   REMOVED   /etc/apt/auth.conf.d/*        the same, as fragments.
 #   REMOVED   /root/.netrc, /home/*/.netrc  the store curl and wget read by default, and which
 #                                           apt's https method inherits through libcurl on some
 #                                           configurations.
-#   REWRITTEN /etc/apt/apt.conf             apt.conf(5): the primary configuration file.  ADDED
-#                                           in this revision -- it was the gap named above.
+#   REWRITTEN /etc/apt/apt.conf             apt.conf(5): the primary configuration file, and
+#                                           the one the short list above omits.
 #   REWRITTEN /etc/apt/apt.conf.d/*         the fragment directory apt reads after it.
 #   REWRITTEN /etc/environment              where a Debian system sets http_proxy/https_proxy for
 #                                           every process including apt, in the same
-#                                           scheme://user:pass@host/ form.  ADDED in this
-#                                           revision: apt inherits it, so a credential there is
-#                                           an apt credential in every practical sense.
+#                                           scheme://user:pass@host/ form.  apt inherits it, so
+#                                           a credential there is an apt credential in every
+#                                           practical sense.
 #
 # DELIBERATELY NOT INCLUDED, with the reason, so the omissions are decisions rather than gaps:
 #
@@ -8373,11 +11544,12 @@ credential_dir_usable() { # $1=absolute path inside the image  $2=path as shown
 # fifo is not a filesystem this script publishes an image around, and skipping the entry would
 # publish that substitution unexamined.
 #
-# `find -P` used to do this and is not used any more.  find does not follow links it encounters
-# INSIDE a tree, but the kernel resolves find's STARTING PATH normally, so an image whose /etc is
-# an absolute symbolic link had its HOST directory enumerated and host filenames reported into
-# this script's diagnostics.  confined_list resolves every component beneath the anchor with
-# links refused, and reads the directory through the descriptor that produced.
+# `find -P` is not used for this, and the reason is not obvious.  find does not follow links it
+# encounters INSIDE a tree, but the kernel resolves find's STARTING PATH normally, so an image
+# whose /etc is an absolute symbolic link would have its HOST directory enumerated and host
+# filenames reported into this script's diagnostics.  confined_list resolves every component
+# beneath the anchor with links refused, and reads the directory through the descriptor that
+# resolution produced.
 collect_credential_dir_entries() { # $1=absolute dir inside the image  $2=dir as shown  $3=array
     local dir_rel="${1#/}" shown="$2" array_name="$3" record entry_type entry_name listing
     listing="$WORK_DIR/credential-dir-listing"
@@ -8499,9 +11671,9 @@ scrub_and_assert_image_credential_stores() {
     # ---- THE STORES THAT ARE REMOVED --------------------------------------------------
     # confined_regular_file answers "is it there, and is it a plain file" from an fstat on the
     # descriptor the confinement produced.  A symbolic link is refused by the kernel before the
-    # type test is even reached, which is what the old `-L` then `-e` pair was written to catch --
-    # -e follows, so a dangling link was dismissed as absent and a live one examined as though it
-    # were the caller's own file.
+    # type test is even reached, which is the case an `-L` then `-e` pair cannot settle: -e
+    # follows, so a dangling link reads as absent and a live one is examined as though it were
+    # the caller's own file.
     for in_image in "${IMAGE_CREDENTIAL_STORE_FILES[@]}"; do
         if confined_regular_file "${in_image#/}" "$in_image" \
                 "remove the credential store $in_image from the image"; then
@@ -8584,8 +11756,8 @@ scrub_and_assert_image_credential_stores() {
 
     # ---- THE CONFIGURATION THAT IS REWRITTEN ------------------------------------------
     # The named FILES first -- /etc/apt/apt.conf is apt's primary configuration file and takes
-    # the same Acquire::*::Proxy directives as the fragments, and it is the path the previous
-    # revision of this inventory did not look at -- then the fragment directories.
+    # the same Acquire::*::Proxy directives as the fragments, and it is the path an inventory of
+    # apt.conf.d alone omits -- then the fragment directories.
     for in_image in "${IMAGE_CREDENTIAL_CONFIG_FILES[@]}"; do
         if confined_regular_file "${in_image#/}" "$in_image" \
                 "rewrite any URL credential in $in_image"; then
@@ -8742,10 +11914,11 @@ release_image() {
     # on every other filesystem the host has mounted; a coreutils too old for -f falls back to
     # the whole-system flush rather than skipping the flush.
     #
-    # AND BOTH FAILING IS FATAL.  This line used to end in `|| true`, which meant an image whose
-    # bytes were never committed could still be published and reported as finished; on a
-    # self-hosted runner that reboots, the caller then has a published path holding a partially
-    # written filesystem.  An unflushed image is not a finished image, so the run stops here.
+    # AND BOTH FAILING IS FATAL, rather than tolerated with a trailing `|| true`.  Tolerated,
+    # an image whose bytes were never committed would still be published and reported as
+    # finished; on a self-hosted runner that reboots, the caller would then have a published
+    # path holding a partially written filesystem.  An unflushed image is not a finished image,
+    # so the run stops here.
     #
     # Named through the publication directory descriptor, like every other operation on the
     # staged image: `sync -f` opens its argument, and an argument that resolved somewhere else
@@ -8841,10 +12014,10 @@ write_manifest() {
         # file a later reader quotes as fact.  What BINDER_PROTOCOL records is the image
         # builder's EXPECTATION, derived at image-build time from two artefacts the caller
         # supplied -- the guest kernel configuration and the staged SDK's CMake cache -- and
-        # refused outright when those two disagree.  It is not declared: an earlier revision
-        # wrote a fixed "BINDER_PROTOCOL=7" here while the SDK inside the image was built
-        # BINDER_IPC_32BIT=OFF, which is protocol 8, and produced a manifest that contradicted
-        # its own image.
+        # refused outright when those two disagree.  It is never declared, because a fixed
+        # "BINDER_PROTOCOL=7" written here beside an SDK built BINDER_IPC_32BIT=OFF -- which is
+        # protocol 8 -- is a manifest that contradicts its own image, and nothing about the
+        # manifest's own text would reveal it.
         #
         # THE AUTHORITY IS THE THREE-WAY CROSS-CHECK THE RUN PERFORMS, not this line: the
         # RUNNING kernel's configuration as the guest reads it back, the SDK build flags as
@@ -8930,17 +12103,16 @@ write_manifest() {
 # the manifest names the image's paths, its architecture and its derived binder protocol, and
 # the workflow reads every path it uses out of it.  A new image beside a stale manifest is worse
 # than no publication, because it looks complete.  So the swap is written as a transaction with
-# one commit point, and everything about its shape follows from the failure it exists to
-# prevent -- which was measured on the previous revisions and is worth stating exactly:
+# one commit point, and everything about its shape follows from the failures it exists to
+# prevent.  Each is stated exactly, because each is reachable by an obvious simpler design:
 #
-#   THE FIRST DEFECT.  The previous image was moved aside to a name held in a FUNCTION LOCAL, and
-#   only then was a second holding name minted for the previous manifest.  A failure of that
-#   second mktemp or mv, or an INT/TERM/HUP landing in that window, reached `die` without any
-#   rollback: the caller's good image was hidden under a private name the EXIT trap could not
-#   see, and nothing existed at --output.  The caller was left with no image and no way to find
-#   the one they had.
+#   THE FIRST FAILURE.  Move the previous image aside to a name held in a FUNCTION LOCAL, and
+#   only then mint a second holding name for the previous manifest: a failure of that second
+#   mktemp or mv, or an INT/TERM/HUP landing in that window, reaches `die` without any rollback.
+#   The caller's good image is then hidden under a private name the EXIT trap cannot see, nothing
+#   exists at --output, and the caller has no image and no way to find the one they had.
 #
-#   WHAT REPLACES IT, in four parts:
+#   WHAT IS DONE INSTEAD, in four parts:
 #
 #   (a) BOTH HOLDING NAMES ARE MINTED BEFORE ANY RENAME.  A failure while minting them happens
 #       when nothing has moved yet, so there is nothing to roll back.
@@ -8956,31 +12128,31 @@ write_manifest() {
 #       handler at all, so recover_interrupted_publication() -- called under the publication
 #       lock before anything is built -- reads the JOURNAL and drives the pair to one state.
 #
-#   THREE FURTHER DEFECTS, EACH CLOSED BY A NAMED MECHANISM BELOW:
+#   THREE FURTHER FAILURE MODES, EACH CLOSED BY A NAMED MECHANISM BELOW:
 #
 #   THE EMPTY-PLACEHOLDER RESTORE.  mktemp mints an aside name by CREATING the file, so between
-#   minting and the `mv` a real, EMPTY, regular file sits at each aside name.  The restore's
-#   whole precondition was `[ -f "$aside" ]`, so a FAILED old-leaf rename -- the one case in
-#   which the aside is still that placeholder -- had the rollback move a ZERO-BYTE FILE over the
+#   minting and the `mv` a real, EMPTY, regular file sits at each aside name.  A restore whose
+#   whole precondition is `[ -f "$aside" ]` would therefore, on a FAILED old-leaf rename -- the
+#   one case in which the aside is still that placeholder -- move a ZERO-BYTE FILE over the
 #   caller's still-good published image.  Closed by PUBLISH_ASIDE_*_HOLDS_OLD, raised only after
 #   that leaf's own `mv` returned success, plus a recorded size the restore re-checks.
 #
-#   THE ASYMMETRIC ROLLBACK.  Only the IMAGE's rename was tracked, so a failure after the
-#   manifest rename -- the chmod, or the durability flush -- withdrew the new image and left the
-#   new MANIFEST published.  On a first publication, with no asides, that is a manifest
-#   describing an image that is not there.  Closed by PUBLISH_MANIFEST_RENAMED and a rollback
-#   that withdraws BOTH new leaves.
+#   THE ASYMMETRIC ROLLBACK.  Track only the IMAGE's rename and a failure after the manifest
+#   rename -- the chmod, or the durability flush -- withdraws the new image and leaves the new
+#   MANIFEST published.  On a first publication, with no asides, that is a manifest describing an
+#   image that is not there.  Closed by PUBLISH_MANIFEST_RENAMED and a rollback that withdraws
+#   BOTH new leaves.
 #
 #   THE UNRECOVERABLE MIXED STATE.  The image and the manifest are two independent renames, and a
-#   SIGKILL between them leaves a new image, no manifest and BOTH asides.  The aside-scan
-#   recovery read that one file at a time and reached the worst possible conclusion: an image
+#   SIGKILL between them leaves a new image, no manifest and BOTH asides.  A recovery that scans
+#   the aside names one file at a time reaches the worst possible conclusion from that: an image
 #   exists, so the old-image aside is "superseded" and is DELETED; no manifest exists, so the old
 #   manifest is RESTORED.  A new image beside an old manifest, cemented, with the old image
 #   destroyed.  Closed by the journal: see the block at PUBLISH_JOURNAL_LEAF for its shape, and
 #   recover_interrupted_publication() for the state machine it drives.
 #
-# WHAT "ATOMIC" MEANS HERE, EXACTLY -- because the word was doing more work in this block than
-# the code could support, and an over-claim in a comment is how the next reader builds on a
+# WHAT "ATOMIC" MEANS HERE, EXACTLY -- because the word does more work than the code can support
+# unless it is pinned down, and an over-claim in a comment is how the next reader builds on a
 # guarantee that is not there.  Three separate statements, and only these three:
 #
 #   (a) EACH LEAF IS REPLACED BY ONE ATOMIC RENAME.  Both renames are same-directory, so at no
@@ -9006,7 +12178,7 @@ write_manifest() {
 #       arrives after a crash rather than during a publication.
 #
 # AND NO POSTCONDITION IS ADVISORY.  The final mode, the durability flush, the rollback itself
-# and the removal of the superseded asides were warning-only; each is now fatal.  A published
+# and the removal of the superseded asides are each FATAL rather than warning-only.  A published
 # image nobody can read, or one that is not on the disk when the runner reboots, is not a
 # published image, and a leftover multi-gigabyte aside is not housekeeping -- it is half of a
 # transaction that did not finish.
@@ -9271,11 +12443,11 @@ publish_identity_well_formed() { # $1=device  $2=inode
 # ------------------------------------------------------------------------------------
 # THE ONLY TWO PLACES THE RECOVERY DELETES ANYTHING, AND THE RULE THEY BOTH ENFORCE.
 #
-# Deleting the wrong file here is how an earlier revision destroyed the caller's previous image:
-# the discard pass removed every journal-named leaf, and a kill in the write-after-move window
-# had left the journal claiming the aside held nothing when it held the only copy.  So deletion
-# is no longer driven by a name or by a flag.  An object is removed ONLY when the journal
-# positively identifies it by device and inode as one of:
+# Deleting the wrong file here destroys the caller's previous image, and a discard pass driven by
+# a NAME does exactly that: it removes every journal-named leaf, including one the journal claims
+# holds nothing because a kill landed in the write-after-move window while the aside held the
+# only copy.  So deletion is driven neither by a name nor by a flag.  An object is removed ONLY
+# when the journal positively identifies it by device and inode as one of:
 #
 #   (1) an empty mktemp placeholder -- a holding name that was minted and never moved into;
 #   (2) one of THIS run's staged files -- the interrupted build's work, which is being discarded
@@ -9568,16 +12740,15 @@ publish_fail() { # $1=message
 # run left, works out from the FILESYSTEM which object is sitting at each of the six names
 # involved, and drives the pair to one consistent generation.
 #
-# WHY IT DOES NOT DECIDE FROM THE RECORD ALONE, which is the correction that matters here.  The
-# record used to carry one completion flag per move, written AFTER the move -- and a kill in that
-# window leaves a durable flag saying the move did not happen when it did.  The previous revision
-# of this function believed the flag: after a kill immediately following the previous image's own
-# `mv`, MOVED_ASIDE_IMAGE read 0, the restore was skipped as "nothing was ever moved into this
-# aside", and the discard pass then removed the journal-named aside -- which at that instant held
-# the caller's only copy of the previous image.  The recovery destroyed the thing it exists to
-# preserve.
+# WHY IT DOES NOT DECIDE FROM THE RECORD ALONE, which is the part worth reading.  A record
+# carrying one completion flag per move, written AFTER the move, is not trustworthy: a kill in
+# that window leaves a durable flag saying the move did not happen when it did.  A recovery that
+# believed the flag would destroy the thing it exists to preserve -- after a kill immediately
+# following the previous image's own `mv`, MOVED_ASIDE_IMAGE reads 0, the restore is skipped as
+# "nothing was ever moved into this aside", and the discard pass then removes the journal-named
+# aside, which at that instant holds the caller's only copy of the previous image.
 #
-# SO THE RECORD IS WRITE-AHEAD AND THE DECISION IS BY INODE.  Each move now has an INTENT field
+# SO THE RECORD IS WRITE-AHEAD AND THE DECISION IS BY INODE.  Each move has an INTENT field
 # flushed before it and a DONE field flushed after, and the journal carries the device and inode
 # of all six participants: the previous image, the previous manifest, this run's two staged files
 # and the two empty mktemp placeholders the holding names were minted as.  (INTENT=1, DONE=0) is
@@ -10368,7 +13539,7 @@ publish_outputs() {
     # point is recoverable by the next run; nothing before it needed to be, because nothing had
     # moved.  A journal that cannot be written is therefore fatal HERE, with the previous pair
     # untouched -- publishing without it would mean a SIGKILL in the next four lines left a state
-    # no later run could resolve, which is the defect this whole mechanism exists to close.
+    # no later run could resolve, which is exactly what this whole mechanism exists to prevent.
     PUBLISH_RUN_ID="$$-$(date -u '+%Y%m%dT%H%M%SZ')"
     PUBLISH_GENERATION="$(date -u '+%Y-%m-%dT%H:%M:%SZ')/$PUBLISH_RUN_ID"
     publish_journal_write 'about to move the previous pair aside' \
@@ -10386,11 +13557,11 @@ publish_outputs() {
     PUBLISH_IN_PROGRESS=1
 
     # 6. ASIDE, not deleted.  EVERY MOVE IS BRACKETED BY TWO FLUSHED JOURNAL WRITES: the INTENT
-    # before it and the DONE after it.  The INTENT write is the one that matters, and it is the
-    # correction of the defect described at PUBLISH_INTENT_ASIDE_IMAGE -- with only the write
-    # after the move, a kill in between left a durable record saying the move had not happened
-    # and the next run believed it.  With both, (INTENT=1, DONE=0) says "may or may not have
-    # happened", and the recorded inodes tell the next run which it was.
+    # before it and the DONE after it.  The INTENT write is the one that matters, for the reason
+    # set out at PUBLISH_INTENT_ASIDE_IMAGE -- with only the write after the move, a kill in
+    # between leaves a durable record saying the move had not happened, which the next run would
+    # believe.  With both, (INTENT=1, DONE=0) says "may or may not have happened", and the
+    # recorded inodes tell the next run which it was.
     if [ -n "$PUBLISH_ASIDE_IMAGE_LEAF" ]; then
         PUBLISH_INTENT_ASIDE_IMAGE=1
         publish_journal_write 'about to move the previous image aside' \
@@ -10409,9 +13580,9 @@ publish_outputs() {
             || publish_fail "the previous image was moved aside to
            $PUBLISH_ASIDE_IMAGE
        but the publication journal could not be updated to record the completion.  The rollback
-       below puts it back; nothing is published.  This is no longer an unrecoverable window --
-       the INTENT above is on the disk and the previous image's inode is recorded with it, so a
-       kill here would be resolved by the next run from the filesystem -- but a transaction whose
+       below puts it back; nothing is published.  This is not an unrecoverable window -- the
+       INTENT above is on the disk and the previous image's inode is recorded with it, so a kill
+       here would be resolved by the next run from the filesystem -- but a transaction whose
        record this run cannot keep current is not one it continues."
     fi
     if [ -n "$PUBLISH_ASIDE_MANIFEST_LEAF" ]; then
@@ -10456,11 +13627,11 @@ publish_outputs() {
     publish_journal_write 'the new image is published' \
         || publish_fail "the new image reached $OUTPUT_IMAGE but the publication journal could
        not be updated to record the completion.  The rollback below withdraws it and puts the
-       previous pair back.  On the previous revision this was the one unrecoverable window -- a
-       kill immediately after the rename left a new image, no manifest, and a journal saying
-       neither had happened.  It is recoverable now, because the INTENT above is on the disk and
-       every participant's inode is recorded with it, but a record this run cannot keep current
-       is still not a transaction it continues."
+       previous pair back.  Without the write-ahead journal this is the one unrecoverable window
+       -- a kill immediately after the rename leaves a new image, no manifest, and a record
+       saying neither had happened.  It IS recoverable here, because the INTENT above is on the
+       disk and every participant's inode is recorded with it, but a record this run cannot keep
+       current is still not a transaction it continues."
     PUBLISH_INTENT_NEW_MANIFEST=1
     publish_journal_write 'about to publish the new manifest' \
         || publish_fail "the publication journal could not record the INTENT to publish the new
@@ -10660,6 +13831,22 @@ main() {
     fi
 
     parse_args "$@"
+    # THE PRIVILEGED SECTION BEGINS HERE, AND IT BEGINS IN A MOUNT NAMESPACE OF ITS OWN.
+    #
+    # This re-executes the script under `unshare --mount --propagation private` and returns only
+    # in the process that came back inside the namespace, having proven it is in one.  It is
+    # placed HERE for two reasons, both load-bearing:
+    #
+    #   * AFTER parse_args, so --help and an unknown option still answer for an unprivileged
+    #     caller exactly as they always have.  parse_args validates argv and nothing else, so
+    #     running it once on each side of the re-exec costs nothing and creates nothing.
+    #   * BEFORE everything else, so that every path resolution, every ownership check, every
+    #     mount, the loop device, the chroot and the scratch directory happen inside the
+    #     namespace.  A check performed outside it and used inside would be the check-then-use
+    #     shape the namespace exists to remove.
+    #
+    # --self-test is dispatched above this point and needs neither root nor a namespace.
+    enter_private_mount_namespace "$@"
     resolve_arch
     require_host_tools
     validate_inputs

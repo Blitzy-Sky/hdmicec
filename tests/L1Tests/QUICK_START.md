@@ -173,9 +173,13 @@ That recipe is deliberately **uninstrumented** — no `-fprofile-arcs`, no `-fte
 first build does not need them; `./run_coverage.sh --build` adds them when coverage is wanted.
 Read the configure output back before trusting it: it prints one `AIDL HDMI CEC back-end:` line per
 resolved path plus the C++17 flag it settled on, so a prefix that resolved to the wrong place is
-visible there rather than in a link error much later.  The C++17 line always names `-std=c++17`:
-configure settles the flag unconditionally and refuses a compiler that rejects it, so "none
-required" is not a state it can report.  The `LD_LIBRARY_PATH` export in the block above is part
+visible there rather than in a link error much later.  Read the `C++17 dialect` line for the flag
+configure **accepted**, not for a spelling you expect: it is `-std=c++17` where the compiler takes
+that spelling, `-std=gnu++17` or `-std=c++1z` where it takes one of those instead, and your own
+`-std=` when you passed a C++17-or-newer dialect in `CXXFLAGS`.  Some dialect is always named —
+configure settles one rather than trusting the compiler default, and it stops with a diagnostic
+when nothing it tries compiles the C++17 constructs the AIDL headers use — so "none required" is
+not a state it can report.  The `LD_LIBRARY_PATH` export in the block above is part
 of the recipe for the same reason the prefixes are — it is needed to *link*, not merely to run.
 
 `libglib2.0-dev` is a hard requirement of `configure`.

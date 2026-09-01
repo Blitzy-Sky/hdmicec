@@ -26,16 +26,17 @@
  * com.rdk.hal.hdmicec service in a process of its own, serves transactions against it, and lives
  * until its parent asks it to stop.@n
  * It exists because process boundaries are not an implementation detail of binder - they are the
- * thing under test.  libbinder resolves a service name that was registered in the CALLING process
+ * thing under test.  libbinder resolves a service name that was registered in the calling process
  * to the local BBinder, so interface_cast there hands back that very object: no Bp* proxy is
  * created, no transaction crosses the binder driver, and the client's threadpool is never involved.
  * A fake registered inside the test runner therefore cannot prove the transport at all, however
- * faithfully it implements the interface.  Hosting the same fake HERE, in a separate process, is
+ * faithfully it implements the interface.  Hosting the same fake here, in a separate process, is
  * what makes the middleware hold a real proxy and receive its event callbacks on a binder thread.
  *
- * There is deliberately nothing else in this file.  It declares no class, wraps nothing, registers
- * nothing with anything, and adds no abstraction of any kind: the fake it hosts is already written
- * and already knows how to publish itself, so this program is a startup order, a readiness signal,
+ * There is deliberately nothing else in this file.  It declares no class, wraps nothing, and adds no
+ * interface and no abstraction of its own: the only interface published from this process is the one
+ * the `.aidl` files already define, and the fake that implements it already knows how to publish
+ * itself under the production service name, so this program is a startup order, a readiness signal,
  * a line-oriented control and observation channel over two inherited descriptors, and a shutdown
  * wait.@n
  * The channel exists because a separate process is opaque from the outside.  Once the fake lives
@@ -55,7 +56,7 @@
  * @brief Separate-process host for the test-scope fake com.rdk.hal.hdmicec AIDL HdmiCec service.
  *
  * Publishes the fake declared in fake_hdmi_cec_aidl_service.h under the production service name,
- * starts the SERVICE-side binder threadpool that serves incoming transactions, signals readiness to
+ * starts the service-side binder threadpool that serves incoming transactions, signals readiness to
  * the parent that launched it, then serves the parent's control and observation channel - the route
  * by which a runner triggers an inbound event and reads back what the middleware actually sent - and
  * stops on a `shutdown` command, on end of file, or on a termination signal.@n
@@ -71,23 +72,30 @@
  * Startup, in this order and no other:
  * -# Install the shutdown handlers, so that a termination signal arriving at any later point still
  *    produces a clean exit rather than a default-disposition kill.
- * -# Resolve the readiness file descriptor.  It is validated here, before any side effect, so that a
- *    botched handoff costs nothing; the readiness line itself is not written until step 7.
- * -# Resolve the control and observation channel, if the parent supplied one, validating both
- *    descriptors here for the same reason, and - only when a channel was supplied - ignore SIGPIPE so
- *    that a client closing its end reports EPIPE instead of terminating this process.
+ * -# Resolve the readiness file descriptor.  What is checked here is the spelling of the value - a
+ *    plain non-negative descriptor number and nothing more - and it is checked before anything is
+ *    published, so a botched handoff costs an exit code and no publication.  Whether that descriptor
+ *    is open and writable is settled by the readiness write in step 7, which fails with
+ *    EXIT_READINESS_WRITE_FAILED.
+ * -# Resolve the control and observation channel, if the parent supplied one.  Both descriptors are
+ *    checked here for their spelling and for being open in this process in the direction they will be
+ *    used, because a channel this program cannot serve has to be refused before anything is published
+ *    rather than discovered as an EBADF three commands later; and - only when a channel was supplied -
+ *    ignore SIGPIPE so that a client closing its end reports EPIPE instead of terminating this
+ *    process.
  * -# Confirm a binder driver node is present and openable.
  * -# Confirm nothing is already published under the production service name.  Something there is a
- *    HARD FAILURE and never a condition to work around: this run's outcome would otherwise depend on
+ *    hard failure and never a condition to work around: this run's outcome would otherwise depend on
  *    a process this suite does not own.
  * -# Construct the fake, start the service-side threadpool, then publish the fake.  The pool is
- *    started BEFORE publication so that no transaction can ever arrive with no thread to serve it.
+ *    started before publication so that no transaction can ever arrive with no thread to serve it.
  * -# Write the readiness line - only now, after publication has succeeded and the pool is running,
  *    so that a parent which has seen the line may rely on the service being both published and
  *    served.
  * -# Serve the control and observation channel, if the parent supplied one, until a `shutdown`
- *    command, end of file on the control descriptor, or a termination signal arrives.  Where no
- *    channel was supplied, block until signalled exactly as this program always has.
+ *    command, end of file on the control descriptor, a parent that has closed the observation
+ *    descriptor, or a termination signal arrives - every one of those four is a clean end of session.
+ *    Where no channel was supplied, block until signalled exactly as this program always has.
  * -# Return EXIT_SUCCESS.
  *
  * @par Environment
@@ -96,22 +104,25 @@
  * - `CEC_FAKE_HOST_READY_FD` is the number of an inherited file descriptor - the write end of a pipe
  *   the parent holds open - on which the readiness line is delivered.  Unset means "no parent is
  *   listening", and the line goes to standard output instead so that a human can run this binary
- *   from a shell and watch it work.  Set but not a usable non-negative descriptor number is a hard
+ *   from a shell and watch it work.  Set but not a plain non-negative descriptor number is a hard
  *   failure, because a parent that asked to be signalled on a pipe and was silently answered on
- *   standard output would wait out its whole timeout with nothing to explain why.
- * - `CEC_FAKE_HOST_CONTROL_FD` is the number of an inherited file descriptor - the READ end of a
+ *   standard output would wait out its whole timeout with nothing to explain why.  That check is on
+ *   the value only: whether the descriptor is open and writable is settled by the readiness write,
+ *   which exits EXIT_READINESS_WRITE_FAILED when it is not.
+ * - `CEC_FAKE_HOST_CONTROL_FD` is the number of an inherited file descriptor - the read end of a
  *   pipe the parent writes to - from which this program reads newline-terminated ASCII commands.
- * - `CEC_FAKE_HOST_OBSERVE_FD` is the number of an inherited file descriptor - the WRITE end of a
+ * - `CEC_FAKE_HOST_OBSERVE_FD` is the number of an inherited file descriptor - the write end of a
  *   second pipe the parent reads from - to which this program writes exactly one newline-terminated
  *   reply per command.
  *
- * Both channel variables are OPTIONAL and they travel together.  Both unset means no channel: this
+ * Both channel variables are optional and they travel together.  Both unset means no channel: this
  * program then behaves exactly as it did before the channel existed, which is why an existing
  * invocation that supplies neither is unaffected.  One set without the other, or either set to
- * something that is not a usable descriptor of the right direction, is a HARD FAILURE that exits
- * EXIT_BAD_CONTROL_CHANNEL and writes NO readiness token - a parent that asked for a channel and
+ * something that is not a usable descriptor of the right direction, is a hard failure that exits
+ * EXIT_BAD_CONTROL_CHANNEL and writes no readiness token - a parent that asked for a channel and
  * was silently served without one would sit in its own bounded wait for a reply that can never
- * come.
+ * come.  Unlike the readiness descriptor, these two are established as open and correctly directed
+ * before they are accepted, because this program reads and writes them itself throughout the session.
  *
  * @par The control and observation protocol, in full
  * This block is the normative statement of the protocol.  The client end lives in the L2 runner and
@@ -120,10 +131,17 @@
  * exactly one reply line per command, terminated by a single `\n`.  A trailing `\r` on a command
  * line is tolerated and stripped.  Tokens are separated by runs of spaces or tabs.  Every reply
  * begins with either `OK ` or `ERR `, so a client can classify an outcome before parsing it.  A
- * blank or whitespace-only line is not a command: it is ignored and produces NO reply.  A command
+ * blank or whitespace-only line is not a command: it is ignored and produces no reply.  A command
  * line longer than MAX_COMMAND_LINE_LENGTH bytes is answered `ERR command-too-long` and discarded
  * unparsed, whether or not its terminator arrived in the same read - how a client's bytes happened to
- * be split must never decide whether its command was accepted.
+ * be split must never decide whether its command was accepted.@n
+ * Reply delivery: each reply is written within one whole-call deadline of OBSERVE_WRITE_TIMEOUT_MS,
+ * measured on the monotonic clock, and is at most MAX_REPLY_LINE_LENGTH bytes - the size up to which a
+ * pipe write is atomic, so a reply is never delivered in pieces.  A client that stops reading costs
+ * this program one deadline and then the session: the reply is abandoned and the host exits
+ * EXIT_CONTROL_CHANNEL_FAILED, which is the one outcome a client can act on where a hang is not.  A
+ * reply that would exceed the cap - only the `ERR unknown-command <verb>` echo of a verb from a client
+ * that has lost its framing can - is refused unwritten and ends the session the same way.
  *
  * Commands, with every reply each can produce:
  * - `ping` - liveness, touching nothing.  Replies `OK pong`.
@@ -137,7 +155,7 @@
  * - `sent-count` - replies `OK sent-count <n>`, the fake controller's real `sendMessage()`
  *   invocation count.
  * - `last-sent` - replies `OK last-sent <lowercase-hex>`, the bytes of the fake controller's last
- *   captured `sendMessage()` frame.  The hex field is EMPTY when nothing has been captured, so that
+ *   captured `sendMessage()` frame.  The hex field is empty when nothing has been captured, so that
  *   reply is `OK last-sent` followed by one space and then the newline, with nothing between them.
  * - `open-count` - replies `OK open-count <n>`, the fake service's real `open()` invocation count.
  * - `close-count` - replies `OK close-count <n>`, the fake service's real `close()` invocation count.
@@ -149,11 +167,11 @@
  *   answers from the same address space and therefore cannot.
  * - `listener` - replies `OK listener present` or `OK listener absent`.
  * - `shutdown` - replies `OK shutdown` and then performs the same clean teardown the signal path
- *   performs, exiting EXIT_SUCCESS.  Anything the client had already queued behind it is NOT served,
+ *   performs, exiting EXIT_SUCCESS.  Anything the client had already queued behind it is not served,
  *   so `shutdown` is the last command of a session by definition.
  * - anything else - replies `ERR unknown-command <verb>` and the loop continues, so one mistyped
- *   command does not end the session.  That includes any verb this vocabulary once carried and no
- *   longer does, so a stale client is answered rather than silently served.
+ *   command does not end the session.  Every verb outside the list above is answered that way, so a
+ *   client whose vocabulary does not match this one is told so rather than silently served.
  *
  * That list is the whole vocabulary.  Three verbs are deliberately absent, recorded here so that
  * nobody restores one on the assumption it was overlooked:
@@ -175,11 +193,11 @@
  * not because it is reachable today.
  *
  * @par The parent's obligations for the channel
- * The parent creates two pipes, passes the control READ end and the observation WRITE end to this
+ * The parent creates two pipes, passes the control read end and the observation write end to this
  * child as inherited descriptors, and names those descriptor numbers in `CEC_FAKE_HOST_CONTROL_FD`
  * and `CEC_FAKE_HOST_OBSERVE_FD`.  Descriptors created with `O_CLOEXEC` - which is how they should
- * be created, so that no unrelated exec leaks them - do NOT survive the exec of this binary unless
- * the parent CLEARS `FD_CLOEXEC` on the child's copies between fork() and exec(), exactly as it
+ * be created, so that no unrelated exec leaks them - do not survive the exec of this binary unless
+ * the parent clears `FD_CLOEXEC` on the child's copies between fork() and exec(), exactly as it
  * already does for the readiness descriptor.  A parent that forgets that step names descriptors this
  * program will reject as unusable, which is the failure it is meant to be: rejected loudly beats
  * served silently.@n
@@ -196,28 +214,28 @@
  *
  * @par The parent's obligations
  * The parent creates the pipe, passes its write end to this child as an inherited descriptor, names
- * that descriptor in `CEC_FAKE_HOST_READY_FD`, and waits for the token under a BOUNDED TIMEOUT after
+ * that descriptor in `CEC_FAKE_HOST_READY_FD`, and waits for the token under a bounded timeout after
  * which it fails the run rather than proceeding.  The bound is not optional: a run that proceeds
  * without the token tests the legacy back-end while reporting an AIDL result.  In its teardown the
  * parent terminates this child and reaps it, so that no host outlives the suite that launched it.
  *
- * @warning `CEC_TEST_AIDL_MODE` is NOT read here.  That variable is read by the L1 and L2 harnesses
- *          and nowhere else; this host is LAUNCHED by the remote mode rather than being told about
+ * @warning `CEC_TEST_AIDL_MODE` is not read here.  That variable is read by the L1 and L2 harnesses
+ *          and nowhere else; this host is launched by the remote mode rather than being told about
  *          it, and a second reader of it would be a second place for the modes to drift.
  * @warning A sleep-based readiness signal is not acceptable anywhere in this contract.  A timed wait
  *          in place of the token converts a race into a flake: it passes on a fast machine, fails on
  *          a loaded one, and never once proves the service was actually published.
- * @warning This host does NOT reimplement the middleware's bounded binder preflight.  That predicate
+ * @warning This host does not reimplement the middleware's bounded binder preflight.  That predicate
  *          is production code in the middleware's own source directory and this binary links no
  *          libRCEC, so its protocol-version equality check and its bounded wait for binder handle 0
  *          are both absent here.  One
  *          consequence survives and is real: where a driver node exists but no service manager is
- *          running, reaching the service manager BLOCKS - it retries in one-second intervals until
+ *          running, reaching the service manager blocks - it retries in one-second intervals until
  *          binder handle 0 resolves - and this program will sit there.  The parent's bounded
  *          readiness timeout is the only guard against that case, which is part of why it is
  *          mandatory.  A service manager is an unconditional runtime prerequisite wherever a binder
  *          driver is present.
- * @note The threadpool started here is the SERVICE side, serving transactions addressed to the fake.
+ * @note The threadpool started here is the service side, serving transactions addressed to the fake.
  *       It is unrelated to the client-side pool, which the middleware's AIDL back-end starts inside
  *       its own open() call.  The fake implementation itself starts neither, which is what keeps the
  *       in-process and out-of-process cases distinguishable.
@@ -247,6 +265,7 @@
 #include <iostream>
 #include <poll.h>
 #include <string>
+#include <time.h>
 #include <unistd.h>
 #include <vector>
 
@@ -329,18 +348,40 @@ static const size_t CONTROL_READ_CHUNK = 512;
 static const size_t TRACED_COMMAND_LIMIT = 120;
 
 /**
- * @brief Milliseconds a single reply write may wait for the observation descriptor to accept bytes.
+ * @brief Milliseconds one call to writeReplyLine() may spend delivering a reply, in total.
  *
  * A pipe whose reader has stopped reading eventually stops accepting writes, and a blocking write
  * there would hang this program with no diagnostic and no exit code - the one failure mode a test
  * harness can least afford, because it presents as a hung suite rather than a failed one.  So every
  * reply write is bounded: this program would rather exit EXIT_CONTROL_CHANNEL_FAILED and let the
  * parent's own bounded wait fail loudly than block.  The bound is generous by design, since a
- * healthy parent reads each reply before sending the next command and never comes close to it.
+ * healthy parent reads each reply before sending the next command and never comes close to it.@n
+ * This is a whole-call budget and not a per-attempt one.  writeReplyLine() converts it once into an
+ * absolute CLOCK_MONOTONIC deadline and derives every wait from the time left to that deadline, so a
+ * reply interrupted repeatedly, or accepted in stages, cannot cost more than this value in total.
  *
  * @see writeReplyLine()
  */
 static const int OBSERVE_WRITE_TIMEOUT_MS = 5000;
+
+/**
+ * @brief Longest reply line this program will write, in bytes, including its terminator.
+ *
+ * PIPE_BUF is the size up to which a pipe write is atomic, and that is the whole reason for the cap
+ * rather than a taste for round numbers.  On a descriptor this program has put into nonblocking mode,
+ * a write of at most PIPE_BUF bytes either transfers the line whole or transfers nothing and reports
+ * EAGAIN; a larger write may transfer part of it and leave the rest for a later call.  A client
+ * reading lines can survive "no reply" and cannot survive "half a reply", so a line that cannot be
+ * one atomic write is refused before it is attempted instead of being fragmented.@n
+ * Every reply a well-framed command produces is far below this: the longest is a `last-sent` carrying
+ * a maximum-length CEC frame, a few hundred bytes of hexadecimal.  The one reply that can exceed it is
+ * the `ERR unknown-command <verb>` echo of a verb from a client that has lost its framing, since a
+ * verb may be as long as MAX_COMMAND_LINE_LENGTH; that reply is refused and the session ends with
+ * EXIT_CONTROL_CHANNEL_FAILED, which is the loud outcome such a client has already earned.
+ *
+ * @see writeReplyLine(), MAX_COMMAND_LINE_LENGTH
+ */
+static const size_t MAX_REPLY_LINE_LENGTH = PIPE_BUF;
 
 /**
  * @brief Binder driver node checked before anything in this process touches libbinder.
@@ -349,7 +390,7 @@ static const int OBSERVE_WRITE_TIMEOUT_MS = 5000;
  * kernel binder support an unguarded service-manager call would kill this program outright: no
  * diagnostic, no exit code, nothing for the parent to report but a timeout.  Checking the node first
  * turns that into a traced failure with an exit code of its own.@n
- * This single check is NOT the middleware's bounded preflight, which additionally requires the
+ * This single check is not the middleware's bounded preflight, which additionally requires the
  * driver's protocol version to equal the one libbinder was built for and waits for binder handle 0
  * under a bound.  Neither of those is performed here, and the @warning on this file records what
  * that leaves exposed.  The node name is spelled here because it cannot be shared: the fake's own
@@ -364,7 +405,13 @@ static const char BINDER_DRIVER_PATH[] = "/dev/binder";
 static const int EXIT_STALE_REGISTRATION = 2;
 
 /**
- * @brief Exit code reported when CEC_FAKE_HOST_READY_FD is set to something unusable.
+ * @brief Exit code reported when CEC_FAKE_HOST_READY_FD is not a plain descriptor number.
+ *
+ * The spelling of the value is what this code answers for.  A value that parses and then turns out
+ * not to be writable is a different failure, found at the readiness write and reported as
+ * EXIT_READINESS_WRITE_FAILED.
+ *
+ * @see resolveReadinessFd(), EXIT_READINESS_WRITE_FAILED
  */
 static const int EXIT_BAD_READY_FD = 3;
 
@@ -375,6 +422,13 @@ static const int EXIT_REGISTRATION_FAILED = 4;
 
 /**
  * @brief Exit code reported when the readiness line could not be written.
+ *
+ * This is also where a readiness descriptor that parsed but is not open for writing in this process
+ * arrives, since resolveReadinessFd() checks the spelling of the value and the write establishes the
+ * rest.  The fake is published by the time this is reached, and the process exits rather than serve
+ * an invocation whose parent can never learn it is ready.
+ *
+ * @see resolveReadinessFd(), writeAllRetryingOnInterrupt()
  */
 static const int EXIT_READINESS_WRITE_FAILED = 5;
 
@@ -411,9 +465,10 @@ static const int EXIT_BAD_CONTROL_CHANNEL = 8;
  *
  * Distinct from EXIT_BAD_CONTROL_CHANNEL, which is a configuration fault found before the host ever
  * became ready.  This code means the channel was accepted and then stopped working: poll() or read()
- * failed for a reason other than an interruption, or a reply could not be delivered within
- * OBSERVE_WRITE_TIMEOUT_MS.  A parent that has closed its ends deliberately is NOT this case - that
- * is end of file, or a broken pipe, and both are clean shutdowns.
+ * failed for a reason other than an interruption, a reply was not delivered within the whole-call
+ * deadline of OBSERVE_WRITE_TIMEOUT_MS, or a reply was longer than MAX_REPLY_LINE_LENGTH and was
+ * refused rather than fragmented.  A parent that has closed its ends deliberately is not this case -
+ * that is end of file, or a broken pipe, and both are clean shutdowns.
  *
  * @see serveControlChannel(), writeReplyLine()
  */
@@ -652,16 +707,27 @@ static bool isUsableDescriptor(int descriptor, bool mustBeWritable)
  *                                          written to.  Untouched when this reports failure
  *
  * @return bool                                   - Whether a descriptor was resolved
- * @retval true                                   - readinessFd holds either the descriptor the parent
- *                                                  named or STDOUT_FILENO
- * @retval false                                  - The variable was present but not a usable
+ * @retval true                                   - readinessFd holds either the descriptor number the
+ *                                                  parent named, unexamined beyond its spelling, or
+ *                                                  STDOUT_FILENO
+ * @retval false                                  - The variable was present but not a plain
  *                                                  non-negative descriptor number
  *
- * @warning Validated here, before this program takes any action a parent could observe, so that a
- *          bad value costs nothing.  The readiness line itself is written much later, only once the
- *          service is published and served.
+ * @warning What is established here is the spelling of the value and nothing else.  The variable is
+ *          put through parseDescriptorNumber(), which reports whether it is a plain non-negative
+ *          decimal number in descriptor range; it does not report whether that descriptor is open in
+ *          this process, nor whether it is open for writing.  The two channel descriptors are held to
+ *          the stronger standard - resolveControlChannelFds() puts each through isUsableDescriptor()
+ *          as well - because this program reads and writes them itself for the whole session, whereas
+ *          the readiness descriptor is written exactly once, and that write is where its openness is
+ *          established: it traces the errno and exits EXIT_READINESS_WRITE_FAILED, so a parent still
+ *          learns from an exit code rather than from its own expired timeout.
+ * @warning The value is read at this point, before the fake is published and long before the
+ *          readiness line is written, so a misspelled value costs an exit code and no publication.
+ *          Diagnostics on standard output and the shutdown self-pipe precede it; nothing a parent
+ *          waits on does.
  *
- * @see writeAllRetryingOnInterrupt(), READY_FD_VARIABLE
+ * @see parseDescriptorNumber(), writeAllRetryingOnInterrupt(), READY_FD_VARIABLE
  */
 static bool resolveReadinessFd(int &readinessFd)
 {
@@ -921,8 +987,8 @@ static bool writeAllRetryingOnInterrupt(int fd, const char *data, size_t length)
  * @retval false                                  - The node is absent or cannot be opened, so no
  *                                                  binder transport exists on this host
  *
- * @warning This is a node check and nothing more.  It does NOT establish that the driver's protocol
- *          version matches the one libbinder was built for, and it does NOT establish that a service
+ * @warning This is a node check and nothing more.  It does not establish that the driver's protocol
+ *          version matches the one libbinder was built for, and it does not establish that a service
  *          manager is running - a node with no service manager behind it still blocks, and the
  *          parent's bounded readiness timeout is the guard for that.
  *
@@ -946,7 +1012,7 @@ static bool isBinderTransportPresent()
  * @brief Establishes that nothing is already published under the production service name.
  *
  * A stale registration left behind by another process - an earlier host that was never reaped, or a
- * real HAL on a device - would make the middleware's own lookup resolve against THAT service instead
+ * real HAL on a device - would make the middleware's own lookup resolve against that service instead
  * of the fake this host publishes.  The invocation would still run, and its result would describe
  * something nobody chose.  So this is a hard failure and not a condition to work around: publishing
  * over the entry would hide the collision, and tolerating it would make a green result meaningless.@n
@@ -1015,7 +1081,7 @@ static int verifyServiceNameIsFree(const std::string &serviceName)
  *
  * @pre installShutdownHandlers() has already reported true.
  *
- * @note This is the wait used when the parent supplied NO control and observation channel, and it is
+ * @note This is the wait used when the parent supplied no control and observation channel, and it is
  *       unchanged from the program's original behaviour for exactly that reason.  Where a channel was
  *       supplied, serveControlChannel() waits instead and watches the same self-pipe, so a
  *       termination signal is answered either way.
@@ -1071,75 +1137,197 @@ enum class ReplyOutcome {
     /**
      * @brief The reply could not be delivered and the parent has not gone away.
      *
-     * The write failed for a reason other than an interruption or a broken pipe, or it could not
-     * complete within OBSERVE_WRITE_TIMEOUT_MS.  Either way the client is waiting for a line it will
-     * never receive, so the caller exits EXIT_CONTROL_CHANNEL_FAILED rather than continue a session
-     * that has silently desynchronised.
+     * The write failed for a reason other than an interruption or a broken pipe, the whole-call
+     * deadline of OBSERVE_WRITE_TIMEOUT_MS expired with the line unfinished, or the line was longer
+     * than MAX_REPLY_LINE_LENGTH and was refused rather than fragmented.  Either way the client is
+     * waiting for a line it will never receive, so the caller exits EXIT_CONTROL_CHANNEL_FAILED
+     * rather than continue a session that has silently desynchronised.
      */
     FAILED
 };
 
 /**
- * @brief Writes exactly one reply line to the observation descriptor, under a bounded wait.
+ * @brief Writes exactly one reply line to the observation descriptor within one whole-call deadline.
  *
  * Appends the single newline that terminates a reply - callers pass the reply text without it, so
- * there is one place in this program that decides how a reply is framed - and delivers the whole line,
- * looping over short writes and retrying an interrupted one.@n
- * The wait is bounded, which is the whole point of doing this by hand rather than with a stream.  A
- * pipe whose reader has stopped reading eventually stops accepting bytes, and a blocking write there
- * would hang this host with no diagnostic: a test harness can survive a failed host far more easily
- * than a hung one.  The write is also raw and unbuffered, so a reply cannot sit in a stream buffer
- * while the client waits for it.
+ * there is one place in this program that decides how a reply is framed - and delivers the whole line
+ * or reports why it could not, without ever blocking indefinitely.  The size cap below is what keeps a
+ * delivered reply to a single atomic pipe write, so a client never has to make sense of half a line.
+ * The write is raw and unbuffered, so a reply cannot sit in a stream buffer while the client waits
+ * for it.@n
+ * Three properties make the bound real, and each of them is a property of this function rather than
+ * of the descriptor it is handed:
+ * -# One deadline for the call.  A CLOCK_MONOTONIC instant OBSERVE_WRITE_TIMEOUT_MS ahead is computed
+ *    on entry, and every wait is given the milliseconds remaining to it, clamped at zero.  An
+ *    interruption or a partially accepted line therefore costs the time it consumed and does not
+ *    start a fresh wait, which a per-attempt timeout would.
+ * -# A nonblocking write, then the flags back as they were.  poll() reporting POLLOUT promises only
+ *    that a write of at most PIPE_BUF bytes will not block, so this function sets O_NONBLOCK on the
+ *    descriptor for the duration of the call and restores the caller's original flags on every way
+ *    out, including every failure.  EAGAIN means the line is not accepted yet and is waited on again
+ *    within the same deadline, not treated as a failure.
+ * -# A size cap.  A line longer than MAX_REPLY_LINE_LENGTH is refused before any write is attempted,
+ *    because a line larger than PIPE_BUF is no longer one atomic pipe write and a client that reads
+ *    lines cannot recover from half of one.
  *
- * @param [in] observeFd                  - Observation descriptor to write to
+ * @param [in] observeFd                  - Observation descriptor to write to.  Its file status flags
+ *                                          are changed for the duration of the call and restored
+ *                                          before it returns
  * @param [in] reply                      - Reply text, without its terminator.  Must begin with
- *                                          "OK " or "ERR " to satisfy the protocol
+ *                                          "OK " or "ERR " to satisfy the protocol, and with its
+ *                                          terminator must not exceed MAX_REPLY_LINE_LENGTH bytes
  *
  * @return ReplyOutcome                           - How the delivery ended
- * @retval ReplyOutcome::DELIVERED                - Every byte of the line was written
- * @retval ReplyOutcome::PARENT_GONE              - The reader closed its end; EPIPE, POLLERR or
- *                                                  POLLHUP was observed
- * @retval ReplyOutcome::FAILED                   - The descriptor rejected the write for another
- *                                                  reason, or the bounded wait expired
+ * @retval ReplyOutcome::DELIVERED                - Every byte of the line was written, and the
+ *                                                  descriptor's original flags were restored
+ * @retval ReplyOutcome::PARENT_GONE              - The descriptor has no reader left to answer: the
+ *                                                  write reported EPIPE, or the wait reported POLLERR,
+ *                                                  POLLHUP or POLLNVAL.  The session ends cleanly on
+ *                                                  all four, since none of them can be answered and
+ *                                                  none of them is a fault of this program
+ * @retval ReplyOutcome::FAILED                   - The line exceeded MAX_REPLY_LINE_LENGTH and was
+ *                                                  not attempted, the monotonic clock or the
+ *                                                  descriptor's flags could not be read or set, the
+ *                                                  whole-call deadline expired with the line
+ *                                                  unfinished, the descriptor rejected the write for
+ *                                                  a reason other than EAGAIN, EINTR or EPIPE, or the
+ *                                                  original flags could not be restored afterwards
  *
  * @pre SIGPIPE is ignored - ignoreBrokenPipeSignal() has reported true - otherwise a closed reader
  *      terminates this process before EPIPE can be observed.
+ * @pre observeFd is open for writing in this process, which resolveControlChannelFds() established
+ *      before the channel was accepted.
  *
- * @see ReplyOutcome, OBSERVE_WRITE_TIMEOUT_MS, ignoreBrokenPipeSignal()
+ * @post The descriptor's file status flags are those it arrived with, on every return path; where
+ *       they could not be restored the outcome is FAILED and the reason is traced, so a session never
+ *       continues on a descriptor whose mode this program cannot describe.
+ *
+ * @warning The bound is on this call, not on the session.  A caller answering many commands spends at
+ *          most OBSERVE_WRITE_TIMEOUT_MS per reply, and a client that stops reading altogether costs
+ *          exactly one deadline, since the first expiry ends the session.
+ *
+ * @see ReplyOutcome, OBSERVE_WRITE_TIMEOUT_MS, MAX_REPLY_LINE_LENGTH, ignoreBrokenPipeSignal()
  */
 static ReplyOutcome writeReplyLine(int observeFd, const std::string &reply)
 {
     const std::string line = reply + "\n";
+
+    if (line.size() > MAX_REPLY_LINE_LENGTH) {
+        std::cout << TRACE_PREFIX << "A reply line of " << line.size() << " bytes exceeds the "
+                  << MAX_REPLY_LINE_LENGTH
+                  << " byte cap, so it is refused rather than attempted: a line that large is no "
+                     "longer one atomic pipe write, and a client can survive no reply far better "
+                     "than half of one" << std::endl;
+        return ReplyOutcome::FAILED;
+    }
+
+    /*
+     * One deadline for the whole call, taken once, here.  Deriving every wait from the time left to
+     * it is what makes the bound a bound: a per-attempt timeout is restarted by each short write and
+     * by each interruption, so a client that accepts a byte at a time, or a signal that arrives
+     * regularly, could hold this program for an unlimited multiple of OBSERVE_WRITE_TIMEOUT_MS while
+     * every individual wait stayed honestly inside it.  CLOCK_MONOTONIC is the clock for this because
+     * it cannot be stepped by an administrator or by NTP while the wait is in progress.
+     */
+    struct timespec deadline;
+    if (::clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+        std::cout << TRACE_PREFIX << "Could not read the monotonic clock to bound a reply write: "
+                  << std::strerror(errno) << ". An unbounded write is not attempted" << std::endl;
+        return ReplyOutcome::FAILED;
+    }
+
+    deadline.tv_sec += OBSERVE_WRITE_TIMEOUT_MS / 1000;
+    deadline.tv_nsec += static_cast<long>(OBSERVE_WRITE_TIMEOUT_MS % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    /*
+     * The descriptor belongs to the caller and arrives in whatever mode the parent created it in,
+     * which for an inherited pipe end is blocking.  poll() reporting POLLOUT does not promise that an
+     * arbitrary write will not block - the guarantee covers at most PIPE_BUF bytes - so the mode is
+     * changed for the duration of this call and restored on the way out, and the caller is handed back
+     * the descriptor it lent rather than a different one.
+     */
+    const int originalFlags = ::fcntl(observeFd, F_GETFL);
+    if (originalFlags < 0) {
+        std::cout << TRACE_PREFIX << "Could not read the flags of fd " << observeFd
+                  << " to make a reply write nonblocking: " << std::strerror(errno)
+                  << ". A write that could block past the deadline is not attempted" << std::endl;
+        return ReplyOutcome::FAILED;
+    }
+
+    if (::fcntl(observeFd, F_SETFL, originalFlags | O_NONBLOCK) != 0) {
+        std::cout << TRACE_PREFIX << "Could not set O_NONBLOCK on fd " << observeFd << ": "
+                  << std::strerror(errno)
+                  << ". A write that could block past the deadline is not attempted" << std::endl;
+        return ReplyOutcome::FAILED;
+    }
+
+    ReplyOutcome outcome = ReplyOutcome::DELIVERED;
     size_t written = 0;
 
     while (written < line.size()) {
+        struct timespec now;
+        if (::clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            std::cout << TRACE_PREFIX << "Could not read the monotonic clock while writing a reply: "
+                      << std::strerror(errno) << std::endl;
+            outcome = ReplyOutcome::FAILED;
+            break;
+        }
+
+        long long remainingMs =
+            (static_cast<long long>(deadline.tv_sec) - static_cast<long long>(now.tv_sec)) * 1000LL +
+            (static_cast<long long>(deadline.tv_nsec) - static_cast<long long>(now.tv_nsec)) /
+                1000000LL;
+
+        if (remainingMs < 0) {
+            remainingMs = 0;
+        }
+
+        if (remainingMs == 0) {
+            std::cout << TRACE_PREFIX << "The observation descriptor did not accept a reply within "
+                      << OBSERVE_WRITE_TIMEOUT_MS << " ms, so the client is not reading. Refusing to "
+                         "block: a hung host is harder to diagnose than a failed one" << std::endl;
+            outcome = ReplyOutcome::FAILED;
+            break;
+        }
+
         struct pollfd watched;
         watched.fd = observeFd;
         watched.events = POLLOUT;
         watched.revents = 0;
 
-        const int ready = ::poll(&watched, 1, OBSERVE_WRITE_TIMEOUT_MS);
+        const int ready = ::poll(&watched, 1, static_cast<int>(remainingMs));
 
         if (ready < 0) {
             if (errno == EINTR) {
+                /*
+                 * An interruption costs the time it consumed and nothing more: the next pass
+                 * recomputes what is left of the one deadline instead of starting a fresh wait.
+                 */
                 continue;
             }
             std::cout << TRACE_PREFIX << "Could not wait for the observation descriptor to accept a "
                          "reply: " << std::strerror(errno) << std::endl;
-            return ReplyOutcome::FAILED;
+            outcome = ReplyOutcome::FAILED;
+            break;
         }
 
         if (ready == 0) {
             std::cout << TRACE_PREFIX << "The observation descriptor did not accept a reply within "
                       << OBSERVE_WRITE_TIMEOUT_MS << " ms, so the client is not reading. Refusing to "
                          "block: a hung host is harder to diagnose than a failed one" << std::endl;
-            return ReplyOutcome::FAILED;
+            outcome = ReplyOutcome::FAILED;
+            break;
         }
 
         if ((watched.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
             std::cout << TRACE_PREFIX << "The observation descriptor reported that its reader is gone"
                       << std::endl;
-            return ReplyOutcome::PARENT_GONE;
+            outcome = ReplyOutcome::PARENT_GONE;
+            break;
         }
 
         const ssize_t result = ::write(observeFd, line.data() + written, line.size() - written);
@@ -1148,14 +1336,26 @@ static ReplyOutcome writeReplyLine(int observeFd, const std::string &reply)
             if (errno == EINTR) {
                 continue;
             }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /*
+                 * Nonblocking, and the pipe has less room than this line needs.  That is ordinary
+                 * while a reader is briefly behind - poll() reports a pipe writable on free space,
+                 * which is not the same question as room for this whole line - so it waits again on
+                 * what is left of the deadline rather than reporting a failure.  The poll() above is
+                 * what paces the retry, and the deadline is what ends it if the room never arrives.
+                 */
+                continue;
+            }
             if (errno == EPIPE) {
                 std::cout << TRACE_PREFIX << "The observation pipe is broken, so the client has "
                              "closed its end" << std::endl;
-                return ReplyOutcome::PARENT_GONE;
+                outcome = ReplyOutcome::PARENT_GONE;
+                break;
             }
             std::cout << TRACE_PREFIX << "Could not write a reply to fd " << observeFd << ": "
                       << std::strerror(errno) << std::endl;
-            return ReplyOutcome::FAILED;
+            outcome = ReplyOutcome::FAILED;
+            break;
         }
 
         if (result == 0) {
@@ -1165,13 +1365,32 @@ static ReplyOutcome writeReplyLine(int observeFd, const std::string &reply)
              */
             std::cout << TRACE_PREFIX << "A reply write to fd " << observeFd
                       << " transferred nothing and made no progress" << std::endl;
-            return ReplyOutcome::FAILED;
+            outcome = ReplyOutcome::FAILED;
+            break;
         }
 
         written += static_cast<size_t>(result);
     }
 
-    return ReplyOutcome::DELIVERED;
+    /*
+     * The single restore point, reached by every way out of the loop, so the mode this function
+     * imposed never outlives the call that imposed it.  A failure to restore is not swallowed: the
+     * caller's descriptor is then not the one it lent, and a session continuing on it would rest on an
+     * assumption this program can no longer make good - so a reply that was delivered is still
+     * reported as a failure, while a parent that has already gone away stays PARENT_GONE, since that
+     * session is ending cleanly either way.
+     */
+    if (::fcntl(observeFd, F_SETFL, originalFlags) != 0) {
+        std::cout << TRACE_PREFIX << "Could not restore the original flags on fd " << observeFd << ": "
+                  << std::strerror(errno)
+                  << ". The descriptor is left nonblocking, which is not the state its owner lent it in"
+                  << std::endl;
+        if (outcome == ReplyOutcome::DELIVERED) {
+            outcome = ReplyOutcome::FAILED;
+        }
+    }
+
+    return outcome;
 }
 
 /**
@@ -1439,7 +1658,7 @@ static bool handleControlCommand(const std::string &line, FakeHdmiCecService &fa
 /**
  * @brief Serves the control and observation channel until the session ends.
  *
- * Waits on the shutdown self-pipe AND the control descriptor together, with poll(), so that neither
+ * Waits on the shutdown self-pipe and the control descriptor together, with poll(), so that neither
  * starves the other: a termination signal is answered while a command is outstanding, and a command
  * is answered while nothing has signalled.  The alternative - a blocking read on one of the two - is
  * what makes a host either deaf to its parent or unstoppable, and this program must be neither.@n
@@ -1464,12 +1683,23 @@ static bool handleControlCommand(const std::string &line, FakeHdmiCecService &fa
  *                                                  closed the observation descriptor, or a termination
  *                                                  signal
  * @retval EXIT_CONTROL_CHANNEL_FAILED            - poll() or read() failed for a reason other than an
- *                                                  interruption, or a reply could not be delivered
+ *                                                  interruption, or writeReplyLine() reported FAILED:
+ *                                                  the whole-call deadline expired, the line exceeded
+ *                                                  MAX_REPLY_LINE_LENGTH, or the descriptor rejected
+ *                                                  it outright
  *
  * @pre installShutdownHandlers() has reported true, resolveControlChannelFds() has reported a channel,
  *      and ignoreBrokenPipeSignal() has reported true.
  *
- * @post Every command read from the channel has been answered with exactly one reply line, in order.
+ * @post On a return of EXIT_SUCCESS, every command that was read and dispatched has been answered with
+ *       exactly one reply line, in order, with one exception: the reply in flight when the parent
+ *       closed the observation descriptor, which the client that closed it is no longer waiting for.
+ *       Commands a client queued behind a `shutdown`, and buffered bytes whose terminator never
+ *       arrived, are deliberately not served.
+ * @post On a return of EXIT_CONTROL_CHANNEL_FAILED, every command before the failing one has been
+ *       answered in order and the command being answered when the channel failed has not; the exit
+ *       code is the only notice the client gets, which is why the parent's own wait for a reply must
+ *       be bounded and why this program never continues a session it can no longer answer on.
  *
  * @note End of file on the control descriptor is a clean shutdown and not a failure: it can only mean
  *       the parent closed its write end, which is a legitimate way to end the session and also what
@@ -1649,7 +1879,7 @@ static int serveControlChannel(int controlFd, int observeFd, FakeHdmiCecService 
  * @brief Hosts the fake com.rdk.hal.hdmicec AIDL service until asked to stop.
  *
  * Runs the startup sequence documented on this file, in that order, and treats every step as
- * load-bearing: each failure traces what happened, returns a code of its own and writes NO readiness
+ * load-bearing: each failure traces what happened, returns a code of its own and writes no readiness
  * line, so a parent never mistakes a host that failed to publish for one that is serving.  Nothing is
  * swallowed and nothing degrades quietly - a host that cannot serve must not report that it can.
  *
@@ -1657,12 +1887,19 @@ static int serveControlChannel(int controlFd, int observeFd, FakeHdmiCecService 
  * @param [in] argv                       - Argument vector.  Unused, for the same reason
  *
  * @return int                                    - Process exit status
- * @retval EXIT_SUCCESS                           - Published, served, and stopped cleanly on a
- *                                                  termination signal
+ * @retval EXIT_SUCCESS                           - Published, served, and stopped cleanly by any of
+ *                                                  its shutdown routes: a SIGTERM or SIGINT, whether
+ *                                                  the wait was the plain one on the self-pipe or the
+ *                                                  channel loop; a `shutdown` command, acknowledged
+ *                                                  before the stop; end of file on the control
+ *                                                  descriptor, or poll() reporting that its writer is
+ *                                                  gone; or the parent closing the observation
+ *                                                  descriptor, which ends the session as deliberately
+ *                                                  as end of file does
  * @retval EXIT_STALE_REGISTRATION                - Something was already published under the
  *                                                  production service name
  * @retval EXIT_BAD_READY_FD                      - CEC_FAKE_HOST_READY_FD was set to something that
- *                                                  is not a usable non-negative descriptor number
+ *                                                  is not a plain non-negative descriptor number
  * @retval EXIT_REGISTRATION_FAILED               - The service manager refused to publish the fake
  * @retval EXIT_READINESS_WRITE_FAILED            - The readiness token could not be written, so the
  *                                                  parent can never learn this host is ready
@@ -1685,9 +1922,12 @@ static int serveControlChannel(int controlFd, int observeFd, FakeHdmiCecService 
  * @warning Configuration is taken from the environment, never from the command line, so that the
  *          parent's launch is a plain exec of the path in CEC_FAKE_AIDL_HOST_PATH with no argument
  *          contract to keep in step.
- * @warning Both channel variables are validated before this program takes any observable action, and a
- *          rejected channel writes NO readiness token, so a parent that botched the handoff learns it
- *          from an exit code rather than from its own expired timeout.
+ * @warning Both channel variables are validated - their spelling, and each descriptor's openness and
+ *          direction - before the fake is published, and a rejected channel writes no readiness token,
+ *          so a parent that botched that handoff learns it from an exit code rather than from its own
+ *          expired timeout.  CEC_FAKE_HOST_READY_FD is held to the spelling alone: a value that parses
+ *          and is not writable is found at the readiness write, after publication, and exits
+ *          EXIT_READINESS_WRITE_FAILED.
  *
  * @see resolveReadinessFd(), resolveControlChannelFds(), verifyServiceNameIsFree(),
  *      registerFakeHdmiCecService(), serveControlChannel(), waitForShutdownSignal()
@@ -1715,9 +1955,9 @@ int main(int argc, char **argv)
     }
 
     /*
-     * The channel is resolved here, beside the readiness descriptor and before any side effect, for
-     * the same reason: a handoff this program is going to reject costs nothing when it is rejected
-     * before anything has been published and before a readiness token could mislead a parent.
+     * The channel is resolved here, beside the readiness descriptor and before anything is published,
+     * for the same reason: a handoff this program is going to reject costs nothing when it is rejected
+     * before the fake exists and before a readiness token could mislead a parent.
      */
     int controlFd = -1;
     int observeFd = -1;
@@ -1764,7 +2004,7 @@ int main(int argc, char **argv)
               << fakeHdmiCecTraceLabel(fake.get()) << std::endl;
 
     /*
-     * The SERVICE-side threadpool, started before publication so that no transaction can arrive with
+     * The service-side threadpool, started before publication so that no transaction can arrive with
      * no thread to serve it.  startThreadPool() is idempotent and the library's own default governs
      * the thread count: setThreadPoolMaxThreadCount() is deliberately not called, because lowering a
      * maximum another component already established can abort the process.

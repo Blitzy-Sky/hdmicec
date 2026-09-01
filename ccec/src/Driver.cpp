@@ -40,7 +40,7 @@ namespace {
  *
  * One format string with one substitution - the back-end name - so that the emitted line
  * is identical across every selection arm apart from that name.@n
- * This is a TEST AND TOOLING CONTRACT rather than a diagnostic convenience, which is why
+ * This is a test and tooling contract rather than a diagnostic convenience, which is why
  * it is defined once, here, and referenced nowhere else. The functional suites match on
  * it to establish which back-end resolved, the coverage runner greps it once per
  * invocation and treats its absence as a failed invocation, and device-level validation
@@ -70,13 +70,16 @@ const char *const SELECTED_BACK_END_LEGACY = "legacy";
  * same Driver interface over different transports - DriverImpl over the legacy in-process
  * C ABI, DriverAidlImpl over the out-of-process `com.rdk.hal.hdmicec` AIDL HAL - and both
  * are compiled into the library in every build, for every SOC vendor. Which one is used is
- * decided here, at run time, on service availability alone.@n
- * The order of the two steps is load bearing and is not a matter of taste. BOTH back-ends
+ * decided here, at run time, on the AIDL service's availability and its compatibility -
+ * both, not availability alone. A service that is present but whose metadata halcompat
+ * rejects selects the legacy back-end exactly as an absent one does, which is why the
+ * question this function asks is isServiceAvailable() and not a bare presence test.@n
+ * The order of the two steps is load bearing and is not a matter of taste. Both back-ends
  * are constructed first, as function-local statics, and only then is the AIDL one asked
  * whether its service came up. Gating construction on availability would invert that
- * order, and it would also be unsafe: the presence query is the first thing in the process
- * that may touch libbinder, and on the pinned binder stack an unguarded lookup on a
- * platform with no binder driver aborts rather than returning an error. DriverAidlImpl's
+ * order, and it would also be unsafe: the availability query is the first thing in the
+ * process that may touch libbinder, and on the pinned binder stack an unguarded lookup on
+ * a platform with no binder driver aborts rather than returning an error. DriverAidlImpl's
  * constructor deliberately touches no binder at all, so constructing it is safe on a
  * legacy-only SOC, and its isServiceAvailable() is documented never to abort, never to
  * block indefinitely and never to propagate an exception.
@@ -89,13 +92,13 @@ const char *const SELECTED_BACK_END_LEGACY = "legacy";
  *    is selected;
  * -# the binder transport itself is unavailable, so the legacy back-end is selected.
  *
- * The distinction between arms 2 and 3 is READ BACK from the query that drew it, through
+ * The distinction between arms 2 and 3 is read back from the query that drew it, through
  * DriverAidlImpl::unavailabilityReason(). Nothing is asked twice: the query runs the
  * bounded preflight as its own first stage and records which stage declined, so this
- * function reports that record rather than re-deriving it. Re-deriving it was the earlier
- * shape and it was wrong twice over - it paid the preflight's context-manager timeout a
- * second time, and a servicemanager appearing or dying between the two calls could make
- * the reported reason name a condition that did not cause the fallback.@n
+ * function reports that record rather than re-deriving it. Re-deriving it would be wrong
+ * in two independent ways - it would pay the preflight's context-manager timeout a second
+ * time, and a servicemanager appearing or dying between the two calls could make the
+ * reported reason name a condition that did not cause the fallback.@n
  * Which specific compatibility rule rejected a service - an empty or "-1" interface hash,
  * an unfrozen development server, or an interface version outside the compiled-against
  * era and major - along with the server's own reported version and hash, is logged by
@@ -114,7 +117,7 @@ const char *const SELECTED_BACK_END_LEGACY = "legacy";
  *          the tree, and referencing it would leave the library with an undefined symbol.
  * @warning Neither construction nor the query throws, so this function cannot leave the
  *          enclosing static uninitialized and cannot be re-entered on a later call.
- * @warning Neither back-end's constructor nor its presence query may call
+ * @warning Neither back-end's constructor nor its availability query may call
  *          Driver::getInstance(). Doing so would re-enter the very initializer that is
  *          still running, which is undefined behaviour rather than a recoverable error.
  *          Both back-ends reach the incoming frame queue through their own accessor
@@ -140,24 +143,23 @@ Driver &resolveBackEnd(void)
 	}
 
 	/*
-	 * Why the AIDL back-end was not selected, TAKEN FROM THE QUERY THAT DECIDED IT.
+	 * Why the AIDL back-end was not selected, taken from the query that decided it.
 	 *
-	 * The reason is read back rather than reconstructed, and that is not a refinement.
-	 * This function used to call DriverAidlImpl::isBinderPreflightOk() here to work out
-	 * which arm had declined - but isServiceAvailable() runs that same bounded preflight
-	 * as its own first stage, so asking again was wrong in two independent ways. It paid
-	 * the context-manager timeout A SECOND TIME, doubling the worst case this function
-	 * adds to LibCCEC::init() on precisely the platform least able to absorb it; and the
-	 * second answer need not match the first, because a servicemanager that starts or
-	 * dies between the two calls flips the preflight's verdict, so the reported reason
-	 * could name a condition that did not cause the fallback at all.
+	 * The reason is read back rather than reconstructed. Calling
+	 * DriverAidlImpl::isBinderPreflightOk() here to work out which arm declined would be
+	 * wrong in two independent ways, because isServiceAvailable() already runs that same
+	 * bounded preflight as its own first stage. It would pay the context-manager timeout
+	 * a second time, doubling the worst case this function adds to LibCCEC::init() on
+	 * precisely the platform least able to absorb it; and the second answer need not
+	 * match the first, because a servicemanager that starts or dies between the two calls
+	 * flips the preflight's verdict, so the reported reason could name a condition that
+	 * did not cause the fallback at all.
 	 *
-	 * The phrases themselves live beside their producer in DriverAidlImpl.cpp, and the
-	 * two long-standing ones are preserved word for word: the line this emits is
-	 * byte-identical to what it emitted before, which matters because the coverage
-	 * runner and the L2 tier both transcribe it. It also stays deliberately unlike the
-	 * selected-path wording above, so grepping for that literal still yields exactly one
-	 * hit per process.
+	 * The phrases themselves live beside their producer in DriverAidlImpl.cpp, where two
+	 * of the three are a contract: the coverage runner and the L2 tier both transcribe
+	 * the line this emits, so rewording either phrase breaks them. The wording also stays
+	 * deliberately unlike the selected-path line above, so grepping for that literal
+	 * yields exactly one hit per process.
 	 *
 	 * NULL is not expected on this path - isServiceAvailable() records a reason on every
 	 * one of its false exits - but it is handled rather than assumed, because a silent

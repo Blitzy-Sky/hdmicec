@@ -37,7 +37,7 @@
  * to attempt at all, and the nested event listener that receives CEC messages from the
  * HAL.@n
  * Every method here mirrors its DriverImpl counterpart's structure, guards, log lines,
- * exceptions AND STATEMENT ORDER, with the `com.rdk.hal.hdmicec` AIDL call substituted
+ * exceptions and statement order, with the `com.rdk.hal.hdmicec` AIDL call substituted
  * for the legacy HDMI CEC C API. Four of them - read(), isValidLogicalAddress(), poll()
  * and printFrameDetails() - make no HAL call on either back-end and are therefore
  * byte-for-byte copies of the legacy bodies, class name aside. That is deliberate: it
@@ -49,13 +49,13 @@
  * the AIDL contract and each documented on the method that carries it - the 16-byte
  * frame limit in write(), the OperationNotSupportedException in writeAsync(), and the
  * coarser failure category in addLogicalAddress(). Any other observable difference is a
- * defect. Two items are BLOCKED on inputs that were not supplied and are marked as such
+ * defect. Two items are blocked on inputs that were not supplied and are marked as such
  * in the code: B1 on getPhysicalAddress() and B2 on close().
  *
- * @note Include-order contract, and it is load bearing: EVERY AIDL, binder and
- *       halcompat header is included BEFORE CCEC_BEGIN_NAMESPACE. The legacy
- *       DriverImpl.cpp includes its plain C HAL header from INSIDE the namespace, which
- *       is tolerable there and must NOT be imitated here - the generated stubs open
+ * @note Include-order contract, and it is load bearing: every AIDL, binder and
+ *       halcompat header is included before CCEC_BEGIN_NAMESPACE. The legacy
+ *       DriverImpl.cpp includes its plain C HAL header from inside the namespace, which
+ *       is tolerable there and must not be imitated here - the generated stubs open
  *       `namespace com::rdk::hal::hdmicec` and transitively pull the SDK headers that
  *       open `namespace android`, and nesting either inside CCEC would break the link
  *       and violate the one-definition rule.
@@ -68,7 +68,7 @@
  *       that `::open()` reaches the system call and `open()` reaches the member.
  *
  * @warning Requires C++17. The generated AIDL stubs include `<optional>`.
- * @warning This is the C++ libbinder AIDL backend, NOT the NDK backend: the pointer
+ * @warning This is the C++ libbinder AIDL backend, not the NDK backend: the pointer
  *          type is `android::sp<>`, the status type is `android::binder::Status`, and
  *          the server base is the generated `BnHdmiCecEventListener`.
  *
@@ -86,13 +86,14 @@
 #include <time.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 /*
- * AIDL and binder headers. These MUST stay above CCEC_BEGIN_NAMESPACE - see the
+ * AIDL and binder headers. These must stay above CCEC_BEGIN_NAMESPACE - see the
  * include-order note in the file block above.
  */
 #include <binder/IBinder.h>
@@ -200,7 +201,7 @@ const size_t AIDL_MAX_MESSAGE_LENGTH = 16;
 /**
  * @brief Shortest received CEC message this back-end will accept onto the incoming queue
  *
- * ONE BYTE, and the exact value matters in both directions.
+ * One byte, and the exact value matters in both directions.
  *
  * It cannot be zero. An out-of-process HAL can deliver an empty `std::vector<uint8_t>` -
  * nothing in the AIDL contract prevents it and no in-process HAL could produce it, so
@@ -208,13 +209,13 @@ const size_t AIDL_MAX_MESSAGE_LENGTH = 16;
  * the Bus reader thread, which hands it to printFrameDetails(); that decodes
  * `Header(frame, HEADER_OFFSET)`, which reaches `frame.at(0)` and raises
  * `std::out_of_range`. printFrameDetails() catches `Exception &`, the CCEC base, which does
- * NOT match it; Bus::Reader::run() catches `InvalidStateException &`, which does not match
- * it either. The exception therefore escapes the thread function and TERMINATES THE
- * PROCESS. One malformed message from the HAL is enough. Rejecting the message here, before
+ * not match it; Bus::Reader::run() catches `InvalidStateException &`, which does not match
+ * it either. The exception therefore escapes the thread function and terminates the
+ * process. One malformed message from the HAL is enough. Rejecting the message here, before
  * anything is allocated, is the only place inside this back-end that can prevent it -
  * `ccec/src/Bus.cpp` and the legacy back-end are out of bounds for this migration.
  *
- * It must not be two. A ONE-BYTE frame is legitimate CEC traffic: a poll, the header-only
+ * It must not be two. A one-byte frame is legitimate CEC traffic: a poll, the header-only
  * ping this class's own poll() transmits, carries exactly one byte and no opcode. The
  * legacy receive path delivers such a frame, and printFrameDetails() handles it safely -
  * `Header(frame, 0)` succeeds and the `frame.length() > OPCODE_OFFSET` test simply skips
@@ -227,10 +228,43 @@ const size_t AIDL_MAX_MESSAGE_LENGTH = 16;
 const size_t MIN_RECEIVED_MESSAGE_LENGTH = 1;
 
 /**
+ * @brief Lowest logical address the AIDL contract permits, inclusive
+ *
+ * @see HAL_LOGICAL_ADDRESS_MAX
+ */
+const int32_t HAL_LOGICAL_ADDRESS_MIN = 0x0;
+
+/**
+ * @brief Highest logical address the AIDL contract permits, inclusive
+ *
+ * THE CONTRACT IS `0x0..0xE` AND IT IS THE HAL'S SIDE OF IT THAT MUST BE POLICED HERE.
+ * `IHdmiCecController.addLogicalAddresses()` documents that range for the addresses a
+ * client may ask for, and `IHdmiCec.getLogicalAddresses()` returns addresses drawn from
+ * the same space; 0xF is the CEC broadcast/unregistered address and is not an address a
+ * device holds.@n
+ * WHY THE RAW `int32_t` IS CHECKED RATHER THAN THE CONVERTED VALUE. What arrives from an
+ * out-of-process HAL is an arbitrary 32-bit integer that the generated proxy reads
+ * straight out of the parcel - nothing between the HAL and this back-end constrains it.
+ * Converting first and validating afterwards does not work: `LogicalAddress`'s
+ * constructor takes the value through a narrower type, so 256 becomes 0 and 271 becomes
+ * 0xF, and a validation applied after that conversion sees a plausible address and accepts
+ * a value the HAL never reported. Downstream that matters concretely, because
+ * `Connection::matchSource()` uses the address the middleware believes it holds to rewrite
+ * the initiator nibble of outbound frames - so an accepted-but-wrong address is put on the
+ * CEC wire.@n
+ * A rejected value falls back to this method's EXISTING no-address behaviour, a zero
+ * return, which `LibCCEC::getLogicalAddress()` already turns into an
+ * InvalidStateException. Nothing new is invented for the failure path.
+ *
+ * @see DriverAidlImpl::getLogicalAddress()
+ */
+const int32_t HAL_LOGICAL_ADDRESS_MAX = 0xE;
+
+/**
  * @brief Most message bytes the receive diagnostic renders before it truncates
  *
  * The receive callback runs on a binder threadpool thread and must return promptly, so its
- * diagnostic has to have a CEILING rather than a length that follows the message. A CEC
+ * diagnostic has to have a ceiling rather than a length that follows the message. A CEC
  * message cannot legitimately exceed the 16 bytes the AIDL transmit contract states, and
  * CECFrame can carry up to 128, so this ceiling shows every byte of any well-formed message
  * with margin, and truncates a malformed one instead of tracking it.
@@ -255,18 +289,19 @@ const size_t RECEIVE_LOG_TEXT_SIZE = (RECEIVE_LOG_MAX_BYTES * 3) + sizeof(RECEIV
 /**
  * @brief Renders a received CEC message as bounded `"%02X "` hex text, without calling out
  *
- * The receive path's whole diagnostic, replacing three separate log lines and a
- * per-byte-`printf` dump. It matters that this is cheap and finite: the callback it serves
+ * The receive path's whole diagnostic: one bounded line for the callback, rather than a
+ * line per stage plus a per-byte-`printf` dump. It matters that this is cheap and finite: the callback it serves
  * arrives on a binder threadpool thread for every CEC message the HAL delivers, and the
  * work it does is work the HAL's own thread pool waits on.@n
- * THE RENDERING IS UNCONDITIONAL, and that is a constraint rather than a choice.
+ * The rendering is unconditional, and that is a constraint rather than a choice.
  * `dump_buffer()` could skip its work by testing `cec_log_level`, but that variable is
  * file-static in `ccec/src/Util.cpp` and there is no accessor, so no code outside that
- * translation unit can ask whether DEBUG logging is even enabled. The rendering therefore
+ * translation unit can ask whether LOG_DEBUG output is even enabled. The rendering therefore
  * happens on every message regardless of log level, which is exactly why it must be
  * call-free and bounded: two direct nibble-to-character writes plus one separator per byte,
  * into a fixed stack buffer, with no function call, no allocation and no stdio in the loop.
- * CCEC_LOG() then discards the finished line cheaply when the level is below DEBUG.
+ * CCEC_LOG() then discards the finished line cheaply when the configured level excludes
+ * LOG_DEBUG.
  *
  * @param [in]  message - First byte of the message to render. Not read at all when
  *                        @p length is zero.
@@ -274,7 +309,7 @@ const size_t RECEIVE_LOG_TEXT_SIZE = (RECEIVE_LOG_MAX_BYTES * 3) + sizeof(RECEIV
  *                        RECEIVE_LOG_MAX_BYTES are rendered; the rest are represented by
  *                        RECEIVE_LOG_TRUNCATION_MARKER.
  * @param [out] text    - Fixed-size buffer receiving the NUL-terminated rendering. Taken as
- *                        a REFERENCE TO AN ARRAY of exactly RECEIVE_LOG_TEXT_SIZE
+ *                        a reference to an array of exactly RECEIVE_LOG_TEXT_SIZE
  *                        characters, so a buffer of the wrong size is a compile error
  *                        rather than an overflow.
  *
@@ -311,12 +346,13 @@ void renderReceivedMessageHex(const uint8_t *message, size_t length, char (&text
 /**
  * @brief Elapsed time, in milliseconds, above which one synchronous HAL call is reported
  *
- * A DIAGNOSTIC THRESHOLD, NOT A TIMEOUT AND NOT A GATE. Crossing it changes nothing about
+ * A diagnostic threshold, not a timeout and not a gate. Crossing it changes nothing about
  * the call: no transaction is abandoned, no exception is raised, no state moves and no
- * retry happens. The only effect is a single LOG_WARN line naming the operation and the
- * elapsed time, so that a stall which would otherwise be silent leaves evidence in the
- * log a field engineer can find.@n
- * The value is taken from THE ONLY DOCUMENTED TIMING FIGURE THIS PROJECT HAS - the HDMI
+ * retry happens. The only effect is an attempt at one LOG_WARN line naming the operation
+ * and the elapsed time, so that a stall which would otherwise be silent can leave
+ * evidence in the log a field engineer can find. Whether that line is emitted is
+ * CCEC_LOG's decision, since it drops anything above the configured log level.@n
+ * The value is taken from the only documented timing figure this project has - the HDMI
  * CEC HAL specification's bound of one second on CEC transmit completion, 200 ms desired.
  * It is deliberately not derived from a benchmark, because no performance measurement has
  * been taken: that measurement is deferred human work on target hardware. Every operation
@@ -324,10 +360,10 @@ void renderReceivedMessageHex(const uint8_t *message, size_t length, char (&text
  * a transmit's budget, so one second is a threshold no healthy HAL crosses and every
  * wedged one does.
  *
- * @warning THIS BOUNDS NOTHING - see the F10 and F20 notes on the methods that use it. The
- *          pinned libbinder C++ backend exposes no client-side transaction deadline, so an
- *          unbounded synchronous call remains unbounded and is merely made observable.
- *          Reading this constant as a timeout would be a serious mistake.
+ * @warning This bounds nothing. The pinned libbinder C++ backend exposes no client-side
+ *          transaction deadline, so an unbounded synchronous call remains unbounded and is
+ *          merely made observable. Reading this constant as a timeout would be a serious
+ *          mistake, and every synchronous HAL call in this file is annotated accordingly.
  *
  * @see warnIfHalCallSlow()
  */
@@ -351,11 +387,11 @@ const int64_t HAL_CALL_CLOCK_UNREADABLE = -1;
  * @brief Reads CLOCK_MONOTONIC as whole milliseconds
  *
  * The single clock utility in this translation unit, used both by the synchronous-call
- * diagnostics and by the binder context-manager probe's deadline. It sits OUTSIDE the
+ * diagnostics and by the binder context-manager probe's deadline. It sits outside the
  * CCEC_HAVE_BINDER_UAPI guard, unlike the probe that also uses it, because the
  * diagnostics are compiled into every build while the probe additionally needs the binder
- * kernel ABI definitions. That is the whole of the restructuring: one helper serves both,
- * so there is no second clock utility to drift.@n
+ * kernel ABI definitions. One helper serves both, so there is no second clock utility to
+ * drift.@n
  * The monotonic clock is used deliberately rather than the wall clock - a wall-clock step
  * during initialization must not extend or collapse either a diagnostic measurement or a
  * bound whose purpose is to keep LibCCEC::init() from stalling. Milliseconds in `int64_t`
@@ -411,13 +447,16 @@ int64_t halCallStarted(void)
 }
 
 /**
- * @brief Reports, once, that a synchronous HAL call took longer than the threshold
+ * @brief Attempts one diagnostic line when a synchronous HAL call ran past the threshold
  *
- * The observable half of the F10 and F20 mitigation. It measures how long a synchronous
- * AIDL call actually took and emits ONE LOG_WARN line when that exceeded
- * SLOW_HAL_CALL_WARN_MS. Nothing else happens: the call has already returned by the time
- * this runs, so there is nothing left to abandon, and no fast path gains a second log
- * line because below the threshold this function is silent.@n
+ * The observable half of the treatment for an unbounded synchronous HAL call: the call
+ * cannot be bounded, so it is measured instead. This runs after the call has returned,
+ * computes how long it took, and when that exceeds SLOW_HAL_CALL_WARN_MS attempts one
+ * LOG_WARN line. Whether the line is emitted is CCEC_LOG's decision rather than this
+ * function's, since CCEC_LOG drops anything above the configured log level; below the
+ * threshold nothing is attempted at all, so no fast path gains a log line. Nothing else
+ * happens either way - the call has already returned, so there is nothing left to
+ * abandon.@n
  * It exists because the alternatives do not exist or are forbidden. The pinned libbinder
  * C++ backend offers no client-side transaction deadline;
  * `IPCThreadState::talkWithDriver()` retries on EINTR, so neither a signal nor an interval
@@ -432,9 +471,14 @@ int64_t halCallStarted(void)
  *                         HAL_CALL_CLOCK_UNREADABLE the measurement is skipped.
  *
  * @pre @p startedMs came from halCallStarted() around the same call.
- * @post Either nothing was logged, or exactly one LOG_WARN line was.
- * @warning Never throws, never blocks and never alters control flow: the caller's status
- *          translation, exception mapping and return value are entirely unaffected.
+ * @post At most one LOG_WARN line was attempted. Nothing else changed: no HAL state, no
+ *       middleware state and no return value anywhere.
+ * @warning Never throws and never alters control flow: the caller's status translation,
+ *          exception mapping and return value are entirely unaffected.
+ * @warning Not nonblocking, and no deadline is enforced anywhere in it. It enforces
+ *          nothing on the HAL, and when CCEC_LOG does emit it formats into a stack buffer
+ *          and writes through `printf`, which can block on whatever the log sink is. It
+ *          runs after the call it describes, so that delay is never added to a HAL call.
  *
  * @see SLOW_HAL_CALL_WARN_MS
  * @see halCallStarted()
@@ -450,7 +494,15 @@ void warnIfHalCallSlow(const char *operation, int64_t startedMs)
 	const int64_t elapsedMs = nowMs - startedMs;
 
 	if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {
-		CCEC_LOG( LOG_WARN, "DriverAidlImpl: synchronous AIDL operation [%s] took %lld ms, past the %lld ms diagnostic threshold; the call was NOT abandoned and no deadline was enforced - see findings F10 and F20\r\n", operation, (long long)elapsedMs, (long long)SLOW_HAL_CALL_WARN_MS);
+		/*
+		 * One line, naming the exact call and the elapsed time, and bounded independently
+		 * against the 499-byte CCEC_LOG expansion limit with the longest operation label
+		 * this file passes (the halcompat::isCompatible one) substituted in. It states
+		 * plainly that nothing was enforced, so the line can never be mistaken for evidence
+		 * of a mitigation, and it points at the platform prerequisite rather than at a
+		 * finding number a log reader cannot resolve.
+		 */
+		CCEC_LOG( LOG_WARN, "DriverAidlImpl: synchronous AIDL call [%s] returned after %lld ms, past the %lld ms threshold. NO DEADLINE WAS ENFORCED and the call was not abandoned - the pinned libbinder offers no client-side transaction bound. A HAL that stalls this long breaks the platform prerequisite recorded on DriverAidlImpl::isServiceAvailable()\r\n", operation, (long long)elapsedMs, (long long)SLOW_HAL_CALL_WARN_MS);
 	}
 }
 
@@ -479,10 +531,10 @@ const unsigned int BINDER_PROBE_MAX_ITERATIONS = 64;
 /**
  * @brief Longest single poll() wait the context-manager probe will ask for, in milliseconds
  *
- * The probe waits in SLICES rather than in one call, and this is the length of a slice.
+ * The probe waits in slices rather than in one call, and this is the length of a slice.
  * That is what makes the `int` that poll() takes safe: the caller's timeout is an
- * `unsigned int` and a large value converted directly to `int` can land NEGATIVE, and
- * `poll(..., -1)` waits FOREVER - the exact opposite of the bound this probe exists to
+ * `unsigned int` and a large value converted directly to `int` can land negative, and
+ * `poll(..., -1)` waits without limit - the exact opposite of the bound this probe exists to
  * provide. A value clamped into [0, POLL_SLICE_MAX_MS] cannot do that, whatever the caller
  * passed and whatever the clock reports.@n
  * Slices also make the wait re-derive itself from the absolute deadline on every iteration,
@@ -522,19 +574,19 @@ static_assert((DriverAidlImpl::MAX_CONTEXT_MANAGER_TIMEOUT_MS / POLL_SLICE_MAX_M
  * rejected promptly with BR_FAILED_REPLY rather than being waited on, so the common
  * negative case costs nothing.
  *
- * HOW THE WAIT IS BOUNDED, and why it is built this way rather than the obvious way:
- * - ONE ABSOLUTE DEADLINE is computed before the loop, in 64-bit milliseconds, and every
+ * How the wait is bounded, and why it is built this way rather than the obvious way:
+ * - one absolute deadline is computed before the loop, in 64-bit milliseconds, and every
  *   iteration re-derives its budget from that deadline. Computing a residual from a fresh
  *   elapsed measurement each time - the obvious way - lets any single accounting error
  *   re-grant the full timeout on every pass, so the loop's real bound becomes the
  *   iteration count multiplied by the timeout rather than the timeout;
- * - each wait is SLICED and clamped into `[0, POLL_SLICE_MAX_MS]` before the conversion to
+ * - each wait is sliced and clamped into `[0, POLL_SLICE_MAX_MS]` before the conversion to
  *   the `int` poll() takes. An unclamped `unsigned int` timeout can convert to a negative
- *   `int`, and `poll(..., -1)` blocks FOREVER. The clamp makes that unreachable by
+ *   `int`, and `poll(..., -1)` blocks without limit. The clamp makes that unreachable by
  *   construction rather than by the caller behaving reasonably;
- * - a slice expiring is NOT the deadline expiring: the loop continues while the deadline
+ * - a slice expiring is not the deadline expiring: the loop continues while the deadline
  *   still leaves budget, and reports the timeout only once it does not;
- * - a CLOCK READ FAILURE fails the probe as "unreachable" instead of being treated as zero
+ * - a failed clock read fails the probe as "unreachable" instead of being treated as zero
  *   elapsed time. An unbounded wait is a worse outcome than a false negative, and a false
  *   negative here simply selects the legacy back-end;
  * - BINDER_PROBE_MAX_ITERATIONS still caps the loop, as belt and braces alongside the
@@ -543,8 +595,8 @@ static_assert((DriverAidlImpl::MAX_CONTEXT_MANAGER_TIMEOUT_MS / POLL_SLICE_MAX_M
  *
  * @param [in] driverFd  - Open binder driver descriptor whose protocol version has
  *                         already been verified. Left open; the caller closes it.
- * @param [in] timeoutMs - Upper bound, in milliseconds, on waiting for an answer. ZERO
- *                         MEANS POLL ONCE WITHOUT WAITING, which is how the negative arm
+ * @param [in] timeoutMs - Upper bound, in milliseconds, on waiting for an answer. Zero
+ *                         means poll once without waiting, which is how the negative arm
  *                         is exercised, and that meaning is load bearing. The caller
  *                         clamps this to DriverAidlImpl::MAX_CONTEXT_MANAGER_TIMEOUT_MS
  *                         before calling, and the slicing above makes the wait safe
@@ -610,7 +662,7 @@ bool pingBinderContextManager(int driverFd, unsigned int timeoutMs)
 	}
 
 	/*
-	 * ONE absolute deadline, in 64-bit milliseconds, established before the loop. Every
+	 * One absolute deadline, in 64-bit milliseconds, established before the loop. Every
 	 * iteration measures against this instant rather than recomputing an elapsed time, so
 	 * no iteration can re-grant the caller's full timeout to itself.
 	 */
@@ -719,9 +771,9 @@ bool pingBinderContextManager(int driverFd, unsigned int timeoutMs)
 
 /*
  * The four default probe operations, i.e. the real kernel-facing calls the preflight
- * performs in production. They exist UNCONDITIONALLY, whether or not this build has the
+ * performs in production. They exist unconditionally, whether or not this build has the
  * binder kernel UAPI definitions, and that is deliberate: the CCEC_HAVE_BINDER_UAPI
- * guard is hoisted DOWN INTO them so that isBinderPreflightOk() itself has exactly five
+ * guard is hoisted down into them so that isBinderPreflightOk() itself has exactly five
  * decision arms in every configuration. A predicate whose branch structure changed with
  * a build macro could not be gated per branch, and each of these five arms carries one
  * record in the coverage branch manifest.
@@ -752,6 +804,116 @@ bool pingBinderContextManager(int driverFd, unsigned int timeoutMs)
 int defaultOpenBinderNode(const char *path, int flags)
 {
 	return ::open(path, flags);
+}
+
+/**
+ * @brief Copies a `struct stat` into the plain-integer identity the preflight carries
+ *
+ * The ONE place the POSIX stat types are converted, so that DriverAidlImpl.hpp needs no
+ * `<sys/stat.h>` and no host's `dev_t` or `ino_t` width leaks across the probe seam. Each
+ * field widens into the widest plain integer that can hold it, so nothing is truncated on
+ * any supported host.
+ *
+ * @param [in]  attributes - Result of a successful `fstat` or `stat`.
+ * @param [out] identity   - Receives the converted identity.
+ *
+ * @pre @p identity is non-null.
+ * @post Every member of @p identity is written; none is left at its previous value.
+ * @warning Never throws and performs no allocation.
+ *
+ * @see DriverAidlImpl::BinderNodeIdentity
+ */
+void copyNodeIdentity(const struct stat &attributes, DriverAidlImpl::BinderNodeIdentity *identity)
+{
+	identity->device = (unsigned long long)attributes.st_dev;
+	identity->inode  = (unsigned long long)attributes.st_ino;
+	identity->rdev   = (unsigned long long)attributes.st_rdev;
+	identity->mode   = (unsigned int)attributes.st_mode;
+	identity->uid    = (unsigned int)attributes.st_uid;
+}
+
+/**
+ * @brief Default probe: identifies the node an open descriptor refers to, with `fstat`
+ *
+ * Asked of the DESCRIPTOR rather than of the path, which is the whole point: the answer
+ * describes the object this process already holds open, so nothing outside the process can
+ * change it afterwards, and it is therefore usable as the reference the later re-check
+ * compares a fresh path resolution against.
+ *
+ * @param [in]  driverFd - Descriptor returned by defaultOpenBinderNode().
+ * @param [out] identity - Receives the identity. Written only on success.
+ *
+ * @return int - Outcome
+ * @retval 0  - The identity was written.
+ * @retval -1 - `fstat` failed, or @p identity was null; `errno` carries the reason in the
+ *              first case and is set to EINVAL in the second.
+ *
+ * @pre @p driverFd is an open descriptor.
+ * @warning Never throws.
+ *
+ * @see DriverAidlImpl::defaultBinderProbe()
+ */
+int defaultIdentifyBinderDescriptor(int driverFd, DriverAidlImpl::BinderNodeIdentity *identity)
+{
+	struct stat attributes;
+
+	if (NULL == identity) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	memset(&attributes, 0, sizeof(attributes));
+
+	if (::fstat(driverFd, &attributes) < 0) {
+		return -1;
+	}
+
+	copyNodeIdentity(attributes, identity);
+
+	return 0;
+}
+
+/**
+ * @brief Default probe: identifies whatever a path currently resolves to, with `stat`
+ *
+ * `stat` and not `lstat`, which is REQUIRED rather than an oversight: a binderfs
+ * deployment may legitimately publish `/dev/binder` as a symlink to
+ * `/dev/binderfs/binder`, and the identity this yields has to be the identity of the node
+ * libbinder will actually open when it resolves the same name. Refusing to follow the link
+ * would refuse a real, correctly provisioned platform.
+ *
+ * @param [in]  path     - Path to resolve, the same one the preflight opened.
+ * @param [out] identity - Receives the identity. Written only on success.
+ *
+ * @return int - Outcome
+ * @retval 0  - The identity was written.
+ * @retval -1 - The path could not be resolved or stat'ed, or an argument was null;
+ *              `errno` carries the reason, or EINVAL for a null argument.
+ *
+ * @pre None. A path that has ceased to exist is a legitimate input and yields -1.
+ * @warning Never throws.
+ *
+ * @see DriverAidlImpl::defaultBinderProbe()
+ * @see DriverAidlImpl::isServiceAvailable()
+ */
+int defaultIdentifyBinderPath(const char *path, DriverAidlImpl::BinderNodeIdentity *identity)
+{
+	struct stat attributes;
+
+	if ((NULL == path) || (NULL == identity)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	memset(&attributes, 0, sizeof(attributes));
+
+	if (::stat(path, &attributes) < 0) {
+		return -1;
+	}
+
+	copyNodeIdentity(attributes, identity);
+
+	return 0;
 }
 
 /**
@@ -873,14 +1035,14 @@ int defaultCloseBinderNode(int driverFd)
  * exactly the disposition the legacy receive callback takes when it deletes the frame
  * on throw.
  *
- * LISTENER LIFETIME, AND WHY DETACHMENT RATHER THAN DESTRUCTION IS THE MECHANISM. The
+ * Listener lifetime, and why detachment rather than destruction is the mechanism. The
  * owner holds one `android::sp<EventListener>` and the HAL holds a strong reference of
  * its own, taken when the listener crossed the binder boundary in `IHdmiCec::open()`.
- * Releasing the owner's reference therefore does NOT necessarily destroy the object:
+ * Releasing the owner's reference therefore does not necessarily destroy the object:
  * the HAL's reference can keep it alive and, with it, keep alive a back pointer to a
  * DriverAidlImpl that is being or has been destroyed. That is reachable rather than
  * theoretical, because the AIDL "no further callbacks" guarantee holds only after a
- * SUCCESSFUL `IHdmiCec::close()`, while a FAILED close still drives this back-end to
+ * successful `IHdmiCec::close()`, while a failed close still drives this back-end to
  * CLOSED - and ~DriverAidlImpl() deliberately swallows that failure, exactly as
  * ~DriverImpl() swallows its own.@n
  * detach() closes that window. Every callback that touches the owner does so under the
@@ -889,20 +1051,24 @@ int defaultCloseBinderNode(int driverFd)
  * state. The owner detaches on every path that ends a session: both arms of close(),
  * the failure arms of open(), and unconditionally in its destructor.
  *
- * LOCK ORDER, stated so a later reader can re-check it rather than re-derive it. The
- * listener lock is a LEAF with one documented exception: a receive callback holds it
+ * Lock order, stated so a later reader can re-check it rather than re-derive it. The
+ * listener lock is a leaf with one documented exception: a receive callback holds it
  * while calling EventQueue::offer(), which takes and releases the queue's own lock
  * inside. The teardown side never runs in the opposite order - close() calls
- * `rQueue.offer(0)` first, which takes and RELEASES the queue lock, and only then calls
+ * `rQueue.offer(0)` first, which takes and releases the queue lock, and only then calls
  * detach() - so the two acquisitions never nest in both directions and there is no
- * inversion to deadlock on. Nor can detach() wait unboundedly on an in-flight callback:
- * that callback's only blocking-capable call is offer(), and offer() never blocks
- * (EventQueue::poll() waits on its condition variable OUTSIDE the queue lock). The
- * listener lock is also never taken while the owner's instance lock is required in the
- * other direction: a callback reaches the owner only through getIncomingQueue(), which
- * takes no instance lock at all.
+ * inversion to deadlock on. The one wait that is genuinely absent is the capacity wait:
+ * a full queue makes offer() discard rather than block, and EventQueue::poll() waits on
+ * its condition variable outside the queue lock, so a blocked consumer cannot hold the
+ * queue lock against a producer. What remains is real and is not a time bound - offer()
+ * acquires the queue lock, may allocate as it appends, and locks and broadcasts the
+ * queue's condition variable - so detach() waits for an in-flight callback to finish
+ * that work and for no longer, which is a completion bound rather than a proven duration.
+ * The listener lock is also never taken while the owner's instance lock is required in
+ * the other direction: a callback reaches the owner only through getIncomingQueue(),
+ * which takes no instance lock at all.
  *
- * @warning Reaches its owner through the back pointer below and NEVER through
+ * @warning Reaches its owner through the back pointer below and never through
  *          Driver::getInstance(). The legacy receive callback resolves its target with
  *          `static_cast<DriverImpl &>(Driver::getInstance())`, which is well defined
  *          only because it is registered from DriverImpl::open() and so never runs on
@@ -912,7 +1078,7 @@ int defaultCloseBinderNode(int driverFd)
  *          copy constructor and copy assignment private.
  * @warning Instances are reference counted and must only ever be held in an
  *          `android::sp<>`; the HAL holds a strong reference of its own for the
- *          lifetime of the session, which is why the object may OUTLIVE the owner's
+ *          lifetime of the session, which is why the object may outlive the owner's
  *          reference to it and why detach() exists.
  *
  * @see DriverAidlImpl::EventListener::detach()
@@ -926,14 +1092,14 @@ public:
 	 * @brief Binds a listener to the back-end instance that will consume its frames
 	 *
 	 * @param [in] ownerDriver - Back-end that owns this listener and whose incoming
-	 *                           queue received frames are offered onto. Its ADDRESS is
+	 *                           queue received frames are offered onto. Its address is
 	 *                           stored, not a reference, so that detach() can null it
 	 *                           when the owner ends the session; a reference member
 	 *                           could not be cleared and would leave the only way to
 	 *                           stop the callbacks be destroying an object the HAL may
 	 *                           still hold a strong reference to.
 	 *
-	 * @pre @p ownerDriver outlives this listener, OR the owner detaches it before it
+	 * @pre @p ownerDriver outlives this listener, or the owner detaches it before it
 	 *      ceases to. The second alternative is what the owner actually guarantees.
 	 * @post The listener is attached. Callbacks deliver to @p ownerDriver until
 	 *       detach() is called.
@@ -950,13 +1116,13 @@ public:
 	 * @brief Severs the link to the owner, after any in-flight callback has finished
 	 *
 	 * The whole of the CWE-416 guarantee, and it rests on one property: every callback
-	 * that touches the owner holds this listener's lock FOR ITS ENTIRE BODY, so taking
+	 * that touches the owner holds this listener's lock for its entire body, so taking
 	 * that same lock here means detach() cannot return while a callback is part-way
 	 * through dereferencing the owner. On return, therefore, no callback is inside the
 	 * owner and no later callback can enter it - the back pointer is null and
-	 * onMessageReceived() drops instead of delivering. THAT BLOCKING PROPERTY IS THE
-	 * POINT of taking the lock rather than merely writing a null.@n
-	 * It is called on every path that ends a session, including the ones that FAILED,
+	 * onMessageReceived() drops instead of delivering. That blocking property is the
+	 * point of taking the lock rather than merely writing a null.@n
+	 * It is called on every path that ends a session, including the ones that failed,
 	 * because a failed `IHdmiCec::close()` leaves the HAL entitled to keep calling: the
 	 * AIDL guarantee of no further callbacks holds only after a close that succeeded.
 	 *
@@ -968,10 +1134,14 @@ public:
 	 *      from any thread.
 	 * @post The owner back pointer is null, no callback is executing inside the owner,
 	 *       and every subsequent callback is a logged drop.
-	 * @warning Blocks until an in-flight callback completes. That wait is bounded: a
-	 *          callback's only blocking-capable call is EventQueue::offer(), which takes
-	 *          the queue lock briefly and never waits on it.
-	 * @warning Does NOT destroy this object and must not be confused with doing so. The
+	 * @warning Blocks until an in-flight callback completes, and no time bound is claimed
+	 *          for that wait. The one thing a callback cannot do is wait for queue
+	 *          capacity, because a full queue makes EventQueue::offer() discard rather
+	 *          than block. What it can do is acquire the queue's own lock, allocate as
+	 *          the offer appends, and lock and broadcast the queue's condition variable -
+	 *          so this call is bounded by the callback finishing that work and by nothing
+	 *          shorter.
+	 * @warning Does not destroy this object and must not be confused with doing so. The
 	 *          HAL holds its own strong reference, so destruction is not the owner's to
 	 *          schedule - which is precisely why detachment is the mechanism.
 	 *
@@ -990,8 +1160,8 @@ public:
 	 *
 	 * The AIDL replacement for the legacy `HdmiCecRxCallback_t`, and a step-for-step
 	 * equivalent of DriverImpl::DriverReceiveCallback(): the payload is copied into a
-	 * freshly allocated CECFrame, logged, and handed to the incoming queue THROUGH THE
-	 * OWNER'S STATE-GUARDED, ACCEPTANCE-REPORTING HANDOFF.@n
+	 * freshly allocated CECFrame, logged, and handed to the incoming queue through the
+	 * owner's state-guarded, acceptance-reporting handoff.@n
 	 * Going through the owner rather than touching the queue member is the load-bearing
 	 * part. The handoff reaches the queue through getIncomingQueue(), which raises when
 	 * the driver is not OPENED, and that is what rejects a callback which arrives during
@@ -999,55 +1169,58 @@ public:
 	 * enqueued. Offering to the member directly would accept frames the legacy path
 	 * rejects.
 	 *
-	 * OWNERSHIP IS EXPLICIT HERE, because the queue can refuse. `EventQueue::offer()`
+	 * Ownership is explicit here, because the queue can refuse. `EventQueue::offer()`
 	 * returns void and silently discards its argument once the queue is at capacity, so a
 	 * callback that offered and then dropped its pointer would leak one heap frame per
 	 * event, without bound, whenever the Bus reader falls behind. Instead
 	 * DriverAidlImpl::offerReceivedFrame() reports whether it took the frame: on true the
-	 * local pointer is cleared IMMEDIATELY, so neither the code below nor any catch arm
+	 * local pointer is cleared immediately, so neither the code below nor any catch arm
 	 * can touch a frame the queue now owns; on false this callback still owns the frame,
 	 * releases it and says so at LOG_EXP. Nothing between the successful handoff and the
 	 * clearing of the pointer can throw, so there is no window in which both would free
 	 * it.
 	 *
-	 * DIAGNOSTIC OUTPUT IS ONE BOUNDED LINE, not a loop. The success path emits exactly
-	 * one CCEC_LOG() call, carrying the byte count and a hex rendering of at most
+	 * Diagnostic output is one bounded line, not a loop. The success path makes one
+	 * CCEC_LOG() call, carrying the byte count and a hex rendering of at most
 	 * RECEIVE_LOG_MAX_BYTES bytes built by renderReceivedMessageHex() into a fixed-size
-	 * stack buffer. It replaces two marker lines, a "frame offered" line and
-	 * dump_buffer(), which together cost four log calls plus one stdio call PER BYTE on a
-	 * binder thread for every message received. The rendering keeps the `%02X ` spelling
-	 * dump_buffer() produced, so the bytes read the same in a log; what is gone is the
-	 * per-byte call and the unbounded length. A refusal, a state-guard rejection or a
-	 * length rejection is reported at LOG_EXP, so a line here with no LOG_EXP line after
-	 * it means the frame was queued - which is the whole of what "frame offered" used to
-	 * say.
+	 * stack buffer. That bound matters because this runs on a binder thread for every
+	 * message received, and the alternative shape - a marker line per stage plus
+	 * dump_buffer(), which issues one stdio call per byte - puts an unbounded amount of
+	 * per-byte logging on the receive path. The rendering keeps dump_buffer()'s `%02X `
+	 * spelling, so the bytes read the same in a log. A refusal, a state-guard rejection
+	 * or a length rejection is reported at LOG_EXP, so a line here with no LOG_EXP line
+	 * after it means the frame was queued.
 	 *
-	 * The whole body is copy-and-enqueue with no blocking call in it, so a binder
-	 * threadpool thread is never held up here, and the frame is handed to the existing
-	 * cross-thread queue that the Bus reader thread already drains. The only thing this
-	 * migration changes about the receive path is which thread produces into that
-	 * queue.
+	 * The body is copy-and-enqueue and holds no HAL call and no IPC, so a binder
+	 * threadpool thread is never held here waiting on the HAL. It is not free of waits:
+	 * the listener lock, the queue's own lock, the allocation the frame copy performs and
+	 * the condition-variable broadcast the offer issues can each delay this thread, and
+	 * no time bound is claimed. What it cannot do is wait for queue capacity, because a
+	 * full queue is a refusal. The frame is handed to the existing cross-thread queue the
+	 * Bus reader already drains, so the only thing this back-end changes about the
+	 * receive path is which thread produces into that queue.
 	 *
-	 * THE MESSAGE LENGTH IS CHECKED FIRST AND THE DETACH SECOND, and nothing is
+	 * The message length is checked first and the detach second, and nothing is
 	 * allocated before either. The length check needs neither the owner nor the lock, so
-	 * it runs ahead of both and a malformed message never even contends for the listener
-	 * lock; MIN_RECEIVED_MESSAGE_LENGTH records why an under-length message would
-	 * otherwise terminate the process. The owner back pointer is then read under the
-	 * listener lock, and a null pointer - the state detach() leaves behind - means the
-	 * session this listener belonged to has ended. A message arriving then is logged and dropped: not enqueued, not
-	 * allocated, and above all not delivered through a pointer to storage that may
-	 * already be gone. The HAL is entitled to arrive here after a FAILED close, so this
-	 * arm is reachable rather than defensive. The lock is held across the whole
-	 * delivery, which is what lets detach() guarantee that no callback is inside the
-	 * owner once it returns.
+	 * it runs ahead of both and an under-length message never even contends for the
+	 * listener lock; MIN_RECEIVED_MESSAGE_LENGTH records why an under-length message
+	 * would otherwise terminate the process. The owner back pointer is then read under
+	 * the listener lock, and a null pointer - the state detach() leaves behind - means
+	 * the session this listener belonged to has ended. A message arriving then is logged
+	 * and dropped: not enqueued, not allocated, and above all not delivered through a
+	 * pointer to storage that may already be gone. The HAL is entitled to arrive here
+	 * after a failed close, so this arm is reachable rather than defensive. The lock is
+	 * held across the whole delivery, which is what lets detach() guarantee that no
+	 * callback is inside the owner once it returns.
 	 *
 	 * @param [in] message - The raw CEC message as received by the HAL, header byte
 	 *                       first. A message shorter than MIN_RECEIVED_MESSAGE_LENGTH is
-	 *                       REJECTED before the lock is taken and before anything is
+	 *                       rejected before the lock is taken and before anything is
 	 *                       allocated: an out-of-process HAL can deliver an empty vector,
 	 *                       and an empty frame on the queue kills the Bus reader thread
 	 *                       and with it the process. A one-byte frame is a legitimate CEC
-	 *                       poll and is accepted.
+	 *                       poll and is accepted. The contents are not inspected; see the
+	 *                       post-condition for the whole of what is checked.
 	 *
 	 * @return ::android::binder::Status - Always ok
 	 * @retval ok - Returned unconditionally, including after a caught failure and after
@@ -1062,8 +1235,14 @@ public:
 	 *       after a detach before allocation; refused at the queue's receive limit;
 	 *       rejected by the OPENED-state guard; or lost to an allocation or append
 	 *       failure.
-	 * @post Nothing undecodable reaches the incoming queue, so the Bus reader thread
-	 *       cannot be killed by a malformed message from the HAL.
+	 * @post Anything that reaches the queue carried at least MIN_RECEIVED_MESSAGE_LENGTH
+	 *       bytes, fitted CECFrame::MAX_LENGTH - `CECFrame::append()` raises past it and
+	 *       the general catch arm releases the frame - and was successfully allocated and
+	 *       copied. That is the whole of the validation. The message is not decoded here:
+	 *       no header, opcode or operand is examined, and no claim is made that the
+	 *       contents are well formed. What the length floor rules out is specifically the
+	 *       empty frame, whose header decode on the Bus reader thread raises
+	 *       `std::out_of_range` out of an uncaught path and takes the process down.
 	 * @warning Runs on a binder threadpool thread, not on any middleware thread.
 	 * @warning A refusal means the Bus reader is not draining. Dropping the frame is then
 	 *          the only choice left - the alternative is unbounded growth on a path a
@@ -1077,14 +1256,14 @@ public:
 	::android::binder::Status onMessageReceived(const ::std::vector<uint8_t> &message) override
 	{
 		/*
-		 * LENGTH CHECK FIRST, before the lock and before anything is allocated. An empty
+		 * Length check first, before the lock and before anything is allocated. An empty
 		 * message from an out-of-process HAL would otherwise become an empty frame on the
 		 * incoming queue, and the Bus reader's decode of that frame raises
 		 * std::out_of_range - which neither printFrameDetails() nor Bus::Reader::run()
-		 * catches, so it escapes the thread function and TAKES THE PROCESS WITH IT. See
+		 * catches, so it escapes the thread function and takes the process with it. See
 		 * MIN_RECEIVED_MESSAGE_LENGTH for the full chain and for why the bound is one byte
 		 * rather than two. It runs ahead of the detach check because it needs neither the
-		 * owner nor the lock, and running it first keeps a malformed message from even
+		 * owner nor the lock, and running it first keeps an under-length message from even
 		 * contending for the listener lock.
 		 */
 		if (message.size() < MIN_RECEIVED_MESSAGE_LENGTH) {
@@ -1107,13 +1286,13 @@ public:
 				frame->append(message.data(), message.size());
 
 				/*
-				 * ONE bounded diagnostic for the whole callback. What stood here was three
-				 * CCEC_LOG() calls - two markers and a "frame offered" line, each a
-				 * vsnprintf plus a timestamp plus a printf - and a dump_buffer() that
-				 * issues one printf() PER BYTE, up to 128 of them, on a binder thread, for
-				 * every message received. The rendering below is call-free and capped
-				 * instead; see renderReceivedMessageHex() for why it cannot be skipped on
-				 * log level and therefore has to be cheap.
+				 * One bounded diagnostic for the whole callback. The obvious alternative -
+				 * a CCEC_LOG() marker per stage, each a vsnprintf plus a timestamp plus a
+				 * printf, and a dump_buffer() issuing one printf() per byte, up to 128 of
+				 * them - puts that cost on a binder thread for every message received. The
+				 * rendering below is call-free and capped instead; see
+				 * renderReceivedMessageHex() for why it cannot be skipped on log level and
+				 * therefore has to be cheap.
 				 */
 				char messageText[RECEIVE_LOG_TEXT_SIZE];
 
@@ -1122,7 +1301,7 @@ public:
 				CCEC_LOG( LOG_DEBUG, ">>> DriverAidlImpl::EventListener::onMessageReceived : %zu bytes : %s\r\n", message.size(), messageText);
 
 				/*
-				 * OWNERSHIP IS EXPLICIT, because the queue can refuse.
+				 * Ownership is explicit, because the queue can refuse.
 				 * `EventQueue::offer()` returns void and silently discards its argument
 				 * once the queue is at capacity, so a callback that offered and then
 				 * dropped its pointer would leak one heap frame per event, without bound,
@@ -1143,10 +1322,10 @@ public:
 				}
 				else {
 					/*
-					 * The queue refused the frame, so it did NOT take it and this callback
+					 * The queue refused the frame, so it did not take it and this callback
 					 * still owns it. Releasing it here is what keeps a stalled reader from
 					 * turning every further event into a leaked frame. The refusal point
-					 * is one entry BELOW the capacity, because the last slot is reserved
+					 * is one entry below the capacity, because the last slot is reserved
 					 * for close()'s wake-the-reader sentinel; the line below names both
 					 * numbers so a log reader is not left thinking the queue reported
 					 * itself full one entry early.
@@ -1159,9 +1338,9 @@ public:
 			}
 			catch(InvalidStateException &e) {
 				/*
-				 * THE CLOSED-STATE REJECTION, GIVEN ITS OWN ARM so it is distinguishable
+				 * The closed-state rejection, given its own arm so it is distinguishable
 				 * in a log from an allocation or append failure. This is the expected and
-				 * REACHABLE outcome of a frame arriving while the driver is not OPENED:
+				 * reachable outcome of a frame arriving while the driver is not OPENED:
 				 * getIncomingQueue(), reached through offerReceivedFrame(), raises before
 				 * anything is offered, so the frame is still this callback's to release.
 				 * It is the AIDL counterpart of the legacy delete-on-throw cleanup, and
@@ -1199,11 +1378,60 @@ public:
 	 *
 	 * @pre None.
 	 * @post No middleware state has changed.
+	 * @post No exception escapes, on any path.
 	 * @warning Runs on a binder threadpool thread.
+	 * @warning THE COMPLETE BODY IS CONTAINED IN A CATCH-ALL, and it has to be. This is
+	 *          a `oneway` callback, so THERE IS NO CALLER TO RECEIVE A FAULT: an
+	 *          exception leaving here unwinds into the generated `onTransact()`, which is
+	 *          not written to expect one, and from there into libbinder's threadpool
+	 *          loop, taking down a binder thread over a log line. The one thing in the
+	 *          body that can raise is `cechal::toString()`, which returns a
+	 *          `std::string` by value for each argument, so either construction can
+	 *          raise `std::bad_alloc`. Dropping the diagnostic and returning ok is the
+	 *          only correct disposition, because there is nothing to report a failure to.
+	 * @warning THE FALLBACK DIAGNOSTIC MUST ITSELF BE ALLOCATION-FREE. The handler
+	 *          renders both states as plain integers through `%d`, constructs no
+	 *          `std::string` and calls no `toString()`. A handler that repeated the
+	 *          failing construction - or that allocated at all, having most likely
+	 *          arrived there because an allocation failed - would defeat the containment
+	 *          it exists to provide. `CCEC_LOG()` is safe to call from the handler: it
+	 *          formats into a fixed 500-byte stack buffer with `vsnprintf` and allocates
+	 *          nothing (`ccec/src/Util.cpp`).
+	 * @see onMessageReceived()
+	 * @see onMessageSent()
 	 */
 	::android::binder::Status onStateChanged(cechal::State oldState, cechal::State newState) override
 	{
-		CCEC_LOG( LOG_INFO, "DriverAidlImpl::EventListener: HAL state changed from %s to %s\r\n", cechal::toString(oldState).c_str(), cechal::toString(newState).c_str());
+		/*
+		 * THE WHOLE BODY IS CONTAINED, for the same reason onMessageReceived()'s is: this
+		 * is a `oneway` callback, so it has NO CALLER to receive a fault. An exception
+		 * escaping here unwinds into the generated `onTransact()`, which is not written to
+		 * expect one, and from there into libbinder's threadpool loop - taking down a
+		 * binder thread of this process over a log line. There is nothing to report a
+		 * failure TO, so the only correct disposition is to drop the diagnostic and return
+		 * ok.
+		 *
+		 * What can actually throw is not hypothetical: `cechal::toString()` returns a
+		 * `std::string` by value for each argument, and either construction can raise
+		 * `std::bad_alloc` - a real possibility on a receive path a HAL can drive as fast
+		 * as it likes.
+		 */
+		try {
+			CCEC_LOG( LOG_INFO, "DriverAidlImpl::EventListener: HAL state changed from %s to %s\r\n", cechal::toString(oldState).c_str(), cechal::toString(newState).c_str());
+		}
+		catch(...) {
+			/*
+			 * THE FALLBACK MUST NOT BE ABLE TO THROW IN TURN, which is why it renders the
+			 * two states as PLAIN INTEGERS through a `%d` conversion and constructs no
+			 * `std::string` and calls no `toString()`. A handler that repeated the failing
+			 * construction - or that allocated at all, having most likely arrived here
+			 * because an allocation failed - would defeat the containment it exists to
+			 * provide. `CCEC_LOG()` itself is safe to call from here: it formats into a
+			 * fixed 500-byte stack buffer with `vsnprintf` and allocates nothing
+			 * (`ccec/src/Util.cpp`), so the fallback cannot raise in turn.
+			 */
+			CCEC_LOG( LOG_EXP, "DriverAidlImpl::EventListener: HAL state changed from %d to %d; the descriptive form of this diagnostic could not be built and was dropped\r\n", (int)oldState, (int)newState);
+		}
 
 		return ::android::binder::Status::ok();
 	}
@@ -1217,20 +1445,20 @@ public:
 	 * `IHdmiCecController::sendMessage()`, so nothing here feeds back into the
 	 * middleware.@n
 	 * The legacy callback logs only on failure. This one logs unconditionally, because
-	 * `SendMessageStatus` has NO back-end-independent success value: `ACK_STATE_0`
+	 * `SendMessageStatus` has no back-end-independent success value: `ACK_STATE_0`
 	 * means acknowledged for a directed message and rejected for a broadcast, so
 	 * deciding "failure" would require re-deriving the destination nibble from the
 	 * message. Doing that in a log-only callback would duplicate write()'s translation
 	 * in a second place where it could drift, so the status is reported verbatim and
 	 * left to the reader.
 	 *
-	 * The line carries the MESSAGE BYTES as well as the status and the length. A status on
+	 * The line carries the message bytes as well as the status and the length. A status on
 	 * its own cannot be tied to a transmit when several are in flight, and a length cannot
 	 * distinguish two frames of the same size, so a report meant to be read after the fact
 	 * has to name which message it is about. The bytes are rendered as lowercase hex into a
 	 * bounded stack buffer sized for `CECFrame::MAX_LENGTH`, and a longer message - which
 	 * the HAL cannot legitimately echo, since write() refuses to send one - is truncated in
-	 * the RENDERING only, with an ellipsis, because a diagnostic must not be able to
+	 * the rendering only, with an ellipsis, because a diagnostic must not be able to
 	 * overrun and must not allocate on a binder thread.
 	 *
 	 * @param [in] message - The message the HAL transmitted, echoed back.
@@ -1241,31 +1469,67 @@ public:
 	 *
 	 * @pre None.
 	 * @post No middleware state has changed.
+	 * @post No exception escapes, on any path.
 	 * @warning Runs on a binder threadpool thread.
+	 * @warning THE COMPLETE BODY IS CONTAINED IN A CATCH-ALL, and it has to be. This is
+	 *          a `oneway` callback, so THERE IS NO CALLER TO RECEIVE A FAULT: an
+	 *          exception leaving here unwinds into the generated `onTransact()`, which is
+	 *          not written to expect one, and from there into libbinder's threadpool
+	 *          loop, taking down a binder thread over a log line. The hex rendering is
+	 *          bounded and allocates nothing, but `cechal::toString()` returns a
+	 *          `std::string` by value and can raise `std::bad_alloc`, and this callback
+	 *          fires once per transmit, so the containment is not theoretical.
+	 * @warning THE FALLBACK DIAGNOSTIC MUST ITSELF BE ALLOCATION-FREE. The handler
+	 *          reports the status as a plain integer through `%d` and the message length,
+	 *          constructing no `std::string`, calling no `toString()` and not repeating
+	 *          the hex rendering. `CCEC_LOG()` is safe to call from the handler: it
+	 *          formats into a fixed 500-byte stack buffer with `vsnprintf` and allocates
+	 *          nothing (`ccec/src/Util.cpp`).
 	 *
 	 * @see DriverAidlImpl::write() - where a transmit outcome is actually acted on
+	 * @see onStateChanged() - same containment, same reason
 	 */
 	::android::binder::Status onMessageSent(const ::std::vector<uint8_t> &message, cechal::SendMessageStatus status) override
 	{
 		/*
-		 * Two hex digits per byte plus the terminator, with the capacity fixed at compile
-		 * time from the frame maximum rather than from the argument, so the rendering
-		 * cannot be made to grow by anything the HAL sends.
+		 * THE WHOLE BODY IS CONTAINED, for the reason onStateChanged() states: a `oneway`
+		 * callback has no caller to receive a fault, so an escaping exception would unwind
+		 * into the generated `onTransact()` and then into libbinder's threadpool loop.
+		 * `cechal::toString()` returns a `std::string` by value and can raise
+		 * `std::bad_alloc`, and this callback fires once per transmit, so the containment
+		 * is not theoretical.
 		 */
-		char rendered[(CECFrame::MAX_LENGTH * 2) + 4];
-		size_t written = 0;
+		try {
+			/*
+			 * Two hex digits per byte plus the terminator, with the capacity fixed at compile
+			 * time from the frame maximum rather than from the argument, so the rendering
+			 * cannot be made to grow by anything the HAL sends.
+			 */
+			char rendered[(CECFrame::MAX_LENGTH * 2) + 4];
+			size_t written = 0;
 
-		for (size_t index = 0; (index < message.size()) && ((written + 2) < sizeof(rendered)); index++) {
-			written += (size_t)snprintf(rendered + written, sizeof(rendered) - written, "%02x", message[index]);
+			for (size_t index = 0; (index < message.size()) && ((written + 2) < sizeof(rendered)); index++) {
+				written += (size_t)snprintf(rendered + written, sizeof(rendered) - written, "%02x", message[index]);
+			}
+
+			rendered[written] = '\0';
+
+			if (message.size() > (size_t)CECFrame::MAX_LENGTH) {
+				snprintf(rendered + written, sizeof(rendered) - written, "...");
+			}
+
+			CCEC_LOG( LOG_DEBUG, "======== onMessageSent received. Result: %s, message length: %zu, message bytes: %s\r\n", cechal::toString(status).c_str(), message.size(), rendered);
 		}
-
-		rendered[written] = '\0';
-
-		if (message.size() > (size_t)CECFrame::MAX_LENGTH) {
-			snprintf(rendered + written, sizeof(rendered) - written, "...");
+		catch(...) {
+			/*
+			 * The allocation-free fallback: the status as a PLAIN INTEGER and the length,
+			 * with no `std::string`, no `toString()` and no hex rendering. It reports the
+			 * two facts that identify the event without repeating the construction that
+			 * failed, and `CCEC_LOG()` formats into a fixed stack buffer and allocates
+			 * nothing, so it cannot raise in turn.
+			 */
+			CCEC_LOG( LOG_EXP, "======== onMessageSent received. Result: %d, message length: %zu; the descriptive form of this diagnostic could not be built and was dropped\r\n", (int)status, message.size());
 		}
-
-		CCEC_LOG( LOG_DEBUG, "======== onMessageSent received. Result: %s, message length: %zu, message bytes: %s\r\n", cechal::toString(status).c_str(), message.size(), rendered);
 
 		return ::android::binder::Status::ok();
 	}
@@ -1277,7 +1541,7 @@ private:
 	 * Held for the whole of every callback that dereferences @ref owner, and by
 	 * detach() while it nulls it. Those two facts together are what make detach()
 	 * synchronous with respect to in-flight delivery rather than merely eventual.@n
-	 * It is a lock of the LISTENER's, deliberately distinct from the owner's instance
+	 * It is a lock of the listener's, deliberately distinct from the owner's instance
 	 * lock: a callback must be able to complete while the owner's teardown holds that
 	 * instance lock, which is exactly the situation close() and ~DriverAidlImpl() create.
 	 * See the lock-order paragraph in the class documentation.
@@ -1286,7 +1550,7 @@ private:
 	/**
 	 * @brief The back-end that owns this listener and consumes its frames, or null
 	 *
-	 * A POINTER rather than a reference precisely so that it can be nulled. Null means
+	 * A pointer rather than a reference precisely so that it can be nulled. Null means
 	 * the owner has detached and this listener - which the HAL may still hold a strong
 	 * reference to - must not touch it again. Read and written only under
 	 * @ref ownerMutex.
@@ -1295,25 +1559,12 @@ private:
 };
 
 /**
- * @brief Constructs the AIDL back-end without touching binder
+ * @copydoc CCEC::DriverAidlImpl::DriverAidlImpl
  *
- * Initializes exactly the same three pieces of state DriverImpl::DriverImpl()
- * initializes, in the same order: the lifecycle state to CLOSED, the retained legacy
- * handle field to 0, and - by their default constructors - the empty frame queue, the
- * lock, the empty local address list and the three null session pointers.
- *
- * Nothing here looks up a service, creates a `ProcessState`, starts a threadpool or
- * opens a driver node, and that is the point rather than an omission. The selection
- * point constructs BOTH back-ends and only then asks this one whether its service came
- * up, so a constructor that reached for binder would abort the process on a legacy-only
- * SOC before the fallback could ever be taken.
- *
- * @post The instance is inert and CLOSED. isServiceAvailable() or open() is the first
- *       thing that touches binder.
- * @warning Does not throw for any reason this class controls.
- *
- * @see DriverAidlImpl::isServiceAvailable()
- * @see DriverImpl::DriverImpl()
+ * The member initializer list is the whole of it: the lifecycle state, the retained
+ * legacy handle field, the queue's capacity and the null availability reason. Everything
+ * else - the lock, the local address list and the two session proxies - is default
+ * constructed, which for the proxies means null.
  */
 DriverAidlImpl::DriverAidlImpl() : status(CLOSED), nativeHandle(0), rQueue(INCOMING_QUEUE_CAPACITY), availabilityReason(NULL)
 {
@@ -1321,34 +1572,13 @@ DriverAidlImpl::DriverAidlImpl() : status(CLOSED), nativeHandle(0), rQueue(INCOM
 }
 
 /**
- * @brief Destroys the back-end, closing an open session first
+ * @copydoc CCEC::DriverAidlImpl::~DriverAidlImpl
  *
- * Byte-for-byte the shape of ~DriverImpl(): under the instance lock, a state other than
- * CLOSED is closed through this class's own close(), and a CCEC exception escaping that
- * close is caught and logged rather than allowed out of a destructor.
- *
- * One thing is added that the legacy destructor has no need of, because the legacy
- * back-end has no listener object: the event listener is DETACHED AND RELEASED
- * UNCONDITIONALLY, after the close attempt. Swallowing the close exception is required
- * of a destructor and is what the legacy destructor does, but on this back-end that
- * swallowed failure is exactly the case in which the HAL may still hold - and still
- * call - the listener, so the detach cannot be left to the close that just failed.
- *
- * @pre None. Safe on an instance that was never opened, and safe on one whose
- *      isServiceAvailable() returned false.
- * @post No AIDL session is held and no listener holds a pointer to this instance, on
- *       every path through this destructor.
- * @warning Takes the instance lock and then calls close(), which takes it again. That
- *          is sound because CCEC_OSAL::Mutex is documented as recursive, and it is the
- *          legacy destructor's own shape, preserved rather than tidied.
- * @warning The detach takes the LISTENER's lock while this destructor holds the
- *          INSTANCE lock. That nesting is one-directional: a callback never acquires
- *          the instance lock, because it reaches this object only through
- *          getIncomingQueue(), which takes no lock at all. See the lock-order paragraph
- *          on EventListener.
+ * The catch names `Exception`, the CCEC base, which is what the legacy destructor
+ * catches. The detach that follows sits outside the state test on purpose; the comment
+ * on it enumerates the three paths that reach it.
  *
  * @see DriverAidlImpl::EventListener::detach()
- * @see DriverAidlImpl::close()
  */
 DriverAidlImpl::~DriverAidlImpl()
 {
@@ -1382,48 +1612,14 @@ DriverAidlImpl::~DriverAidlImpl()
 }
 
 /**
- * @brief Opens the AIDL HDMI CEC session and begins receiving CEC messages
+ * @copydoc CCEC::DriverAidlImpl::open
  *
- * DriverImpl::open() with `IHdmiCec::open()` substituted for `HdmiCecOpen()`, in the
- * same order and under the same lock:
- * -# a state other than CLOSED RETURNS SILENTLY. The legacy `throw
- *    InvalidStateException()` is `#if 0`'d out, so a silent return is the observable
- *    legacy behaviour and the `#if 0` is carried here verbatim so the two files read
- *    alike;
- * -# the process binder threadpool is started, without which no `oneway` listener
- *    callback ever arrives;
- * -# the nested listener is created, if this session does not have one yet, and handed
- *    to the HAL;
- * -# a non-ok status OR a null controller is an IOException, mirroring the legacy
- *    mapping of an `HdmiCecOpen()` failure;
- * -# the state becomes OPENED.
- *
- * The null-controller arm is contract, not defence: `IHdmiCec.open()` is declared
- * `@nullable` and documented as returning null on error, so an ok status carrying no
- * controller is a genuinely reachable outcome that must not be mistaken for success.
- *
- * A FRESH LISTENER IS CONSTRUCTED PER SESSION, and that is intended rather than
- * incidental. The `eventListener == 0` guard is kept, but every path that ends a
- * session - both arms of close(), both failure arms here, and the destructor - detaches
- * and releases the listener, so the guard finds a null pointer on the next open() and
- * builds a new one. A listener reused across sessions would be one the HAL of the
- * PREVIOUS session may still hold a strong reference to, which is the CWE-416 window
- * detach() exists to close; a per-session object keeps each session's callbacks
- * attributable to that session alone.
- *
- * @throws IOException - No compatible service proxy is held, or `IHdmiCec::open()`
- *                       reported a non-ok binder status, or it succeeded and returned
- *                       no controller. In the latter two cases the listener is detached
- *                       and released before the exception leaves, because a failed open
- *                       may still have left the HAL holding it.
- *
- * @pre isServiceAvailable() has returned true. Without it there is no proxy and this
- *      raises IOException rather than crashing.
- * @post The state is OPENED and a controller session is held, or nothing is held at all
- *       and IOException was raised.
- * @warning `IHdmiCec.open()` admits a single controlling client and fails with
- *          `EX_ILLEGAL_STATE` if one is already open, which is why the CLOSED /
- *          CLOSING / OPENED machine is reproduced rather than simplified.
+ * The steps run in the legacy order and under the same lock: the state test, the proxy
+ * test, the threadpool start, the listener construction, the HAL open, the status and
+ * controller tests, and the state change. The `#if 0`'d legacy throw is carried here
+ * verbatim rather than deleted, so this file and DriverImpl.cpp read alike at that point.
+ * The `eventListener == 0` guard is what makes the per-session listener rule hold: it
+ * finds a null pointer because every session-ending path released the previous one.
  *
  * @see DriverAidlImpl::close()
  * @see DriverImpl::open()
@@ -1446,7 +1642,7 @@ void DriverAidlImpl::open(void) noexcept(false)
 
 		/*
 		 * IHdmiCecEventListener is declared oneway, so its callbacks arrive on a binder
-		 * thread inside THIS process, and binder starts no threadpool by default -
+		 * thread inside this process, and binder starts no threadpool by default -
 		 * without this call no CEC message is ever delivered. startThreadPool() is
 		 * idempotent and safe whether or not another component in this process has
 		 * already started one, which is precisely why the maximum thread count is left
@@ -1462,7 +1658,7 @@ void DriverAidlImpl::open(void) noexcept(false)
 		}
 
 		::android::sp<cechal::IHdmiCecController> controller;
-		/* F20: synchronous, no client-side deadline available - measured, not bounded. */
+		/* Synchronous, with no client-side deadline available: measured, not bounded. */
 		const int64_t openStartedMs = halCallStarted();
 		::android::binder::Status txn = hdmiCecService->open(eventListener, &controller);
 
@@ -1493,50 +1689,16 @@ void DriverAidlImpl::open(void) noexcept(false)
 }
 
 /**
- * @brief Closes the AIDL HDMI CEC session
+ * @copydoc CCEC::DriverAidlImpl::close
  *
- * DriverImpl::close() step for step, with the same ordering decisions preserved because
- * each of them is observable:
- * -# a state other than OPENED RETURNS SILENTLY, for the same `#if 0` reason open()
- *    does;
- * -# the state becomes CLOSING, so a receive callback or a blocked reader arriving from
- *    here on is rejected;
- * -# the NULL sentinel is offered onto the incoming queue so a blocked reader wakes and
- *    unwinds. It is offered BEFORE the HAL transaction, which is the observable order
- *    the legacy back-end has and is relied upon;
- * -# the HAL session is released;
- * -# the listener is DETACHED AND RELEASED, on both arms - see the detach note below;
- * -# the state becomes CLOSED BEFORE any failure is raised, so a caller that swallows
- *    the exception still sees a consistently closed object.
- *
- * The local logical-address list is DELIBERATELY NOT CLEARED. DriverImpl::close() does
- * not clear it either, so isValidLogicalAddress() can keep reporting true across a
- * close on the legacy path, and the HAL drops the addresses on its own side in any
- * case. Clearing here would be an unauthorized improvement and a fourth observable
- * difference.
- *
- * @throws IOException - The close transaction reported a non-ok binder status, or it
- *                       succeeded and reported a false result. The state is already
- *                       CLOSED by then.
- *
- * @pre None. A closed instance returns silently.
- * @post The state is CLOSED, no controller session is held, and the listener is
- *       detached and released WHETHER OR NOT the HAL reported a successful close. The
- *       local address list is untouched, by design.
- * @warning The detach is placed before the failure check on purpose and must stay
- *          there. A failed `IHdmiCec::close()` leaves the HAL entitled to keep calling
- *          the listener, since the AIDL no-further-callbacks guarantee attaches only to
- *          a close that succeeded; detaching only on the success arm would leave a
- *          listener holding a back pointer into an owner that is about to be destroyed,
- *          which is CWE-416 by construction.
- * @warning BLOCKED ITEM B2. `IHdmiCec::close()` is a HIGH-CONFIDENCE CANDIDATE for the
- *          legacy `HdmiCecClose()`, PENDING OWNER CONFIRMATION - the HAL mapping table
- *          carries no entry for `HdmiCecClose()` and no divergence settles it. The
- *          candidate is used because a back-end that cannot close is not deliverable:
- *          every `LibCCEC::term()` would leak an open session and the next open() would
- *          fail `EX_ILLEGAL_STATE`, leaving a back-end that works once per process. If
- *          the mapping owners reject the candidate, the body of THIS ONE METHOD changes
- *          and nothing else does.
+ * The six steps run in the legacy order, and each of them is observable: the state test,
+ * the move to CLOSING, the sentinel offer, the HAL close, the listener detach and
+ * release, and the move to CLOSED ahead of any raise. The sentinel is offered before the
+ * HAL transaction, which is the order the legacy back-end has and is relied upon, and the
+ * detach runs on both arms, so a failed close still leaves this side fully closed - no
+ * controller held, no listener attached, state CLOSED - before the exception is raised.
+ * Blocked item B2 concerns which HAL call step four makes; it does not affect the
+ * ordering of the other five.
  *
  * @see DriverAidlImpl::open()
  * @see DriverImpl::close()
@@ -1555,18 +1717,18 @@ void  DriverAidlImpl::close(void) noexcept(false)
 		status = CLOSING;
 
 		/*
-		 * The sentinel is offered UNDER queueProducerMutex, because close() is a
-		 * PRODUCER on this queue and not merely its terminator. The receive path
+		 * The sentinel is offered under queueProducerMutex, because close() is a
+		 * producer on this queue and not merely its terminator. The receive path
 		 * establishes that there is room before it parts with ownership of a frame, and
 		 * an occupancy observation is only stable while every producer that can raise
 		 * occupancy is serialized against it - offering here without the producer lock
 		 * would let this sentinel land in the gap between that check and its offer, and
-		 * `EventQueue::offer()` would then DISCARD the frame silently while the receive
+		 * `EventQueue::offer()` would then discard the frame silently while the receive
 		 * path reported it accepted, leaking it. The lock is this class's own, held for
-		 * one constant-time offer with no IPC under it, and it is taken INSIDE the
-		 * instance lock, which is the only nesting order that exists: offerReceivedFrame()
-		 * takes queueProducerMutex alone and never the instance lock, so no inversion is
-		 * possible. The offer statement itself is unchanged from the legacy line.
+		 * one offer with no IPC under it, and it is taken inside the instance lock, which
+		 * is the only nesting order that exists: offerReceivedFrame() takes
+		 * queueProducerMutex alone and never the instance lock, so no inversion is
+		 * possible. The offer statement itself matches the legacy line.
 		 *
 		 * @see DriverAidlImpl::offerReceivedFrame()
 		 */
@@ -1580,7 +1742,7 @@ void  DriverAidlImpl::close(void) noexcept(false)
 
 		if (hdmiCecService != 0) {
 			/* B2: candidate mapping for the legacy HdmiCecClose(), pending confirmation. */
-			/* F20: synchronous, no client-side deadline available - measured, not bounded. */
+			/* Synchronous, with no client-side deadline available: measured, not bounded. */
 			const int64_t closeStartedMs = halCallStarted();
 
 			txn = hdmiCecService->close(hdmiCecController, &closed);
@@ -1594,16 +1756,16 @@ void  DriverAidlImpl::close(void) noexcept(false)
 		hdmiCecController.clear();
 
 		/*
-		 * Detach BEFORE the failure check, so that BOTH arms detach. This is the
-		 * CWE-416 fix and the placement is the whole of it: a close that reported
-		 * failure leaves the HAL entitled to keep calling the listener, because the
-		 * AIDL guarantee of no further callbacks attaches to a SUCCESSFUL close, and
-		 * the failure arm below leaves by way of an exception that ~DriverAidlImpl()
-		 * swallows. Detaching only on success would leave exactly that path holding a
-		 * listener with a live back pointer into an object about to be destroyed.
+		 * Detach before the failure check, so that both arms detach. The placement is
+		 * the whole of the CWE-416 guarantee here: a close that reported failure leaves
+		 * the HAL entitled to keep calling the listener, because the AIDL guarantee of
+		 * no further callbacks attaches to a successful close, and the failure arm below
+		 * leaves by way of an exception that ~DriverAidlImpl() swallows. Detaching only
+		 * on success would leave exactly that path holding a listener with a live back
+		 * pointer into an object about to be destroyed.
 		 *
 		 * detach() returns only once any in-flight callback has finished, and it is
-		 * called AFTER the sentinel offer above rather than before it, so the queue
+		 * called after the sentinel offer above rather than before it, so the queue
 		 * lock is never held while the listener lock is being waited on. See the
 		 * lock-order paragraph on EventListener.
 		 */
@@ -1624,30 +1786,17 @@ void  DriverAidlImpl::close(void) noexcept(false)
 }
 
 /**
- * @brief Takes the next received CEC frame, blocking until one arrives
+ * @copydoc CCEC::DriverAidlImpl::read
  *
- * BYTE-FOR-BYTE the legacy DriverImpl::read(), class name aside: the same queue, the
- * same `status != OPENED` guard on entry, the same re-check under the lock when the
- * queue yields nothing, and the same flush-then-raise on the NULL close sentinel. There
- * is NO AIDL call in this method at all.@n
- * Copying rather than re-deriving is the specification here, and it is what leaves the
- * Bus reader thread untouched by this migration: the only difference between the two
- * back-ends on the receive path is which thread PRODUCES into the queue - the vendor
- * HAL's own thread on the legacy path, a binder threadpool thread here - and the queue
- * itself was already the cross-thread synchronization point.
+ * A copy of DriverImpl::read(), class name aside, with one departure that the flush loop's
+ * own comment argues in full: the same entry guard, the same re-check under the lock when
+ * the queue yields nothing, and the same flush-then-raise on the NULL close sentinel - but
+ * every pointer the flush dequeues is null checked, not only the first poll, because more
+ * than one close sentinel can be present and dereferencing the second would fault on the
+ * Bus reader thread. There is no AIDL call in this method at all. Copying rather than
+ * re-deriving is the specification, because any other divergence here would be a
+ * divergence in the Bus reader's behaviour.
  *
- * @param [out] frame - Receives a copy of the frame taken from the incoming queue. Also
- *                      written by the flush that precedes the raise on close, exactly
- *                      as on the legacy path.
- *
- * @throws InvalidStateException - The driver was not OPENED on entry, or it stopped
- *                                 being OPENED while this call was blocked.
- *
- * @pre open() has completed successfully.
- * @warning Blocks the calling thread until a frame or the close sentinel arrives. It is
- *          called from the Bus reader thread, never from a plugin thread.
- *
- * @see DriverAidlImpl::close()
  * @see DriverImpl::read()
  */
 void  DriverAidlImpl::read(CECFrame &frame)  noexcept(false)
@@ -1673,11 +1822,38 @@ void  DriverAidlImpl::read(CECFrame &frame)  noexcept(false)
 		else {AutoLock lock_(mutex);
 
 			if (status != OPENED) {
-				/* Flush and return */
+				/*
+				 * Flush and return. EVERY dequeued pointer is null checked, including
+				 * the ones this loop takes, because a NULL entry in this queue is not a
+				 * malformed frame - it is close()'s wake-the-reader sentinel, and more
+				 * than one of them can be present. close() offers one on each
+				 * transition out of OPENED, so a stop/reopen/close or a close racing a
+				 * second close leaves two, the checked poll above consumes the first,
+				 * and this loop then meets the second. Dereferencing it would fault on
+				 * the Bus reader thread, which is the one thread in the middleware whose
+				 * death silently ends all CEC reception.
+				 *
+				 * A skipped sentinel is DROPPED rather than acted on, which is correct
+				 * and complete here: this loop has already established that the driver
+				 * is no longer OPENED and it raises InvalidStateException below
+				 * regardless of what it drained, so the second sentinel has nothing
+				 * left to signal.
+				 *
+				 * THIS IS NOT AN OBSERVABLE BEHAVIOUR CHANGE and so it does not weaken
+				 * the byte-for-byte parity this method otherwise keeps with
+				 * DriverImpl::read(). The only entry this check can alter the handling
+				 * of is a NULL one, and the previous handling of a NULL one was
+				 * undefined behaviour - a null dereference - not a defined behaviour
+				 * that some caller could have depended on. Every non-NULL entry takes
+				 * exactly the path it took before: copied into `frame`, then released.
+				 */
 				while (rQueue.size() > 0) {
 					inFrame = rQueue.poll();
-					frame = *inFrame;
-					delete inFrame;
+
+					if (inFrame != 0) {
+						frame = *inFrame;
+						delete inFrame;
+					}
 				}
 				throw InvalidStateException();
 			}
@@ -1689,37 +1865,12 @@ void  DriverAidlImpl::read(CECFrame &frame)  noexcept(false)
 }
 
 /**
- * @brief Not supported on the AIDL back-end; raises after the legacy prelude
+ * @copydoc CCEC::DriverAidlImpl::writeAsync
  *
- * Asynchronous transmit is NOT MIGRATED. The AIDL HAL exposes no asynchronous transmit
- * and none is emulated here: no threads, no work queue, no deferred callback and no
- * wrapper. That is a decided point rather than an unresolved mapping, and it is safe
- * because NO production call site reaches this method - every plugin transmit goes
- * through Connection::sendToAsync() and Connection::sendAsync() onto the Bus writer
- * thread, which then calls the SYNCHRONOUS write().
- *
- * The legacy statement order is nevertheless reproduced exactly, because it is
- * observable. DriverImpl::writeAsync() takes the frame buffer and logs the frame BEFORE
- * it locks and checks the state, and printFrameDetails() catches only CCEC exceptions -
- * so an EMPTY frame raises `std::out_of_range` out of the header decode regardless of
- * the driver state, rather than InvalidStateException. Existing tests assert exactly
- * that. Reordering the prelude for tidiness would be an unregistered behaviour change.
- *
- * @param [in] frame - The frame that would have been transmitted. Still read by the
- *                     prelude, which is why an empty frame raises before the state
- *                     guard runs.
- *
- * @throws std::out_of_range              - Raised out of the prelude for an empty
- *                                          frame. Identical on both back-ends.
- * @throws InvalidStateException          - The driver is not OPENED. Identical on both
- *                                          back-ends.
- * @throws OperationNotSupportedException - Always, once the prelude and the guard have
- *                                          passed.
- *
- * @pre None beyond the prelude's own requirement that the frame be non-empty.
- * @post Nothing was transmitted and no middleware state changed.
- * @warning AUTHORIZED OBSERVABLE DIFFERENCE 2. A valid frame on an open driver succeeds
- *          on the legacy back-end and raises OperationNotSupportedException here.
+ * The two prelude statements below sit outside the lock, in that order, because that is
+ * where DriverImpl::writeAsync() has them and the ordering is observable: an empty frame
+ * raises out of printFrameDetails()'s header decode before the state guard is ever
+ * reached. Reordering the prelude for tidiness would be an unregistered behaviour change.
  *
  * @see DriverAidlImpl::write() - the synchronous path every production caller reaches
  * @see DriverImpl::writeAsync()
@@ -1748,56 +1899,29 @@ void  DriverAidlImpl::writeAsync(const CECFrame &frame)  noexcept(false)
  * Only 1 write is allowed at a time. Queue the write request and wait for response.
  */
 /**
- * @brief Transmits a CEC frame synchronously and reports the bus outcome
+ * @copydoc CCEC::DriverAidlImpl::write
  *
- * DriverImpl::write() with `IHdmiCecController::sendMessage()` substituted for
- * `HdmiCecTx()`, in the same order: the frame buffer is taken and the frame is logged,
- * then the lock is acquired and the state checked, then the frame length is policed,
- * then the transmit runs WITH THE LOCK STILL HELD, and finally the returned status is
- * translated onto the legacy exception set.@n
- * Holding the lock across the whole IPC round trip is deliberate. The legacy
- * implementation holds it across the whole in-process call, so keeping it preserves the
- * existing serialization exactly; narrowing the critical section would change behaviour
- * and is out of scope.
- *
- * The translation has to respect an INVERTED sense, which is the crux of the whole
- * adaptation. `ACK_STATE_0` means acknowledged for a directed message but REJECTED for
- * a broadcast, and `ACK_STATE_1` is the mirror of that. The destination nibble is read
- * from `frame.at(0) & 0x0F` exactly as the legacy implementation reads it, and each arm
- * below reproduces one arm of the legacy mapping:
+ * The statement order is DriverImpl::write()'s: the prelude outside the lock, then the
+ * state guard, then the length check, then the transmit with the lock still held, then
+ * the status translation. Each arm of that translation reproduces one arm of the legacy
+ * mapping:
  * - a non-ok binder status - transport failure, `EX_ILLEGAL_STATE`, dead binder - is an
  *   IOException, as `err != HDMI_CEC_IO_SUCCESS` is;
  * - `BUSY`, meaning arbitration failed after two attempts and nothing was sent, is an
  *   IOException, as the legacy send-failed family is;
  * - a directed message with `ACK_STATE_1` was not acknowledged and raises
  *   CECNoAckException;
- * - a broadcast with `ACK_STATE_0` raises CECNoAckException ONLY on the CEC CTS 9-3-3
+ * - a broadcast with `ACK_STATE_0` raises CECNoAckException only on the CEC CTS 9-3-3
  *   arm - a rejected REPORT_PHYSICAL_ADDRESS - so that the caller retries, and returns
  *   normally for every other opcode, which is what the legacy implementation does;
  * - a directed `ACK_STATE_0` and a broadcast `ACK_STATE_1` both mean success and return
  *   normally.
  *
- * @param [in] frame - The frame to transmit, header byte first. Must be no longer than
- *                     AIDL_MAX_MESSAGE_LENGTH.
- *
- * @throws InvalidStateException - The driver is not OPENED.
- * @throws IOException           - The frame exceeds the AIDL length contract; or no
- *                                 controller session is held; or the transaction
- *                                 reported a non-ok binder status; or the HAL reported
- *                                 `BUSY`.
- * @throws CECNoAckException     - A directed message was not acknowledged, or the CEC
- *                                 CTS 9-3-3 broadcast arm was hit.
- * @throws std::out_of_range     - Raised out of `frame.at()` for a frame with no header
- *                                 byte, as on the legacy path.
- *
- * @pre open() has completed successfully.
- * @post On a normal return the frame reached the CEC bus and was not rejected.
- * @warning AUTHORIZED OBSERVABLE DIFFERENCE 1. `sendMessage()` states a 16-byte
- *          maximum, while CECFrame carries up to CECFrame::MAX_LENGTH (128) and the
- *          legacy HAL specification allows 20 - so a frame of 17 to 20 bytes is
- *          sendable on the legacy back-end and raises IOException here. The frame is
- *          POLICED, NEVER TRUNCATED: truncating would put a corrupt CEC frame on the
- *          bus, which is worse than refusing to send it.
+ * The destination nibble is read from `frame.at(0) & 0x0F`, the same expression the
+ * legacy implementation uses. The translation is exhaustive over the enum and its default
+ * arm fails: `sendMessage()`'s result is an `int32_t` read out of a parcel, so a value
+ * outside the three documented enumerators can arrive, and it is logged by number and
+ * raises IOException rather than being reported to the caller as a completed transmit.
  *
  * @see DriverAidlImpl::poll()
  * @see DriverImpl::write()
@@ -1826,7 +1950,7 @@ void  DriverAidlImpl::write(const CECFrame &frame)  noexcept(false)
 		cechal::SendMessageStatus sendResult = cechal::SendMessageStatus::BUSY;
 		CCEC_LOG( LOG_DEBUG, "DriverAidlImpl::write to call IHdmiCecController::sendMessage\r\n");
 
-		/* F20: synchronous, no client-side deadline available - measured, not bounded. */
+		/* Synchronous, with no client-side deadline available: measured, not bounded. */
 		const int64_t sendStartedMs = halCallStarted();
 
 		::android::binder::Status txn = hdmiCecController->sendMessage(std::vector<uint8_t>(buf, buf + length), &sendResult);
@@ -1845,20 +1969,52 @@ void  DriverAidlImpl::write(const CECFrame &frame)  noexcept(false)
 			throw IOException();
 		}
 
-        if (sendResult == cechal::SendMessageStatus::BUSY) {
-            /* Arbitration failed after two attempts and the message was not sent, which
-               is the legacy send-failed family and therefore an IOException. */
-            throw IOException();
-        }
+		/*
+		 * EXHAUSTIVE OVER THE ENUM, WITH A FAILING DEFAULT, and that shape is the point
+		 * rather than tidiness. `sendResult` is filled by the generated proxy from an
+		 * `int32_t` read out of the parcel, so an out-of-process HAL can put ANY 32-bit
+		 * value in it - the three documented enumerators do not constrain what arrives.
+		 * A chain of positive tests that fell through to the success path would therefore
+		 * report an unknown or hostile value to the caller as a COMPLETED TRANSMIT, and a
+		 * caller told the frame reached the bus does not retry: a suppressed transmit
+		 * would look, from the plugin upwards, exactly like a delivered one.
+		 *
+		 * Every documented arm below is the legacy mapping unchanged, including the
+		 * INVERTED broadcast sense, and the destination nibble is still read from
+		 * `frame.at(0) & 0x0F` inside the arms that need it rather than before the switch -
+		 * so BUSY is still decided without touching the frame, exactly as it was.
+		 */
+		switch (sendResult) {
+			case cechal::SendMessageStatus::BUSY:
+				/* Arbitration failed after two attempts and the message was not sent, which
+				   is the legacy send-failed family and therefore an IOException. */
+				throw IOException();
 
-		if (((frame.at(0) & 0x0F) != 0x0F) && sendResult == cechal::SendMessageStatus::ACK_STATE_1) {
-			throw CECNoAckException();
-		}
-		   /* CEC CTS 9-3-3 -Ensure that the DUT will accept a negatively for broadcat report physical address msg and retry atleast once */
-		else if (((frame.at(0) & 0x0F) == 0x0F) && (length > 1) && ((frame.at(1) & 0xFF) == REPORT_PHYSICAL_ADDRESS ) && (sendResult == cechal::SendMessageStatus::ACK_STATE_0))
-		{
+			case cechal::SendMessageStatus::ACK_STATE_1:
+				/* Directed: not acknowledged by the addressed follower. Broadcast: sent and
+				   not rejected, which is success - the inverted sense. */
+				if ((frame.at(0) & 0x0F) != 0x0F) {
+					throw CECNoAckException();
+				}
+				break;
 
-                   throw CECNoAckException();
+			case cechal::SendMessageStatus::ACK_STATE_0:
+				/* CEC CTS 9-3-3 -Ensure that the DUT will accept a negatively for broadcat report physical address msg and retry atleast once */
+				if (((frame.at(0) & 0x0F) == 0x0F) && (length > 1) && ((frame.at(1) & 0xFF) == REPORT_PHYSICAL_ADDRESS )) {
+					throw CECNoAckException();
+				}
+				/* Directed ACK_STATE_0 is an acknowledgement, and a broadcast ACK_STATE_0 on
+				   any other opcode returns normally, which is what the legacy back-end does. */
+				break;
+
+			default:
+				/*
+				 * ONLY THE NUMERIC VALUE IS LOGGED, for the same reason the address
+				 * validation logs only a number: the value is HAL-controlled and must
+				 * never reach the diagnostic as text or as a format string.
+				 */
+				CCEC_LOG( LOG_EXP, "DriverAidlImpl::write : the HAL reported send status %d, which is not a documented SendMessageStatus value; the transmit is treated as FAILED rather than assumed successful\r\n", (int)sendResult);
+				throw IOException();
 		}
     }
 
@@ -1866,40 +2022,14 @@ void  DriverAidlImpl::write(const CECFrame &frame)  noexcept(false)
 }
 
 /**
- * @brief Reads back the logical address in use
+ * @copydoc CCEC::DriverAidlImpl::getLogicalAddress
  *
- * Calls `IHdmiCec::getLogicalAddresses()` - on the top-level interface, NOT on the
- * controller, which carries only the three transmit and address-mutation methods - and
- * returns the first entry. `devType` is IGNORED, exactly as DriverImpl::getLogicalAddress()
- * ignores it: the legacy per-device-type get and the AIDL get-all are treated as
- * equivalent, and no per-type filtering is invented here.@n
- * When the HAL reports more than one address the count and the entry used are logged and
- * the first entry is returned. There is no iteration, no multi-address state and no
- * dispatch fan-out, and no middleware structure or signature grows a plural form: the
- * array shape is confined to the local vector below.
- *
- * @param [in] devType - Accepted for signature compatibility with the Driver interface
- *                       and with the legacy back-end. NOT USED, beyond being echoed into
- *                       the log so the two back-ends' traces line up.
- *
- * @return int - The logical address in use
- * @retval 0     - No address is in use. THIS SINGLE VALUE COVERS FOUR CASES, which are
- *                 distinguished in the log rather than in the return value: no service
- *                 proxy, a non-ok binder status, a successful call that reported no
- *                 addresses, and the genuine address 0. That is not a shortcut - the
- *                 legacy implementation zero-initializes its local and returns whatever
- *                 the HAL leaves there, and LibCCEC::getLogicalAddress() turns a zero
- *                 into an InvalidStateException, which is the EXISTING signal for "no
- *                 address". Any other sentinel here would suppress that throw.
- * @retval other - The first logical address the HAL reports.
- *
- * @pre None. Unlike most methods here this one carries no state guard, matching the
- *      legacy implementation.
- * @post No state changed.
- * @warning Never throws on HAL failure. The zero return is the failure signal.
- * @warning An empty result is a DOCUMENTED NORMAL OUTCOME rather than an error: the
- *          AIDL contract states the array is empty when no additional addresses have
- *          been set.
+ * `devType` is echoed into the log so the two back-ends' traces line up, and is used for
+ * nothing else. The array shape the AIDL call requires is confined to the local vector
+ * below, so nothing plural escapes this method. Each of the five ways the return value
+ * can be zero writes its own log line, which is where the distinction the return value
+ * cannot carry is recorded; one of them is a first entry outside the AIDL contract range
+ * 0x0..0xE, which is rejected on the raw `int32_t` rather than converted.
  *
  * @see DriverAidlImpl::isValidLogicalAddress()
  * @see DriverImpl::getLogicalAddress()
@@ -1916,7 +2046,7 @@ int DriverAidlImpl::getLogicalAddress(int devType)
 		CCEC_LOG( LOG_EXP, "DriverAidlImpl::getLogicalAddress : no AIDL service proxy is held; reporting no address\r\n");
 	}
 	else {
-		/* F20: synchronous, no client-side deadline available - measured, not bounded. */
+		/* Synchronous, with no client-side deadline available: measured, not bounded. */
 		const int64_t getStartedMs = halCallStarted();
 
 		::android::binder::Status txn = hdmiCecService->getLogicalAddresses(&halAddresses);
@@ -1930,10 +2060,31 @@ int DriverAidlImpl::getLogicalAddress(int devType)
 			CCEC_LOG( LOG_INFO, "DriverAidlImpl::getLogicalAddress : the HAL holds no logical addresses; reporting no address\r\n");
 		}
 		else {
+			/*
+			 * The RAW value, taken before any conversion, because that is the only point
+			 * at which the HAL's actual answer is still visible. See
+			 * HAL_LOGICAL_ADDRESS_MAX for why validating after a conversion would accept
+			 * values the HAL never reported.
+			 */
+			const int32_t rawAddress = halAddresses[0];
+
 			if (halAddresses.size() > 1) {
-				CCEC_LOG( LOG_INFO, "DriverAidlImpl::getLogicalAddress : the HAL reports %zu logical addresses; operating on entry 0 [%d]\r\n", halAddresses.size(), (int)halAddresses[0]);
+				CCEC_LOG( LOG_INFO, "DriverAidlImpl::getLogicalAddress : the HAL reports %zu logical addresses; operating on entry 0 [%d]\r\n", halAddresses.size(), (int)rawAddress);
 			}
-			logicalAddress = (int)halAddresses[0];
+
+			if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {
+				/*
+				 * ONLY THE NUMERIC VALUE IS LOGGED. The rejected value is
+				 * HAL-controlled, so it is rendered through a `%d` conversion of an
+				 * integer and never as a format string or as text the HAL supplied -
+				 * the diagnostic cannot be turned into a formatting primitive by what it
+				 * reports.
+				 */
+				CCEC_LOG( LOG_EXP, "DriverAidlImpl::getLogicalAddress : the HAL reported logical address %d, which is outside the contract range %d..%d; reporting no address\r\n", (int)rawAddress, (int)HAL_LOGICAL_ADDRESS_MIN, (int)HAL_LOGICAL_ADDRESS_MAX);
+			}
+			else {
+				logicalAddress = (int)rawAddress;
+			}
 		}
 	}
 
@@ -1943,48 +2094,29 @@ int DriverAidlImpl::getLogicalAddress(int devType)
 }
 
 /**
- * @brief Physical-address retrieval - BLOCKED on B1 for this back-end
+ * @copydoc CCEC::DriverAidlImpl::getPhysicalAddress
  *
- * BLOCKED ITEM B1. On the AIDL back-end this method DOES NOT retrieve a physical
- * address. It logs that the read is unavailable pending the device settings HAL
- * contract, names B1, and returns leaving the caller's out parameter UNTOUCHED.
- *
- * The legacy back-end reads the address with `HdmiCecGetPhysicalAddress()`, a CEC HAL
- * call that needs a native handle obtained from `HdmiCecOpen()` - a handle this back-end
- * never has, because it opens the AIDL HAL instead. The mandated replacement is an
- * EDID-byte read belonging to the DEVICE SETTINGS HAL layer, not to the CEC HAL, and the
- * public header declaring it was to be supplied as a separate input to this migration
- * and WAS NOT. Every alternative route is closed, and each for its own reason:
+ * Blocked item B1. This body is the whole of the block: it logs, leaves the out
+ * parameter untouched and returns. The legacy counterpart it stands in for is
+ * `HdmiCecGetPhysicalAddress()`, and what is awaited is the device-settings HAL header
+ * declaring the mandated EDID-byte read, owed by whoever owns the device-settings HAL
+ * contract. Every alternative route is closed, and each for its own reason:
  * - reconstructing the declaration from the plugin test mocks is forbidden, and a mock
  *   is usage;
  * - the AIDL HDMI-output controller EDID event is forbidden outright;
  * - substituting any CEC HAL call is forbidden;
- * - acquiring a legacy CEC handle lazily is forbidden as such a substitution AND is
+ * - acquiring a legacy CEC handle lazily is forbidden as such a substitution and is
  *   independently unsafe, because `HdmiCecOpen()` performs logical-address discovery for
- *   source devices - that is CEC polling on the wire, so it would put a SECOND CEC
+ *   source devices - that is CEC polling on the wire, so it would put a second CEC
  *   controller on the bus while the AIDL HAL is the active controller, and the legacy
  *   header additionally warns that the API is not thread safe and requires a matching
  *   close.
  *
  * Returning without writing is the minimum-harm interim behaviour rather than a
- * fabricated value: it is the SAME observable outcome the legacy path already produces
+ * fabricated value: it is the same observable outcome the legacy path already produces
  * when its own call fails, since the legacy implementation ignores the return value and
  * writes nothing on failure. Both plugin call sites already wrap the call and tolerate
  * not obtaining an address.
- *
- * @param [out] physicalAddress - Would receive the physical address. LEFT UNTOUCHED by
- *                                this back-end, so the caller keeps whatever value it
- *                                initialized the variable to.
- *
- * @pre None.
- * @post The out parameter is unmodified and no state changed.
- * @warning The physical address is UNAVAILABLE on the AIDL back-end until B1 resolves.
- *          This is a real functional gap and it is reported rather than papered over.
- * @warning THE BODY OF THIS METHOD IS THE ONE PLACE THAT CHANGES WHEN THE B1 CONTRACT
- *          ARRIVES. At that point the mandated device settings read is implemented here
- *          against the supplied declaration, and DriverImpl::getPhysicalAddress() is
- *          reviewed for whether the same read should replace its own CEC HAL call so
- *          that both back-ends use the mandated API.
  *
  * @see DriverImpl::getPhysicalAddress() - the legacy implementation, unchanged
  */
@@ -1993,7 +2125,7 @@ void DriverAidlImpl::getPhysicalAddress(unsigned int *physicalAddress)
     {AutoLock lock_(mutex);
         CCEC_LOG( LOG_EXP, "DriverAidlImpl::getPhysicalAddress : BLOCKED ITEM B1 - the device settings HAL contract for the EDID byte read was not supplied, so the physical address is unavailable on the AIDL back-end. The caller's value is left untouched.\r\n");
 
-        (void)physicalAddress;   /* deliberately NOT written - see B1 above */
+        (void)physicalAddress;   /* deliberately not written - see B1 above */
 
         return ;
     }
@@ -2001,29 +2133,14 @@ void DriverAidlImpl::getPhysicalAddress(unsigned int *physicalAddress)
 
 
 /**
- * @brief Relinquishes one logical address
+ * @copydoc CCEC::DriverAidlImpl::removeLogicalAddress
  *
- * DriverImpl::removeLogicalAddress(), whose shape IS the specification and is therefore
- * reproduced rather than improved: the state guard first, then the removal from the
- * LOCAL list, and only then the HAL call - whose result the legacy implementation
- * DISCARDS.@n
- * That disposition is kept exactly. `IHdmiCecController::removeLogicalAddresses()` is
- * called with a ONE-ELEMENT vector, and both a false result and a non-ok binder status
- * are logged and otherwise ignored, because raising where the legacy back-end returns
- * silently would be an unregistered behaviour change. A caller that needs to know an
- * address was really released must re-query, on either back-end.
- *
- * @param [in] source - The logical address to relinquish. Marshalled as a one-element
- *                      `std::vector<int32_t>` built from LogicalAddress::toInt(); no
- *                      multi-address state is introduced anywhere.
- *
- * @throws InvalidStateException - The driver is not OPENED.
- *
- * @pre open() has completed successfully.
- * @post The address is absent from the local list whether or not the HAL agreed, because
- *       the local removal precedes the HAL call and is not rolled back - which is what
- *       the legacy back-end does.
- * @warning Reports nothing about HAL-side failure, by design and not by omission.
+ * DriverImpl::removeLogicalAddress()'s shape is the specification and is reproduced
+ * rather than improved: the state guard, then the local removal, then the HAL call whose
+ * result the legacy implementation discards. Both a false result and a non-ok binder
+ * status are therefore logged and otherwise ignored - raising where the legacy back-end
+ * returns silently would be an unregistered behaviour change - and the local removal
+ * precedes the call and is not rolled back.
  *
  * @see DriverAidlImpl::addLogicalAddress()
  * @see DriverImpl::removeLogicalAddress()
@@ -2042,7 +2159,7 @@ void DriverAidlImpl::removeLogicalAddress(const LogicalAddress &source)
 		}
 		else {
 			bool removed = false;
-			/* F20: synchronous, no client-side deadline available - measured, not bounded. */
+			/* Synchronous, with no client-side deadline available: measured, not bounded. */
 			const int64_t removeStartedMs = halCallStarted();
 			::android::binder::Status txn = hdmiCecController->removeLogicalAddresses(std::vector<int32_t>{ source.toInt() }, &removed);
 
@@ -2059,38 +2176,11 @@ void DriverAidlImpl::removeLogicalAddress(const LogicalAddress &source)
 }
 
 /**
- * @brief Acquires one logical address
+ * @copydoc CCEC::DriverAidlImpl::addLogicalAddress
  *
- * Calls `IHdmiCecController::addLogicalAddresses()` with a ONE-ELEMENT vector built from
- * LogicalAddress::toInt(), then records the address in the local list on success. The
- * state guard, the local bookkeeping and the return-outside-the-lock shape all match
- * DriverImpl::addLogicalAddress().
- *
- * @param [in] source - The logical address to acquire.
- *
- * @return bool - Acquisition result
- * @retval true - The address was acquired. This is the ONLY value ever returned; every
- *                failure leaves by way of an exception, exactly as on the legacy
- *                back-end.
- *
- * @throws InvalidStateException        - The driver is not OPENED. This guard is present
- *                                        on the legacy back-end and is reproduced here.
- * @throws IOException                  - No controller session is held, or the
- *                                        transaction reported a non-ok binder status.
- * @throws AddressNotAvailableException - The HAL reported false.
- *
- * @pre open() has completed successfully.
- * @post On success the address is in the local list, so isValidLogicalAddress() reports
- *       it.
- * @warning AUTHORIZED OBSERVABLE DIFFERENCE 3. The legacy back-end distinguishes three
- *          HAL outcomes - address unavailable, general error, and anything else as
- *          success - whereas `addLogicalAddresses()` returns a SINGLE BOOLEAN documented
- *          as false both when the address is outside 0x0..0xE and when it is already
- *          added. Carrying the legacy distinction would require a new HAL method, which
- *          is out of bounds for this migration, so false maps to the NEARER legacy
- *          category, AddressNotAvailableException. A caller that discriminates
- *          IOException from other failures therefore sees a different category for the
- *          same underlying condition.
+ * The state guard, the local bookkeeping and the return-outside-the-lock shape all match
+ * DriverImpl::addLogicalAddress(), and the one-element vector is built inline so no
+ * plural form escapes this method.
  *
  * @see DriverAidlImpl::removeLogicalAddress()
  * @see DriverImpl::addLogicalAddress()
@@ -2109,7 +2199,7 @@ bool DriverAidlImpl::addLogicalAddress(const LogicalAddress &source)
 		}
 
 		bool added = false;
-		/* F20: synchronous, no client-side deadline available - measured, not bounded. */
+		/* Synchronous, with no client-side deadline available: measured, not bounded. */
 		const int64_t addStartedMs = halCallStarted();
 		::android::binder::Status txn = hdmiCecController->addLogicalAddresses(std::vector<int32_t>{ source.toInt() }, &added);
 
@@ -2132,25 +2222,11 @@ bool DriverAidlImpl::addLogicalAddress(const LogicalAddress &source)
 }
 
 /**
- * @brief Reports whether a logical address is one this device holds
+ * @copydoc CCEC::DriverAidlImpl::isValidLogicalAddress
  *
- * BYTE-FOR-BYTE the legacy DriverImpl::isValidLogicalAddress(), class name aside: a walk
- * of the local list under the instance lock, with NO HAL CALL on either back-end. It is
- * copied rather than re-derived because there is nothing here for the transport to
+ * Copied rather than re-derived because there is nothing here for the transport to
  * change, and because keeping it identical is what makes the two back-ends
- * indistinguishable to Connection, its only production caller.@n
- * Note that close() does not clear the local list on either back-end, so this can still
- * report true after a close. That is pre-existing behaviour, preserved.
- *
- * @param [in] source - The logical address to test.
- *
- * @return bool - Whether the address is held locally
- * @retval true  - The address is in the local list.
- * @retval false - It is not.
- *
- * @pre None. Valid in any state.
- * @post No state changed.
- * @warning Never throws.
+ * indistinguishable to Connection, its only production caller.
  *
  * @see DriverAidlImpl::addLogicalAddress()
  * @see DriverImpl::isValidLogicalAddress()
@@ -2170,31 +2246,15 @@ bool DriverAidlImpl::isValidLogicalAddress(const LogicalAddress & source) const
 }
 
 /**
- * @brief Pings a logical address by transmitting a header-only frame
+ * @copydoc CCEC::DriverAidlImpl::poll
  *
- * BYTE-FOR-BYTE the legacy DriverImpl::poll(), class name aside: the header byte is
- * assembled as `((from & 0x0F) << 4) | (to & 0x0F)`, appended to a one-byte CECFrame,
- * and handed to THIS back-end's own write() - so the poll travels over whichever
- * transport the enclosing back-end uses, with no transport-specific code of its own.@n
- * The AIDL `getState()` is DELIBERATELY NOT USED. A poll is a CEC ping performed by a
- * one-byte transmit, not a state query, and consulting the HAL's state would create a
- * second source of truth beside the middleware's own machine. The outcome therefore
- * reaches the caller through write()'s exceptions.
+ * Consulting the HAL's `getState()` instead would create a second source of truth beside
+ * the middleware's own state machine, which is why the ping is a one-byte transmit and
+ * the outcome reaches the caller through write()'s exceptions.
  *
  * The trailing `#if 0` block is inert legacy code, carried verbatim so that this method
  * remains a character-for-character copy of its counterpart and the two files diff
  * cleanly. It is not new dead code and it is not a placeholder.
- *
- * @param [in] from - Initiator logical address, placed in the high nibble.
- * @param [in] to   - Follower logical address to ping, placed in the low nibble.
- *
- * @throws CECNoAckException     - Nothing acknowledged the ping, which is the normal way
- *                                 a caller learns the address is free.
- * @throws IOException           - The transmit failed, or the HAL was busy.
- * @throws InvalidStateException - The driver is not OPENED.
- *
- * @pre open() has completed successfully.
- * @post Nothing was queued locally; the ping went out on the bus.
  *
  * @see DriverAidlImpl::write()
  * @see DriverImpl::poll()
@@ -2222,34 +2282,15 @@ void DriverAidlImpl::poll(const LogicalAddress &from, const LogicalAddress &to)
 }
 
 /**
- * @brief Returns the incoming frame queue, but only while the driver is open
+ * @copydoc CCEC::DriverAidlImpl::getIncomingQueue
  *
- * The state-guarded accessor that mirrors DriverImpl::getIncomingQueue(). The GUARD is
- * the load-bearing part, not the return: it is what rejects a receive callback that
- * arrives during or after a close, and it is what drives the listener's release of the
- * frame it was about to enqueue. The listener must reach the queue through here and
- * never touch the member directly, or it would accept frames the legacy path rejects.@n
- * The legacy signature carries a native handle its own body never reads; it is dropped
- * here because the AIDL back-end has no handle to pass.
- *
- * @return IncomingQueue& - The queue received frames are offered onto and that read()
- *                          drains.
- *
- * @throws InvalidStateException - The driver is not OPENED, i.e. it is closed or
- *                                 closing.
- *
- * @pre None. The state check is this method's entire purpose.
- * @post No state changed.
- * @warning Reads the state WITHOUT holding the instance lock, reproducing the
- *          pre-existing unlocked read in DriverImpl::getIncomingQueue(). That race
- *          exists today between the vendor HAL's thread and a closing thread; here it is
- *          the same shape with a binder thread in place of the HAL thread. It is a known
- *          pre-existing condition, PRESERVED DELIBERATELY rather than fixed, because
- *          behaviour preservation outranks code improvement in this migration. Adding a
- *          lock here would be an unregistered change.
- *
- * @see DriverAidlImpl::read()
- * @see DriverImpl::getIncomingQueue()
+ * The guard is the load-bearing part of this accessor, not the return: it is what rejects
+ * a receive callback arriving during or after a close, and the listener must reach the
+ * queue through here rather than touching the member. The unlocked state read is the
+ * pre-existing shape of DriverImpl::getIncomingQueue(). The race it carries exists today
+ * between the vendor HAL's thread and a closing thread; here it is the same shape with a
+ * binder thread in place of the HAL thread. Adding a lock would be an unregistered
+ * behaviour change, so the read stays as it is.
  */
 DriverAidlImpl::IncomingQueue & DriverAidlImpl::getIncomingQueue(void)
 {
@@ -2261,79 +2302,22 @@ DriverAidlImpl::IncomingQueue & DriverAidlImpl::getIncomingQueue(void)
 }
 
 /**
- * @brief Hands one received frame to the incoming queue and REPORTS WHETHER IT TOOK IT
+ * @copydoc CCEC::DriverAidlImpl::offerReceivedFrame
  *
- * The ownership-transferring counterpart of getIncomingQueue(). It exists because
- * `CCEC_OSAL::EventQueue::offer()` RETURNS VOID and, when the queue already holds
- * INCOMING_QUEUE_CAPACITY entries, silently discards its argument - the OSAL source
- * carries a long-standing unresolved marker where the rejection should be reported, and
- * `osal/include/osal/EventQueue.hpp` is out of bounds for this migration in any case. A
- * caller that offers and then drops its pointer therefore leaks one heap frame per event,
- * for as long as the queue stays full, and on a remotely driven receive path that is
- * unbounded. Establishing that there is room before parting with ownership, and reporting
- * the outcome, is what makes the loss impossible.
- *
- * The two-lock arrangement is deliberate and is the part to get right:
- * - the queue is reached through getIncomingQueue(), so the OPENED-state guard still runs.
- *   That guard is load bearing rather than decorative - it is what rejects a callback
- *   arriving during or after a close, and its exception is what drives the caller's
- *   release of the frame;
- * - the occupancy reads and the offer between them run under queueProducerMutex, a lock of
- *   THIS METHOD'S OWN that close() takes for its sentinel offer too. The instance mutex is
- *   emphatically not reused: write() holds it across a whole synchronous IPC round trip, so
- *   borrowing it here would make every received frame wait out the current transmit and
- *   would park a binder thread behind a stalled HAL.
- *
- * WHY THE OCCUPANCY OBSERVATION HOLDS, stated in terms of who can raise it. Every producer
+ * Why the occupancy observation holds, stated in terms of who can raise it. Every producer
  * on this queue is serialized on queueProducerMutex - this method and close()'s sentinel
  * offer, which takes the same lock for exactly that statement - so while this lock is held
- * nothing can ADD an entry. Consumers are unaffected by the lock and keep removing, which
- * can only LOWER the occupancy; "there is room" therefore cannot turn false between the
- * check and the offer. An earlier revision of this method argued the same conclusion from
- * consumers being removal-only alone, which was WRONG: close() is a producer, and before it
- * took this lock it could land its sentinel in precisely that gap, whereupon
- * `EventQueue::offer()` discarded the received frame silently while this method still
- * reported it accepted - one leaked frame per event.
+ * nothing can add an entry. Consumers are unaffected by the lock and keep removing, which
+ * can only lower the occupancy, so "there is room" cannot turn false between the check and
+ * the offer. Consumers being removal-only is not on its own enough to reach that
+ * conclusion: close() is a producer, and a close exempted from this lock could land its
+ * sentinel in precisely that gap, whereupon `EventQueue::offer()` would discard the
+ * received frame silently while this method still reported it accepted - one leaked frame
+ * per event.
  *
- * THE LAST SLOT IS RESERVED FOR close()'s SENTINEL, which is what the refusal point being
- * one below the capacity buys. A sentinel that a full queue swallowed would leave the Bus
- * reader blocked in EventQueue::poll() with nothing coming to wake it, so the receive path
- * stops one entry early and the wake-the-reader offer always has somewhere to go. That is
- * the property the previous revision wanted and did not achieve by exempting close() from
- * the lock.
+ * `osal/include/osal/EventQueue.hpp` is out of bounds for this migration, so the silent
+ * discard it performs at capacity is worked around here rather than fixed there.
  *
- * @param [in] frame - Frame to hand over. Ownership passes to the queue if and only if
- *                     this returns true.
- *
- * @return bool - Whether ownership was transferred
- * @retval true  - The frame is on the queue. The caller must not delete it and must drop
- *                 its pointer at once.
- * @retval false - The queue had no slot this method may use, the frame was NOT queued, and
- *                 the caller still owns it and must release it.
- *
- * @throws InvalidStateException - The driver is not OPENED. Raised by getIncomingQueue()
- *                                 before anything is offered, so ownership stays with the
- *                                 caller.
- *
- * @pre @p frame is a heap-allocated frame the caller owns. A null pointer would be a
- *      caller defect: NULL is the close sentinel on this queue and only close() may post
- *      it, which is why nothing here manufactures one.
- * @post Exactly one of: the frame is queued and true was returned; or the frame is still
- *       the caller's, and false was returned or an exception left.
- * @warning Holds queueProducerMutex only for two constant-time size reads and a
- *          constant-time offer. No IPC, no allocation and no logging happens under it, so
- *          it cannot become a latency source on the binder thread.
- * @warning A refusal means the Bus reader is not draining, so DROPPING the frame is the
- *          only remaining choice - the alternative is growing without bound on a path a
- *          remote HAL drives. The drop is logged by the caller at LOG_EXP so it is never
- *          silent.
- * @warning The read-back is trusted in ONE DIRECTION ONLY, and the body says why at
- *          length: a consumer may take the frame the instant the offer wakes it, so a
- *          non-rise does NOT prove refusal, and reporting refusal there would hand the
- *          caller a pointer the queue already owns - a double free, which is strictly
- *          worse than the leak this method exists to prevent.
- *
- * @see DriverAidlImpl::getIncomingQueue()
  * @see DriverAidlImpl::close() - the other producer, serialized on the same lock
  * @see DriverAidlImpl::EventListener::onMessageReceived()
  */
@@ -2354,8 +2338,8 @@ bool DriverAidlImpl::offerReceivedFrame(CECFrame *frame)
 
     {AutoLock lock_(queueProducerMutex);
 		/*
-		 * ONE SLOT IS RESERVED FOR close()'s SENTINEL, which is why the refusal point is
-		 * one BELOW the capacity rather than at it. close() offers NULL to wake a blocked
+		 * One slot is reserved for close()'s sentinel, which is why the refusal point is
+		 * one below the capacity rather than at it. close() offers NULL to wake a blocked
 		 * Bus reader, under this same lock; if the receive path were allowed to fill the
 		 * last slot, that offer would be silently discarded by EventQueue::offer() and the
 		 * reader would stay asleep with nothing left to wake it. Stopping one entry early
@@ -2370,19 +2354,19 @@ bool DriverAidlImpl::offerReceivedFrame(CECFrame *frame)
 		queue.offer(frame);
 
 		/*
-		 * THE OUTCOME IS READ BACK FROM THE QUEUE rather than assumed from the check
+		 * The outcome is read back from the queue rather than assumed from the check
 		 * above, because EventQueue::offer() returns void and reports nothing at all. The
 		 * read-back is trusted in one direction only, and the asymmetry is deliberate:
 		 *
-		 * - a read-back BELOW the capacity is consistent with the offer having gone in, and
+		 * - a read-back below the capacity is consistent with the offer having gone in, and
 		 *   is the ordinary outcome. It may sit below occupancyBefore, because a consumer
 		 *   can take entries - including this very frame - between the offer and this read;
 		 *   the Bus reader is normally blocked in EventQueue::poll() on an empty queue and
 		 *   is woken by the offer itself, so "offered, taken, and back to the previous
-		 *   occupancy" is the COMMON interleaving, not a corner. Reporting a refusal there
+		 *   occupancy" is the common interleaving, not a corner. Reporting a refusal there
 		 *   would hand the caller a pointer the queue already owns and may already have
 		 *   destroyed, turning a bounded leak into a double free;
-		 * - a read-back AT OR ABOVE the capacity is inconsistent with acceptance and is
+		 * - a read-back at or above the capacity is inconsistent with acceptance and is
 		 *   reported as a refusal. Producers are serialized here, so an accepted offer can
 		 *   leave at most occupancyBefore + 1 entries, which the check above kept below the
 		 *   capacity. Seeing the queue at capacity therefore means something outside this
@@ -2399,30 +2383,16 @@ bool DriverAidlImpl::offerReceivedFrame(CECFrame *frame)
 }
 
 /**
- * @brief Logs a decoded, human-readable rendering of a frame
+ * @copydoc CCEC::DriverAidlImpl::printFrameDetails
  *
- * BYTE-FOR-BYTE the legacy DriverImpl::printFrameDetails(), class name aside: pure
- * formatting with no HAL call on either back-end. The header is decoded from the frame,
- * the opcode name is resolved when the frame is long enough to carry one, and every CCEC
- * exception raised while decoding a malformed frame is caught and logged so that
- * diagnostics can never break a transmit.@n
- * Two details are preserved precisely because they are load bearing rather than
- * incidental. The catch names `Exception`, the CCEC base, so a `std::out_of_range` from
- * an EMPTY frame's header decode ESCAPES - which is the mechanism by which
- * writeAsync()'s prelude raises before its state guard on both back-ends. And the single
- * log line here terminates with a bare `\n` where every other log line in this file uses
+ * A byte-for-byte copy of DriverImpl::printFrameDetails(), class name aside, and two
+ * details of that copy are load bearing rather than incidental. The catch names
+ * `Exception`, the CCEC base, so the `std::out_of_range` an empty frame's header decode
+ * raises leaves this method - which is the mechanism by which write() and writeAsync()
+ * raise out of their prelude, ahead of their state guard, on both back-ends alike. And
+ * the log line terminates with a bare `\n` where every other log line in this file uses
  * `\r\n`; that is how the legacy line reads, and normalizing it would break the
  * character-for-character copy this method is required to be.
- *
- * @param [in] frame - The frame to render.
- *
- * @throws std::out_of_range - Propagated out of the header decode for a frame with no
- *                             header byte. Not caught here, on either back-end.
- *
- * @pre None. A malformed frame is tolerated; an empty one raises.
- * @post No state changed.
- * @warning Declared `noexcept(false)` to match the Driver interface, and does not in
- *          practice propagate CCEC exceptions - only the non-CCEC one noted above.
  *
  * @see DriverAidlImpl::write()
  * @see DriverImpl::printFrameDetails()
@@ -2451,29 +2421,19 @@ void  DriverAidlImpl::printFrameDetails(const CECFrame &frame)  noexcept(false) 
 }
 
 /**
- * @brief The production probe: the real `::open`, `BINDER_VERSION`, ping and `::close`
+ * @copydoc CCEC::DriverAidlImpl::defaultBinderProbe
  *
- * One immutable instance with static storage duration, initialized from the four
- * file-local wrappers above. It is the default argument of isBinderPreflightOk(), which
- * is what keeps every production call site free of any mention of the seam and keeps
- * production behaviour - including every log line the predicate emits - exactly what it
- * would be if the seam did not exist.
- *
- * @return const BinderPreflightProbe& - The real kernel-facing operations.
- *
- * @pre None.
- * @post Nothing in the process is initialized. The probe is function pointers and
- *       nothing else.
- * @warning Never throws. The instance is const, so no caller can rebind production's
- *          probe; a test supplies its own by passing it.
+ * The instance is a function-local static initialized from the six file-local wrappers
+ * above, so the six real kernel-facing operations are named in exactly one place.
  *
  * @see DriverAidlImpl::isBinderPreflightOk()
- * @see DriverAidlImpl::BinderPreflightProbe
  */
 const DriverAidlImpl::BinderPreflightProbe &DriverAidlImpl::defaultBinderProbe(void)
 {
 	static const BinderPreflightProbe probe = {
 		defaultOpenBinderNode,
+		defaultIdentifyBinderDescriptor,
+		defaultIdentifyBinderPath,
 		defaultReadBinderProtocolVersion,
 		defaultPingBinderContextManager,
 		defaultCloseBinderNode,
@@ -2483,23 +2443,11 @@ const DriverAidlImpl::BinderPreflightProbe &DriverAidlImpl::defaultBinderProbe(v
 }
 
 /**
- * @brief The binder protocol version this build must speak to be usable
+ * @copydoc CCEC::DriverAidlImpl::expectedBinderProtocolVersion
  *
- * `BINDER_CURRENT_PROTOCOL_VERSION`, read from the build rather than written down,
- * because the constant follows `BINDER_IPC_32BIT`: an all-32-bit platform speaks
- * protocol 7 and 32-bit middleware against a 64-bit vendor speaks 8. Exposed as a
- * function so that a test can synthesise both a matching and a mismatching version
- * through a probe of its own without the binder kernel UAPI definitions appearing in
- * DriverAidlImpl.hpp or in the test translation unit.
- *
- * @return unsigned int - Expected protocol version
- * @retval 0     - This build carries no binder kernel ABI definitions. The comparison
- *                 that consumes this value is unreachable in that configuration, because
- *                 the default probe's version read fails first.
- * @retval other - The protocol version the linked libbinder was built for.
- *
- * @pre None.
- * @warning Never throws.
+ * The `BINDER_CURRENT_PROTOCOL_VERSION` read sits under the CCEC_HAVE_BINDER_UAPI guard.
+ * This is the one place in this file where the absence of the binder kernel ABI
+ * definitions changes a returned value rather than only a log line.
  *
  * @see DriverAidlImpl::isBinderPreflightOk()
  */
@@ -2513,119 +2461,70 @@ unsigned int DriverAidlImpl::expectedBinderProtocolVersion(void)
 }
 
 /**
- * @brief Decides whether a binder lookup may safely be attempted at all
+ * @copydoc CCEC::DriverAidlImpl::isBinderPreflightOk
  *
- * A preflight is REQUIRED rather than convenient, and this is the method that discharges
- * the absolute requirement that a supported SOC WITHOUT an AIDL HAL must reach the
- * legacy back-end - never abort, never block. Reaching the service manager directly is
- * unsafe in two independent ways on the pinned binder stack, and either one alone
- * defeats that requirement:
- * - a missing or protocol-mismatched driver node is FATAL, not an error return. The pin
- *   extends libbinder's failed-driver `LOG_ALWAYS_FATAL_IF` to plain Linux, so the abort
- *   that upstream guards for Android is live here and would kill the middleware during
- *   initialization instead of falling back. This was confirmed by observation on a
- *   driverless host, where merely reaching `ProcessState::self()` raises SIGABRT;
- * - a missing context manager BLOCKS. Obtaining an `IServiceManager` at all polls in
- *   one-second intervals until binder handle 0 resolves, with no upper bound of its own.
- *
- * The three checks therefore run BEFORE ANYTHING IN THE PROCESS TOUCHES LIBBINDER, in
- * this order, stopping at the first failure: the node exists and can be opened; the
- * protocol version it reports EQUALS the version this build was compiled for, because
- * libbinder enforces equality and a mismatch fails every open; and handle 0 resolves
- * within a BOUNDED timeout. Only when all three pass may the caller proceed to the
- * service lookup and the compatibility check.
- *
- * FIVE DECISION POINTS, IN THIS ORDER, AND THE ORDER IS PART OF THE CONTRACT: the path
- * is empty; the node could not be opened; its version could not be read; the version
- * differs from this build's; the context manager did not answer. Each carries one record
- * in the coverage branch manifest, so reordering them, merging two of them, or making
- * any of them conditional on a build macro invalidates that mapping. This is why the
- * CCEC_HAVE_BINDER_UAPI guard lives inside the DEFAULT PROBE rather than around this
- * body: a build without the binder kernel ABI definitions still runs all five arms and
- * still reaches the same verdict, false, by failing the version read with ENOSYS and
+ * Eight decision points, in this order, and the order is part of the contract: the path is
+ * empty; the node could not be opened; the object behind the descriptor could not be
+ * identified; it is not a character device; it is not owned by root; its version could not
+ * be read; the version differs from this build's; the context manager did not answer.
+ * Each carries one record in the coverage branch manifest, so reordering them, merging two
+ * of them, or making any of them conditional on a build macro invalidates that mapping.
+ * That is why the CCEC_HAVE_BINDER_UAPI guard lives inside the default probe rather than
+ * around this body: a build without the binder kernel ABI definitions still runs every arm
+ * and still reaches the same verdict, false, by failing the version read with ENOSYS and
  * logging why.
  *
- * @param [in]  binderDriverPath        - Binder driver node to inspect. Taken as a
- *                                        parameter, not hard-coded, so that the negative
- *                                        arms - a nonexistent path, or a path whose
- *                                        reported protocol differs - can be exercised
- *                                        WITHOUT rendering a test runner's real driver
- *                                        unusable.
- * @param [in]  contextManagerTimeoutMs - Upper bound, in milliseconds, on the handle-0
- *                                        resolution check. Zero means do not wait at
- *                                        all, which is how the timeout arm is
- *                                        exercised.
- * @param [in]  probe                   - The four kernel-facing operations performed
- *                                        here, injected for the same reason
- *                                        @p binderDriverPath is a parameter and carrying
- *                                        it further: a path alone cannot produce a node
- *                                        that OPENS and then reports a mismatched
- *                                        protocol version, cannot produce one that
- *                                        reports a MATCHING version and then fails the
- *                                        context-manager check, and cannot produce a
- *                                        positive verdict on a host with no binder
- *                                        driver. Substituting these four makes all five
- *                                        arms reachable deterministically. Defaults to
- *                                        defaultBinderProbe(), the real syscalls, so
- *                                        production is unaffected.
- *
- * @return bool - Whether a binder lookup may safely be attempted
- * @retval true  - All three checks passed.
- * @retval false - The path was empty, or the node is absent or cannot be opened, or its
- *                 protocol version could not be read or differs, or handle 0 did not
- *                 answer within the bound, or this build has no binder kernel ABI
- *                 definitions with which to check any of it. WHICH ONE is distinguished
- *                 in the log, not in the return value.
- *
- * @pre None whatsoever. This is the first thing that runs, on any platform.
- * @post Nothing in the process has been left initialized: no `ProcessState` singleton
- *       exists, no threadpool was started, and the descriptor and mapping this check
- *       used are released before it returns. A false result leaves the process exactly
- *       as it was.
- * @warning The protocol constant this compares against follows `BINDER_IPC_32BIT`, so
- *          the middleware MUST be compiled with the same setting as the libbinder it
- *          links - an all-32-bit platform speaks protocol 7 and a 32-bit-middleware
- *          against 64-bit-vendor platform speaks 8. Disagreement makes every open fail,
- *          and this check reports that as "AIDL absent" rather than letting libbinder
- *          abort on it.
- * @warning Never throws and never blocks beyond the stated bound. Both guarantees are
- *          what the caller relies on.
+ * The abort hazard the first checks exist for is observed rather than inferred: on a
+ * driverless host, merely reaching `ProcessState::self()` raises SIGABRT, which is why
+ * nothing in this body may touch libbinder and every operation it performs goes through
+ * the probe's plain syscalls instead. A missing context manager is the other hazard, and
+ * it blocks rather than aborting, which is what the bounded handle-0 check answers.
  *
  * @see DriverAidlImpl::isServiceAvailable()
  * @see DriverAidlImpl::BinderPreflightProbe
  * @see DriverAidlImpl::defaultBinderProbe()
  * @see DriverAidlImpl::expectedBinderProtocolVersion()
- * @see DriverAidlImpl::DEFAULT_BINDER_DRIVER_PATH
- * @see DriverAidlImpl::DEFAULT_CONTEXT_MANAGER_TIMEOUT_MS
  */
 bool DriverAidlImpl::isBinderPreflightOk(const std::string &binderDriverPath,
                                          unsigned int contextManagerTimeoutMs,
-                                         const BinderPreflightProbe &probe)
+                                         const BinderPreflightProbe &probe,
+                                         int *retainedDescriptor,
+                                         BinderNodeIdentity *retainedIdentity)
 {
-	/* Decision point 1 of 5: the path itself. */
+	/*
+	 * The custody slot is cleared BEFORE any arm can return, so that "no descriptor was
+	 * retained" and "a value left over from a previous call" are the same observation and
+	 * no caller has to distinguish them. Everything below may therefore return early
+	 * without touching it again.
+	 */
+	if (NULL != retainedDescriptor) {
+		*retainedDescriptor = -1;
+	}
+
+	/* Decision point 1 of 8: the path itself. */
 	if (binderDriverPath.empty()) {
 		CCEC_LOG( LOG_INFO, "DriverAidlImpl preflight: no binder driver path was given; treating the AIDL HAL as absent\r\n");
 		return false;
 	}
 
-	/* Decision point 2 of 5: the node exists and can be opened. */
+	/* Decision point 2 of 8: the node exists and can be opened. */
 	const int driverFd = probe.openNode(binderDriverPath.c_str(), O_RDWR | O_CLOEXEC);
 
 	if (driverFd < 0) {
 		/*
-		 * errno is captured BEFORE anything else runs, because every call between the
+		 * errno is captured before anything else runs, because every call between the
 		 * failed open and the report - CCEC_LOG included - is free to overwrite it.
 		 *
-		 * THE TWO CAUSES ARE REPORTED SEPARATELY, and they are not the same platform
+		 * The two causes are reported separately, and they are not the same platform
 		 * condition. ENOENT means this kernel carries no binder driver at all, which is
 		 * the ordinary, expected, entirely healthy state of a legacy-only SOC and the
-		 * exact case the fallback exists to serve. Any other errno means the node IS
+		 * exact case the fallback exists to serve. Any other errno means the node is
 		 * there and this process could not use it - EACCES for a permission or policy
 		 * problem, EMFILE or ENFILE for exhausted descriptors, ENODEV for a driver that
 		 * unregistered - and those are misconfigurations an integrator has to act on.
-		 * Collapsing them into one line made a broken platform indistinguishable from a
-		 * legacy-only one, so both arms name what happened, and the second carries the
-		 * errno TEXT as well as its number because nobody reads a build log with an
+		 * Collapsing them into one line would make a broken platform indistinguishable
+		 * from a legacy-only one, so both arms name what happened, and the second carries
+		 * the errno text as well as its number because nobody reads a build log with an
 		 * errno table beside them.
 		 */
 		const int openErrno = errno;
@@ -2640,7 +2539,91 @@ bool DriverAidlImpl::isBinderPreflightOk(const std::string &binderDriverPath,
 		return false;
 	}
 
-	/* Decision point 3 of 5: the node will tell us which protocol it speaks. */
+	/*
+	 * Decision point 3 of 8: the object behind the descriptor can be identified at all.
+	 *
+	 * Asked of the DESCRIPTOR, never of the path. The answer then describes what this
+	 * process already holds open, which is the only form of the question whose answer
+	 * cannot be changed underneath it, and it is the reference the caller's re-check
+	 * compares a fresh resolution of the same name against.
+	 */
+	BinderNodeIdentity identity;
+
+	memset(&identity, 0, sizeof(identity));
+
+	if (0 != probe.identifyDescriptor(driverFd, &identity)) {
+		/* Captured first, and reported with its text, for the reason stated at decision point 2. */
+		const int identifyErrno = errno;
+
+		CCEC_LOG( LOG_WARN, "DriverAidlImpl preflight: binder driver [%s] opened but its node could not be identified, errno %d (%s); treating the AIDL HAL as absent. Without an identity there is nothing to re-verify before libbinder opens the same name, so the check could not be made to mean anything\r\n", binderDriverPath.c_str(), identifyErrno, strerror(identifyErrno));
+		probe.closeNode(driverFd);
+		return false;
+	}
+
+	/*
+	 * Decision point 4 of 8: it is a CHARACTER DEVICE.
+	 *
+	 * Every supported binder layout publishes one - a devtmpfs node under `/dev`, or a
+	 * binderfs node reached directly or through a symlink - so anything else behind this
+	 * name is not the binder driver however it is named. A regular file at that path is the
+	 * shape a substitution takes when an unprivileged process wins a race to create it.
+	 */
+	if ((identity.mode & BINDER_NODE_MODE_TYPE_MASK) != BINDER_NODE_MODE_CHARACTER_DEVICE) {
+		CCEC_LOG( LOG_WARN, "DriverAidlImpl preflight: binder driver [%s] is not a character device, mode 0%o; treating the AIDL HAL as absent. Every supported binder layout publishes a character device, so this node is not the binder driver and must not be handed to libbinder\r\n", binderDriverPath.c_str(), (unsigned int)(identity.mode & BINDER_NODE_MODE_TYPE_MASK));
+		probe.closeNode(driverFd);
+		return false;
+	}
+
+	/*
+	 * Decision point 5 of 8: it is owned by ROOT.
+	 *
+	 * devtmpfs and binderfs both create the node as root. A node at this path owned by
+	 * anyone else is one an unprivileged process was able to create or replace, and
+	 * selecting the AIDL path against it would put the whole HAL boundary - every frame
+	 * transmitted, every frame delivered - behind whatever registered itself there. Only
+	 * the numeric owner is logged: nothing HAL-controlled or filesystem-controlled is
+	 * rendered as text here.
+	 */
+	if (identity.uid != BINDER_NODE_REQUIRED_OWNER_UID) {
+		CCEC_LOG( LOG_WARN, "DriverAidlImpl preflight: binder driver [%s] is owned by uid %u rather than %u; treating the AIDL HAL as absent. A binder node not owned by root is one an unprivileged process could have created, so it is refused rather than trusted\r\n", binderDriverPath.c_str(), identity.uid, (unsigned int)BINDER_NODE_REQUIRED_OWNER_UID);
+		probe.closeNode(driverFd);
+		return false;
+	}
+
+	/*
+	 * AN OBSERVATION, AND DELIBERATELY NOT A DECISION POINT. It cannot change the verdict,
+	 * nothing below reads it, and it is placed here - after the file type and the owner have
+	 * been established - only so that what it describes is known to be a root-owned
+	 * character device rather than an arbitrary node.
+	 *
+	 * WHAT IT REPORTS. A binder node writable beyond its owner means every process in that
+	 * group, or every process on the box, can open the driver. That is worth a line in the
+	 * log of the one component whose whole HAL boundary sits behind that driver, because on
+	 * a platform that ALSO fails to authorize service registration it is the precondition of
+	 * the impersonation recorded on isServiceAvailable() - and nowhere else does an
+	 * integrator get told the two conditions coexist.
+	 *
+	 * WHY IT IS A LINE AND NOT A REFUSAL, WHICH IS THE WHOLE POINT AND MUST NOT BE
+	 * "FIXED" LATER. A binder device node HAS to be openable by every client process that
+	 * uses binder, so AOSP-derived platforms - and this port vendors AOSP
+	 * `android-13.0.0_r74` - publish it broadly accessible BY DESIGN, and a binderfs
+	 * deployment gets whatever mode binderfs assigns. Refusing a group- or world-writable
+	 * node would therefore decline the AIDL path on conformant production platforms while
+	 * PASSING in CI, whose guest node is root-owned with everything running as root: green
+	 * here, migration silently defeated everywhere that matters. Restrictiveness is not a
+	 * property this middleware can require, so it is not required - it is reported.
+	 *
+	 * WHAT DOES CARRY A VERDICT, so this reads as a boundary rather than as a shrug: the two
+	 * checks immediately above (character device, owned by root), and the five-attribute
+	 * identity comparison the caller makes immediately before the lookup, which is what
+	 * catches this mode CHANGING inside the check-to-use window even though its value is not
+	 * dictated here. Numeric only, in octal, as a mode is read.
+	 */
+	if (0u != (identity.mode & (BINDER_NODE_MODE_GROUP_WRITE | BINDER_NODE_MODE_WORLD_WRITE))) {
+		CCEC_LOG( LOG_WARN, "DriverAidlImpl preflight: binder driver [%s] is writable beyond its owner, permission bits 0%o; continuing, because a binder node must be openable by every binder client and restrictive modes are NOT a property this middleware can require. On a platform that also leaves service registration unauthorized this is the precondition of HAL impersonation - see the service-authorization prerequisite on isServiceAvailable()\r\n", binderDriverPath.c_str(), (identity.mode & BINDER_NODE_MODE_PERMISSION_MASK));
+	}
+
+	/* Decision point 6 of 8: the node will tell us which protocol it speaks. */
 	unsigned int protocolVersion = 0;
 
 	if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {
@@ -2648,10 +2631,10 @@ bool DriverAidlImpl::isBinderPreflightOk(const std::string &binderDriverPath,
 		const int ioctlErrno = errno;
 
 		/*
-		 * LOG_WARN, NOT LOG_INFO, AND THAT IS THE WHOLE POINT OF SPLITTING THE ABSENT NODE
-		 * FROM THE BROKEN ONE.  A node that does not EXIST is a legacy-only SOC behaving
-		 * exactly as designed, which is why that arm alone stays at LOG_INFO.  Reaching HERE
-		 * means the node existed AND opened, and then refused the one ioctl every binder
+		 * LOG_WARN rather than LOG_INFO, and that is the whole point of splitting the absent
+		 * node from the broken one.  A node that does not exist is a legacy-only SOC behaving
+		 * exactly as designed, which is why that arm alone stays at LOG_INFO.  Reaching here
+		 * means the node existed and opened, and then refused the one ioctl every binder
 		 * client issues before anything else.  No correctly provisioned platform does that:
 		 * it is a mis-created device node, a driver that is not binder, or a kernel and a
 		 * libbinder that disagree about the interface.  The fallback it causes is otherwise
@@ -2665,7 +2648,7 @@ bool DriverAidlImpl::isBinderPreflightOk(const std::string &binderDriverPath,
 	}
 
 	/*
-	 * Decision point 4 of 5: EQUALITY, not a minimum. libbinder enforces an exact match
+	 * Decision point 7 of 8: equality, not a minimum. libbinder enforces an exact match
 	 * when it opens the driver, so a difference in either direction fails every open and
 	 * is reported here as "AIDL absent" rather than being left for libbinder to abort on.
 	 */
@@ -2690,22 +2673,44 @@ bool DriverAidlImpl::isBinderPreflightOk(const std::string &binderDriverPath,
 		effectiveTimeoutMs = MAX_CONTEXT_MANAGER_TIMEOUT_MS;
 	}
 
-	/* Decision point 5 of 5: a context manager is registered and answers, under bound. */
+	/* Decision point 8 of 8: a context manager is registered and answers, under bound. */
 	const bool contextManagerReachable = probe.pingContextManager(driverFd, effectiveTimeoutMs);
 
-	probe.closeNode(driverFd);
-
-	if (contextManagerReachable) {
-		CCEC_LOG( LOG_INFO, "DriverAidlImpl preflight: binder driver [%s] and its context manager are usable\r\n", binderDriverPath.c_str());
+	if (!contextManagerReachable) {
+		probe.closeNode(driverFd);
+		return false;
 	}
 
-	return contextManagerReachable;
+	CCEC_LOG( LOG_INFO, "DriverAidlImpl preflight: binder driver [%s] and its context manager are usable\r\n", binderDriverPath.c_str());
+
+	/*
+	 * CUSTODY, OR THE ORIGINAL RELEASE, and this is the only place the two differ.
+	 *
+	 * A caller that asked for custody keeps the validated descriptor open and receives the
+	 * identity beside it, so that the node it re-resolves before the use can be compared
+	 * with the node that was actually validated, and so that the inode cannot be recycled
+	 * underneath the comparison while the descriptor is held. A caller that asked for
+	 * nothing gets the behaviour this predicate had before custody existed: the descriptor
+	 * is released here, and the process is left exactly as it was found.
+	 */
+	if (NULL != retainedDescriptor) {
+		*retainedDescriptor = driverFd;
+
+		if (NULL != retainedIdentity) {
+			*retainedIdentity = identity;
+		}
+	}
+	else {
+		probe.closeNode(driverFd);
+	}
+
+	return true;
 }
 
 namespace {
 
 /*
- * THE THREE FALLBACK-REASON PHRASES, AND THE FIRST TWO ARE A CONTRACT.
+ * The three fallback-reason phrases, and the first two are a contract.
  *
  * They are declared here rather than at the top of the file because isServiceAvailable()
  * below is the only thing that ever assigns one, and the selection helper in
@@ -2714,13 +2719,13 @@ namespace {
  * phrase being reworded away from the arm it names.
  *
  * REASON_TRANSPORT_UNAVAILABLE and REASON_NO_COMPATIBLE_SERVICE are the exact texts the
- * factory has always emitted, preserved WORD FOR WORD. They are transcribed by
- * tests/L1Tests/run_coverage.sh and by tests/L2Tests/ccec/test_DualPathIntegration.cpp,
- * and they are also deliberately worded so that neither contains the selected-path
- * literal - which is what keeps a grep for that literal at exactly one hit per process.
- * Rewording either breaks those consumers.
+ * selection helper emits, and they are transcribed word for word by
+ * tests/L1Tests/run_coverage.sh and by tests/L2Tests/ccec/test_DualPathIntegration.cpp.
+ * They are also deliberately worded so that neither contains the selected-path literal,
+ * which is what keeps a grep for that literal at exactly one hit per process. Rewording
+ * either breaks those consumers.
  *
- * REASON_QUERY_FAILED is the third arm and is new. It covers the catch-all in
+ * REASON_QUERY_FAILED is the third arm. It covers the catch-all in
  * isServiceAvailable(): a query that neither succeeded nor cleanly declined is a
  * different platform condition from an absent transport and from an unusable service,
  * and reporting it as either of those would misdescribe it.
@@ -2732,10 +2737,380 @@ const char *const REASON_QUERY_FAILED          = "the service query failed unexp
 /** @brief Longest interface hash rendered into a log line by sanitizedInterfaceHash(). */
 const size_t MAX_LOGGED_HASH_LENGTH = 16;
 
+/*
+ * ONE BIT PER ATTRIBUTE OF BinderNodeIdentity, so that the re-verification's diagnostic can
+ * say WHICH attribute changed between the check and the use as a single number rather than
+ * as a sentence assembled at runtime.
+ *
+ * NAMED RATHER THAN WRITTEN AS LITERALS AT THE POINT OF USE, for the same reason the node
+ * constants in the header are named: the bit order is a reading contract - it is printed in
+ * the log line's own legend and transcribed by the contract suite - so it has to be
+ * changeable in exactly one place. The values are plain integers and nothing derives them
+ * from a struct layout, because a bit whose meaning depended on member order would silently
+ * re-point the moment a member moved.
+ */
+/** @brief Divergence bit for BinderNodeIdentity::device, POSIX `st_dev`. */
+const unsigned int NODE_IDENTITY_DIVERGED_DEVICE = 0x01u;
+/** @brief Divergence bit for BinderNodeIdentity::inode, POSIX `st_ino`. */
+const unsigned int NODE_IDENTITY_DIVERGED_INODE  = 0x02u;
+/** @brief Divergence bit for BinderNodeIdentity::rdev, POSIX `st_rdev`. */
+const unsigned int NODE_IDENTITY_DIVERGED_RDEV   = 0x04u;
+/** @brief Divergence bit for BinderNodeIdentity::mode, POSIX `st_mode`. */
+const unsigned int NODE_IDENTITY_DIVERGED_MODE   = 0x08u;
+/** @brief Divergence bit for BinderNodeIdentity::uid, POSIX `st_uid`. */
+const unsigned int NODE_IDENTITY_DIVERGED_UID    = 0x10u;
+
+/**
+ * @brief Holds the descriptor the preflight retained, and releases it on every exit path
+ *
+ * WHAT IT IS FOR, since "an RAII holder" says nothing about why one is needed here. The
+ * preflight now hands its validated descriptor to isServiceAvailable(), which then has
+ * SEVEN ways out - four declines, one success, one incompatible-service arm and one
+ * catch-all - and the descriptor is a `/dev/binder` open, i.e. a live driver context that
+ * nothing will reclaim until the process exits. Releasing it correctly on each of those
+ * seven paths by hand is exactly the kind of accounting that survives review and then
+ * fails on the eighth path somebody adds. Scope-bound release makes the property
+ * structural instead: the window opens where this object is constructed and closes where
+ * it goes out of scope, INCLUDING when an exception unwinds through it, which is the one
+ * path no hand-written release can cover here because the catch-all sits outside it.
+ *
+ * IT IS NOT AN ABSTRACTION IN THE SENSE THE PLAN PROHIBITS. It adds no virtual dispatch,
+ * no allocation, no ownership question and no indirection at the HAL boundary - it is the
+ * same scope-bound-release idiom the CCEC sources already use for the instance lock
+ * (`{AutoLock lock_(mutex);`), applied to a descriptor instead of a mutex, and it is
+ * file-local so nothing outside this translation unit can see it.
+ *
+ * @warning Not copyable and not assignable, because two holders of one descriptor would
+ *          close it twice. The copy operations are declared private and never defined.
+ * @warning Holds the probe BY REFERENCE. Every use below binds it to a probe that
+ *          outlives the holder - a caller's argument or defaultBinderProbe()'s static -
+ *          which is the only correct lifetime and the one the single call site provides.
+ *
+ * @see DriverAidlImpl::isBinderPreflightOk()
+ * @see DriverAidlImpl::isServiceAvailable()
+ */
+class RetainedBinderNode {
+public:
+	/**
+	 * @brief Takes an empty holder bound to the probe that will release the descriptor
+	 *
+	 * @param [in] probe - The operations the retained descriptor was opened through, and
+	 *                     whose `closeNode` will release it. Must outlive this object.
+	 *
+	 * @post No descriptor is held. The holder becomes non-empty only when the preflight
+	 *       writes into descriptorSlot().
+	 */
+	explicit RetainedBinderNode(const DriverAidlImpl::BinderPreflightProbe &probe)
+		: probe(probe), descriptor(-1)
+	{
+	}
+
+	/**
+	 * @brief Releases the descriptor if one is still held
+	 *
+	 * @post Nothing is held. This runs on a normal return and on an exception unwinding
+	 *       through the enclosing scope, which is what makes the custody window closed by
+	 *       construction rather than by care.
+	 * @warning Never throws: the probe's `closeNode` is required not to, exactly as the
+	 *          real `::close` does not.
+	 */
+	~RetainedBinderNode()
+	{
+		release();
+	}
+
+	/**
+	 * @brief The slot isBinderPreflightOk() writes its retained descriptor into
+	 *
+	 * @return int* - Address of the held descriptor. The preflight sets it to -1 on every
+	 *                decline and to the validated descriptor on a positive verdict, so
+	 *                after the call this holder is non-empty if and only if custody was
+	 *                actually transferred.
+	 *
+	 * @pre Nothing is held yet, which is true for the single call site.
+	 */
+	int *descriptorSlot(void)
+	{
+		return &descriptor;
+	}
+
+	/**
+	 * @brief Reports whether a descriptor is currently held
+	 *
+	 * @return bool - Whether custody is in force
+	 * @retval true  - A validated descriptor is held and the node's inode is pinned.
+	 * @retval false - Nothing is held, so no custody window is open.
+	 */
+	bool held(void) const
+	{
+		return (descriptor >= 0);
+	}
+
+	/**
+	 * @brief Releases the descriptor early, before the holder goes out of scope
+	 *
+	 * Idempotent, so the destructor can call it unconditionally after an early release.
+	 *
+	 * @post Nothing is held.
+	 * @warning Never throws.
+	 */
+	void release(void)
+	{
+		if (descriptor >= 0) {
+			probe.closeNode(descriptor);
+			descriptor = -1;
+		}
+	}
+
+private:
+	RetainedBinderNode(const RetainedBinderNode &);
+	RetainedBinderNode &operator=(const RetainedBinderNode &);
+
+	/** @brief The operations the descriptor was opened through, and is released through. */
+	const DriverAidlImpl::BinderPreflightProbe &probe;
+	/** @brief The held descriptor, or -1 when nothing is held. */
+	int descriptor;
+};
+
+/**
+ * @brief Reports whether a fresh resolution yielded the UNCHANGED validated node
+ *
+ * ALL FIVE CAPTURED ATTRIBUTES ARE ENFORCED - `device`, `inode`, `rdev`, `mode` AND `uid` -
+ * and the question this answers is deliberately "has the node CHANGED", not "is the node
+ * still acceptable". Those are different questions and only the first one closes a
+ * check-to-use window.
+ *
+ * `device` and `inode` together identify one filesystem object uniquely, and `rdev` is the
+ * driver's major/minor pair, so a REPLACEMENT node - newly created, bind-mounted over, or
+ * reached through a re-pointed symlink - differs in at least one of the three. That much
+ * catches substitution of the object.
+ *
+ * `mode` AND `uid` CATCH THE OTHER HALF OF THE SAME WINDOW, AND OMITTING THEM LEFT IT OPEN.
+ * The preflight validates ownership and file type once, on the object it has open; libbinder
+ * then resolves the same pathname for itself, and every client process on the platform opens
+ * that node too. An attacker who cannot REPLACE the node can still `chmod` or `chown` THE
+ * VERY SAME INODE inside that window - widening write access to the driver, or handing its
+ * ownership to an unprivileged user - and a comparison of `(device, inode, rdev)` alone
+ * reports that as "unchanged" because the object genuinely is the same object. The
+ * preflight's own ownership and file-type checks cannot see it either: they ran before the
+ * change. So the values are captured for a reason and are compared here, which makes the
+ * validation this function guards a statement about the node AS IT IS AT THE MOMENT OF USE
+ * rather than as it was some milliseconds earlier.
+ *
+ * WHY THIS IS SAFE AT ANY PLATFORM BASELINE, which is the objection an earlier version of
+ * this comment raised against including them and got wrong. Comparing `mode` asserts only
+ * that it did not CHANGE - it requires no particular value - so a platform whose binder node
+ * is restrictive (0600) and a platform whose node is broadly accessible (0666, which
+ * AOSP-derived layouts publish deliberately, because every binder client must be able to
+ * open it) both pass unchanged. What fails is movement, in either direction, which is
+ * precisely the event worth refusing. And refusing is nonfatal: the AIDL path is declined
+ * and the legacy back-end is selected.
+ *
+ * @param [in] validated - The identity the preflight established, taken from the
+ *                         descriptor this process holds open.
+ * @param [in] observed  - The identity a fresh resolution of the same path just yielded,
+ *                         either by re-resolving the pathname or by identifying a
+ *                         freshly opened descriptor.
+ *
+ * @return bool - Whether the fresh resolution is the validated node, unchanged
+ * @retval true  - Every one of the five attributes agrees; the check and the use are about
+ *                 the same node in the same state.
+ * @retval false - At least one diverged, so the name resolves elsewhere or the node was
+ *                 re-permissioned or re-owned underneath the validation. WHICH attributes
+ *                 diverged is reported in the log, numerically, not in the return value.
+ *
+ * @pre None.
+ * @post No state changed.
+ * @warning Never throws and performs no allocation. On a divergence it emits ONE
+ *          diagnostic line carrying a divergence bitmask and both value tuples, and it
+ *          logs NUMBERS ONLY - no HAL-supplied and no filesystem-supplied text is
+ *          rendered, matching the discipline the address-range and transmit-status
+ *          diagnostics already follow.
+ * @warning The verdict is the caller's to act on. This function DECIDES NOTHING about the
+ *          back-end: both call sites turn a false verdict into the same nonfatal decline.
+ *
+ * @see DriverAidlImpl::BinderNodeIdentity
+ * @see reverifyBinderNodeBeforeLookup()
+ * @see DriverAidlImpl::isServiceAvailable()
+ */
+bool binderNodeIdentitiesMatch(const DriverAidlImpl::BinderNodeIdentity &validated,
+                               const DriverAidlImpl::BinderNodeIdentity &observed)
+{
+	const unsigned int divergence =
+	        ((validated.device != observed.device) ? NODE_IDENTITY_DIVERGED_DEVICE : 0u) |
+	        ((validated.inode  != observed.inode)  ? NODE_IDENTITY_DIVERGED_INODE  : 0u) |
+	        ((validated.rdev   != observed.rdev)   ? NODE_IDENTITY_DIVERGED_RDEV   : 0u) |
+	        ((validated.mode   != observed.mode)   ? NODE_IDENTITY_DIVERGED_MODE   : 0u) |
+	        ((validated.uid    != observed.uid)    ? NODE_IDENTITY_DIVERGED_UID    : 0u);
+
+	if (0u == divergence) {
+		return true;
+	}
+
+	/*
+	 * ONE LINE, EMITTED HERE RATHER THAN AT THE CALL SITES, so that both re-verification
+	 * points inherit the detail without either of them growing a conditional of its own -
+	 * the second is a disjunction whose other operand is a failed `fstat`, and splitting it
+	 * to report a divergence would turn one documented decision into two.
+	 *
+	 * The mask says which attributes moved and the two tuples say what they moved from and
+	 * to, so a reader diagnosing a fallback can distinguish a substituted node from a
+	 * re-permissioned or re-owned one without a second run. Modes are octal because that
+	 * is how a mode is read; everything else is decimal and unsigned, and nothing here is
+	 * a string.
+	 */
+	CCEC_LOG( LOG_WARN, "DriverAidlImpl::isServiceAvailable : binder node identity CHANGED between the preflight and the lookup, divergence mask 0x%02x (bit0 device, bit1 inode, bit2 rdev, bit3 mode, bit4 uid); validated dev %llu ino %llu rdev %llu mode 0%o uid %u; observed dev %llu ino %llu rdev %llu mode 0%o uid %u\r\n",
+	          divergence,
+	          validated.device, validated.inode, validated.rdev, validated.mode, validated.uid,
+	          observed.device, observed.inode, observed.rdev, observed.mode, observed.uid);
+
+	return false;
+}
+
+/**
+ * @brief Re-verifies the binder node and its context manager immediately before the lookup
+ *
+ * THE SINGLE STEP THAT MAKES THE CHECK AND THE USE ONE PATH, and it does two things that
+ * are separate concerns only if the failure modes are read separately.
+ *
+ * FIRST, IDENTITY. The preflight validated a node; libbinder is about to resolve the same
+ * PATHNAME independently, and on the pinned stack it aborts rather than returns if what it
+ * finds is not a usable binder driver. So the name is resolved once more here and compared
+ * against the identity that was validated. A mismatch means the window was lost and the
+ * AIDL path is declined - nonfatally, which is the entire value of declining at all.@n
+ * The comparison covers ALL FIVE captured attributes, so it catches both halves of the
+ * window: a node SUBSTITUTED for another object, and the same object RE-PERMISSIONED or
+ * RE-OWNED after the preflight's ownership and file-type checks had already run.
+ * binderNodeIdentitiesMatch() records why, and reports which attributes moved.
+ *
+ * SECOND, LIVENESS UNDER A BOUND. `defaultServiceManager()` polls until binder handle 0
+ * resolves, with no upper bound of its own, so the dominant stall mode for a correctly
+ * provisioned driver is a wedged or dying `servicemanager`. The preflight's bounded ping
+ * establishes liveness at check time; asking again HERE, under the same bound, is what
+ * turns "the manager died between the preflight and the lookup" from an unbounded hang
+ * inside libbinder into a decline. It bounds what is boundable and claims nothing about
+ * what is not: once `getService` is entered, no client-side deadline exists on the pinned
+ * libbinder, which is recorded as a platform prerequisite on isServiceAvailable().
+ *
+ * WHY THE PING GOES OVER A SECOND, FRESHLY OPENED DESCRIPTOR RATHER THAN THE RETAINED ONE,
+ * which is the one non-obvious decision here and is forced by the driver rather than
+ * chosen. The ping maps the driver's transaction buffer, and the binder driver permits
+ * exactly ONE mapping per open descriptor for that descriptor's lifetime: unmapping
+ * releases the address range but not the right, so a second mapping attempt on the same
+ * descriptor is refused unconditionally. A re-ping over the retained descriptor would
+ * therefore fail on every correctly provisioned platform and decline the AIDL path
+ * everywhere - a check that always says no is not a check. The fresh descriptor is
+ * identified with `fstat` and compared against the SAME validated identity before it is
+ * used, so it inherits the whole of the guarantee: it is the same object, and the retained
+ * descriptor is still held throughout, which is what keeps the inode from being recycled
+ * underneath either comparison.
+ *
+ * @param [in] binderDriverPath        - The path the preflight validated, resolved again.
+ * @param [in] contextManagerTimeoutMs - Bound on the second ping, in milliseconds. The
+ *                                       same value the preflight used, clamped there and
+ *                                       clamped again here so neither route can exceed
+ *                                       the ceiling.
+ * @param [in] probe                   - The operations to perform this with; the same
+ *                                       probe the preflight used.
+ * @param [in] validated               - The identity the preflight established.
+ *
+ * @return bool - Whether the lookup may proceed
+ * @retval true  - The path still resolves to the validated node AND a context manager
+ *                 answered over a fresh descriptor within the bound.
+ * @retval false - The path no longer resolves, or resolves elsewhere, or the fresh
+ *                 descriptor is not the validated node, or it could not be opened or
+ *                 identified, or no context manager answered. Every one of these is
+ *                 logged and NONE of them throws.
+ *
+ * @pre The preflight returned true for @p binderDriverPath and its descriptor is still
+ *      held by the caller, so @p validated describes an object that still exists.
+ * @post No descriptor opened here survives the call: the fresh one is released on every
+ *       path, including the refusals. The caller's retained descriptor is untouched.
+ * @warning Never throws and never blocks beyond @p contextManagerTimeoutMs.
+ *
+ * @see binderNodeIdentitiesMatch()
+ * @see DriverAidlImpl::isBinderPreflightOk()
+ * @see DriverAidlImpl::isServiceAvailable()
+ */
+bool reverifyBinderNodeBeforeLookup(const std::string &binderDriverPath,
+                                    unsigned int contextManagerTimeoutMs,
+                                    const DriverAidlImpl::BinderPreflightProbe &probe,
+                                    const DriverAidlImpl::BinderNodeIdentity &validated)
+{
+	DriverAidlImpl::BinderNodeIdentity observed;
+
+	memset(&observed, 0, sizeof(observed));
+
+	/* Re-verification point 1 of 4: the name still resolves to something. */
+	if (0 != probe.identifyPath(binderDriverPath.c_str(), &observed)) {
+		const int identifyErrno = errno;
+
+		CCEC_LOG( LOG_WARN, "DriverAidlImpl::isServiceAvailable : binder driver [%s] could no longer be resolved between the preflight and the lookup, errno %d (%s); declining the AIDL HAL rather than letting libbinder open a name whose meaning changed\r\n", binderDriverPath.c_str(), identifyErrno, strerror(identifyErrno));
+		return false;
+	}
+
+	/*
+	 * Re-verification point 2 of 4: and it resolves to the SAME object that was validated,
+	 * IN THE SAME STATE - the attribute-by-attribute detail is emitted by the comparison
+	 * itself, which is why this line names the condition and not the values.
+	 */
+	if (!binderNodeIdentitiesMatch(validated, observed)) {
+		CCEC_LOG( LOG_WARN, "DriverAidlImpl::isServiceAvailable : binder driver [%s] is NOT the node the preflight validated - it resolves to a different filesystem object, or to the same one re-permissioned or re-owned since; declining the AIDL HAL. A node substituted in this window would otherwise be opened by libbinder, which aborts rather than fails on the pinned stack\r\n", binderDriverPath.c_str());
+		return false;
+	}
+
+	/*
+	 * Re-verification point 3 of 4: a second descriptor on the same node, for the ping the
+	 * retained descriptor cannot carry. Opened with the same flags the preflight used, so
+	 * the two descriptors are equivalent in every respect that matters.
+	 */
+	const int freshFd = probe.openNode(binderDriverPath.c_str(), O_RDWR | O_CLOEXEC);
+
+	if (freshFd < 0) {
+		const int openErrno = errno;
+
+		CCEC_LOG( LOG_WARN, "DriverAidlImpl::isServiceAvailable : binder driver [%s] could not be reopened for the pre-lookup liveness check, errno %d (%s); declining the AIDL HAL\r\n", binderDriverPath.c_str(), openErrno, strerror(openErrno));
+		return false;
+	}
+
+	DriverAidlImpl::BinderNodeIdentity reopened;
+
+	memset(&reopened, 0, sizeof(reopened));
+
+	if ((0 != probe.identifyDescriptor(freshFd, &reopened)) ||
+	    (!binderNodeIdentitiesMatch(validated, reopened))) {
+		CCEC_LOG( LOG_WARN, "DriverAidlImpl::isServiceAvailable : the descriptor reopened on binder driver [%s] could not be identified, or does not refer to the node the preflight validated in the state it validated it; declining the AIDL HAL\r\n", binderDriverPath.c_str());
+		probe.closeNode(freshFd);
+		return false;
+	}
+
+	/*
+	 * Clamped here as well as in the preflight, so that neither entry point can exceed the
+	 * ceiling and initialization stays bounded whichever route reached this ping.
+	 */
+	unsigned int effectiveTimeoutMs = contextManagerTimeoutMs;
+
+	if (effectiveTimeoutMs > DriverAidlImpl::MAX_CONTEXT_MANAGER_TIMEOUT_MS) {
+		effectiveTimeoutMs = DriverAidlImpl::MAX_CONTEXT_MANAGER_TIMEOUT_MS;
+	}
+
+	/* Re-verification point 4 of 4: a context manager still answers, under the same bound. */
+	const bool contextManagerReachable = probe.pingContextManager(freshFd, effectiveTimeoutMs);
+
+	probe.closeNode(freshFd);
+
+	if (!contextManagerReachable) {
+		CCEC_LOG( LOG_WARN, "DriverAidlImpl::isServiceAvailable : the binder context manager answered the preflight but not the pre-lookup check within %u ms; declining the AIDL HAL rather than entering an unbounded wait inside the service manager\r\n", effectiveTimeoutMs);
+		return false;
+	}
+
+	return true;
+}
+
 /**
  * @brief Renders a server-supplied interface hash safely for a log line
  *
- * The hash arrives from ANOTHER PROCESS over binder, so its content and its length are
+ * The hash arrives from another process over binder, so its content and its length are
  * both outside this process's control and neither may be pasted into a log unexamined.
  * A frozen AIDL hash is a short hexadecimal digest, but a broken or hostile server can
  * answer with anything at all - control characters that would corrupt a terminal or a
@@ -2755,7 +3130,7 @@ const size_t MAX_LOGGED_HASH_LENGTH = 16;
  *
  * @pre None.
  * @post No state changed; the argument is not modified.
- * @warning For DIAGNOSTICS ONLY. No compatibility decision is ever taken on this value:
+ * @warning For diagnostics only. No compatibility decision is ever taken on this value:
  *          halcompat::isCompatible() reads the unmodified hash and is the sole decision.
  *
  * @see DriverAidlImpl::isServiceAvailable()
@@ -2790,20 +3165,13 @@ std::string sanitizedInterfaceHash(const std::string &hash)
 } // anonymous namespace
 
 /**
- * @brief Names the CATEGORY of an interface hash observed after a compatibility rejection
+ * @copydoc CCEC::DriverAidlImpl::describeObservedInterfaceHash
  *
- * The header carries the reasoning. The short form is that this describes a value and
- * never attributes a cause to it: the three phrases below say what the observed string
- * IS, so that a reader can see whether the server answered with a frozen digest, with
- * the failure marker, or with an unfrozen development marker, without the code claiming
- * to know which of halcompat's rules did the rejecting.
- *
- * @param [in] hash - The observed hash, exactly as reported.
- * @return const char* - A static phrase naming the category. Never NULL.
- *
- * @pre None.
- * @post No state changed.
- * @warning Diagnostics only; no decision is taken on this value.
+ * The three phrases below say what the observed string is, and none of them says why the
+ * rejection happened. That separation is the whole of this function: a reader can see
+ * whether the server answered with a frozen digest, with the failure marker, or with an
+ * unfrozen development marker, without the code claiming to know which of halcompat's
+ * rules did the rejecting.
  *
  * @see DriverAidlImpl::isServiceAvailable()
  */
@@ -2825,32 +3193,16 @@ const char *DriverAidlImpl::describeObservedInterfaceHash(const std::string &has
 }
 
 /**
- * @brief Whether a post-decision metadata SNAPSHOT would itself be accepted
+ * @copydoc CCEC::DriverAidlImpl::observedMetadataWouldBeAccepted
  *
- * The header carries the reasoning, including why both arguments must come from ONE
- * snapshot. The short form is that a `true` answer means the observation DISAGREES with
- * the decision, which is evidence of changed or recovered metadata and is reported as
- * that rather than as a version mismatch.
+ * The version half calls `halcompat::detail::isCompatible()` rather than restating its
+ * rule, so this function cannot drift from the rule that governed the decision. The hash
+ * half is written out here because halcompat exposes no equivalent entry point for a
+ * hash alone; it follows halcompat's own gate order, and it treats an unfrozen server as
+ * not accepted because production calls the predicate with its `allowUnfrozen` default of
+ * false.
  *
- * The version half is `halcompat::detail::isCompatible()` - the real rule, constexpr over
- * two ints, so it issues no transaction and cannot disagree with itself between calls.
- * The hash half mirrors halcompat's own gate order for the observed value only, treating
- * an unfrozen server as not accepted because production calls the predicate with its
- * `allowUnfrozen` default of false.
- *
- * @param [in] hash            - The observed hash, unmodified.
- * @param [in] clientVersion   - This client's compiled-in interface version.
- * @param [in] observedVersion - The observed server version, from the SAME snapshot.
- *
- * @return bool - True when this snapshot alone would have satisfied the rule.
- * @retval true  - Observation disagrees with the decision: metadata changed or recovered.
- * @retval false - Observation is consistent with a rejection, without establishing which
- *                 rule applied.
- *
- * @pre Both value arguments come from one snapshot.
- * @post No state changed.
- * @warning Diagnostics only; never used to select a back-end.
- *
+ * @see DriverAidlImpl::describeObservedInterfaceHash()
  * @see DriverAidlImpl::isServiceAvailable()
  */
 bool DriverAidlImpl::observedMetadataWouldBeAccepted(const std::string &hash,
@@ -2866,21 +3218,10 @@ bool DriverAidlImpl::observedMetadataWouldBeAccepted(const std::string &hash,
 
 
 /**
- * @brief Emits the compatibility-rejection diagnostic for a service halcompat rejected
+ * @copydoc CCEC::DriverAidlImpl::emitCompatibilityRejectionDiagnostic
  *
- * See the declaration in DriverAidlImpl.hpp for why this is a static and why it is
- * reachable from a test. In short: one copy of the wording, and a function that cannot
- * touch the cause its caller recorded.
- *
- * @param[in] service        The rejected service, already established non-null by the caller.
- * @param[in] halServiceName The binder name it was resolved under.
- *
- * @return void
- *
- * @pre halcompat::isCompatible<IHdmiCec>(service) returned false and the caller recorded
- *      REASON_NO_COMPATIBLE_SERVICE.
- * @post No member state changes; structurally guaranteed by being static.
- * @warning Diagnostics only.
+ * Every line below is bounded independently against the log buffer, and the body's own
+ * comments record which bound each one is written against.
  *
  * @see DriverAidlImpl::isServiceAvailable()
  */
@@ -2892,27 +3233,45 @@ void DriverAidlImpl::emitCompatibilityRejectionDiagnostic(
 		const int clientVersion = cechal::IHdmiCec::VERSION;
 
 		/*
-		 * THE ONE SNAPSHOT. Each value is read exactly once and nothing below re-reads
-		 * either. This is the rule that closed the second of the two earlier defects: a
-		 * predicate result combined with separately retried values could land in the
-		 * not-compatible arm holding compatible metadata and blame the version rule.
+		 * The one snapshot. Each value is read exactly once and nothing below re-reads
+		 * either. Combining a predicate result with separately retried values would let
+		 * the not-compatible arm hold compatible metadata and blame the version rule for
+		 * a rejection it did not cause.
 		 */
+		/*
+		 * INSTRUMENTED LIKE EVERY OTHER SYNCHRONOUS CALL, and for a sharper reason than
+		 * consistency. These two are REMOTE ROUND TRIPS to the same server that has just
+		 * been rejected, and a server that answers wrongly is exactly the kind that answers
+		 * slowly or not at all - so a stall here happens at initialization, inside the
+		 * fallback path, on a platform already known to be misbehaving. Left uninstrumented
+		 * it would be the one stall in this file with no attribution at all: the last line
+		 * in the log would be the rejection, and nothing would say that the process is
+		 * blocked in a diagnostic ABOUT the rejection rather than in the rejection itself.
+		 * Each is measured separately, so the log names which of the two blocked.
+		 */
+		const int64_t hashReadStartedMs = halCallStarted();
 		const std::string observedHash = service->getInterfaceHash();
+
+		warnIfHalCallSlow("IHdmiCec::getInterfaceHash (post-rejection diagnostic read)", hashReadStartedMs);
+
+		const int64_t versionReadStartedMs = halCallStarted();
 		const int observedVersion = service->getInterfaceVersion();
 
+		warnIfHalCallSlow("IHdmiCec::getInterfaceVersion (post-rejection diagnostic read)", versionReadStartedMs);
+
 		/*
-		 * EMITTED AS SEVERAL SHORT LINES, AND THE REASON IS A HARD PLATFORM LIMIT RATHER
-		 * THAN A PREFERENCE.
+		 * Emitted as several short lines, and the reason is a hard platform limit rather
+		 * than a preference.
 		 *
 		 * CCEC_LOG formats through a 500-byte stack buffer -- MAX_LOG_BUFF in
 		 * ccec/src/Util.cpp, which is not this migration's to change -- and vsnprintf
-		 * TRUNCATES silently at 499. This diagnostic was first written as one message of
-		 * about 900 characters, and the effect was the worst possible one: the sentence
-		 * explaining that no cause is being claimed survived, and every OBSERVED VALUE it
-		 * exists to report -- the hash, its classification, both versions and the recovery
-		 * note -- was cut off. A contract-suite case that captures this output is what
-		 * found it; before that case existed the truncation was invisible, because the
-		 * surviving prefix reads like a complete message.
+		 * truncates silently at 499. One message of about 900 characters does not survive
+		 * that, and it fails in the worst possible direction: the sentence explaining that
+		 * no cause is being claimed sits at the front and survives, while every observed
+		 * value the diagnostic exists to report -- the hash, its classification, both
+		 * versions and the recovery note -- is cut off, leaving a prefix that reads like a
+		 * complete message. The contract-suite case that captures this output is what
+		 * makes that bound observable rather than a matter of trust.
 		 *
 		 * So each line below is bounded independently, with the longest possible
 		 * substitution in it, and the recovery note is a line of its own rather than a
@@ -2939,7 +3298,7 @@ void DriverAidlImpl::emitCompatibilityRejectionDiagnostic(
 	catch(...) {
 		/*
 		 * The observation itself failed. That costs a less specific message and nothing
-		 * else. The caller recorded the cause BEFORE calling this, and this function is
+		 * else. The caller recorded the cause before calling this, and this function is
 		 * static, so there is no path by which a failed observation can relabel an
 		 * established compatibility rejection.
 		 */
@@ -2949,64 +3308,73 @@ void DriverAidlImpl::emitCompatibilityRejectionDiagnostic(
 
 
 /**
- * @brief Reports whether a usable, compatible AIDL HDMI CEC service is present
+ * @copydoc CCEC::DriverAidlImpl::isServiceAvailable
  *
- * This is the question the selection helper in `ccec/src/Driver.cpp` asks, ONCE, after
- * both back-ends have been constructed. It answers in three ordered stages and stops at
- * the first that fails: the binder preflight, so that nothing in this process touches
- * libbinder unless doing so is known to be safe; the service lookup, which resolves
- * `IHdmiCec::serviceName()` - the literal `"HdmiCec"` - through the binder service
- * manager; and the compatibility check.
- *
- * PRESENCE ALONE IS NOT SUFFICIENT. A service that answers but cannot be spoken to
- * compatibly is treated exactly as an absent one and the legacy back-end is selected.
- * The compatibility rule is NOT reimplemented here - `halcompat::isCompatible()` is
- * reused verbatim, which rejects a null proxy, an empty or `"-1"` interface hash and an
- * unfrozen development server, and otherwise compares this client's compiled-in
- * `IHdmiCec::VERSION` against the server's within one era and major. That comparison
- * ACCEPTS A NEWER SERVER within the same era and major, which is why nothing here treats
- * "not exactly our version" as incompatible.
- *
- * A resolved and compatible proxy is CACHED on this instance for open() to use, so the
- * lookup happens once for the process rather than once per operation.
- *
- * @return bool - Whether the AIDL back-end should be selected
- * @retval true  - The preflight passed, the service resolved, and it is compatible. The
- *                 proxy is cached and open() may be called.
- * @retval false - Any stage failed. The reason is logged, and the caller must select the
- *                 legacy back-end.
- *
- * @pre None. Safe to call on a platform with no binder driver, no `servicemanager` and
- *      no AIDL HAL whatsoever - which is the entire point of the preflight.
- * @post No lifecycle transition occurs; the instance remains CLOSED either way. On true,
- *       and only on true, the service proxy is held.
- * @warning NEVER aborts, NEVER blocks indefinitely and NEVER propagates an exception -
- *          a legacy-only SOC must reach the legacy back-end rather than fail to
- *          initialize. The catch-all below is what makes the last of those three
- *          unconditional rather than merely expected.
- * @warning Not thread safe, and not intended to be: it is called once from the factory's
- *          one-time static initializer, which the language already serializes.
+ * The function-level catch-all at the end is what makes the no-propagation guarantee
+ * unconditional rather than merely expected: every stage below is written not to raise,
+ * and the catch is there for the case where one does anyway, because an exception
+ * escaping into the factory's one-time static initializer would fail initialization on a
+ * platform whose correct outcome is the legacy back-end.
  *
  * @see DriverAidlImpl::isBinderPreflightOk()
  * @see DriverAidlImpl::open()
  */
-bool DriverAidlImpl::isServiceAvailable(void)
+bool DriverAidlImpl::isServiceAvailable(const std::string &binderDriverPath,
+                                        unsigned int contextManagerTimeoutMs,
+                                        const BinderPreflightProbe &probe)
 {
 	availabilityReason = NULL;
 
+	/*
+	 * THE CUSTODY WINDOW OPENS HERE AND CLOSES WHEN THIS OBJECT GOES OUT OF SCOPE, on every
+	 * one of this method's exit paths including the catch-all's. Declared OUTSIDE the try so
+	 * that the descriptor is released after the handler has run rather than during the
+	 * unwind, which keeps the release out of the exceptional path's way while still making
+	 * it unconditional.
+	 */
+	RetainedBinderNode retainedNode(probe);
+	BinderNodeIdentity validatedIdentity;
+
+	memset(&validatedIdentity, 0, sizeof(validatedIdentity));
+
 	try {
-		if (!isBinderPreflightOk()) {
+		/*
+		 * Stage 1: the preflight, WITH CUSTODY. Passing the two out-parameters is what
+		 * makes this stage and the lookup below one path instead of two independent
+		 * resolutions of the same pathname: the validated descriptor stays open, pinning
+		 * the node's inode, and its identity is carried forward to stage 2.
+		 */
+		if (!isBinderPreflightOk(binderDriverPath, contextManagerTimeoutMs, probe,
+		                         retainedNode.descriptorSlot(), &validatedIdentity)) {
 			CCEC_LOG( LOG_INFO, "DriverAidlImpl::isServiceAvailable : the binder preflight declined; the AIDL HDMI CEC HAL is treated as absent\r\n");
 			availabilityReason = REASON_TRANSPORT_UNAVAILABLE;
 			return false;
 		}
 
+		/*
+		 * Stage 2: THE SAME NODE, AND A STILL-LIVE CONTEXT MANAGER, immediately before the
+		 * lookup. The preflight's verdict is only worth acting on if it still describes the
+		 * name libbinder is about to open, and the check that establishes that has to sit
+		 * as close to the use as the code can put it - which is here, with nothing between
+		 * this and getService() but the service name.
+		 *
+		 * A false verdict is reported as an unavailable TRANSPORT rather than as an
+		 * unusable service, deliberately: what failed is the driver node or its context
+		 * manager, not anything about `"HdmiCec"`, and reporting it as a service problem
+		 * would send an integrator looking in the wrong place.
+		 */
+		if (!reverifyBinderNodeBeforeLookup(binderDriverPath, contextManagerTimeoutMs, probe,
+		                                    validatedIdentity)) {
+			availabilityReason = REASON_TRANSPORT_UNAVAILABLE;
+			return false;
+		}
+
 		const std::string &halServiceName = cechal::IHdmiCec::serviceName();
-		/* F10: synchronous lookup, no client-side deadline available - measured, not bounded. */
+		/* Synchronous lookup, with no client-side deadline available: measured, not bounded. */
 		const int64_t lookupStartedMs = halCallStarted();
 		::android::sp<cechal::IHdmiCec> service = halcompat::getService<cechal::IHdmiCec>();
 
-		warnIfHalCallSlow("IHdmiCec service lookup", lookupStartedMs);
+		warnIfHalCallSlow("IServiceManager::checkService via halcompat::getService<IHdmiCec>", lookupStartedMs);
 
 		if (service == 0) {
 			CCEC_LOG( LOG_INFO, "DriverAidlImpl::isServiceAvailable : binder service [%s] is not registered; the AIDL HDMI CEC HAL is treated as absent\r\n", halServiceName.c_str());
@@ -3014,78 +3382,61 @@ bool DriverAidlImpl::isServiceAvailable(void)
 			return false;
 		}
 
-		/* F10: getInterfaceHash()/getInterfaceVersion() are round trips - measured, not bounded. */
+		/* getInterfaceHash()/getInterfaceVersion() are round trips: measured, not bounded. */
 		const int64_t compatibilityStartedMs = halCallStarted();
 		const bool compatible = halcompat::isCompatible<cechal::IHdmiCec>(service);
 
-		warnIfHalCallSlow("IHdmiCec compatibility check", compatibilityStartedMs);
+		warnIfHalCallSlow("IHdmiCec::getInterfaceVersion and getInterfaceHash via halcompat::isCompatible<IHdmiCec>", compatibilityStartedMs);
 
 		if (!compatible) {
 			/*
-			 * THE DECISION HAS ALREADY BEEN TAKEN, AND IT WAS TAKEN BY halcompat.
-			 * halcompat::isCompatible() is and remains the SINGLE implementation of the
-			 * compatibility rule; nothing below re-implements it or re-decides anything.
+			 * The decision has already been taken, and halcompat took it.
+			 * halcompat::isCompatible() is the single implementation of the compatibility
+			 * rule; nothing below re-implements it or re-decides anything.
 			 *
-			 * The cause is recorded HERE, before any observation, so that what explains
+			 * The cause is recorded here, before any observation, so that what explains
 			 * the fallback is fixed by the decision itself and cannot be rewritten by
 			 * anything that runs afterwards.
 			 */
 			availabilityReason = REASON_NO_COMPATIBLE_SERVICE;
 
 			/*
-			 * WHY THIS BLOCK REPORTS AN OBSERVATION AND NEVER A CAUSE.
+			 * What follows reports an observation about the server and never a cause.
 			 *
-			 * halcompat decided using ITS OWN metadata transactions, and those values
+			 * halcompat decided using its own metadata transactions, and those values
 			 * cannot be recovered: they are locals inside a template in a read-only
-			 * consumed header. Anything read HERE is a FRESH transaction, and the
-			 * generated proxy does not make the two equivalent -- it CACHES a value it
-			 * read successfully, but stores a FAILED read as -1 and RETRIES it on the
+			 * consumed header. Anything read here is a fresh transaction, and the
+			 * generated proxy does not make the two equivalent - it caches a value it
+			 * read successfully, but stores a failed read as -1 and retries it on the
 			 * next call. So a transaction that failed for the decision can succeed
 			 * afterwards, and an in-process fake whose answers change between calls
-			 * produces the same divergence.
-			 *
-			 * TWO EARLIER VERSIONS OF THIS BLOCK GOT THAT WRONG, IN TWO DIFFERENT WAYS,
-			 * and both are recorded because the second looked like a fix for the first.
-			 * The first asserted the two "can never disagree about the outcome" and
-			 * blamed the era-and-major version rule whenever the observed hash looked
-			 * frozen. The second asked the predicate a second time and THEN read the
-			 * hash and version again -- so a predicate retry that still failed, combined
-			 * with a metadata retry that succeeded, landed in the not-compatible arm
-			 * holding compatible values and blamed the version rule all the same.
-			 *
-			 * THE RULE THIS BLOCK NOW FOLLOWS ADMITS NO SUCH COMBINATION:
-			 *   * ONE SNAPSHOT. The hash and the version are read exactly once each, and
-			 *     every statement below is a property of that ONE pair. No predicate
-			 *     result is ever combined with separately retried values.
-			 *   * NO CAUSAL CLAIM. Which of halcompat's three rules rejected this server
-			 *     is NOT reported, because nothing here can know it. All three are named
+			 * produces the same divergence. Three rules follow from that, each of them
+			 * load bearing:
+			 *   * one snapshot. The hash and the version are read exactly once each, and
+			 *     every statement derived from them is a property of that one pair. A
+			 *     predicate result is never combined with separately retried values,
+			 *     because asking the predicate again and then re-reading the metadata can
+			 *     land a still-failing retry alongside compatible values;
+			 *   * no causal claim. Which of halcompat's three rules rejected this server
+			 *     is not reported, because nothing here can know it. All three are named
 			 *     as the possibilities they are, and the snapshot is labelled as evidence
-			 *     about the server rather than as the reason it was rejected.
-			 *   * NO REIMPLEMENTATION OF THE VERSION RULE. The version half of the
+			 *     about the server rather than as the reason it was rejected. An observed
+			 *     hash that looks frozen in particular does not implicate the
+			 *     era-and-major version rule;
+			 *   * no reimplementation of the version rule. The version half of the
 			 *     observation is evaluated by halcompat::detail::isCompatible(), the real
-			 *     rule -- constexpr over two ints, so it performs no transaction and
+			 *     rule - constexpr over two ints, so it performs no transaction and
 			 *     cannot disagree with itself.
 			 *
-			 * The block is guarded on its own, and that guard is load-bearing rather than
-			 * defensive habit: letting a failed observation reach the function's outer
-			 * catch would relabel an established compatibility rejection as that
-			 * handler's REASON_QUERY_FAILED, and the factory would then report a cause
-			 * that did not produce the fallback.
-			 */
-			/*
-			 * THE DIAGNOSTIC LIVES IN ONE PLACE, AND THAT PLACE IS REACHABLE FROM A TEST.
-			 *
-			 * It was written inline here until a review observed that no test could reach
-			 * it on a host with no binder driver -- the preflight declines before this
-			 * stage is ever entered -- so the wording went unverified exactly where the
-			 * previous two defects had been. It is now a static, called from here and
-			 * nowhere else in production, and driven directly by the contract suite.
-			 *
-			 * Being STATIC is the load-bearing part, not an implementation detail: with no
-			 * `this` it cannot reach availabilityReason, so the cause recorded above
-			 * survives the diagnostic by construction rather than by care. It also
-			 * swallows its own failure, so the function-level catch below -- which would
-			 * record REASON_QUERY_FAILED -- is unreachable from it.
+			 * The diagnostic lives in emitCompatibilityRejectionDiagnostic() rather than
+			 * inline here, because on a host with no binder driver the preflight declines
+			 * before this stage is entered, so wording written inline could not be
+			 * reached by a test at all. That function is static, and being static is the
+			 * load-bearing part rather than an implementation detail: with no `this` it
+			 * cannot reach availabilityReason, so the cause recorded above survives the
+			 * diagnostic by construction. It also swallows its own failure, so the
+			 * function-level catch below - which would record REASON_QUERY_FAILED and so
+			 * relabel an established compatibility rejection - is unreachable from it.
 			 */
 			emitCompatibilityRejectionDiagnostic(service, halServiceName);
 
@@ -3106,24 +3457,14 @@ bool DriverAidlImpl::isServiceAvailable(void)
 }
 
 /**
- * @brief Reports WHY the last isServiceAvailable() declined, without asking again
+ * @copydoc CCEC::DriverAidlImpl::unavailabilityReason
  *
- * A pure read of the reason isServiceAvailable() recorded when it decided. The header
- * carries the reasoning for why the decision is preserved rather than reconstructed;
- * the short form is that re-running the bounded preflight to rebuild the answer pays
- * its context-manager timeout a second time and can return a different verdict than
- * the one that actually caused the fallback.
+ * A pure read of the pointer isServiceAvailable() set. The body is one statement for the
+ * reason the declaration gives: rebuilding the answer would re-run the bounded preflight,
+ * and the record is what makes the reported condition the one that actually caused the
+ * fallback.
  *
- * @return const char* - The reason phrase, or NULL when there is none to report.
- * @retval NULL     - isServiceAvailable() has not run, or it returned true.
- * @retval non-NULL - A static-storage-duration phrase naming the platform condition.
- *
- * @pre None.
- * @post Nothing changed.
- * @warning Never throws and never touches binder.
- *
- * @see isServiceAvailable()
- * @see Driver::getInstance()
+ * @see DriverAidlImpl::isServiceAvailable()
  */
 const char *DriverAidlImpl::unavailabilityReason(void) const
 {

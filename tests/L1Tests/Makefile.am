@@ -55,7 +55,7 @@ AUTOMAKE_OPTIONS = subdir-objects
 # measuring the staged libbinder - -DBINDER_IPC_32BIT, or nothing for a 64-bit ABI.
 # The test tier needs it for exactly the reason the library does, and needs it to be
 # the SAME value: test_main.cpp reaches the service manager, the fake service source
-# derives from the generated Bn* bases, and ccec/ccec/test_DriverAidl.cpp includes
+# derives from the generated Bn* bases, and ccec/test_DriverAidl.cpp includes
 # ccec/src/DriverAidlImpl.hpp - so several translation units here see Binder headers
 # whose declarations of binder_size_t, binder_uintptr_t and
 # BINDER_CURRENT_PROTOCOL_VERSION follow that macro.  Compiling the suite with one
@@ -74,14 +74,17 @@ AM_CPPFLAGS = -I$(top_srcdir)/ccec/include \
 # C++17, not C++14: the generated AIDL headers include <optional> and declare
 # std::optional parameters, and halcompat.h opens a nested-namespace definition, so the
 # dialect is a requirement of the dependency rather than a preference.  It is spelled
-# explicitly here for the same reason configure.ac probes for it explicitly - a host whose
+# explicitly here for the same reason configure.ac settles it explicitly - a host whose
 # compiler already defaults to C++17 would otherwise hide the requirement from a SOC
-# toolchain that does not.  @AIDL_CXXFLAGS@ follows it as configure's verified
-# reinforcement: configure probes this one spelling and no other, and fails outright if the
-# compiler will not take it, so the substitution is never empty and is always the same
-# -std=c++17 spelled literally above.  Belt-and-braces rather than duplication - the literal
-# pins the dialect even if the substitution were ever lost, and the substituted copy is
-# configure's proof that this compiler accepts it.
+# toolchain that does not.  @AIDL_CXXFLAGS@ follows it and carries the dialect flag
+# configure accepted, which is C++17 or newer and need not be this spelling: a -std=
+# supplied in CXXFLAGS is probed as given and adopted verbatim, and configuration stops
+# instead when it is older than C++17, because Automake places CXXFLAGS after AM_CXXFLAGS
+# and the package cannot override it; with none supplied, -std=c++17, -std=gnu++17 and
+# -std=c++1z are tried in that order and the first that compiles is adopted.  Both flags
+# reach the compile command and the substitution lands last, so the substitution is the one
+# that governs - the literal states what this suite requires, and the substituted flag is
+# the spelling the compiler in use was measured to accept.
 AM_CXXFLAGS = -Wall -std=c++17 -g @AIDL_CXXFLAGS@
 
 # Define test programs

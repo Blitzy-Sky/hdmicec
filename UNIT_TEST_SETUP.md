@@ -286,12 +286,11 @@ pass `--no-per-file-gate`, do not exempt a file and do not add an exclusion glob
 matrix on the binder-capable job before treating a figure from a partial matrix as this suite's
 coverage.
 
-`ccec/src/Driver.cpp` was named alongside it at **78.6% (11/14)** until recently and is not any
-more: it measures **80.0% (12/15)** and passes.  The two lines it lost were a second call to the
-Binder preflight, made only so the selection helper could decide what to report; the helper now
-reads that reason back from the single query it already made, so on a driverless host there is no
-longer an unexecutable pair to depress the figure.  Read the 80.0% as *exactly* on the bar and not
-as headroom — one further line unreachable without a driver puts the file back below it.
+`ccec/src/Driver.cpp` is not named alongside it: that file measures **80.0% (12/15)** and passes.
+It carries no unexecutable pair to depress the figure, because the selection helper reads the
+reason for a fallback back from the single availability query it already made rather than calling
+the Binder preflight a second time to decide what to report.  Read the 80.0% as *exactly* on the
+bar and not as headroom — one further line unreachable without a driver puts the file below it.
 
 Four prerequisites precede `configure`, and each is fatal rather than degrading if skipped:
 
@@ -503,16 +502,19 @@ rather than for a seed; and one green seed is not a proof of order independence.
 **Test Order Dependence (diagnostic)** section of `tests/L1Tests/README.md`, which is the
 authoritative shuffle-order record and carries the crash rate, the assertion outcome per seed, the
 two production defects behind the crashes, and the toolchain and suite size the sweeps were
-measured on.  An earlier revision of this guide named seeds that "fail deterministically" and one
-it said crashed on every repeat; later sweeps on that same tree superseded those figures -- the
-seed that had been named for the crash no longer reproduces it at all -- so they are removed here
-rather than corrected in place, because a second copy of a measurement is a second thing to go
-stale.  Read that section before quoting any seed.
+measured on.  Read that section before quoting any seed, and quote it rather than keeping a figure
+here: a per-seed result is a snapshot of one tree, one toolchain and one test inventory, so a
+second copy of it is a second thing to go stale.
 
 The fixtures that own the shared library's lifecycle wait for the bus reader to publish RUNNING
-before terminating it, so that window is not opened.  Use the flag to check that a test you just
-wrote is self-sufficient, and re-derive any figure on your own build after adding tests: the
-failing set is specific to the seed *and* to the test inventory, and the inventory has grown.
+before terminating it, so that window is not opened.  The sanctioned use of the flag is narrow:
+pin the order with `--gtest_random_seed=<seed>` to check that a test you just wrote is
+self-sufficient, and re-derive any figure on your own build.  Read a seed that reproduces a
+failure for which of the two problems it reproduced -- an **assertion** failure under a pinned seed
+is a real order dependence and worth reporting with that seed attached, because it repeats for the
+same seed on the same tree and inventory, while a **crash** under a pinned seed says only that the
+crash fired on that run, since it is tied to no seed and a rerun of the same seed can come back
+green.
 
 ### Back-End Selection: the Invocation Matrix
 

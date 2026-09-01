@@ -286,10 +286,10 @@ dnl
 dnl The probe, not a list of dialect names, decides: it compiles the two
 dnl constructs the real dependencies use, so c++17, gnu++17, c++20, c++2a, c++23
 dnl and anything newer are accepted on evidence, and c++14 or gnu++14 is
-dnl rejected on evidence.  DriverAidlImpl.hpp carries the matching
-dnl "#if __cplusplus < 201703L" guard, so an override applied after configure -
-dnl at make time, where configure cannot see it - fails immediately with a named
-dnl diagnostic instead of failing deep inside the generated AIDL headers.
+dnl rejected on evidence.  What configure cannot see is an override applied
+dnl afterwards at make time; nothing in the tree screens for that, so such an
+dnl override surfaces as a compile error inside the generated AIDL headers
+dnl rather than as a named diagnostic.
 m4_define([HDMICEC_CXX17_TESTPROGRAM],
     [AC_LANG_PROGRAM([[
 #include <optional>
