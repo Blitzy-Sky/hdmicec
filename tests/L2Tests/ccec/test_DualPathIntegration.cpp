@@ -2660,9 +2660,10 @@ TEST_F(DualPathLegacyFlowTest, OutboundTransmitFailureFromTheLegacyHalSurfacesAs
  *
  * Establishes the middleware leg of flow B on the AIDL back-end over a real proxy and a real driver
  * transaction.  Requires invocation E, the resolved back-end to be DriverAidlImpl, and the fake
- * service host to be serving with its control channel open; the evidence is the encoder's own bytes,
- * the fake's sendMessage() invocation count read over the pipe channel before and after, and the
- * fake's captured frame read the same way.
+ * service host to be serving with its control channel open; the evidence is the wire image this case
+ * reconstructs from the encoder's own frame and the connection's own source address, the fake's
+ * sendMessage() invocation count read over the pipe channel before and after, and the fake's
+ * captured frame read the same way.
  *
  * Two bytes on the wire, { 0x40, 0x04 }: initiator 4 (this Connection's source, Playback Device 1)
  * in the high nibble, destination 0 (TV) in the low nibble, opcode 0x04 (<Image View On>).  A
@@ -2684,10 +2685,16 @@ TEST_F(DualPathLegacyFlowTest, OutboundTransmitFailureFromTheLegacyHalSurfacesAs
  *       because a retry that transmitted the frame twice is a defect on a bus where a duplicate
  *       <Image View On> is a second command to a real device.
  *
- *   (3) It arrived intact.  The fake's captured frame, read the same way, must equal the exact
- *       hexadecimal rendering of the bytes this case encoded.  It is the assertion a corrupt or
- *       truncated marshalling fails, and the comparison is against what the encoder produced, so it
- *       also catches the middleware writing the right length with the wrong content.
+ *   (3) It arrived intact.  The fake's captured frame, read the same way, must equal the wire image
+ *       CEC defines for this message - the header this Connection contributes followed by the bytes
+ *       this case encoded.  It is the assertion a corrupt or truncated marshalling fails, and the
+ *       comparison is against a value rebuilt with the same two calls sendTo makes rather than a
+ *       literal, so it also catches the middleware writing the right length with the wrong content.
+ *       Pinned alongside it, and separately, is the payload the encoder produced - the opcode
+ *       without the header, because Connection::sendTo prepends the header to its own copy and
+ *       leaves the caller's frame untouched, so the encoded frame alone is one byte short of the
+ *       wire image - so the case cannot agree with a corrupt send by having encoded the message
+ *       wrongly itself.
  *
  * What it deliberately does not establish: anything about the inbound direction.  Nothing here
  * causes the service to call back, and the two inbound cases below own that.
@@ -2710,18 +2717,48 @@ TEST_F(DualPathAidlFlowTest, OutboundImageViewOnCrossesRealBinderIpcToTheFakeSer
            "service; the frame did not marshal, the transaction did not cross the binder driver, "
            "or the SendMessageStatus reply was translated as a failure";
 
-    // The bytes the wire image is compared against are the encoder's, taken from the same frame the
-    // send used, so this case cannot agree with a corrupt send by having encoded it wrongly itself.
-    const uint8_t* encodedBytes = nullptr;
-    size_t encodedLength = 0;
-    frame.getBuffer(&encodedBytes, &encodedLength);
-    ASSERT_EQ(2u, encodedLength)
+    // Two separate things are pinned here, and they must not be conflated.  MessageEncoder writes
+    // the PAYLOAD - the opcode and its operands - into the caller's frame.  The header is prepended
+    // by Connection::sendTo, which builds its own local CECFrame, serializes the header into it and
+    // appends the caller's frame (ccec/src/Connection.cpp:141-157); the caller's frame is taken by
+    // const reference and is never modified.  So the frame this case still holds after the send is
+    // the payload alone, and the wire image the service received is one byte longer.  Asserting the
+    // wire length against the caller's frame would be asserting that sendTo mutates its const
+    // argument, which it must not and does not.
+    //
+    // (a) The payload the encoder produced, so this case cannot agree with a corrupt send by having
+    //     encoded the message wrongly itself - and, because it is read AFTER the send, it is also
+    //     the assertion that sendTo left the caller's frame alone.
+    const uint8_t* payloadBytes = nullptr;
+    size_t payloadLength = 0;
+    frame.getBuffer(&payloadBytes, &payloadLength);
+    ASSERT_EQ(1u, payloadLength)
+        << "an <Image View On> payload is a bare opcode - one byte, with no operands - so the "
+           "encoder produced the wrong frame and the wire comparison below would be meaningless";
+    EXPECT_EQ("04",
+              toLowercaseHex(reinterpret_cast<const unsigned char*>(payloadBytes), payloadLength))
+        << "the encoded payload is not the 0x04 <Image View On> opcode this case is written around";
+
+    // (b) The wire image the service must have received.  It is RECONSTRUCTED rather than read back
+    //     off `frame`, with the same two calls sendTo makes, off the same encoded frame and the
+    //     connection's own source address - so the expectation stays derived rather than hardcoded,
+    //     and this case can neither agree with a corrupt send by having encoded the frame wrongly
+    //     itself nor agree with a wrong header by restating one.  The literal CEC defines is then
+    //     cross-checked against the reconstruction, which is how the legacy arm of this flow asserts.
+    CECFrame wireImage;
+    Header(scoped.connection().getSource(), LogicalAddress(LogicalAddress::TV)).serialize(wireImage);
+    wireImage.append(frame);
+
+    const uint8_t* wireBytes = nullptr;
+    size_t wireLength = 0;
+    wireImage.getBuffer(&wireBytes, &wireLength);
+    ASSERT_EQ(2u, wireLength)
         << "an <Image View On> is a header and an opcode - two bytes - so the encoder produced the "
            "wrong frame and the comparison below would be against the wrong expectation";
     const std::string expectedHex =
-        toLowercaseHex(reinterpret_cast<const unsigned char*>(encodedBytes), encodedLength);
+        toLowercaseHex(reinterpret_cast<const unsigned char*>(wireBytes), wireLength);
     EXPECT_EQ("4004", expectedHex)
-        << "the encoded frame is not the { 0x40, 0x04 } this case is written around";
+        << "the reconstructed wire image is not the { 0x40, 0x04 } this case is written around";
 
     long sentAfter = -1;
     ASSERT_TRUE(askHostForSentCount(sentAfter, detail)) << detail;
@@ -2768,8 +2805,11 @@ TEST_F(DualPathAidlFlowTest, OutboundImageViewOnCrossesRealBinderIpcToTheFakeSer
  * returns normally against the host's default reply.
  *
  * The operands are asserted at the service, not merely at the encoder.  The fake's captured frame is
- * read back over the pipe channel and compared byte for byte against what the encoder produced, so
- * an operand dropped, reordered or zeroed inside the parcel fails here.  Asserting the count as well
+ * read back over the pipe channel and compared byte for byte against the wire image CEC defines for
+ * this message, rebuilt from what the encoder produced, so an operand dropped, reordered or zeroed
+ * inside the parcel fails here; the encoder's own payload is pinned separately, because the header is
+ * prepended by Connection::sendTo to a local copy rather than written into the caller's frame.
+ * Asserting the count as well
  * - exactly one further sendMessage() - is what separates "the bytes were wrong" from "the transmit
  * never arrived", which are different defects and must not share one failure message.
  *
@@ -2796,18 +2836,45 @@ TEST_F(DualPathAidlFlowTest, OutboundActiveSourceWithOperandsCrossesRealBinderIp
            "refused by the length guard, or the broadcast arm of the status translation raised "
            "where it should not";
 
-    const uint8_t* encodedBytes = nullptr;
-    size_t encodedLength = 0;
-    frame.getBuffer(&encodedBytes, &encodedLength);
-    ASSERT_EQ(4u, encodedLength)
+    // As in the previous case, the payload and the wire image are pinned separately: the encoder
+    // writes the opcode and its operands into the caller's frame, and Connection::sendTo prepends
+    // the header to a local copy (ccec/src/Connection.cpp:141-157) without touching the caller's.
+    //
+    // (a) The payload, which for this message carries the operands the case exists to follow
+    //     through the parcel.
+    const uint8_t* payloadBytes = nullptr;
+    size_t payloadLength = 0;
+    frame.getBuffer(&payloadBytes, &payloadLength);
+    ASSERT_EQ(3u, payloadLength)
+        << "an <Active Source> payload is an opcode and a two-byte physical address - three bytes - "
+           "so the encoder produced the wrong frame and the wire comparison below would be "
+           "meaningless";
+    EXPECT_EQ("821000",
+              toLowercaseHex(reinterpret_cast<const unsigned char*>(payloadBytes), payloadLength))
+        << "the encoded payload is not the { 0x82, 0x10, 0x00 } this case is written around - "
+           "physical address 1.0.0.0 packs to 0x10 0x00";
+
+    // (b) The wire image: the header with the broadcast destination nibble, then that payload.
+    //     Reconstructed the same way, and for the same reason, as the previous case: sendTo leaves
+    //     the caller's frame alone, so the header byte has to be prepended here to obtain what
+    //     actually went on the wire.  See the comment there for the full argument.
+    CECFrame wireImage;
+    Header(scoped.connection().getSource(), LogicalAddress(LogicalAddress::BROADCAST))
+        .serialize(wireImage);
+    wireImage.append(frame);
+
+    const uint8_t* wireBytes = nullptr;
+    size_t wireLength = 0;
+    wireImage.getBuffer(&wireBytes, &wireLength);
+    ASSERT_EQ(4u, wireLength)
         << "an <Active Source> is a header, an opcode and a two-byte physical address, so the "
            "encoder produced the wrong frame and the comparison below would be against the wrong "
            "expectation";
     const std::string expectedHex =
-        toLowercaseHex(reinterpret_cast<const unsigned char*>(encodedBytes), encodedLength);
+        toLowercaseHex(reinterpret_cast<const unsigned char*>(wireBytes), wireLength);
     EXPECT_EQ("4f821000", expectedHex)
-        << "the encoded frame is not the { 0x4F, 0x82, 0x10, 0x00 } this case is written around - "
-           "physical address 1.0.0.0 packs to 0x10 0x00";
+        << "the reconstructed wire image is not the { 0x4F, 0x82, 0x10, 0x00 } this case is written "
+           "around - physical address 1.0.0.0 packs to 0x10 0x00";
 
     long sentAfter = -1;
     ASSERT_TRUE(askHostForSentCount(sentAfter, detail)) << detail;

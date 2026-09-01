@@ -439,12 +439,15 @@
 #
 #   THE LINE GATE READS A DERIVATIVE with the dependency headers removed, and only them.
 #   Its 80% threshold is an aggregate, and an aggregate means nothing without a stable
-#   denominator.  MEASURED: the capture holds 145 source-file records; the seven globs
-#   reduce that to 42; and of those, 31 are this submodule's own and ELEVEN are dependency
-#   headers -- six from the binder SDK, four generated AIDL stubs, and halcompat.h.  Left
-#   in, they move the denominator away from the one the baseline was measured over and,
-#   because per-file gating is on, start failing runs over how well this suite covers a
-#   third-party header it neither owns nor tests.
+#   denominator.  MEASURED -- one full `--build --run` on this host, gcc/gcov 13, with
+#   invocations A and D executed and B, C and E deferred for want of a binder driver: the
+#   RECORD LINEAGE IS 146 -> 43 -> 32.  The capture holds 146 source-file records; the seven
+#   globs reduce that to 43; and of those 43, ELEVEN are dependency headers -- six from the
+#   binder SDK and five generated AIDL stubs -- leaving the 32 the line gate judges: 31 inside
+#   this submodule plus halcompat.h, which is retained deliberately (see below).  Left in, the
+#   eleven move the denominator away from the one the baseline was measured over and, because
+#   per-file gating is on, start failing runs over how well this suite covers a third-party
+#   header it neither owns nor tests.
 #
 #   halcompat.h IS RETAINED in the derivative: it is a consumed HALIF header called from
 #   the selection path, not toolchain code.  ccec/src/Driver.cpp and
@@ -795,10 +798,13 @@ readonly LCOV_EXCLUDES=(
 # WHY A SECOND LIST IS NEEDED AT ALL.  libRCEC carries the AIDL back-end, so the compiled
 # objects reference header-only code from outside this submodule: halcompat.h's templates, the
 # generated Bp*/Bn* inline definitions, and binder SDK headers.  gcov attributes records to
-# those paths, and NONE of the seven globs describes them.  MEASURED on this host: the capture
-# holds 145 source-file records, the seven globs reduce that to 42, and of those 42 exactly 31
-# are inside this submodule while ELEVEN are dependency headers -- six binder SDK headers, four
-# generated AIDL stub headers, and halcompat.h.  Left in, they change the file set the per-file
+# those paths, and NONE of the seven globs describes them.  MEASURED on this host, from one full
+# `--build --run` with invocations A and D executed and B, C and E deferred: the capture holds
+# 146 source-file records, the seven globs reduce that to 43, and ELEVEN of those 43 are
+# dependency headers -- six binder SDK headers and five generated AIDL stub headers -- which
+# this second list removes.  That leaves 32 records for the line gate: 31 inside this submodule
+# and halcompat.h, retained for the reason below.  So the lineage is 146 raw -> 43 after the
+# seven globs -> 32 in the trace the line gate reads.  Left in, they change the file set the per-file
 # gate judges and the denominator the aggregate is computed over, so the figure would
 # not be comparable with the recorded baseline and the per-file gate would start voting on
 # whether a binder SDK header is well tested by this suite.
@@ -843,7 +849,7 @@ readonly DEPENDENCY_EXCLUDES=(
 # WHY halcompat.h IS ON THIS LIST AND NOT MERELY MENTIONED IN A COMMENT.  AAP 0.6.5 requires it
 # retained in the filtered copy: it is CONSUMED HALIF SOURCE, not third-party toolchain code.
 # getService<I>() and isCompatible<I>() are called from the selection path, and SEVENTEEN of the
-# 90 required branch arms in BRANCH_MANIFEST below live inside isCompatible<>() -- both arms of
+# 89 required branch arms in BRANCH_MANIFEST below live inside isCompatible<>() -- both arms of
 # the null gate, of the empty-hash and "-1" gates, of the "notfrozen" gate, and of each of the
 # era, major and ordering comparisons.  The branch gate reads the UNFILTERED capture, so those
 # seventeen are not what a
@@ -1740,10 +1746,11 @@ assert_output_dir_still_safe() { # $1=artifact path about to be written (optiona
 }
 
 # ------------------------------------------------------------------------------------
-# Cleanup state and the single trap that services it.  Both actions are idempotent, so
+# Cleanup state and the single trap that services it.  All three actions are idempotent, so
 # running the trap on a normal exit and again on a signal is harmless.
-#   LCOV_HOME   private, empty, mode-0700 HOME handed to every lcov and genhtml call
-#   STAGE_DIR   private staging directory for the HTML report
+#   LCOV_HOME         private, empty, mode-0700 HOME handed to every lcov and genhtml call
+#   STAGE_DIR         private staging directory for the HTML report
+#   LISTING_GCOV_DIR  the sink the --gtest_list_tests launches' counters are diverted into
 # Each carries the device:inode it had when this script created it, so the recursive remove
 # below can prove it is deleting the directory it made -- see remove_minted_dir.
 # ------------------------------------------------------------------------------------
@@ -1751,6 +1758,9 @@ LCOV_HOME=''
 LCOV_HOME_IDENTITY=''
 STAGE_DIR=''
 STAGE_DIR_IDENTITY=''
+LISTING_GCOV_DIR=''
+LISTING_GCOV_DIR_IDENTITY=''
+LISTING_GCOV_PREFIX_STRIP=''
 
 # ------------------------------------------------------------------------------------
 # `rm -rf` A DIRECTORY THIS SCRIPT MINTED, HAVING RE-PROVED IT IS THE SAME DIRECTORY.
@@ -1817,6 +1827,20 @@ cleanup_stage_dir() {
     STAGE_DIR=''
     STAGE_DIR_IDENTITY=''
     remove_minted_dir "$stage" "$identity" "HTML staging"
+    return 0
+}
+
+# The diverted listing counters are DISCARDED, and that is the whole point of collecting them
+# somewhere else: they describe a process that listed test names and executed no test, so there
+# is nothing in them any figure in this run may be computed from.  Removed on every exit path
+# for the same reason the staging directory is -- it is this run's private directory and
+# nobody's evidence.
+cleanup_listing_gcov_dir() {
+    [ -n "$LISTING_GCOV_DIR" ] || return 0
+    local sink="$LISTING_GCOV_DIR" identity="$LISTING_GCOV_DIR_IDENTITY"
+    LISTING_GCOV_DIR=''
+    LISTING_GCOV_DIR_IDENTITY=''
+    remove_minted_dir "$sink" "$identity" "diverted listing-counter"
     return 0
 }
 
@@ -2586,6 +2610,7 @@ on_exit() {
     restore_regenerated_makefiles_from_snapshot || rc=1
     cleanup_makefile_snapshot
     cleanup_stage_dir
+    cleanup_listing_gcov_dir
     cleanup_lcov_home
     # THE MARKER IS REWRITTEN HERE AND NOWHERE ELSE, so that one line of code covers every exit
     # path there is: success, a die anywhere above, a failed gate, and a cancellation through
@@ -2732,6 +2757,124 @@ make_private_lcov_home() {
     [ -n "$LCOV_HOME_IDENTITY" ] || die "could not read the identity (device:inode) of the
        private lcov HOME: $LCOV_HOME"
     log "lcov runs with a private empty HOME: $LCOV_HOME (your \$HOME is not read or written)"
+}
+
+# ------------------------------------------------------------------------------------
+# WHERE THE --gtest_list_tests LAUNCHES' COUNTERS GO, and why they must go somewhere.
+#
+# THE DEFECT THIS EXISTS TO CLOSE, measured on this host before it did.  do_run zeroes the
+# counters, proves the tree holds no .gcda, and then runs the matrix -- but the first thing
+# each invocation does is ASK THE BINARY WHAT IT REGISTERS, three or four times, through
+# registered_test_count's `--gtest_list_tests` launch.  A gcov-instrumented process writes its
+# .gcda on exit whatever it did, so those listings deposited counters into the object tree
+# AFTER the zeroing and BEFORE the first measured case: 32 .gcda files, 347 hit lines and 68
+# hit arcs, all of them describing static initialisation and the listing path rather than a
+# test.  Every figure the capture then reported included them.  Production hit lines happened
+# to be zero, which made the contamination easy to overlook and did not make it harmless: the
+# counters accumulate, so any line the listing path ever reaches is credited to the matrix.
+#
+# WHY DIVERSION RATHER THAN REORDERING.  Moving the listings ahead of the zeroing was the other
+# candidate and it is the weaker fix: the counts are read PER INVOCATION with that invocation's
+# own filters, deliberately (see registered_test_count), so hoisting them out of the loop would
+# either re-order the evidence away from the invocation it belongs to or leave the listings
+# inside the loop and contaminating from the second invocation onwards.  GCOV_PREFIX is the
+# mechanism libgcov itself provides for exactly this: the process still writes its counters, it
+# writes them somewhere this run then discards, and the object tree is untouched.
+#
+# GCOV_PREFIX_STRIP IS NOT OPTIONAL WITH IT.  GCOV_PREFIX alone PREPENDS to the object file's
+# full absolute path, so the sink would mirror the whole path from '/' downwards -- on this host
+# a seven-component tree per .gcda, for files nobody will read.  Stripping exactly the depth of
+# the submodule root reproduces the tree from ccec/... downwards and nothing above it.  The
+# depth is COMPUTED from the root this run resolved rather than written down, because a clone at
+# a different path has a different depth and a wrong strip count is silent: it just makes the
+# sink deeper.
+#
+# ONE SINK PER RUN, CREATED IN THE MAIN SHELL.  registered_test_count is always read through a
+# command substitution, so a global it assigned would die with that subshell and the directory
+# would be re-minted and leaked on every call.  do_run therefore creates it once, before the
+# matrix, and this function is what it calls; the launch site only READS the two values.
+# ------------------------------------------------------------------------------------
+make_listing_counter_sink() {
+    [ -z "$LISTING_GCOV_DIR" ] || return 0
+
+    local parent depth
+    select_safe_temp_parent
+    parent="$RUNNER_TEMP_PARENT"
+    assert_safe_ancestry "$parent/hdmicec-listing-gcda" minted
+
+    LISTING_GCOV_DIR="$("$MKTEMP_BIN" -d "$parent/hdmicec-listing-gcda.XXXXXXXX")" \
+        || die "could not create the directory this run diverts the --gtest_list_tests
+       launches' gcov counters into, under $parent.
+       Refusing to run the matrix without it: those launches would then write their .gcda
+       into the object tree between the zeroing and the first measured case, and every
+       coverage figure this run reported would include execution no test performed."
+    chmod 700 -- "$LISTING_GCOV_DIR" \
+        || die "could not restrict the diverted listing-counter directory to mode 0700: $LISTING_GCOV_DIR"
+    assert_private_dir "$LISTING_GCOV_DIR"
+
+    # Recorded so cleanup_listing_gcov_dir's recursive remove can prove it is deleting this
+    # run's own directory rather than whatever the name points at by then.
+    LISTING_GCOV_DIR_IDENTITY="$(path_identity "$LISTING_GCOV_DIR")"
+    [ -n "$LISTING_GCOV_DIR_IDENTITY" ] || die "could not read the identity (device:inode) of the
+       diverted listing-counter directory: $LISTING_GCOV_DIR"
+
+    # The submodule root's own depth, so the mirrored tree starts at the first path component
+    # BELOW it.  ${HDMICEC_ROOT#/} drops the leading slash, which would otherwise be counted as
+    # an empty first field.
+    depth="$(printf '%s\n' "${HDMICEC_ROOT#/}" | "$AWK_BIN" -F/ '{ print NF; exit }')"
+    case "$depth" in
+        ''|*[!0-9]*) die "could not compute the GCOV_PREFIX_STRIP depth of $HDMICEC_ROOT
+       (read back as '${depth:-<empty>}').  Refusing to divert the listing counters with a
+       strip count this script cannot state, because a wrong one is silent." ;;
+    esac
+    LISTING_GCOV_PREFIX_STRIP="$depth"
+
+    log "the --gtest_list_tests launches write their counters to $LISTING_GCOV_DIR"
+    log "  (GCOV_PREFIX with GCOV_PREFIX_STRIP=$LISTING_GCOV_PREFIX_STRIP; discarded on exit, so"
+    log "   no listing-only execution reaches the tree the capture reads)"
+}
+
+# ------------------------------------------------------------------------------------
+# THE INVARIANT THE DIVERSION ABOVE EXISTS TO ESTABLISH, ASSERTED RATHER THAN TRUSTED.
+#
+# The diversion fixes the launches that exist today.  This is what makes the defect unable to
+# come back: it is checked immediately before the FIRST measured suite launch, so ANY future
+# launch of an instrumented binary added between do_run's zeroing and that point -- another
+# listing, a version probe, a smoke check -- is caught by the counters it leaves behind rather
+# than by somebody re-reading this file.
+#
+# ONCE, not before every invocation, and that is the correct scope rather than a saving.  From
+# the second invocation onwards the tree legitimately holds the counters of every invocation
+# before it: accumulation across the matrix into a single capture is the whole design (see ONE
+# BUILD, ONE MACHINE), so a zero test there would fail on the very behaviour it is protecting.
+#
+# It reuses gcda_count rather than counting again, so there is one definition of "how many
+# counter files are under this tree" and no second walk to keep in step with it.
+# ------------------------------------------------------------------------------------
+FIRST_MEASURED_LAUNCH_SEEN=0
+assert_no_counters_before_first_case() { # $1=invocation label, for the message
+    local label="$1" present offenders
+    [ "$FIRST_MEASURED_LAUNCH_SEEN" -eq 0 ] || return 0
+    FIRST_MEASURED_LAUNCH_SEEN=1
+
+    present="$(gcda_count)"
+    [ "$present" -eq 0 ] || {
+        offenders="$( { "$FIND_BIN" "$HDMICEC_ROOT" -name '*.gcda' -type f 2>/dev/null || true; } \
+                      | head -n 10 | sed 's/^/         /')"
+        die "$present .gcda counter file(s) exist under
+       $HDMICEC_ROOT
+       BEFORE invocation $label -- the first measured case -- has run, and after do_run
+       proved the tree held none.  Something between the zeroing and this launch executed
+       instrumented code, so the counters this run is about to accumulate into are not
+       exclusively the matrix's and no figure derived from them could be attributed to it.
+       The known source of this was registered_test_count's --gtest_list_tests launches,
+       which are diverted with GCOV_PREFIX (see make_listing_counter_sink); a count here
+       means a NEW launch has appeared that is not diverted.  Give it the same diversion.
+       First offenders:
+$offenders"
+    }
+    log "counters verified still zero immediately before invocation $label's launch: the"
+    log "  matrix is the only thing that will have written to them"
 }
 
 # Every lcov and genhtml invocation in this script goes through these two wrappers, and
@@ -2890,13 +3033,16 @@ selftest() {
     log "SELF-TEST: no suite is run, no counters are zeroed, nothing is captured and no"
     log "  artifact directory is created."
     rule
-    log "1/3 re-parsing this script"
+    log "1/4 re-parsing this script"
     bash -n -- "$SCRIPT_PATH" || die "this script does not parse: $SCRIPT_PATH"
     log "    parses cleanly"
-    log "2/3 auditing every internal function and variable reference"
+    log "2/4 auditing every internal function and variable reference"
     reference_audit
     log "    every reference resolves"
-    log "3/3 measurement tooling pre-flight"
+    log "3/4 threshold range guard, at both ends of the shell's integer range"
+    threshold_selftest
+    log "    every boundary value is classified correctly"
+    log "4/4 measurement tooling pre-flight"
     require_tools
     log "    tooling present and usable"
     rule
@@ -3159,6 +3305,77 @@ ${matrix_summary}
 USAGE
 }
 
+# Significant digits before the decimal point: padding zeros removed, and an absent integer
+# part (".5") read as 0.  Pure string work -- no arithmetic -- so nothing here can overflow
+# whatever spelling the caller was given.
+threshold_normalized_int() {
+    local int="${1%%.*}"
+    : "${int:=0}"
+    while [ "${#int}" -gt 1 ] && [ "${int#0}" != "$int" ]; do
+        int="${int#0}"
+    done
+    printf '%s\n' "$int"
+}
+
+# Decide whether a threshold spelling lies OUTSIDE 0..100.  Returns 0 (true) when it does.  The
+# caller has already established the spelling is digits or digits.digits, so this function only
+# has to rule on magnitude.
+#
+# WHY THIS IS LEXICAL AND NOT ARITHMETIC -- a fix, not a matter of style.  `[ "$n" -gt 100 ]`
+# does not return false for a value the shell cannot hold: it returns status 2 and writes
+# "integer expression expected" to stderr.  Status 2 is not 0, so an `||` list whose every arm
+# does that evaluates FALSE, and a `die` guarded by one is skipped entirely.  A threshold of 2^63
+# or larger therefore used to pass this validation untouched and go on to take the build lock,
+# probe the measurement tooling, mint an artifact directory and reach lcov before failing for a
+# reason that had nothing to do with the argument -- and because the not-80 advisory below was
+# lost the same way, the run also presented itself as an ordinary acceptance attempt at the 80%
+# bar.  Refusing a bad bar BEFORE any of that happens is the whole reason this validation lives
+# in parse_args, so the guard must not have a magnitude of its own to overflow.
+#
+# A value in 0..100 has at most three significant digits, and "100" is the only three-digit
+# member, so the entire decision is a length test and two string compares.
+threshold_out_of_range() {
+    local int frac=""
+    int="$(threshold_normalized_int "$1")"
+    case "$1" in
+        *.*) frac="${1#*.}" ;;
+    esac
+    if [ "${#int}" -gt 3 ]; then
+        return 0                       # four or more significant digits: 1000 and up
+    fi
+    if [ "${#int}" -eq 3 ] && [ "$int" != "100" ]; then
+        return 0                       # 101..999
+    fi
+    if [ "$int" = "100" ] && [ -n "${frac//0/}" ]; then
+        return 0                       # 100.5 is above the bar; 100.0 and 100.00 are not
+    fi
+    return 1
+}
+
+# Hold the range guard to both ends of the shell's integer range, so a future rewrite of it
+# cannot quietly reintroduce the status-2 hole described above.  No suite is run, no counter is
+# touched and nothing is written: this is a decision function fed a table of values.
+threshold_selftest() {
+    local v failures=0
+    for v in 0 00 8 80 80.0 80.00 100 100.0 100.00 0100 99.999 0.5; do
+        if threshold_out_of_range "$v"; then
+            warn "threshold self-test: '$v' is inside 0..100 but the guard refuses it."
+            failures=$((failures + 1))
+        fi
+    done
+    for v in 101 100.5 100.01 999 1000 4294967296 9223372036854775807 \
+             9223372036854775808 18446744073709551616 99999999999999999999999999; do
+        if ! threshold_out_of_range "$v"; then
+            warn "threshold self-test: '$v' is outside 0..100 but the guard accepts it."
+            failures=$((failures + 1))
+        fi
+    done
+    [ "$failures" -eq 0 ] || die "the threshold range guard misclassified $failures value(s).
+       Every value outside 0..100 must be refused in parse_args -- BEFORE the run lock, the
+       tooling pre-flight, the counter zeroing and the artifact directory -- so a bar that
+       cannot be met never acquires the power to disturb a tree or an existing measurement."
+}
+
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -3208,29 +3425,28 @@ parse_args() {
     # shell, and awk cannot be used here because this validation runs BEFORE require_tools()
     # -- deliberately, so that a bad threshold is refused before anything else happens -- so
     # an absent awk would surface as a threshold error, which would be a lie.
-    local min_int="${COVERAGE_MIN%%.*}"          # digits before the point, "" for ".5"
-    local min_frac=""
-    case "$COVERAGE_MIN" in
-        *.*) min_frac="${COVERAGE_MIN#*.}" ;;
-    esac
-    : "${min_int:=0}"
-    # A leading run of digits can be arbitrarily long ("00080"); strip it to a plain integer
-    # so the comparison below is on a value the shell can hold.
-    while [ "${#min_int}" -gt 1 ] && [ "${min_int#0}" != "$min_int" ]; do
-        min_int="${min_int#0}"
-    done
-    if [ "$min_int" -gt 100 ] || { [ "$min_int" -eq 100 ] && [ -n "${min_frac//0/}" ]; }; then
+    if threshold_out_of_range "$COVERAGE_MIN"; then
         die "threshold must be between 0 and 100 (got '$COVERAGE_MIN').  A bar above 100% can
        never be met, so the gate could only ever fail and would say nothing about the tests."
     fi
+    local min_int min_frac=""
+    min_int="$(threshold_normalized_int "$COVERAGE_MIN")"
+    case "$COVERAGE_MIN" in
+        *.*) min_frac="${COVERAGE_MIN#*.}" ;;
+    esac
     # 80 is this submodule's acceptance bar.  Any other value is a diagnostic, and saying so is
     # not enough on its own: a warning still lets the run print the same PASS line and return
     # the same 0 a real acceptance run returns, so on a warning alone `COVERAGE_MIN=0` buys an
     # acceptance success with no coverage requirement behind it.  The weakening is recorded as an
     # ADVISORY REASON, which forces the final verdict to ADVISORY and the exit status to
     # $EXIT_ADVISORY - a status a caller can branch on and cannot mistake for a pass.
-    # 80, 80.0 and 80.00 are the same bar; 80.5 is not.
-    if [ "$min_int" -ne 80 ] || [ -n "${min_frac//0/}" ]; then
+    # 80, 80.0 and 80.00 are the same bar; 80.5 is not.  The integer half is compared as a
+    # STRING for the same reason the range guard above is: `[ "$min_int" -ne 80 ]` returns
+    # status 2, not false, for a value the shell cannot hold, and a status-2 arm in this `||`
+    # list would silently suppress the advisory -- so an unreadably large bar would have
+    # presented itself as an ordinary acceptance run at 80%.  min_int is already normalised to
+    # significant digits, so "80" is its only spelling of eighty.
+    if [ "$min_int" != "80" ] || [ -n "${min_frac//0/}" ]; then
         warn "the line bar is ${COVERAGE_MIN}%, not the required 80%.  This is a DIAGNOSTIC run:"
         warn "    its verdict is NOT the acceptance verdict for this submodule."
         note_advisory "the line bar was set to ${COVERAGE_MIN}%, not the 80% Directive 4 requires,
@@ -3909,12 +4125,12 @@ readonly LEGACY_BOUND_SUITES='BusTest.*:ConnectionTest.*:IntegrationFlowTest.*:D
 # The contract suite's own fixtures, partitioned by which back-end each one requires.  Read
 # from the FIXTURE MANIFEST in tests/L1Tests/ccec/test_DriverAidl.cpp, which is the authority
 # for its own case set, and cross-checked against the built binary.
-#   back-end independent  Compatibility 23, Preflight 27, LocalInstance 25  = 75, under A, B and C
+#   back-end independent  Compatibility 23, Preflight 28, LocalInstance 25  = 76, under A, B and C
 #   legacy back-end only  Selection 4, LegacyArm 5                          =  9, under A only
-#   AIDL back-end only    Session 23, Transmit 12                           = 35, under B only
-# That is 119 contract cases, so run_L1Tests registers 602 in total: the 483 pre-existing cases
-# plus these 119.  Under the filters below that comes out as 567 selected and 35 excluded on
-# invocation A, 418 and 184 on B, and 383 and 219 on C -- figures the reconciliation in
+#   AIDL back-end only    Session 26, Transmit 12                           = 38, under B only
+# That is 123 contract cases, so run_L1Tests registers 606 in total: the 483 pre-existing cases
+# plus these 123.  Under the filters below that comes out as 568 selected and 38 excluded on
+# invocation A, 422 and 184 on B, and 384 and 222 on C -- figures the reconciliation in
 # run_one_invocation measures from the binary rather than reading from here.
 readonly CONTRACT_ANY_BACKEND_SUITES='DriverAidlCompatibilityTest.*:DriverAidlPreflightTest.*:DriverAidlLocalInstanceTest.*'
 readonly CONTRACT_LEGACY_ONLY_SUITES='DriverAidlSelectionTest.*:DriverAidlLegacyArmTest.*'
@@ -4392,8 +4608,32 @@ registered_test_count() { # $1=directory  $2=binary name  $3=rebuilt loader path
     local dir="$1" binary="$2" ld_path="$3" filter="${4:-}" listing
     local -a filter_args=()
     [ -z "$filter" ] || filter_args=("--gtest_filter=$filter")
+
+    # THIS LAUNCH'S COUNTERS ARE DIVERTED AND THE MEASURED LAUNCH'S ARE NOT.  The binary below
+    # is the instrumented one, so it writes a .gcda on exit having executed no test at all --
+    # and it runs AFTER do_run zeroed the counters, three or four times per invocation.
+    # GCOV_PREFIX sends those files to a directory this run discards; the reasoning, the
+    # measurement and the strip depth are at make_listing_counter_sink.
+    #
+    # BOTH ARE COMMAND-PREFIX ASSIGNMENTS on the launch itself, alongside the LD_LIBRARY_PATH
+    # this launch already carries, so they are in the environment of THIS process and of nothing
+    # else: not exported, not set in the caller, and unreachable from the suite launch in
+    # run_one_invocation, which must keep writing its counters into the tree because they are
+    # the ones the capture reads.
+    #
+    # THE SINK IS A PRECONDITION RATHER THAN SOMETHING TO CREATE HERE.  This function is always
+    # read through a command substitution, so anything it minted would be minted per call and
+    # leaked; do_run creates it once before the matrix and this is the guard that says so.
+    [ -n "$LISTING_GCOV_DIR" ] || die "internal error: registered_test_count would launch the
+       instrumented $binary before make_listing_counter_sink ran, so its counters would land in
+       the object tree the capture reads.  do_run creates the sink before the matrix; a caller
+       that reaches this function from anywhere else must do the same."
+
     listing="$(cd "$dir" \
-        && LD_LIBRARY_PATH="$ld_path" "$TIMEOUT_BIN" --foreground 120 \
+        && LD_LIBRARY_PATH="$ld_path" \
+           GCOV_PREFIX="$LISTING_GCOV_DIR" \
+           GCOV_PREFIX_STRIP="$LISTING_GCOV_PREFIX_STRIP" \
+           "$TIMEOUT_BIN" --foreground 120 \
             "./$binary" --gtest_list_tests "${filter_args[@]}" 2>/dev/null)" || return 0
     [ -n "$listing" ] || return 0
     printf '%s\n' "$listing" \
@@ -4780,6 +5020,14 @@ do_run() {
        without it, because the run would then be unbounded.  timeout ships with coreutils:
            sudo apt-get install -y coreutils
        Then re-run, or invoke this script without --run against counters produced elsewhere."
+
+    # THE LISTING SINK IS MINTED BEFORE THE FIRST COUNTER IS ZEROED, for the same reason the
+    # timeout check above is made here: a failure to create it must leave the tree exactly as it
+    # was found rather than half prepared.  It is also the only order in which the guard inside
+    # registered_test_count can be an invariant instead of a race -- every listing launch in the
+    # matrix happens after this line.
+    make_listing_counter_sink
+
     rule
     log "zeroing gcov counters under $HDMICEC_ROOT (leaves *.gcno instrumentation intact)"
     lcov_run --zerocounters -d "$HDMICEC_ROOT" \
@@ -5075,6 +5323,14 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # the default disposition (measured SigIgn=0x0, and the child then dies on TERM); bash's rule
     # that signals ignored ON SHELL ENTRY cannot be reset does not apply to a signal the script
     # itself set to ignore.  So the mask protects the registration and nothing else.
+    # THE LAST THING BEFORE THE FIRST MEASURED LAUNCH: prove the counters are still zero.
+    # Everything between do_run's zeroing and this point is this script's own preparation --
+    # three or four --gtest_list_tests launches of the instrumented binary among it -- and the
+    # counters it leaves behind would be indistinguishable from a test's.  Once only, because
+    # from the second invocation onwards the accumulated counters of the earlier ones are
+    # exactly what the design requires to be there.
+    assert_no_counters_before_first_case "$label"
+
     local rc=0
     trap '' INT TERM HUP
     set -m
@@ -5091,6 +5347,13 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     ) >"$run_log" 2>&1 &
     SUITE_PGID=$!
     set +m
+    # LAUNCHED IS RECORDED HERE, WHILE THE SUITE IS STILL RUNNING, and that is the point of
+    # recording it at all: from this line onwards a log exists at $run_log, so every exit path
+    # below -- including a cancellation that never reaches the checks and a `die` from any of
+    # them -- has an invocation the status marker must describe as launched rather than as one
+    # that never ran.  The marker is written from the EXIT trap, so it reads whatever these
+    # globals hold at the moment the run ends.
+    INVOCATIONS_LAUNCHED="${INVOCATIONS_LAUNCHED}${INVOCATIONS_LAUNCHED:+, }$label"
     trap 'on_signal INT 130' INT
     trap 'on_signal TERM 143' TERM
     trap 'on_signal HUP 129' HUP
@@ -5115,6 +5378,15 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # every path out of the three checks below -- pass, die, timeout and signal -- goes through
     # a terminate-reap-verify.
     wait "$SUITE_PGID" || rc=$?
+
+    # COMPLETED, WITH THE STATUS, recorded before anything is judged.  The process is gone and
+    # its status is in hand: that is a fact about execution and it is true whether the status is
+    # 0, a test failure, or the 124 `timeout` reports.  Recording it here rather than after the
+    # checks is what stops a rejected invocation being reported as one that never ran, and
+    # carrying the status with it is what stops "completed" being read as "completed cleanly".
+    INVOCATIONS_COMPLETED="${INVOCATIONS_COMPLETED}${INVOCATIONS_COMPLETED:+, }$label"
+    INVOCATION_EXIT_STATUSES="${INVOCATION_EXIT_STATUSES}${label}	${rc}
+"
 
     # STAMP THE GENERATION INTO THE LOG, and do it here rather than as a header.  The redirect
     # above TRUNCATES this file, so anything written before the suite starts is destroyed by the
@@ -5234,8 +5506,78 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
 # turned into an advisory reason, so the run cannot produce an acceptance verdict while claiming
 # five invocations' worth of evidence from two.
 # ------------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# WHAT AN INVOCATION REACHED, IN THREE INDEPENDENT STATES RATHER THAN ONE.
+#
+# THE DEFECT THIS REPLACES.  There used to be one list, appended to only AFTER
+# run_one_invocation RETURNED -- and every evidence check inside that function is fatal.  So an
+# invocation that launched, ran, PASSED every one of its cases and then failed an evidence check
+# was reported by the status marker as `ran : none` and by the per-letter artifact list as "did
+# not run in this generation", with its log and its results file sitting on disk beside the
+# marker saying so.  That is the most misleading available summary of "it ran and its evidence
+# was rejected": a reader looking for whether the suite executed is told it did not.
+#
+# THE THREE STATES, and why each is separate:
+#   LAUNCHED   the process was started, so a log EXISTS and must be listed whatever came next.
+#   COMPLETED  the process is gone and its exit status was collected.  Recorded with that status,
+#              because "completed, exit 124" (the timeout fired) and "completed, exit 0" are
+#              both completions and lead to entirely different conclusions.
+#   VALIDATED  all four checks passed: exit status, case-count reconciliation, exactly one
+#              correct selected-path line, and an empty process group at close-out.
+# DEFERRED stays what it was -- never attempted, for a named reason -- and is reported apart
+# from all three, because an invocation nobody started is not an invocation that failed.
+#
+# INVOCATIONS_RUN KEEPS ITS NAME AND ITS MEANING, deliberately: it is the VALIDATED list, and
+# branch_arm_unmet_requirement resolves the manifest's per-arm invocation tokens against it.
+# Widening it to "launched" would make the branch gate judge arms on the strength of an
+# invocation whose evidence was rejected, which is the opposite of this finding's remedy.
+#
+# NOTHING HERE MAKES A FAILURE SURVIVABLE.  Every `die` in run_one_invocation still ends the run
+# at the first failing invocation with nothing captured.  What changes is only what the status
+# marker SAYS about the invocation that failed.
+# ------------------------------------------------------------------------------------
+INVOCATIONS_LAUNCHED=''
+INVOCATIONS_COMPLETED=''
 INVOCATIONS_RUN=''
 INVOCATIONS_DEFERRED=''
+INVOCATION_EXIT_STATUSES=''
+
+# Membership with delimiters on both sides, so "A" cannot match a future invocation named "AB".
+# The same shape as branch_arm_unmet_requirement's own test, which is where it was measured.
+letter_in_list() { # $1=letter  $2=', '-joined list;  0 when the letter is in the list
+    case ", $2, " in
+        *", $1, "*) return 0 ;;
+    esac
+    return 1
+}
+
+# The state of one invocation as a phrase, for the status marker.  One function so that the
+# vocabulary is identical everywhere a reader meets it, and so that "not reached" -- the matrix
+# stopped at an earlier letter -- is never rendered as though the invocation had been considered
+# and declined.
+invocation_state_phrase() { # $1=letter
+    local letter="$1" rc
+    if letter_in_list "$letter" "$INVOCATIONS_DEFERRED"; then
+        printf 'DEFERRED -- not attempted on this host, and not passed\n'
+        return 0
+    fi
+    if ! letter_in_list "$letter" "$INVOCATIONS_LAUNCHED"; then
+        printf 'not reached: the matrix ended before this invocation started\n'
+        return 0
+    fi
+    rc="$(printf '%s' "$INVOCATION_EXIT_STATUSES" \
+          | "$AWK_BIN" -v want="$letter" '$1 == want { print $2; exit }')"
+    if ! letter_in_list "$letter" "$INVOCATIONS_COMPLETED"; then
+        printf 'LAUNCHED and did not complete: no exit status was collected, so it was killed or cancelled mid-run\n'
+        return 0
+    fi
+    if letter_in_list "$letter" "$INVOCATIONS_RUN"; then
+        printf 'launched, completed (exit %s), evidence validated\n' "${rc:-?}"
+        return 0
+    fi
+    printf 'launched, completed (exit %s), EVIDENCE NOT VALIDATED -- it ran; its evidence was rejected\n' "${rc:-?}"
+    return 0
+}
 
 run_invocation_matrix() {
     local binder_available=0
@@ -5274,11 +5616,18 @@ run_invocation_matrix() {
 
         run_one_invocation "$label" "$tier" "$mode" "$back_end" \
                            "$select_filter" "$exclude_filter" "$synopsis" "$permit_skip"
+        # EVIDENCE-VALIDATED, and only here: reaching this line means run_one_invocation
+        # returned, which it does only after all four checks passed -- every one of them exits
+        # the run instead of returning.  The launched and completed states were recorded inside
+        # that function, at the moments they became true, so a failing invocation is still
+        # described accurately by the status marker.
         INVOCATIONS_RUN="${INVOCATIONS_RUN}${INVOCATIONS_RUN:+, }$label"
     done
 
     rule
-    log "invocations run      : ${INVOCATIONS_RUN:-none}"
+    log "invocations launched : ${INVOCATIONS_LAUNCHED:-none}"
+    log "invocations completed: ${INVOCATIONS_COMPLETED:-none}  (a status was collected; see the log for which)"
+    log "invocations validated: ${INVOCATIONS_RUN:-none}  (all four checks passed)"
     log "invocations deferred : ${INVOCATIONS_DEFERRED:-none}"
     [ -n "$INVOCATIONS_RUN" ] || die "no invocation ran at all, so there is nothing to measure.
        Every one of them was deferred for want of a binder transport, which cannot be right:
@@ -5634,9 +5983,24 @@ write_run_status() { # $1=phase word  $2=one-line detail
         printf '  --run            : %s\n' "$( [ "$DO_RUN" -eq 1 ] && printf yes || printf no )"
         printf '  line bar         : %s%%  (per-file gating: %s)\n' \
             "$COVERAGE_MIN" "$( [ "$COVERAGE_PER_FILE_GATE" -eq 1 ] && printf on || printf off )"
+        # ------------------------------------------------------------------------------
+        # THREE STATES, NOT ONE, because "did it run" and "was its evidence accepted" are
+        # different questions and this marker used to answer the first with the second.  An
+        # invocation whose cases all passed and whose evidence was then rejected was reported
+        # here as `ran : none`, with its log and its results file on disk beside the marker.
+        # The vocabulary is defined at INVOCATIONS_LAUNCHED; each list is cumulative and each
+        # is a subset of the one above it.
+        # ------------------------------------------------------------------------------
         printf '\nINVOCATIONS\n'
-        printf '  ran              : %s\n' "${INVOCATIONS_RUN:-none}"
-        printf '  deferred         : %s\n' "${INVOCATIONS_DEFERRED:-none}"
+        printf '  launched           : %s\n' "${INVOCATIONS_LAUNCHED:-none}"
+        printf '  completed          : %s\n' "${INVOCATIONS_COMPLETED:-none}"
+        printf '  evidence-validated : %s\n' "${INVOCATIONS_RUN:-none}"
+        printf '  deferred           : %s\n' "${INVOCATIONS_DEFERRED:-none}"
+        printf '%s\n' "  launched means a process started and a log exists; completed means its exit"
+        printf '%s\n' "  status was collected; evidence-validated means all four checks passed (exit"
+        printf '%s\n' "  status, case-count reconciliation, exactly one correct selected-path line, and"
+        printf '%s\n' "  an empty process group at close-out).  A letter that is launched and completed"
+        printf '%s\n' "  but not validated RAN: its evidence was rejected, and the reason is in its log."
         printf '\nPER-INVOCATION ARTIFACTS BELONGING TO THIS GENERATION\n'
         printf '%s\n' "  (the GoogleTest JSON is written by the test binary and cannot carry the run"
         printf '%s\n' "   id, so this list is what says which of those files are this run's)"
@@ -5651,12 +6015,27 @@ write_run_status() { # $1=phase word  $2=one-line detail
             printf '%s\n' "  previous generation.  Any per-invocation file present at this moment belongs"
             printf '%s\n' "  to THAT generation and is about to be removed, so none is listed here."
         else
+            # THE ARTIFACTS ARE LISTED FROM WHAT IS ON DISK, AND THE STATE FROM WHAT HAPPENED --
+            # two independent sources, both reported.  Keying the whole entry on the results
+            # JSON, as this used to, made an invocation that produced a log and no JSON read as
+            # one that never ran; and an invocation can legitimately have a log without a JSON
+            # (a suite killed before it wrote one, or a diverted output path), which is a
+            # difference a reader needs rather than one to hide.
             for letter in $PURGEABLE_INVOCATION_LETTERS; do
+                local have_json='' have_log='' artifacts=''
                 if [ -f "$OUTPUT_DIR/rdkTestResults_invocation_${letter}.json" ]; then
-                    printf '  %s : rdkTestResults_invocation_%s.json, run_invocation_%s.log\n' \
-                        "$letter" "$letter" "$letter"
-                else
-                    printf '  %s : no results file -- this invocation did not run in this generation\n' "$letter"
+                    have_json="rdkTestResults_invocation_${letter}.json"
+                fi
+                if [ -f "$OUTPUT_DIR/run_invocation_${letter}.log" ]; then
+                    have_log="run_invocation_${letter}.log"
+                fi
+                artifacts="${have_json}${have_json:+${have_log:+, }}${have_log}"
+                printf '  %s : %s\n' "$letter" "$(invocation_state_phrase "$letter")"
+                printf '      artifacts: %s\n' "${artifacts:-none in this directory}"
+                if [ -n "$have_log" ] && [ -z "$have_json" ]; then
+                    printf '%s\n' "      the log exists and the results JSON does not: the process ran and either"
+                    printf '%s\n' "      did not reach the point of writing its JSON or wrote it elsewhere.  Read"
+                    printf '%s\n' "      the log before concluding anything about what executed."
                 fi
             done
         fi
@@ -6387,8 +6766,65 @@ BELOW_BAR_FILES=''
 # the recorded hash does not match the script now on disk, the artifact was produced by a
 # different runner and its acceptance decision does not transfer.
 # ------------------------------------------------------------------------------------
-git_sha_of() { # $1 = repository path;  prints "<sha> (<branch>)<dirty marker>" or "unavailable"
-    local repo="$1" sha branch dirty=''
+# ------------------------------------------------------------------------------------
+# AN IDENTITY THAT IS A FUNCTION OF THE CONTENT, WHICH THE COMMIT SHA ALONE IS NOT.
+#
+# THE DEFECT THIS REPLACES, reproduced before it was fixed.  The identity used to be
+# "<sha> (<branch>)  [DIRTY: tracked files modified]" -- a FIXED string for every dirty tree at
+# that commit.  Two different contents of one tracked file therefore produced byte-identical
+# provenance: measured in a scratch repository, blob 702203843c04 and blob 50d9b13397f8 both
+# recorded as `e8f4b3b6afa1 (master)  [DIRTY: tracked files modified]`.  Recording provenance
+# beside a measurement exists to answer one question -- "were these two numbers produced from
+# the same source?" -- and an identity that cannot distinguish two trees cannot answer it.  Worse
+# than useless: it looks like an answer.
+#
+# WHY DIRTY TREES ARE NOT SIMPLY REFUSED, which was the other candidate.  This runner is
+# routinely invoked from a working tree that is dirty BY CONSTRUCTION -- an in-flight change is
+# the normal subject of a coverage run, and `configure` overwrites six tracked Makefiles during
+# --build, so even a pristine checkout is dirty by the time the capture happens.  Refusing would
+# make the tool unusable on its own use case; describing the dirt exactly costs one hash.
+#
+# WHAT MAKES IT CONTENT-ADDRESSED.  The digest is taken over `git diff --binary HEAD`, which is
+# the complete difference between the recorded commit and what is on disk for every tracked
+# path: content, mode changes, additions, deletions and gitlink movements alike.  --binary so a
+# binary file contributes its bytes rather than the words "Binary files differ"; --no-ext-diff
+# and --no-textconv so a configured diff driver cannot make the digest a function of anything
+# but the content.  HEAD plus that digest names the tree exactly, and two runs whose lines match
+# are comparable.
+#
+# THE SHORT FORM IS ON THE ONE-LINE IDENTITY AND THE FULL ONE IS IN THE DETAIL BLOCK.  A human
+# reads this line to decide whether two results are comparable, and 64 hex characters per
+# repository across nine repositories is a wall rather than evidence; 16 hex characters is 64
+# bits of it, which no accident collides.  write_provenance prints the full digest and the
+# per-path hashes underneath, so nothing is only available in truncated form.
+# ------------------------------------------------------------------------------------
+git_tracked_diff_digest() { # $1 = repository path;  prints the sha256 of the tracked diff
+    local repo="$1" digest
+    command -v sha256sum >/dev/null 2>&1 || { printf 'unavailable (no sha256sum)\n'; return 0; }
+    # The `|| true` is inside the braces so a git failure yields an empty diff rather than
+    # killing the pipeline under pipefail; an empty diff hashes to the empty-input digest, and
+    # the caller only prints this for a tree git has already reported as dirty.
+    # shellcheck disable=SC2016  # $1 is awk's first field, not a shell parameter
+    digest="$( { git -C "$repo" diff --binary --no-ext-diff --no-textconv HEAD -- 2>/dev/null || true; } \
+               | sha256sum | "$AWK_BIN" '{print $1; exit}' )" || digest=''
+    printf '%s\n' "${digest:-unavailable}"
+}
+
+git_dirty_paths_of() { # $1 = repository path;  prints one tracked path per line, or nothing
+    local repo="$1" path
+    command -v git >/dev/null 2>&1 || return 0
+    # -z so a path containing a space, a quote or a newline arrives verbatim: git's default
+    # output QUOTES such paths, and a quoted path is not the path -- it cannot be hashed and it
+    # cannot be looked up.  This workspace has one today (blitzy/documentation/Project Guide.md).
+    while IFS= read -r -d '' path; do
+        [ -n "$path" ] || continue
+        printf '%s\n' "$path"
+    done < <( { git -C "$repo" diff --name-only -z HEAD -- 2>/dev/null || true; } )
+    return 0
+}
+
+git_sha_of() { # $1 = repository path;  prints "<sha> (<branch>)<dirty detail>" or "unavailable"
+    local repo="$1" sha branch dirty='' paths count digest
     command -v git >/dev/null 2>&1 || { printf 'unavailable (no git)\n'; return 0; }
     git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'unavailable (not a repository)\n'; return 0; }
     sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || sha=''
@@ -6397,7 +6833,11 @@ git_sha_of() { # $1 = repository path;  prints "<sha> (<branch>)<dirty marker>" 
     # --porcelain over tracked paths only: untracked build residue is not a content difference
     # and must not be reported as one, or every instrumented tree would read as dirty.
     if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
-        dirty='  [DIRTY: tracked files modified]'
+        paths="$(git_dirty_paths_of "$repo")"
+        count="$(printf '%s' "$paths" | grep -c . || true)"
+        digest="$(git_tracked_diff_digest "$repo")"
+        dirty="$(printf '  [DIRTY: %s tracked path(s), content sha256 %.16s]' \
+                    "${count:-?}" "$digest")"
     fi
     printf '%s (%s)%s\n' "$sha" "$branch" "$dirty"
 }
@@ -6411,6 +6851,84 @@ sha256_of() { # $1 = file;  prints the hex digest, or a reason
     else
         printf 'unavailable (no sha256sum)\n'
     fi
+}
+
+# ------------------------------------------------------------------------------------
+# THE REPOSITORIES THIS RUN REPORTS ON, NAMED ONCE.
+#
+# Two consumers read this list -- the run-start capture below and write_provenance -- and a
+# second copy of it is how the two would come to describe different trees.  Prints
+# "<label><TAB><path>", the superproject first and then each submodule that is actually checked
+# out, because a submodule directory that is not there is not evidence of anything.
+# ------------------------------------------------------------------------------------
+provenance_repositories() { # -> "<label>\t<path>" per line
+    local sub
+    printf 'superproject\t%s\n' "$WS"
+    for sub in hdmicec entservices-hdmicecsource entservices-hdmicecsink entservices-testframework \
+               entservices-apis entservices-helpers Thunder ThunderTools; do
+        if [ -d "$WS/$sub" ]; then
+            printf '%s\t%s\n' "$sub" "$WS/$sub"
+        fi
+    done
+    return 0
+}
+
+# ------------------------------------------------------------------------------------
+# THE IDENTITY OF THE TREE AS IT STOOD WHEN THIS RUN STARTED, captured BEFORE the build.
+#
+# WHY IT CANNOT BE LEFT TO write_provenance.  That function runs after --build and after the
+# matrix, and --build's `configure` OVERWRITES six git-tracked Makefiles: the identity read at
+# that point describes a tree the caller never had, and its diff digest changes from run to run
+# for reasons that have nothing to do with what was measured.  So the identity is read here,
+# before do_build, and the reading at write time is kept as well -- the pair is what makes a
+# mid-run rewrite VISIBLE rather than absorbed into one number.
+#
+# TWO GLOBALS, and each has one job.  PROVENANCE_START_DETAIL is pre-rendered text for
+# provenance.txt to print, and PROVENANCE_START_IDENTITIES is a "<label><TAB><identity>" map for
+# the write-time comparison.  Rendering at capture time is deliberate: the tree it describes no
+# longer exists by the time the file is written, so anything not captured now cannot be
+# recovered later.
+# ------------------------------------------------------------------------------------
+PROVENANCE_START_DETAIL=''
+PROVENANCE_START_IDENTITIES=''
+capture_start_provenance() {
+    local tab label path identity paths one hash
+    tab="$(printf '\t')"
+
+    while IFS="$tab" read -r label path; do
+        [ -n "$label" ] || continue
+        identity="$(git_sha_of "$path")"
+        PROVENANCE_START_IDENTITIES="${PROVENANCE_START_IDENTITIES}${label}${tab}${identity}
+"
+        PROVENANCE_START_DETAIL="${PROVENANCE_START_DETAIL}$(printf '  %-18s : %s' "$label" "$identity")
+"
+        paths="$(git_dirty_paths_of "$path")"
+        [ -n "$paths" ] || continue
+
+        # THE PER-PATH HASHES ARE WHAT MAKE THE LINE ACTIONABLE.  The diff digest says two trees
+        # differ; these say WHERE, and they are read from the working tree rather than from git,
+        # because the working tree is what was compiled.
+        PROVENANCE_START_DETAIL="${PROVENANCE_START_DETAIL}$(printf '      tracked diff sha256 : %s' \
+            "$(git_tracked_diff_digest "$path")")
+"
+        while IFS= read -r one; do
+            [ -n "$one" ] || continue
+            if [ -d "$path/$one" ]; then
+                # A gitlink: its content is the submodule's own row, so hashing the directory
+                # would be both impossible and the wrong answer.
+                hash='(gitlink or directory -- its content is its own row above or below)'
+            elif [ -f "$path/$one" ]; then
+                hash="sha256 $(sha256_of "$path/$one")"
+            else
+                hash='(deleted from the working tree)'
+            fi
+            PROVENANCE_START_DETAIL="${PROVENANCE_START_DETAIL}$(printf '      %-58s %s' "$one" "$hash")
+"
+        done <<< "$paths"
+    done <<< "$(provenance_repositories)"
+
+    log "tree identity captured before the build: content-addressed, one line per repository,"
+    log "  with the dirty paths and their hashes (written to provenance.txt)"
 }
 
 write_provenance() {
@@ -6436,15 +6954,58 @@ write_provenance() {
         printf 'Workspace root       : %s\n' "$WS"
         printf 'Submodule root       : %s\n' "$HDMICEC_ROOT"
         printf 'Output directory     : %s\n' "$OUTPUT_DIR"
-        printf '\nREVISIONS\n'
-        printf '  superproject       : %s\n' "$(git_sha_of "$WS")"
-        local sub
-        for sub in hdmicec entservices-hdmicecsource entservices-hdmicecsink entservices-testframework \
-                   entservices-apis entservices-helpers Thunder ThunderTools; do
-            if [ -d "$WS/$sub" ]; then
-                printf '  %-18s : %s\n' "$sub" "$(git_sha_of "$WS/$sub")"
+        # ------------------------------------------------------------------------------
+        # TWO READINGS OF THE SAME REPOSITORIES, and the pair is the point.
+        #
+        # THE FIRST is the tree as it stood when this run started, captured by
+        # capture_start_provenance before --build ran.  That is the tree whose source was
+        # compiled and whose behaviour was measured, and it is the identity another run has to
+        # match for two results to be comparable.
+        #
+        # THE SECOND is read now.  It differs from the first whenever something changed the tree
+        # during the run -- and one thing reliably does: `configure` overwrites six git-tracked
+        # Makefiles, one of them hand-written build source (see THE REGENERATED MAKEFILES).  A
+        # single reading taken at this point would fold that rewrite into the identity and report
+        # a tree the caller never had; two readings say plainly that it happened and where.
+        # ------------------------------------------------------------------------------
+        printf '\nREVISIONS -- THE TREE AS IT STOOD WHEN THIS RUN STARTED, BEFORE ANY BUILD\n'
+        printf '%s\n' "  (content-addressed: HEAD, branch, and a sha256 over the tracked diff, so two"
+        printf '%s\n' "   different dirty trees at one commit cannot record the same identity)"
+        if [ -n "$PROVENANCE_START_DETAIL" ]; then
+            printf '%s' "$PROVENANCE_START_DETAIL"
+        else
+            printf '%s\n' "  not captured: this invocation reached the report without passing through"
+            printf '%s\n' "  capture_start_provenance, so no pre-build identity exists.  Treat the"
+            printf '%s\n' "  reading below as the only one, and note that it is post-build."
+        fi
+
+        printf '\nREVISIONS -- RE-READ NOW, AS THIS FILE IS WRITTEN\n'
+        local tab label path start_identity now_identity changed=0
+        tab="$(printf '\t')"
+        while IFS="$tab" read -r label path; do
+            [ -n "$label" ] || continue
+            now_identity="$(git_sha_of "$path")"
+            start_identity="$(printf '%s' "$PROVENANCE_START_IDENTITIES" \
+                              | "$AWK_BIN" -F"$tab" -v want="$label" \
+                                    '$1 == want { sub(/^[^\t]*\t/, ""); print; exit }')"
+            if [ -z "$start_identity" ]; then
+                printf '  %-18s : %s   (no pre-build reading to compare with)\n' "$label" "$now_identity"
+            elif [ "$start_identity" = "$now_identity" ]; then
+                printf '  %-18s : unchanged since this run started\n' "$label"
+            else
+                changed=$((changed + 1))
+                printf '  %-18s : CHANGED DURING THIS RUN\n' "$label"
+                printf '      at start : %s\n' "$start_identity"
+                printf '      now      : %s\n' "$now_identity"
             fi
-        done
+        done <<< "$(provenance_repositories)"
+        if [ "$changed" -ne 0 ]; then
+            printf '%s\n' "  $changed repository/repositories changed while this run was in progress.  The"
+            printf '%s\n' "  expected cause is configure overwriting the six tracked Makefiles during"
+            printf '%s\n' "  --build, which this run restores from its own snapshot on exit; anything else"
+            printf '%s\n' "  means the tree was edited under a measurement, and the numbers in this bundle"
+            printf '%s\n' "  belong to the identity recorded ABOVE, not to this one."
+        fi
         printf '\nRUNNER AND CONFIGURATION\n'
         printf '  runner path        : %s\n' "$SCRIPT_PATH"
         printf '  runner sha256      : %s\n' "$(sha256_of "$SCRIPT_PATH")"
@@ -6805,16 +7366,29 @@ per_file_report() {
 # principle; the principle -- never write a number that was not measured -- is what the `needs`
 # fields carry instead.
 #
-# WHAT IS STILL UNPROVEN, STATED PRECISELY.  The `taken` counts of the 31 arms that carry a
-# prerequisite -- 29 needing invocation B, 1 needing invocation C, and 1 needing a usable binder
-# driver without a service registered on it -- have NOT been observed non-zero anywhere.  That is
-# the whole of the unproven set as this manifest stands, and the other 59 required arms were all
-# observed non-zero by a driverless run: every arm of the bounded preflight, including the two
+# WHAT IS PROVEN, AND WHERE.  Every one of the 89 required arms below has been observed non-zero,
+# and the 30 that carry a prerequisite were observed on a binder-capable guest rather than assumed.
+# On 2026-09-01 the full A-E matrix ran in one instrumented i386 guest under the QEMU provisioning
+# that .github/workflows/aidl-path-tests.yml owns -- kernel 5.15.148 with
+# CONFIG_ANDROID_BINDER_IPC_32BIT=y, binder protocol 7 agreeing between kernel, SDK build and the
+# BINDER_VERSION ioctl, servicemanager answering -- and this gate reported, over the one
+# accumulated capture: `89 taken, 0 never taken, 0 absent, 0 deferred, 0 unchecked`.  All five
+# invocations passed all four of their own checks, and the line gate passed both halves
+# (aggregate and per file) for the first time, with ccec/src/DriverAidlImpl.cpp at 88.4% line.
+# So the 28 arms needing invocation B, the 1 needing invocation C and the 1 needing a driver with
+# no service on it are measured facts, not projections.
+#
+# WHAT A DRIVERLESS HOST STILL CANNOT SHOW, STATED PRECISELY.  Those same 30 arms are reported
+# DEFERRED, not passed, on any host without a binder driver -- which is the ordinary development
+# case and the hosted-CI case both.  A driverless run therefore enforces 59 of the 89 and names
+# the rest with the invocation or resource they are missing; it is not an acceptance run and this
+# script does not let it read as one.  The other 59 required arms are observed non-zero by a
+# driverless run: every arm of the bounded preflight, including the two
 # beyond the BINDER_VERSION gate, is reached under invocation A through the BinderPreflightProbe
 # seam that ccec/src/DriverAidlImpl.hpp declares and isBinderPreflightOk() takes as a defaulted
 # third parameter, so their `needs` fields are empty and their counts are real.  A seam rather
 # than syscall interposition is what makes that true without a driver and without redefining
-# ioctl() or mmap() for a 567-case process.  The receive path's own two guards and the
+# ioctl() or mmap() for a 568-case process.  The receive path's own two guards and the
 # slow-call diagnostic are in the deferred set, because a
 # listener callback and a synchronous AIDL call both need a live session; the queue handoff's
 # reserved-slot arithmetic and the context-manager timeout ceiling are NOT, because a
@@ -6978,8 +7552,23 @@ readonly BRANCH_MANIFEST=(
     "compat.hash-non-empty|rdk-halif-aidl/common/current/halcompat.h|165|0|0|every case reporting a non-empty hash (measured taken 15, which is the number of times the second condition was evaluated at all)|required||if (hash.empty() || hash == \"-1\") {"
     "compat.reject-minus-one-hash|rdk-halif-aidl/common/current/halcompat.h|165|0|4|unit test, DriverAidlCompatibilityTest.IncompatibleWhenInterfaceHashIsMinusOne; also reached at FACTORY level by invocation C, whose in-process fake reports \"-1\" (measured taken 4 on a driverless host, where C is deferred. The four are TEMPLATE calls, which is the only way this arc is reachable: .IncompatibleWhenInterfaceHashIsMinusOne once, .ARecoveredMetadataReadMakesTwoCompatibilityCallsDisagree once on its first read, and .DelayedMetadataRecoveryOnAThirdReadCannotBeBlamedOnTheVersionRule twice while its double is still failing. DriverAidlImpl::observedMetadataWouldBeAccepted() does NOT contribute here and must not be credited with it -- it takes a hash by value, tests it inline and calls only detail::isCompatible, so it never enters this template at all)|required||if (hash.empty() || hash == \"-1\") {"
     "compat.hash-not-minus-one|rdk-halif-aidl/common/current/halcompat.h|165|0|5|every case reporting a usable hash (measured taken 11)|required||if (hash.empty() || hash == \"-1\") {"
-    "compat.reject-notfrozen|rdk-halif-aidl/common/current/halcompat.h|168|0|2|unit test, DriverAidlCompatibilityTest.UnfrozenServerIsRejectedByDefaultAndAcceptedOnlyWhenOptedIn (measured taken 2: once rejected by default, once accepted with allowUnfrozen)|required||if (hash == \"notfrozen\") {"
-    "compat.hash-frozen|rdk-halif-aidl/common/current/halcompat.h|168|0|3|the frozen-hash cases, which are the ones that reach the version rule at all (measured taken 9)|required||if (hash == \"notfrozen\") {"
+    # LINE 168 IS THE ONE PLACE IN THIS MANIFEST WHERE THE ARC LAYOUT IS NOT PORTABLE, so its two
+    #   records carry per-layout alternatives instead of a bare index.  Measured on both targets
+    #   this project runs on: x86-64 gives line 168 three block-0 arcs (0, 2 and 3) plus an `e0`
+    #   throw arc, and i386 gives it two (0 and 1) -- gcc expands the inlined std::string
+    #   comparison differently per target.  The pair below previously read 2 and 3, which is right
+    #   on x86-64 and does not exist on i386; rewriting them to 0 and 1 was right on i386 and made
+    #   arc 1 vanish on x86-64.  Both spellings were observed failing as ABSENT arms, which is the
+    #   signal reserved for a branch deleted from the source, so neither single spelling is usable
+    #   and the alternates mechanism exists for exactly this.  See resolve_branch_alternates().
+    #
+    #   THE DIRECTION IS SETTLED BY THE LINE HITS EITHER SIDE OF THE BRANCH, never by the arc
+    #   counts, because only the line hits say which arc is the true arm.  On the i386 layout
+    #   DA:169 -- `return allowUnfrozen;`, reached only when the comparison is TRUE -- is 6, which
+    #   is BRDA:168,0,0; DA:171, the version rule reached only when it is FALSE, is 32, which is
+    #   BRDA:168,0,1.  The x86-64 pairing keeps the indices the original derivation measured there.
+    "compat.reject-notfrozen|rdk-halif-aidl/common/current/halcompat.h|168|0|2:0,3:2|unit test, DriverAidlCompatibilityTest.UnfrozenServerIsRejectedByDefaultAndAcceptedOnlyWhenOptedIn (measured taken 6 across the template instantiations this suite exercises; confirmed as the TRUE arm because DA:169, the return-allowUnfrozen body, is 6 on the same run)|required||if (hash == \"notfrozen\") {"
+    "compat.hash-frozen|rdk-halif-aidl/common/current/halcompat.h|168|0|2:1,3:3|the frozen-hash cases, which are the ones that reach the version rule at all (measured taken 32; confirmed as the FALSE arm because DA:171, the version rule it falls through to, is 32 on the same run)|required||if (hash == \"notfrozen\") {"
     "compat.server-era-frozen|rdk-halif-aidl/common/current/halcompat.h|111|0|0|unit test, DriverAidlCompatibilityTest.IncompatibleWhenServerReportsDifferentEra: the only server value with era >= 1 (measured taken 2 of the 19 evaluations on this line, which is what identifies this pair as era(serverVersion) >= 1 rather than the ternary's true arm)|required||? (serverVersion >= clientVersion)"
     "compat.server-era-zero|rdk-halif-aidl/common/current/halcompat.h|111|0|1|every era-0 server value the version cases use (measured taken 17)|required||? (serverVersion >= clientVersion)"
     "compat.client-era-zero|rdk-halif-aidl/common/current/halcompat.h|110|0|1|unit test, DriverAidlCompatibilityTest.IncompatibleWhenServerReportsDifferentEra: this client is era 0, so the second conjunct is false whenever it is evaluated at all (measured taken 2 of the 2 evaluations, which is what identifies this pair as era(clientVersion) >= 1)|required||return (era(serverVersion) >= 1 && era(clientVersion) >= 1)"
@@ -7130,8 +7719,29 @@ readonly BRANCH_MANIFEST=(
     # the preflight declines: they belong to invocation B.  The clock-unreadable arm is mapped
     # alongside the threshold because it decides whether a measurement is trusted, and a
     # diagnostic computed from a fabricated origin would be worse than none.
-    "halcall.clock-unreadable|ccec/src/DriverAidlImpl.cpp|490|0|0|invocation B with an unreadable CLOCK_MONOTONIC: the measurement is skipped rather than computed from a fabricated origin|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
-    "halcall.clock-readable|ccec/src/DriverAidlImpl.cpp|490|0|1|invocation B: the ordinary case, where both clock reads succeeded and the elapsed time can be compared|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
+    # THE PAIR ON LINE 490 WAS INVERTED, and the first full-matrix trace settles it beyond
+    #   argument.  Line 490 is a short-circuited `||` carrying six arcs; arcs 0 and 1 are its
+    #   FIRST decision, `HAL_CALL_CLOCK_UNREADABLE == startedMs`.  DA:491 -- the `return;` reached
+    #   only when the whole condition is TRUE -- is 0, and DA:494, the `elapsedMs` computation
+    #   reached only when it is FALSE, is 288.  BRDA:490,0,0 is 288 and BRDA:490,0,1 is 0, so arc
+    #   0 is the readable arm and arc 1 the unreadable one, the opposite of what was recorded.
+    #   Read the old way the gate credited "clock unreadable" with 288 takings on runs where no
+    #   clock read had failed at all, which is worse than a miss: it reported an unexercised
+    #   defensive arm as covered.
+    #
+    # AND THE UNREADABLE ARM IS UNREACHABLE FROM ANY TEST SURFACE, recorded as such rather than
+    #   left to fail.  Two independent reasons, both measured rather than argued: monotonicNowMs()
+    #   and halCallStarted() sit inside the anonymous namespace opened at DriverAidlImpl.cpp:185,
+    #   so they have internal linkage and `nm -DC libRCEC.so` finds no dynamic symbol for either --
+    #   no test translation unit can call them or substitute for them.  And the only production
+    #   route into the arm is clock_gettime(CLOCK_MONOTONIC, &stack_timespec) returning non-zero,
+    #   which Linux does not do: EINVAL needs an unsupported clk_id and this one is a compile-time
+    #   constant the vDSO serves, EFAULT needs a bad pointer and this one is a stack local.  It is
+    #   kept in the manifest, not deleted, so the gate still fails if the arm is REMOVED from the
+    #   source -- the same disposition as compat.client-era-frozen and selection.reason-unrecorded.
+    #   Driving it would take a clock_gettime interposer, which would test the interposer.
+    "halcall.clock-unreadable|ccec/src/DriverAidlImpl.cpp|490|0|1|UNREACHABLE: halCallStarted() only yields HAL_CALL_CLOCK_UNREADABLE when clock_gettime(CLOCK_MONOTONIC) fails on a stack timespec, which Linux does not do, and the helper has internal linkage so no test can substitute for it; measured taken 0 with DA:491 also 0 on the full matrix|unreachable|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
+    "halcall.clock-readable|ccec/src/DriverAidlImpl.cpp|490|0|0|invocation B: the ordinary case, where startedMs was readable so the second read is evaluated and the elapsed time can be compared (measured taken 288, matching DA:494 on the same run)|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
     "halcall.slow|ccec/src/DriverAidlImpl.cpp|496|0|0|invocation B against a deliberately delayed fake: one LOG_WARN line naming the operation and the elapsed time|required|B|if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {"
     "halcall.within-threshold|ccec/src/DriverAidlImpl.cpp|496|0|1|invocation B: every healthy synchronous call, which must stay silent|required|B|if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {"
 
@@ -7339,6 +7949,68 @@ branch_records_for_file() { # $1=trace  $2=SF path suffix
     ' "$1"
 }
 
+# Resolve a manifest branch field that carries PER-ARC-LAYOUT ALTERNATIVES.
+#
+# WHY ANY RECORD NEEDS ALTERNATIVES AT ALL, because a coordinate ought to be a property of the
+# source and mostly is.  Measured across both architectures this project builds and runs on --
+# x86-64 for the hosted L1 job, i386 for the binder-capable matrix job -- 312 of the 316
+# branch-carrying lines in the three mapped files emit an IDENTICAL arc layout.  Four do not,
+# because gcc expands some short-circuited conditions and some inlined std::string comparisons
+# into a different number of arcs per target, and one of those four -- halcompat.h:168, the
+# "notfrozen" gate -- carries mapped records.  There it is 3 block-0 arcs on x86-64 (0, 2, 3)
+# against 2 on i386 (0, 1).  A manifest holding one set is therefore WRONG on one architecture
+# whichever set it holds, and it fails in the worst available way: as an ABSENT arm, which is the
+# signal reserved for a branch that has been deleted from the source.  Both were observed --
+# absent on i386 with the x86-64 coordinates, absent on x86-64 with the i386 ones.
+#
+# WHAT THE KEY IS, AND WHY IT IS THE ARC COUNT rather than uname, a build flag or an environment
+# variable.  The thing that varies is the layout, so the layout selects: the key is how many arcs
+# the trace itself holds for that file, line and block.  It is read from the same trace the gate
+# is judging, so it cannot disagree with it, and it needs nothing passed in from outside.  A
+# record reading `2:0,3:2` says "arc 0 where the line has two block arcs, arc 2 where it has
+# three", which is a statement a reader can check against a trace in one grep.
+#
+# AND WHAT HAPPENS TO A LAYOUT NOBODY HAS SEEN.  No key matches, so this prints a sentinel that
+# cannot match any BRDA record, and the arm reports ABSENT.  That is deliberately the
+# conservative direction: a new architecture with a fourth layout makes the gate FAIL and asks
+# for a measurement, rather than quietly picking the nearest arc and crediting the wrong one.
+#
+# Arguments: $1 the branch field, $2 the records for the file, $3 the line, $4 the block.
+# Prints: the resolved branch index, or the field unchanged when it carries no alternatives.
+resolve_branch_alternates() {
+    local field="$1" records="$2" line="$3" block="$4"
+
+    # The overwhelmingly common case, kept first and kept free: a bare arc index, no ':' in it,
+    # returned untouched.  Ninety of the ninety-two records take this path.
+    case "$field" in
+        *:*) ;;
+        *) printf '%s\n' "$field"; return 0 ;;
+    esac
+
+    local arc_count
+    arc_count="$(printf '%s\n' "$records" \
+                 | "$AWK_BIN" -v l="$line" -v b="$block" \
+                       '$1 "" == l "" && $2 "" == b "" { n++ } END { print n + 0 }')"
+
+    local pair
+    local old_ifs="$IFS"
+    IFS=','
+    # shellcheck disable=SC2086  # deliberate word splitting on the comma-separated list
+    set -- $field
+    IFS="$old_ifs"
+
+    for pair in "$@"; do
+        if [ "${pair%%:*}" = "$arc_count" ]; then
+            printf '%s\n' "${pair#*:}"
+            return 0
+        fi
+    done
+
+    # No layout matched.  The sentinel is a string no BRDA branch field can ever equal, so the
+    # caller's lookup reports ABSENT and the gate says so by name.
+    printf '%s\n' "UNMATCHED-ARC-LAYOUT-${arc_count}"
+}
+
 # ------------------------------------------------------------------------------------
 # THE BRANCH GATE.  Reads the UNFILTERED trace, per ONE TRACE, TWO CONSUMERS in the header:
 # some of the arms above live in halcompat.h, which the line gate's derivative keeps but which
@@ -7359,25 +8031,64 @@ apply_branch_gate() {
 
     local record id file line block branch reacher status source needs
     local required=0 unreachable=0 unpopulated=0 covered=0 zero_taken=0 absent=0 deferred=0
-    local -a zero_list=() absent_list=() deferred_list=()
+    local unreachable_present=0 unreachable_taken=0 unreachable_absent=0 unreachable_unpopulated=0
+    local absent_required=0
+    local -a zero_list=() absent_list=() deferred_list=() unreachable_list=() unreachable_taken_list=()
 
     # One pass per distinct file, cached in a variable keyed by nothing more elaborate than the
     # file we last read -- the manifest is grouped by file, so this is a single read per group.
     local cached_file='' cached_records=''
 
+    # ------------------------------------------------------------------------------------
+    # EVERY POPULATED TUPLE IS LOOKED UP, INCLUDING THE UNREACHABLE ONES.  This is the whole
+    # of what `unreachable` exempts and the whole of what it does not, and the distinction is
+    # the reason the status exists at all.
+    #
+    # THE DEFECT THIS SHAPE REPLACES.  The loop used to count an `unreachable` entry and
+    # `continue` BEFORE it ever read the trace, so such an entry was never compared against
+    # anything: delete its BRDA record, or move it by editing the line above it, and this gate
+    # stayed green.  Both entries that carry the status say in their own text that they are
+    # recorded unreachable "so the gate still fails if it is DELETED while exempting it from the
+    # taken check" -- the manifest documented the intent and the code did not implement it, which
+    # is the most expensive kind of disagreement because the manifest reads as evidence.
+    #
+    # SO THE EXEMPTION IS NARROWED TO EXACTLY TWO CHECKS.  An unreachable arm is exempt from the
+    # taken-count check -- a `taken` of 0 or `-` is its EXPECTED state, which is why it is not
+    # required -- and from the DEFERRED classification, which asks whether this run could have
+    # driven the arm and is a question with no meaning for one nothing can drive.  It is NOT
+    # exempt from existing: absence fails for an unreachable arm exactly as it fails for a
+    # required one, because a coordinate that has vanished has vanished for the same two reasons
+    # either way -- the source moved, or the branch was deleted -- and neither is made harmless
+    # by the arm having been unreachable.
+    #
+    # AND THE THREE POPULATIONS ARE COUNTED APART.  required-and-taken, required-but-deferred and
+    # unreachable-present-and-untaken are three different states of evidence, and a single
+    # "checked" line that merged them would let a reader conclude that a taken count had been
+    # observed where none was expected to exist.  Each has its own counter and its own line
+    # below.
+    # ------------------------------------------------------------------------------------
+    local exempt_from_taken
     for record in "${BRANCH_MANIFEST[@]}"; do
         IFS='|' read -r id file line block branch reacher status needs source <<< "$record"
 
+        exempt_from_taken=0
         if [ "$status" = 'unreachable' ]; then
             unreachable=$((unreachable + 1))
-            log "  UNREACHABLE  $id"
-            log "               $reacher"
-            continue
+            exempt_from_taken=1
+        else
+            required=$((required + 1))
         fi
-        required=$((required + 1))
 
         if [ -z "$line" ] || [ -z "$block" ] || [ -z "$branch" ]; then
-            unpopulated=$((unpopulated + 1))
+            # An unreachable entry with no coordinates is counted in its OWN unpopulated tally
+            # rather than in the required one: the remedy is the same (measure it and fill them
+            # in) but the number of required arms this gate could not check must stay the number
+            # of REQUIRED arms, or the advisory below misstates its own subject.
+            if [ "$exempt_from_taken" -eq 1 ]; then
+                unreachable_unpopulated=$((unreachable_unpopulated + 1))
+            else
+                unpopulated=$((unpopulated + 1))
+            fi
             continue
         fi
 
@@ -7390,24 +8101,75 @@ apply_branch_gate() {
         # for the arcs gcov labels "(throw)" and that value appears in all three mapped files.
         # An awk numeric comparison would coerce `e0` to 0 and match the wrong record -- a
         # silent mis-identification rather than a visible error, which is the worst kind.
+        # PER-ARC-LAYOUT RESOLUTION, ahead of the lookup and reported in the failure text below.
+        # A record carrying no alternatives comes back unchanged, so this costs the other ninety
+        # records one case statement.  See resolve_branch_alternates() for why four of the 316
+        # branch-carrying lines differ between the x86-64 and i386 builds and why the arc count is
+        # the key.
+        local resolved_branch
+        resolved_branch="$(resolve_branch_alternates "$branch" "$cached_records" "$line" "$block")"
+
         local taken
         # shellcheck disable=SC2016  # $1/$2/$3/$4 below are awk's fields, passed -v l/b/br
         taken="$(printf '%s\n' "$cached_records" \
-                 | "$AWK_BIN" -v l="$line" -v b="$block" -v br="$branch" \
+                 | "$AWK_BIN" -v l="$line" -v b="$block" -v br="$resolved_branch" \
                        '$1 "" == l "" && $2 "" == b "" && $3 "" == br "" { print $4; found = 1; exit }
                         END { if (!found) print "ABSENT" }')"
 
-        # ABSENCE IS CHECKED BEFORE MEASURABILITY, and the order is deliberate.  An arm missing
-        # from the trace has moved or been deleted in the SOURCE, which is true regardless of
-        # which invocations ran -- and it is exactly the case a deferral must not excuse, because
-        # excusing it would let a refactor delete a mapped branch and make this gate greener.
+        # ABSENCE IS CHECKED BEFORE MEASURABILITY AND BEFORE THE UNREACHABLE EXEMPTION, and both
+        # orderings are deliberate.  An arm missing from the trace has moved or been deleted in
+        # the SOURCE, which is true regardless of which invocations ran and regardless of whether
+        # anything could ever have driven it -- and it is exactly the case neither a deferral nor
+        # an exemption may excuse, because excusing it would let a refactor delete a mapped branch
+        # and make this gate greener.
         if [ "$taken" = 'ABSENT' ]; then
             absent=$((absent + 1))
+            if [ "$exempt_from_taken" -eq 1 ]; then
+                unreachable_absent=$((unreachable_absent + 1))
+            else
+                absent_required=$((absent_required + 1))
+            fi
             # The quoted source line is carried into the report, not just held in the
             # manifest: a reader told an arm has moved needs the line to look for, and
             # making them go and read the manifest to find it is a step this can save.
-            absent_list+=("$id  ($file:$line block $block branch $branch)")
+            #
+            # THE STATUS IS NAMED IN THE ENTRY rather than splitting the list in two.  An
+            # absent arm is one failure with one remedy whichever status it carried, and a
+            # reader looking at the list needs to know which of the two they are holding --
+            # for an unreachable one, "it was never taken" is not the explanation, because it
+            # was never expected to be.
+            #
+            # The coordinate is reported with the RESOLVED branch index, which is the one the
+            # lookup above actually used and therefore the one a reader can grep the trace for.
+            if [ "$exempt_from_taken" -eq 1 ]; then
+                absent_list+=("$id  ($file:$line block $block branch $resolved_branch)  [recorded UNREACHABLE]")
+                absent_list+=("    exempt from the taken check, NOT from existing: this coordinate is")
+                absent_list+=("    gone from the trace, so the arm has moved or been deleted.")
+            else
+                absent_list+=("$id  ($file:$line block $block branch $resolved_branch)")
+            fi
             absent_list+=("    manifest source: $source")
+            continue
+        fi
+
+        # THE UNREACHABLE ARMS END HERE, having been proved to EXIST.  Their taken count is
+        # reported and not judged: 0 or `-` is the state the entry predicts, and a count that
+        # is neither is a statement about the manifest rather than about the test set, so it is
+        # carried into its own list below instead of being folded into either verdict.
+        if [ "$exempt_from_taken" -eq 1 ]; then
+            unreachable_present=$((unreachable_present + 1))
+            case "$taken" in
+                -|0)
+                    unreachable_list+=("$id  ($file:$line block $block branch $resolved_branch)  taken: $taken")
+                    unreachable_list+=("    $reacher")
+                    ;;
+                *)
+                    unreachable_taken=$((unreachable_taken + 1))
+                    unreachable_taken_list+=("$id  ($file:$line block $block branch $resolved_branch)  taken: $taken")
+                    unreachable_taken_list+=("    recorded as: $reacher")
+                    unreachable_taken_list+=("    manifest source: $source")
+                    ;;
+            esac
             continue
         fi
 
@@ -7418,7 +8180,7 @@ apply_branch_gate() {
         unmet="$(branch_arm_unmet_requirement "$needs")"
         if [ -n "$unmet" ]; then
             deferred=$((deferred + 1))
-            deferred_list+=("$id  ($file:$line block $block branch $branch)  needs $unmet")
+            deferred_list+=("$id  ($file:$line block $block branch $resolved_branch)  needs $unmet")
             continue
         fi
 
@@ -7430,7 +8192,7 @@ apply_branch_gate() {
                 # was never entered at all".  This arm was measurable by this run and was not
                 # measured, which is the same finding either way.
                 zero_taken=$((zero_taken + 1))
-                zero_list+=("$id  ($file:$line block $block branch $branch)  taken: $taken")
+                zero_list+=("$id  ($file:$line block $block branch $resolved_branch)  taken: $taken")
                 zero_list+=("    should be reached by: $reacher")
                 zero_list+=("    manifest source:     $source")
                 ;;
@@ -7441,6 +8203,41 @@ apply_branch_gate() {
     done
 
     log "  manifest: $required required arm(s), $unreachable recorded unreachable by construction"
+
+    # ------------------------------------------------------------------------------------
+    # THE UNREACHABLE POPULATION, REPORTED AS ITS OWN THING.  Present in the trace, exempt from
+    # the taken check, and now provably present rather than assumed to be: each line names the
+    # count actually read, so a reader can see that the exemption was applied to a record that
+    # exists.  An absent one never reaches here -- it is a failure above, in the absent list.
+    # ------------------------------------------------------------------------------------
+    if [ "$unreachable_present" -gt 0 ]; then
+        log "  $unreachable_present of $unreachable unreachable arm(s) are PRESENT in the trace and exempt"
+        log "    from the taken check only:"
+        printf '%s\n' "${unreachable_list[@]}" | sed 's/^/[run_coverage]      /'
+    fi
+    if [ "$unreachable_unpopulated" -gt 0 ]; then
+        warn "  $unreachable_unpopulated unreachable arm(s) carry NO COORDINATES, so their presence in the"
+        warn "  trace was not checked either.  An entry with no coordinates is exempt from"
+        warn "  everything, which is not what 'unreachable' is for: fill them in the way the"
+        warn "  populated entries were, from $RAW_TRACE."
+        note_advisory "the branch-arm gate could not check the existence of $unreachable_unpopulated arm(s) recorded
+       unreachable in BRANCH_MANIFEST: they carry no line/block/branch coordinates, so the one
+       check that still applies to an unreachable arm -- that its record is still there -- was
+       not performed on them."
+    fi
+    if [ "$unreachable_taken" -gt 0 ]; then
+        warn "  $unreachable_taken arm(s) recorded UNREACHABLE were TAKEN by this run:"
+        printf '%s\n' "${unreachable_taken_list[@]}" | sed 's/^/[run_coverage]      /' >&2
+        warn "  That is a finding about the MANIFEST, not about the test set: something drove an"
+        warn "  arm whose entry states nothing can.  The entry is wrong and should become a"
+        warn "  required one with the reacher that drove it named -- which makes this gate"
+        warn "  STRICTER, so it is reported rather than silently accepted.  It is not counted as"
+        warn "  a failing arm, because no requirement has gone unmet."
+        note_advisory "the branch-arm gate observed $unreachable_taken arm(s) recorded UNREACHABLE in
+       BRANCH_MANIFEST with a non-zero taken count.  The exemption those entries carry is
+       therefore unjustified as written: re-derive them as required arms naming what drove them,
+       because an exemption nobody needs hides the next arm that does read zero."
+    fi
 
     # ------------------------------------------------------------------------------------
     # THE UNPOPULATED CASE.  It is neither a pass nor a failure of the TEST SET: it is this
@@ -7501,6 +8298,9 @@ apply_branch_gate() {
         warn "  An arm that is not in the trace has either been DELETED from the source or has"
         warn "  MOVED, and both matter: a deleted branch would otherwise make this gate greener"
         warn "  rather than redder, which is why absence fails instead of being ignored."
+        warn "  THIS INCLUDES THE ARMS RECORDED UNREACHABLE, marked as such in the list above:"
+        warn "  their exemption is from the taken check, never from existing, so a deleted or"
+        warn "  moved coordinate fails here whatever status its entry carries."
         warn "  Check the source lines quoted in BRANCH_MANIFEST for each id above, then either"
         warn "  re-derive the coordinates or remove the entry with a reason."
         BRANCH_GATE_FAILURES=$((BRANCH_GATE_FAILURES + absent))
@@ -7528,7 +8328,17 @@ apply_branch_gate() {
         log "  the $covered measurable arm(s) are all present and taken; $deferred could not be"
         log "    measured here and are reported above rather than passed"
     fi
-    log "  checked: $covered taken, $zero_taken never taken, $absent absent, $deferred deferred, $unpopulated unchecked"
+    # THE THREE POPULATIONS ON THREE LINES, because they are three different kinds of evidence
+    # and one merged line is what let the middle one be assumed rather than read.  The required
+    # tally accounts for every required arm; the unreachable tally accounts for every
+    # unreachable one; and both add up to the manifest, which is the arithmetic a reader can
+    # check without reading the manifest.
+    log "  required    ($required): $covered taken, $zero_taken never taken, $deferred deferred,"
+    log "                  $absent_required absent, $unpopulated unchecked"
+    log "  unreachable ($unreachable): $unreachable_present present and exempt from the taken check only,"
+    log "                  $unreachable_absent absent, $unreachable_unpopulated with no coordinates to check"
+    log "                  (of the present, $unreachable_taken were taken -- see above if not zero)"
+    log "  absent from the trace, either population: $absent -- each one a FAILURE above"
     return 0
 }
 
@@ -7742,6 +8552,14 @@ main() {
     make_private_lcov_home
     log_tool_versions
     prepare_output_dir
+
+    # THE TREE'S IDENTITY IS READ HERE, BEFORE THE BUILD, and that position is the whole of what
+    # makes it evidence.  --build's configure step overwrites six git-tracked Makefiles, so an
+    # identity read after it describes a tree the caller never had; write_provenance reads them
+    # again at the end and reports both, which is how a mid-run change becomes visible instead of
+    # being absorbed.  It needs the resolved tools, so it comes after require_tools, and it
+    # writes nothing into the tree it reads.
+    capture_start_provenance
 
     if [ "$DO_BUILD" -eq 1 ]; then
         do_build

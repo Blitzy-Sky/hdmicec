@@ -113,10 +113,21 @@
  */
 #include "../../ccec/src/DriverAidlImpl.hpp"
 
+/*
+ * DriverImpl.hpp, reached by the same relative-path route and for one symbol as well: the
+ * class itself, so that the per-test registry restoration below can establish by dynamic_cast
+ * WHICH back-end this process resolved to. It needs to know, because restoring the registry
+ * means calling Driver::removeLogicalAddress(), and on the AIDL back-end that issues a binder
+ * transaction - work this harness must not perform. Nothing else in this file needs the type,
+ * and no case is served by it.
+ */
+#include "../../ccec/src/DriverImpl.hpp"
+
 #include <binder/IServiceManager.h>
 #include <utils/String16.h>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 // Create mock instance before main
 static HdmiCecDriverMock* g_driverMock = nullptr;
@@ -340,6 +351,289 @@ void applyAidlModeBeforeInit() {
               "to the legacy back-end and report it as a pass";
 }
 
+/*
+ * PER-TEST RESTORATION OF THE ONE PIECE OF DRIVER STATE THAT OUTLIVES A TEST.
+ *
+ * THE DEFECT THIS EXISTS TO REMOVE. The driver is a process singleton, and its list of
+ * acquired logical addresses is the only piece of its state a test can add to and that
+ * nothing takes away again: DriverImpl::close() deliberately does not clear the list - the
+ * AIDL back-end matches it, and clearing would be an unauthorized improvement to legacy
+ * behaviour - so a registration made by one case is still there when the next case runs. Two
+ * groups of cases in this binary sit on opposite sides of that: some register an address and
+ * do not remove it in their teardown, and others assert the negative precondition that a
+ * particular address is NOT registered, because Connection::matchSource() only rewrites a
+ * frame's source nibble when Driver::isValidLogicalAddress() says the address is acquired.
+ *
+ * In declaration order the negative-precondition cases happen to run first and everything
+ * passes. Under `--gtest_shuffle` - a valid order, and one CI is entitled to use - the
+ * registering cases can run first, and then the negative-precondition cases fail with a
+ * rewritten source nibble. Measured: seeds 12345 and 99999 each failed exactly two cases,
+ * seed 54321 passed. That is a false regression produced by test order alone, and a suite
+ * whose verdict depends on its order cannot be used to certify anything.
+ *
+ * WHY THE FIX IS HERE AND NOT IN A FIXTURE TEARDOWN. Two reasons, and the second is the one
+ * that matters. First, the twelve pre-existing L1 units are outside this migration's diff by
+ * design, and an acceptance check enforces that. Second - and this would be the right place
+ * even without that boundary - a teardown added to the two registering fixtures would make
+ * exactly those two fixtures order-independent and leave every other fixture, and every
+ * fixture added later, free to reintroduce the same leak. A process-global listener makes the
+ * property hold for all of them: whatever a case registers, the next case starts from the
+ * registry the FIRST case started from.
+ *
+ * WHAT IT DOES NOT DO, deliberately:
+ *
+ *  - it does not touch production close/term semantics. The registry is restored from
+ *    OUTSIDE the driver, through the driver's own public interface, and no production file
+ *    changes. A close() that leaves the list populated still leaves it populated;
+ *  - it does nothing at all when nothing leaked, which is the case after all but a handful
+ *    of the cases in this binary. Detection is a pure list walk under the driver's own lock
+ *    (Driver::isValidLogicalAddress() on both back-ends reaches no HAL and no service), so
+ *    the common path costs fifteen list walks and issues no HAL call whatsoever;
+ *  - it issues NO BINDER CALL, ever. Driver::removeLogicalAddress() on the AIDL back-end is
+ *    a transaction, so restoration is performed only when the resolved back-end is the legacy
+ *    one; under an AIDL selection a residual registration is reported and left, which is
+ *    honest and visible. The order-dependence this guard removes is a legacy-invocation
+ *    problem in any case: the cases that leak a registration are the LibCCEC ones, which the
+ *    AIDL invocations' filters exclude, while the AIDL session fixture's own cases add and
+ *    remove their addresses inside a single case;
+ *  - it never fails a test. Everything it calls is wrapped, because a restoration problem
+ *    must not be reported against a case that has already produced its own result - it would
+ *    attribute a harness fault to unrelated code. It reports loudly on stdout instead, which
+ *    is where a reader looking at a later failure will find it.
+ *
+ * ON THE GMOCK WARNING IT PRODUCES. Restoring on the legacy back-end reaches
+ * HdmiCecRemoveLogicalAddress() on the process-global mock, which no expectation covers, so
+ * gmock prints its "Uninteresting mock function call" warning and takes the ON_CALL default
+ * the mock already installs (hdmi_cec_driver_mock.cpp, returning HDMI_CEC_IO_SUCCESS).
+ * That warning is accepted rather than silenced, and the alternative was measured and
+ * rejected: installing a permissive EXPECT_CALL and then calling
+ * ::testing::Mock::VerifyAndClearExpectations() would clear EVERY expectation live on the
+ * mock at that moment, including one a case had legitimately left unmet, and would therefore
+ * be capable of hiding a real failure. A warning that is explained is better than a verifier
+ * that can lie. ::testing::Mock::AllowUninterestingCalls() would express this exactly and is
+ * private in GoogleTest 1.15, so it is not available. An explanatory line is logged
+ * immediately before the removals so the warning is never unaccounted for.
+ */
+class LogicalAddressRegistryGuard : public ::testing::EmptyTestEventListener {
+public:
+    /**
+     * @brief Creates the guard with no baseline yet, so nothing is probed before a test runs
+     *
+     * @post No baseline is held and Driver::getInstance() has not been called. The baseline is
+     *       taken lazily at the start of the first test, which is deliberate: a run whose
+     *       environment SetUp failed fatally never starts a test, and this guard must not be
+     *       the thing that forces the back-end selection on such a run.
+     */
+    LogicalAddressRegistryGuard(void) : baselineCaptured(false) {
+        for (int index = 0; index < ASSIGNABLE_ADDRESS_COUNT; index++) {
+            baselineRegistered[index] = false;
+        }
+    }
+
+    /**
+     * @brief Captures the registry the suite starts from, once, at the first test
+     *
+     * @param [in] testInfo  - The test about to run. Unused; the first call is what matters,
+     *                         not which case it belongs to.
+     *
+     * @return None.
+     *
+     * @pre The global environment's SetUp() has completed, so LibCCEC::init() has already
+     *      forced the back-end selection and this call cannot be what resolves it.
+     * @post The baseline is held for the lifetime of the process. It is captured rather than
+     *       assumed empty, so an address that init() itself acquired - none does today - would
+     *       be treated as part of the starting state instead of being torn out from under
+     *       every case.
+     */
+    void OnTestStart(const ::testing::TestInfo & /* testInfo */) override {
+        if (baselineCaptured) {
+            return;
+        }
+
+        for (int address = FIRST_ASSIGNABLE_ADDRESS; address <= LAST_ASSIGNABLE_ADDRESS;
+             address++) {
+            baselineRegistered[address - FIRST_ASSIGNABLE_ADDRESS] = isRegistered(address);
+        }
+
+        baselineCaptured = true;
+    }
+
+    /**
+     * @brief Returns the registry to the captured baseline, so the next case starts where the
+     *        first one did
+     *
+     * @param [in] testInfo  - The case that has just finished, named in the report so a leak
+     *                         is attributed to the case that made it rather than to the case
+     *                         that would have tripped over it.
+     *
+     * @return None. Nothing here can fail a test: every call is wrapped and every problem is
+     *         reported on stdout.
+     *
+     * @pre Called after the case's own TearDown, which is where GoogleTest sequences listener
+     *      OnTestEnd, so a fixture that cleans up after itself has already done so and this
+     *      finds nothing to do.
+     * @post Every address registered after the baseline was captured has been removed, or the
+     *       reason it could not be is reported. Addresses that were part of the baseline are
+     *       left exactly as they are.
+     * @warning Restoration reaches the legacy HAL mock, which produces one gmock warning per
+     *          removal. The note above this class records why that is accepted rather than
+     *          suppressed, and an explanatory line is logged immediately before it happens.
+     */
+    void OnTestEnd(const ::testing::TestInfo &testInfo) override {
+        if (!baselineCaptured) {
+            return;
+        }
+
+        std::vector<int> leaked;
+
+        for (int address = FIRST_ASSIGNABLE_ADDRESS; address <= LAST_ASSIGNABLE_ADDRESS;
+             address++) {
+            if (isRegistered(address) &&
+                !baselineRegistered[address - FIRST_ASSIGNABLE_ADDRESS]) {
+                leaked.push_back(address);
+            }
+        }
+
+        // The overwhelmingly common case: no case in this binary leaked anything, so there is
+        // nothing to log, nothing to remove and no HAL call to make.
+        if (leaked.empty()) {
+            return;
+        }
+
+        std::cout << "[LogicalAddressRegistryGuard] " << testInfo.test_suite_name() << "."
+                  << testInfo.name() << " left " << leaked.size()
+                  << " logical address(es) registered in the process-global driver:";
+
+        for (size_t entry = 0; entry < leaked.size(); entry++) {
+            std::cout << " " << LogicalAddress(leaked[entry]).toString();
+        }
+
+        std::cout << ". Removing them so the next case starts from the registry the first case "
+                     "started from; the gmock \"uninteresting call\" warnings that follow are "
+                     "this removal reaching HdmiCecRemoveLogicalAddress and are expected."
+                  << std::endl;
+
+        if (!restore(leaked)) {
+            return;
+        }
+
+        // Verified rather than assumed. A removal that reported nothing and changed nothing
+        // would otherwise leave the next case to fail for a reason nothing in the log explains.
+        for (size_t entry = 0; entry < leaked.size(); entry++) {
+            if (isRegistered(leaked[entry])) {
+                const std::string name = LogicalAddress(leaked[entry]).toString();
+
+                std::cout << "[LogicalAddressRegistryGuard] " << name
+                          << " is STILL registered after removal. A later case that requires it "
+                             "absent will fail, and this line - not that case - is where the "
+                             "cause is." << std::endl;
+            }
+        }
+    }
+
+private:
+    /**
+     * @brief The assignable logical addresses, which are the only ones a driver can hold.
+     *
+     * 0x0 to 0xE inclusive. 0xF is UNREGISTERED/BROADCAST - a destination, never an address a
+     * device acquires - and the AIDL controller documents the same range for
+     * addLogicalAddresses(), so probing it would ask about a value neither back-end can hold.
+     */
+    enum {
+        FIRST_ASSIGNABLE_ADDRESS = LogicalAddress::TV,
+        LAST_ASSIGNABLE_ADDRESS  = LogicalAddress::SPECIFIC_USE,
+        ASSIGNABLE_ADDRESS_COUNT = (LAST_ASSIGNABLE_ADDRESS - FIRST_ASSIGNABLE_ADDRESS) + 1
+    };
+
+    /**
+     * @brief Whether the driver currently holds @p address, without ever raising
+     *
+     * @param [in] address  - Assignable logical address to probe.
+     * @return bool - Whether the driver reports the address as acquired. False is also the
+     *                answer when the query itself failed, which is the safe direction: it
+     *                leads to no removal being attempted.
+     *
+     * @note Driver::isValidLogicalAddress() is a list walk under the driver's own lock on both
+     *       back-ends and reaches no HAL, no service and no binder transaction, which is what
+     *       makes probing every address after every test free. It does not check the driver's
+     *       lifecycle state either, so it answers on a closed driver exactly as it does on an
+     *       open one - which is the answer that matters here, since the registry survives a
+     *       close.
+     */
+    bool isRegistered(int address) {
+        try {
+            return Driver::getInstance().isValidLogicalAddress(LogicalAddress(address));
+        }
+        catch (...) {
+            return false;
+        }
+    }
+
+    /**
+     * @brief Removes every leaked address through the driver's own public interface
+     *
+     * @param [in] leaked  - The addresses registered after the baseline was captured.
+     * @return bool - Whether removal was attempted. False when the resolved back-end is not
+     *                the legacy one, in which case nothing was called and the caller must not
+     *                report a residual registration as a failure of a removal that never ran.
+     *
+     * @post On the legacy back-end every address in @p leaked has had removeLogicalAddress()
+     *       called for it. On any other back-end nothing was called at all.
+     * @warning An InvalidStateException here is expected rather than exceptional: the driver
+     *          must be OPENED for a removal to be accepted, and a case that terminated the
+     *          library leaves it CLOSED. That is reported and the loop continues, because the
+     *          remaining addresses are worth attempting and because nothing this guard does
+     *          may fail a test.
+     */
+    bool restore(const std::vector<int> &leaked) {
+        Driver &driver = Driver::getInstance();
+
+        if (dynamic_cast<DriverImpl *>(&driver) == NULL) {
+            std::cout << "[LogicalAddressRegistryGuard] the resolved back-end is not the legacy "
+                         "one, so these addresses are LEFT REGISTERED: removing them would issue "
+                         "a binder transaction, and this harness issues none. Reported rather "
+                         "than passed over in silence, because a later case that needs one of "
+                         "these addresses absent would be reading the state this line names."
+                      << std::endl;
+
+            return false;
+        }
+
+        for (size_t entry = 0; entry < leaked.size(); entry++) {
+            try {
+                driver.removeLogicalAddress(LogicalAddress(leaked[entry]));
+            }
+            catch (InvalidStateException &) {
+                std::cout << "[LogicalAddressRegistryGuard] "
+                          << LogicalAddress(leaked[entry]).toString()
+                          << " could not be removed because the driver is not OPENED. The "
+                             "registry survives a close, so this address remains registered "
+                             "until something reopens the driver and a later case may see it."
+                          << std::endl;
+            }
+            catch (...) {
+                std::cout << "[LogicalAddressRegistryGuard] removing "
+                          << LogicalAddress(leaked[entry]).toString()
+                          << " raised. The address may remain registered." << std::endl;
+            }
+        }
+
+        return true;
+    }
+
+    /** @brief Whether the registry the suite starts from has been captured yet. */
+    bool baselineCaptured;
+
+    /**
+     * @brief The registry as the first case found it, indexed from FIRST_ASSIGNABLE_ADDRESS.
+     *
+     * Held rather than assumed empty so that an address the starting state legitimately holds
+     * is never removed. It is empty in practice on this binary, and asserting that would be
+     * asserting a property of LibCCEC::init() from the wrong place.
+     */
+    bool baselineRegistered[ASSIGNABLE_ADDRESS_COUNT];
+};
+
 } // namespace
 
 // Global test environment to set up mocks
@@ -403,5 +697,17 @@ public:
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     ::testing::AddGlobalTestEnvironment(new CecTestEnvironment);
+
+    // The per-test registry restoration described above LogicalAddressRegistryGuard, which is
+    // what makes this binary's result independent of the order its cases run in - including
+    // under --gtest_shuffle, which CI is entitled to use and which used to fail two cases on
+    // two of three sampled seeds.
+    //
+    // APPENDED, so it runs after the default result printer's own OnTestEnd: the printer emits
+    // the case's [ OK ] or [ FAILED ] line first, and any report this guard makes then appears
+    // beneath the case that caused it rather than above it. GoogleTest takes ownership of the
+    // listener, which is why nothing here deletes it.
+    ::testing::UnitTest::GetInstance()->listeners().Append(new LogicalAddressRegistryGuard());
+
     return RUN_ALL_TESTS();
 }

@@ -304,7 +304,11 @@
 #        --base-tarball /path/to/base-i386.tar.gz --base-sha256 <hex> \
 #        [--lcov-tarball /path/to/lcov-2.x.tar.gz --lcov-sha256 <hex>] \
 #        [--gtest-prefix /path/to/install/usr] [--kernel-config /path/to/.config] \
+#        [--sink-caller-source /path/to/HdmiCecSinkImplementation.cpp] \
 #        [--arch i386] [--size 6144] [--apt-mirror URL]
+#
+#   --sink-caller-source is optional only in spelling: the file is REQUIRED, and when the
+#   option is omitted it is taken from beside the --payload tree or the build FAILS.
 #
 #   Run --help for the full option and default reference.  Root privilege is required: the
 #   image is populated through a loop device, a mount and a chroot.
@@ -361,9 +365,35 @@ readonly GUEST_WORKSPACE='/opt/cec-l2'
 readonly GUEST_PAYLOAD_DIR="$GUEST_WORKSPACE/hdmicec"
 readonly GUEST_SDK_DIR="$GUEST_WORKSPACE/rdk-halif-aidl"
 readonly GUEST_GTEST_PREFIX="$GUEST_WORKSPACE/install/usr"
+# THE SINK CALLER SOURCE, PLACED WHERE THE CI WORKSPACE PUTS IT.  The L1 suite carries a
+# drift guard -- DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSink
+# Source -- which reads the real Sink plugin source and FAILS HARD when it cannot find it,
+# deliberately, because the difference-3 case it protects otherwise asserts against a model
+# of the plugin that nothing has checked against its subject.  The guard looks for the file
+# beside this component, so the destination reproduces the superproject layout -- a sibling
+# of the payload directory -- rather than inventing one, and the init additionally exports
+# CEC_SINK_CALLER_SOURCE to the absolute path so the guard does not depend on the runner's
+# working directory.  Measured: without it the guest ran the whole build under emulation and
+# then failed invocation A on this one case, 566 of 567 passing.
+#   It is a REQUIRED ACCEPTANCE INPUT on every invocation, not an optional diagnostic: absent it
+#   that guard FAILS by design rather than skipping, because a skip is indistinguishable from a
+#   pass in an aggregate count.  Nothing compiles the file -- it is read as text.
+readonly GUEST_SINK_COMPONENT_DIR="$GUEST_WORKSPACE/entservices-hdmicecsink"
+readonly GUEST_SINK_CALLER_SOURCE="$GUEST_SINK_COMPONENT_DIR/plugin/HdmiCecSinkImplementation.cpp"
 readonly GUEST_ARTIFACT_DIR='/artifacts'
 readonly GUEST_STATUS_FILE="$GUEST_ARTIFACT_DIR/run_coverage.status"
-readonly GUEST_INIT_PATH='/sbin/cec-l2-init'
+# ANCHORED UNDER /usr/sbin, NOT /sbin, AND THAT IS LOAD-BEARING RATHER THAN A PREFERENCE.
+# Debian has been usr-merged since buster: in the bookworm base tarball this script builds,
+# /sbin, /bin and /lib are SYMBOLIC LINKS -- and relative ones (`sbin -> usr/sbin`), not the
+# absolute form an earlier reading of this hazard anticipated.  The confinement that writes
+# into the image refuses to traverse a symbolic link of either form, by design, because
+# following one is exactly how a write escapes the image and lands on the build host.  So
+# `/sbin/cec-l2-init` is not a path this script can write on a usr-merged base at all: it is
+# refused with ELOOP before a byte is written.  /usr/sbin is a real directory in both the
+# merged and the split layout, so anchoring here writes the same file on either base and asks
+# nothing of the confinement.  The kernel is booted with init=<this path>, which the workflow
+# reads back out of the image manifest, so this constant is the single place it is decided.
+readonly GUEST_INIT_PATH='/usr/sbin/cec-l2-init'
 readonly GUEST_CONF_DIR='/etc/cec-l2'
 readonly GUEST_IMAGE_CONF="$GUEST_CONF_DIR/image.conf"
 readonly GUEST_KERNEL_EXPECTATION="$GUEST_CONF_DIR/expected-kernel-config"
@@ -1058,6 +1088,11 @@ LCOV_TARBALL=''
 LCOV_SHA256=''
 GTEST_PREFIX_SRC=''
 KERNEL_CONFIG_SRC=''
+# --sink-caller-source: the real Sink plugin source the L1 drift guard reads.  A REQUIRED
+# acceptance input.  Left unset, validate_inputs looks for it beside the payload tree and FAILS
+# when it is not there -- it is never silently omitted, because omitting it turns the modelled Sink
+# call paths into a model nothing has checked against its subject.  See GUEST_SINK_CALLER_SOURCE.
+SINK_CALLER_SOURCE_SRC=''
 APT_MIRROR=''
 # --apt-auth-file: a build-time-only apt credential file.  It is installed into the chroot
 # immediately before the apt phase and removed immediately after, and it is never logged,
@@ -1075,6 +1110,22 @@ APT_AUTH_CUSTODY=''
 VETTED_FD_PROC=''
 IMAGE_SIZE_MIB="$DEFAULT_IMAGE_SIZE_MIB"
 READINESS_TIMEOUT_SECONDS="$DEFAULT_READINESS_TIMEOUT_SECONDS"
+# --toolchain-gcc-major: the GCC family the CALLER pins for the acceptance measurement.  It is
+# passed in rather than defaulted here on purpose -- the value lives once, in the workflow's env
+# block, and a copy in this script would be a second place for it to be wrong.  EMPTY means "no
+# pin was named", in which case the guest's own toolchain is still RECORDED and its internal
+# consistency still asserted; what is skipped is only the comparison against a family nobody
+# named.  See install_image_pinned_compiler and assert_image_toolchain.
+TOOLCHAIN_GCC_MAJOR=''
+# Set by install_image_pinned_compiler, read by assert_image_toolchain and write_manifest.  One
+# of: 'not requested', 'selected', or 'unavailable'.  Declared here so `set -u` cannot make a
+# read of it fatal on a path where the installer did not run.
+PINNED_COMPILER_STATE='not requested'
+# The guest's own measured versions, filled in by assert_image_toolchain and recorded in the
+# manifest.  Measured inside the image rather than inferred from a package name.
+GUEST_GCC_VERSION=''
+GUEST_GXX_VERSION=''
+GUEST_GCOV_VERSION=''
 
 # Derived once ARCH is resolved.
 EXPECTED_ELF_CLASS=''
@@ -1167,6 +1218,27 @@ OPTIONAL
                            architecture, whose lib/pkgconfig holds gtest.pc.  Copied to
                            $GUEST_GTEST_PREFIX and exported as GTEST_PREFIX by the init.
                            Omit it only when the image's own packaging provides gtest.pc.
+      --sink-caller-source FILE
+                           The REAL entservices-hdmicecsink plugin source
+                           (plugin/HdmiCecSinkImplementation.cpp), from a checkout pinned at
+                           the reviewed commit.  Staged into the image BESIDE THE PAYLOAD,
+                           reproducing the superproject layout, and exported to the guest as
+                           CEC_SINK_CALLER_SOURCE by the init.  Destination:
+                             $GUEST_SINK_CALLER_SOURCE
+                           A REQUIRED ACCEPTANCE INPUT, not an optional diagnostic.
+                           DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatch
+                           TheRealSinkSource reads it and asserts the structural facts that
+                           DriverAidlSessionTest.AddLogicalAddressFailuresReachBothReal
+                           SinkCallPathsAsExpected asserts a MODEL of; without it that guard
+                           FAILS -- deliberately, since a skip could not be told apart from
+                           a pass -- and the model becomes unchecked rather than evidence
+                           about a caller.  The guest cannot see the host workspace, so a
+                           host-side checkout is not enough on its own: the file must be
+                           staged INTO the image, which is what this option does.
+                           Omit it only when the plugin tree sits beside the --payload tree
+                           at ../entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp,
+                           which is then used and reported.  When neither resolves the image
+                           build FAILS rather than producing an image whose guard cannot run.
       --kernel-config FILE The guest kernel's configuration.  Copied into the image as
                            build-time provenance, AND read here as one of the two sources
                            the expected binder wire protocol is DERIVED from: an explicit
@@ -1225,6 +1297,29 @@ OPTIONAL
       --readiness-timeout S  Seconds the in-guest init waits for servicemanager to ANSWER
                            (default $DEFAULT_READINESS_TIMEOUT_SECONDS).  The wait is a bounded
                            poll on a real binder transaction, never a sleep.
+      --toolchain-gcc-major N  The GCC MAJOR the caller pins for the acceptance measurement --
+                           13 for this project, whose single definition point is
+                           CEC_TOOLCHAIN_GCC_MAJOR in .github/workflows/aidl-path-tests.yml.
+                           GATE-AND-RECORD, NOT GATE-AND-FAIL, and the distinction is the whole
+                           of this option.  The guest is populated from ITS OWN pinned archive,
+                           whose default GCC family need not be the caller's and which may not
+                           carry the pinned one at all -- Debian bookworm's default is GCC 12.
+                           So: gcc-N and g++-N are attempted as OPTIONAL packages; when the
+                           archive has them they are SELECTED for every in-guest compile by
+                           symbolic links in /usr/local/bin, which is first on the guest PATH,
+                           and gcov-N is selected with them because tests/L1Tests/run_coverage.sh
+                           resolves a bare `gcov` and has no override knob; when the archive does
+                           not have them the base default is kept and the shortfall is reported
+                           as a NAMED LIMITATION beside the recorded versions, because an image
+                           build that died on a package name the archive never had would be
+                           failing for the caller's archive rather than for anything about this
+                           image.  WHAT IS ASSERTED HARD either way is the property the guest's
+                           own trace depends on: that the guest's gcov and the guest's compiler
+                           are the same family, since gcov refuses notes files written by
+                           another.  Omitted, the guest toolchain is recorded and that internal
+                           consistency is still asserted; only the comparison against a family
+                           nobody named is skipped.  The measured versions and the outcome are
+                           logged, and written to the manifest as GUEST_TOOLCHAIN_*.
   -h, --help               This message.
       --self-test          Run this script's own checked-in regression cases and exit.  Takes
                            no other argument, needs no root, and returns BEFORE anything
@@ -1310,6 +1405,8 @@ parse_args() {
             --lcov-sha256=*)      LCOV_SHA256="${1#*=}" ;;
             --gtest-prefix)       require_option_value "$1" $#; GTEST_PREFIX_SRC="$2"; shift ;;
             --gtest-prefix=*)     GTEST_PREFIX_SRC="${1#*=}" ;;
+            --sink-caller-source) require_option_value "$1" $#; SINK_CALLER_SOURCE_SRC="$2"; shift ;;
+            --sink-caller-source=*) SINK_CALLER_SOURCE_SRC="${1#*=}" ;;
             --kernel-config)      require_option_value "$1" $#; KERNEL_CONFIG_SRC="$2"; shift ;;
             --kernel-config=*)    KERNEL_CONFIG_SRC="${1#*=}" ;;
             --apt-mirror)         require_option_value "$1" $#; APT_MIRROR="$2"; shift ;;
@@ -1320,6 +1417,8 @@ parse_args() {
             --size=*)             IMAGE_SIZE_MIB="${1#*=}" ;;
             --readiness-timeout)  require_option_value "$1" $#; READINESS_TIMEOUT_SECONDS="$2"; shift ;;
             --readiness-timeout=*) READINESS_TIMEOUT_SECONDS="${1#*=}" ;;
+            --toolchain-gcc-major) require_option_value "$1" $#; TOOLCHAIN_GCC_MAJOR="$2"; shift ;;
+            --toolchain-gcc-major=*) TOOLCHAIN_GCC_MAJOR="${1#*=}" ;;
             -h|--help)            usage; exit 0 ;;
             --)                   shift; break ;;
             # An unknown option is REFUSED rather than ignored.  Silently accepting one
@@ -5030,6 +5129,9 @@ assert_secret_inputs_outside_copied_roots() {
     if [ -n "$GTEST_PREFIX_SRC" ]; then
         root_opts+=('--gtest-prefix'); root_paths+=("$GTEST_PREFIX_SRC")
     fi
+    if [ -n "$SINK_CALLER_SOURCE_SRC" ]; then
+        root_opts+=('--sink-caller-source'); root_paths+=("$SINK_CALLER_SOURCE_SRC")
+    fi
 
     for (( i = 0; i < ${#secret_paths[@]}; i++ )); do
         for (( j = 0; j < ${#root_paths[@]}; j++ )); do
@@ -5175,6 +5277,10 @@ validate_inputs() {
     # caller a whole second run.
     require_positive_integer "$IMAGE_SIZE_MIB" '--size'
     require_positive_integer "$READINESS_TIMEOUT_SECONDS" '--readiness-timeout'
+    # Only when it was given: an ABSENT pin is a supported mode (record, do not compare), while a
+    # pin that is not a number would compose package names like "gcc-thirteen" and fail three
+    # phases later on something that reads as an archive problem.
+    [ -z "$TOOLCHAIN_GCC_MAJOR" ] || require_positive_integer "$TOOLCHAIN_GCC_MAJOR" '--toolchain-gcc-major'
 
     [ -n "$OUTPUT_IMAGE" ] || die "--output is required: this script has no default place to
        write a root image and will not invent one.  Run '$SCRIPT_PATH --help'."
@@ -5291,6 +5397,48 @@ validate_inputs() {
         KERNEL_CONFIG_SRC="$(absolutise_and_check "$KERNEL_CONFIG_SRC" '--kernel-config')"
         require_existing_file "$KERNEL_CONFIG_SRC" 'the --kernel-config guest kernel configuration'
     fi
+
+    # THE SINK CALLER SOURCE.  Named, or found beside the payload, or the build fails -- there is
+    # deliberately no fourth outcome in which an image is produced without it.
+    #
+    # The reason it cannot degrade to a warning is the same reason the guard itself fails rather
+    # than skipping: an image whose guard cannot run still executes
+    # DriverAidlSessionTest.AddLogicalAddressFailuresReachBothRealSinkCallPathsAsExpected, which
+    # asserts against a MODEL of two Sink call sites. A model nothing has checked against its
+    # subject is not evidence about a caller, and an aggregate count cannot tell the difference.
+    # So the failure is moved here, to image-build time on the host, where the fix is obvious and
+    # cheap -- rather than being discovered as a red test inside a guest an hour later.
+    if [ -n "$SINK_CALLER_SOURCE_SRC" ]; then
+        SINK_CALLER_SOURCE_SRC="$(absolutise_and_check "$SINK_CALLER_SOURCE_SRC" '--sink-caller-source')"
+        require_existing_file "$SINK_CALLER_SOURCE_SRC" \
+            "the --sink-caller-source Sink plugin source.  It is read by the L1 drift guard
+       DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource and is a
+       required acceptance input"
+    else
+        # The payload is the hdmicec checkout, so its sibling is where a superproject checkout
+        # puts the plugin. Reported when used, so a reader of the log never has to guess which
+        # of the two routes supplied the file.
+        local sink_sibling="$PAYLOAD_DIR/../entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp"
+        if [ -r "$sink_sibling" ]; then
+            SINK_CALLER_SOURCE_SRC="$(absolutise_and_check "$sink_sibling" 'the Sink source beside --payload')"
+            log "--sink-caller-source was not given; using the tree beside --payload:"
+            log "  $SINK_CALLER_SOURCE_SRC"
+        else
+            die "the real Sink caller source was not supplied and is not beside the --payload tree,
+       so this image would carry no source for the L1 drift guard to read.  THAT IS A REQUIRED
+       ACCEPTANCE INPUT, NOT AN OPTIONAL DIAGNOSTIC: without it,
+       DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource fails
+       inside the guest, and DriverAidlSessionTest.AddLogicalAddressFailuresReachBothRealSink
+       CallPathsAsExpected goes on asserting against a model of the Sink plugin that nothing has
+       checked against its subject.
+       SUPPLY IT EITHER WAY: pass --sink-caller-source with the absolute path of
+       entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp from a checkout pinned at the
+       commit the guard names as reviewed -- which is what .github/workflows/aidl-path-tests.yml
+       does -- or place that checkout beside the --payload tree, where this path was tried:
+       $sink_sibling"
+        fi
+    fi
+    assert_path_embeddable "$SINK_CALLER_SOURCE_SRC" '--sink-caller-source'
     # --apt-auth-file.  Checked for confidentiality the same way --base-url-file is.  Its
     # CONTENT is apt's business in the sense that this script does not interpret it: nothing here
     # parses a record into fields it acts on, nothing logs it and nothing digests it into the
@@ -7278,6 +7426,16 @@ assert_base_architecture() {
 # ------------------------------------------------------------------------------------
 readonly IMAGE_PACKAGES=(
     # Build-and-measure toolchain.  The suites build at -std=c++17.
+    #
+    # 'g++' IS UNVERSIONED HERE ON PURPOSE, and it is the FLOOR rather than the selection.
+    # This list is REQUIRED -- every entry must install or the image build fails -- and the
+    # guest's archive is the caller's snapshot pin, not this script's, so naming a versioned
+    # package here would fail the whole image build on a package that archive may not carry.
+    # What honours --toolchain-gcc-major is install_image_pinned_compiler, which runs after
+    # this list, attempts gcc-N/g++-N as OPTIONAL packages, and selects them ahead of these
+    # via /usr/local/bin symlinks when they arrive.  Either way the family actually in force
+    # is measured out of the image by assert_image_compiler_identity and recorded in the
+    # manifest, so no reader has to infer it from this line.
     g++ make autoconf automake libtool pkg-config binutils
     # A hard configure dependency: PKG_CHECK_MODULES([GLIB], [glib-2.0 >= 0.10.28]).
     libglib2.0-dev
@@ -7289,7 +7447,19 @@ readonly IMAGE_PACKAGES=(
     lcov
     # lcov 2.x is Perl and needs these modules; naming them here means a source install of
     # lcov 2.x has its dependencies already satisfied.
-    perl libcapture-tiny-perl libdatetime-perl libjson-xs-perl libperlio-gzip-perl
+    #
+    # libtimedate-perl IS NOT OPTIONAL, AND ITS ABSENCE COST A WHOLE GUEST RUN.  genhtml
+    # opens with `use Date::Parse`, which comes from libtimedate-perl and from nothing else
+    # in this list -- libdatetime-perl provides DateTime, a different module.  Without it
+    # genhtml dies at load with "Can't locate Date/Parse.pm in @INC" while `lcov --version`
+    # still answers, so the image built, booted and reached the coverage runner before
+    # generate_html() failed the run outright: run_coverage.sh treats a genhtml failure as
+    # fatal, and coverage/index.html is one of the artifacts the workflow's completeness gate
+    # requires.  Measured inside the guest, at the end of a full TCG run.  The module set was
+    # taken from the five tools this job actually invokes -- lcov, genhtml, geninfo, genpng,
+    # gendesc -- plus lib/lcovutil.pm; everything else they use is core perl.
+    perl libcapture-tiny-perl libdatetime-perl libtimedate-perl libjson-xs-perl \
+    libperlio-gzip-perl
     # What the init and run_coverage.sh reach for: mount, mknod, stat, timeout, flock,
     # nproc, awk, find, mktemp, ps, and a shell that is actually bash.
     bash coreutils util-linux findutils mawk procps
@@ -7488,6 +7658,103 @@ remove_image_apt_auth() {
     log "the temporary apt credentials have been removed from the image and verified absent"
 }
 
+# ------------------------------------------------------------------------------------
+# THE PINNED COMPILER FAMILY INSIDE THE GUEST.  OPTIONAL BY ARCHIVE, SELECTED WHEN PRESENT,
+# NAMED AS A LIMITATION WHEN ABSENT.
+#
+# WHY THIS IS NOT SIMPLY ADDED TO IMAGE_PACKAGES.  That set is the one the image cannot be built
+# without, and every name in it exists in every archive this image is populated from.  gcc-N does
+# not: the guest is Debian at a pinned snapshot -- bookworm's default family is GCC 12 -- and
+# whether that snapshot serves the caller's pinned family is a property of the archive, not of
+# this script.  Putting gcc-N in the required set would make the image build fail on a package
+# the archive never had, which reports the caller's archive as an image defect.  Leaving the pin
+# out altogether is the other wrong answer: then the guest measures with an unrecorded compiler
+# and nothing says so.  So the third option is taken -- attempt, select on success, RECORD either
+# way, and name the shortfall in the caller's own terms when it happens.
+#
+# WHY SYMBOLIC LINKS IN /usr/local/bin RATHER THAN update-alternatives OR CC/CXX EXPORTS.
+# Three reasons, in order of how much they matter:
+#
+#   * /usr/local/bin is FIRST on the PATH the in-guest init exports, so a link there is what a
+#     bare `gcc`, `g++` or `gcov` resolves to for every in-guest compile and for lcov's own
+#     invocations of gcov -- including tests/L1Tests/run_coverage.sh, which resolves gcov from
+#     PATH and offers no override knob at all.  An exported CXX would reach configure and make
+#     but would NOT reach that.
+#   * It reaches the helper compiles in this script too (build_guest_helpers runs after this
+#     phase and invokes unversioned gcc/g++ inside the chroot), so the whole image is built with
+#     one family rather than two.
+#   * update-alternatives would need the base to have registered the alternative already, which
+#     a minimal debootstrap has not.
+#
+# gcov IS LINKED WITH THE COMPILERS AND NOT SEPARATELY, because the pairing is the property that
+# matters: gcov demands a notes-file version stamp derived from the GCC major and minor that
+# wrote the file and reads nothing when they differ.  Selecting a compiler without its gcov would
+# produce a build the guest cannot measure.
+#
+# EVERY WRITE HERE IS A chroot_run ON AN IN-IMAGE ABSOLUTE PATH, which is confined by
+# construction -- the chroot is the confinement -- rather than a host-side write through
+# "$IMAGE_MOUNT/...", which would follow a link the base tarball supplied.
+# ------------------------------------------------------------------------------------
+install_image_pinned_compiler() {
+    if [ -z "$TOOLCHAIN_GCC_MAJOR" ]; then
+        PINNED_COMPILER_STATE='not requested'
+        log "no --toolchain-gcc-major was given: the image keeps its base default compiler."
+        log "  Its versions are still measured and recorded by assert_image_toolchain, and the"
+        log "  gcov-matches-compiler assertion still applies; only the comparison against a"
+        log "  pinned family is skipped, because none was named."
+        return 0
+    fi
+
+    local major="$TOOLCHAIN_GCC_MAJOR"
+    log "attempting the pinned compiler family for the guest: gcc-$major and g++-$major"
+    if ! chroot_run apt-get install -y --no-install-recommends "gcc-$major" "g++-$major"; then
+        PINNED_COMPILER_STATE='unavailable'
+        warn "NAMED LIMITATION: the guest archive does not provide gcc-$major and g++-$major, so"
+        warn "  the image keeps its base default compiler and the GUEST DOES NOT MATCH the"
+        warn "  acceptance family pinned by the caller (--toolchain-gcc-major $major)."
+        warn "  This is reported rather than fatal: the package set comes from the archive the"
+        warn "  caller pinned with --apt-mirror -- Debian bookworm's default family is GCC 12 --"
+        warn "  and dying here would fail the image build for the archive's contents."
+        warn "  WHAT IT MEANS FOR THE EVIDENCE: the guest's line, function and branch figures"
+        warn "  and its (file,line,block,branch) branch-arm coordinates are produced by the"
+        warn "  guest's own compiler, so they are internally consistent and comparable ACROSS"
+        warn "  RUNS OF THIS IMAGE, but they are not proven comparable with figures recorded on"
+        warn "  the pinned family. assert_image_toolchain records the measured versions and the"
+        warn "  manifest carries them as GUEST_TOOLCHAIN_*."
+        warn "  TO CLOSE IT: pin an archive that serves gcc-$major (a suite whose default family"
+        warn "  is $major, or one with a backports component carrying it) and rebuild the image."
+        return 0
+    fi
+
+    # SELECTED, AND THE SELECTION IS THEN PROVEN RATHER THAN ASSUMED. `ln -sfn` because the base
+    # may already provide /usr/local/bin entries, and the assertion afterwards is what
+    # distinguishes "the link command returned 0" from "a bare gcc now resolves to the pinned
+    # family".
+    local tool
+    for tool in gcc g++ gcov; do
+        chroot_run ln -sfn -- "/usr/bin/$tool-$major" "/usr/local/bin/$tool" \
+            || die "could not select the pinned compiler inside the image: linking
+       /usr/local/bin/$tool to /usr/bin/$tool-$major failed.  The packages installed, so the
+       image now holds two families with the unpinned one first on PATH, which is worse than
+       either alone -- the build and the measurement could disagree about which compiler wrote
+       the notes files.  The image is not published."
+    done
+
+    local resolved
+    for tool in gcc g++ gcov; do
+        resolved="$(chroot_run sh -c "command -v -- '$tool' 2>/dev/null" || true)"
+        [ "$resolved" = "/usr/local/bin/$tool" ] || die "inside the image a bare '$tool'
+       resolves to '${resolved:-nothing at all}' rather than to the /usr/local/bin/$tool link
+       just created for the pinned family.  Something in the image's PATH resolution precedes
+       /usr/local/bin, so the in-guest build and the coverage capture would not use the compiler
+       this option selected.  The image is not published."
+    done
+
+    PINNED_COMPILER_STATE='selected'
+    log "the pinned family is selected inside the image: gcc, g++ and gcov in /usr/local/bin"
+    log "  point at /usr/bin/<tool>-$major, and a bare lookup of each resolves there."
+}
+
 install_image_packages() {
     if [ -n "$APT_MIRROR" ]; then
         # THE VALUE WRITTEN HERE CANNOT CARRY A CREDENTIAL, and that is enforced at the
@@ -7582,6 +7849,10 @@ install_image_packages() {
             warn "  Nothing the guest must do depends on it."
         fi
     done
+
+    # AFTER the fixed set and the optional list, and BEFORE the package record below, so that
+    # whichever compiler ends up selected is the one the record describes.
+    install_image_pinned_compiler
 
     # RECORD BEFORE CLEANING.  apt-get clean removes the downloaded archives but not the dpkg
     # database, so the order here is not load-bearing -- it is written this way so that the
@@ -8722,9 +8993,9 @@ install_lcov_2x() {
 
         chroot_run make -C "$staging" install \
             || die "'make install' failed for the lcov source tree inside the image.  lcov 2.x
-       needs perl with Capture::Tiny, DateTime, JSON::XS, PerlIO::gzip and Memory::Process;
-       those are in the installed package set, so check the tarball's own README for anything
-       further it requires."
+       needs perl with Capture::Tiny, DateTime, Date::Parse, JSON::XS, PerlIO::gzip and
+       Memory::Process; those are in the installed package set, so check the tarball's own
+       README for anything further it requires."
         remove_tree_in_image "$staging_rel" "$staging_identity" \
             'the lcov 2.x source staging tree' \
             'remove the lcov source staging tree from the image'
@@ -8755,7 +9026,26 @@ install_lcov_2x() {
            --lcov-tarball /path/to/lcov-2.x.tar.gz --lcov-sha256 <hex>
        Failing the image build here is deliberate: a 1.x lcov reaching the guest surfaces as
        a confusing coverage failure hours later, with nothing pointing at the cause."
-    log "lcov 2.x assertion passed"
+    # genhtml IS ASSERTED SEPARATELY, BECAUSE `lcov --version` DOES NOT COVER IT.  They are
+    # different Perl programs with different `use` lists: genhtml alone loads Date::Parse, so
+    # a missing libtimedate-perl leaves lcov answering normally while genhtml cannot even
+    # load.  Measured -- that combination built an image that passed every assertion here,
+    # booted, ran the whole invocation matrix under emulation, and only then failed in
+    # generate_html(), which run_coverage.sh treats as fatal.  Asserting it here turns an
+    # hours-late failure into an image build that stops on the line naming the package.
+    local genhtml_line
+    genhtml_line="$(chroot_run genhtml --version 2>&1 | head -n 1 || true)"
+    case "$genhtml_line" in
+        *[0-9].[0-9]*) log "genhtml in the image reports: $genhtml_line" ;;
+        *) die "genhtml does not run inside the image.  Its own output was:
+           ${genhtml_line:-<nothing at all>}
+       run_coverage.sh calls genhtml and dies if it fails, and the workflow's artifact
+       completeness gate requires coverage/index.html, so this image could not produce a
+       passing run.  A 'Can't locate <Module>.pm in @INC' line above names the missing Perl
+       module: Date::Parse comes from libtimedate-perl, Capture::Tiny from
+       libcapture-tiny-perl, DateTime from libdatetime-perl.  Add it to IMAGE_PACKAGES."
+    esac
+    log "lcov 2.x and genhtml assertions passed"
 }
 
 
@@ -9079,6 +9369,204 @@ READY_PROBE_EOF
 }
 
 # ------------------------------------------------------------------------------------
+# THE GUEST'S COMPILER AND gcov, MEASURED RATHER THAN NAMED - AND WHAT IS ASSERTED ABOUT THEM.
+#
+# `command -v gcov` establishes only that a file exists at that name.  The guest's whole output
+# is a coverage trace and a set of branch-arm coordinates, and both are properties of the
+# compiler that produced them, so an image that carries "a gcov" and "a g++" without recording
+# WHICH is an image whose figures cannot be attributed afterwards.  This function is the one
+# place those versions are read out of the image, and it makes three statements of different
+# strengths, deliberately kept apart:
+#
+#   1. RECORDED, always: the exact versions of the guest's gcc, g++ and gcov, by the unversioned
+#      names the guest itself will resolve, so the values describe what the guest will actually
+#      run rather than what was installed under some other name.  They travel into the manifest
+#      as GUEST_TOOLCHAIN_GCC / _GXX / _GCOV.
+#   2. ASSERTED HARD: gcc, g++ and gcov agree with each other.  This is the property the guest's
+#      own trace depends on and it is closable inside any archive, because all three come from
+#      one family's packages.  gcov demands a notes-file version stamp derived from the GCC major
+#      AND minor that wrote the file; where they disagree it reads nothing, one file at a time,
+#      and the run would report a capture with no counters rather than a wrong number - which is
+#      still hours of a QEMU boot spent on a question this second answers.
+#   3. COMPARED AND REPORTED, never asserted: the guest family against --toolchain-gcc-major.
+#      The reasoning for why this half is a record rather than a gate is in
+#      install_image_pinned_compiler; the short form is that the guest's archive is the caller's
+#      to choose and this script does not fail an image build for what an archive does not carry.
+#
+# -dumpfullversion IS WHAT IS READ FROM THE COMPILERS, NOT -dumpversion: since GCC 7 the latter
+# prints the MAJOR ALONE, so comparing it against gcov's full version fails on every correct
+# toolchain.  gcov has neither option and reports its version as the last field of its first
+# line; the raw line is logged beside the parsed value so a format change is visible rather than
+# silently reinterpreted.
+# ------------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------------
+# ARE THE STAGED LIBRARIES ACTUALLY LOADABLE IN THIS IMAGE?  ASKED OF THE IMAGE'S OWN LOADER,
+# BECAUSE NOTHING ELSE CAN ANSWER IT.
+#
+# The staged Binder closure, the two AIDL stub libraries and servicemanager are compiled ON THE
+# BUILD RUNNER against the runner's own 32-bit runtime, and then run inside an image built from
+# a different distribution with a different glibc and a different libstdc++.  The workflow that
+# calls this script used to justify that arrangement by comparing SUITE VINTAGES -- the guest's
+# runtime being newer than the runner's, so "the safe direction".  That reasoning is both
+# fragile and no longer true of the runner it now runs on, and the honest replacement is not a
+# better argument: it is to ASK THE LOADER, in the image, before a QEMU cycle is spent.
+#
+# WHY VINTAGE COMPARISON WAS THE WRONG TEST ANYWAY.  An ELF does not require "the glibc it was
+# built on".  It requires the specific symbol versions its referenced symbols were introduced
+# at, which for ordinary C++17 code sit far below any current release -- measured on a
+# gcc-13-built 32-bit C++17 object using std::string, std::vector, std::mutex and exceptions:
+# GLIBC_2.0, GLIBC_2.1.3, GLIBC_2.4, GLIBCXX_3.4, GLIBCXX_3.4.11, GLIBCXX_3.4.21, CXXABI_1.3
+# and GCC_3.0, every one of them satisfied by a bookworm i386 userspace with room to spare.
+# So a newer build host is usually harmless and occasionally fatal, and which of the two it is
+# cannot be read off the suite names. `ldd` resolves the closure through the image's real
+# loader and reports both failure modes by name: a library that cannot be found at all, and a
+# symbol version the image's runtime does not define.
+#
+# THIS IS ALSO THE CHECK THAT GIVES THE GUEST COMPILER PIN ITS TEETH.  install_image_pinned_
+# compiler is deliberately gate-and-record: it cannot fail an image build for a package the
+# guest's archive may not carry.  The residual risk of that decision is precisely a staged
+# artefact built by a newer host compiler against a runtime the guest lacks -- and that risk
+# is what this function converts from "recorded, hope for the best" into a named failure with
+# a remedy.  It runs AFTER register_guest_library_paths, so ldconfig has already taught the
+# image's loader cache where the staged directories are.
+# ------------------------------------------------------------------------------------
+assert_image_staged_libraries_loadable() {
+    local -a targets=()
+    local library
+    for library in "${BINDER_CLOSURE_LIBRARIES[@]}"; do
+        targets+=("$GUEST_SDK_DIR/$SDK_REL_BINDER_TARGET/lib/binder/$library")
+    done
+    for library in "${HALIF_STUB_LIBRARIES[@]}"; do
+        targets+=("$GUEST_SDK_DIR/$SDK_REL_HALIF_LIB/$library")
+    done
+    targets+=("$GUEST_SDK_DIR/$SDK_REL_SERVICEMANAGER")
+
+    # ldd is part of the base system, but saying so and finding out are different things, and
+    # an image without it must not silently skip the check.
+    chroot_run sh -c "command -v -- ldd >/dev/null 2>&1" || die "ldd is not present inside the
+       image, so whether the staged Binder and AIDL libraries can be LOADED there cannot be
+       established.  It ships with libc-bin, which a Debian base always has; an image missing
+       it has been trimmed past what this script can verify.  Do not proceed on the assumption
+       that they load -- that assumption is what this check exists to replace."
+
+    local target report unresolved bad_version
+    for target in "${targets[@]}"; do
+        # 2>&1 on purpose: a version failure is reported on stderr by some loader versions and
+        # on stdout by others, and losing it to the wrong stream would turn this check green.
+        report="$(chroot_run sh -c "ldd -- '$target' 2>&1" || true)"
+        [ -n "$report" ] || die "ldd produced no output at all for the staged artefact
+           $target
+       inside the image, so its loadability is unknown.  Check that the file was copied and
+       that it is the architecture the guest runs; assert_target_arch_binary covers the second
+       on the host side, and this is the in-image counterpart."
+
+        unresolved="$(printf '%s\n' "$report" | grep -F 'not found' | grep -Fv 'version' || true)"
+        [ -z "$unresolved" ] || die "a staged artefact has dependencies the image's loader
+       cannot find:
+           $target
+$(printf '%s\n' "$unresolved" | sed 's/^/           /')
+       The staged directories are registered with the image's loader in
+       /etc/ld.so.conf.d/cec-l2-binder.conf and ldconfig has already run, so a name still
+       missing here is a library that was never staged rather than one the loader cannot see.
+       Stage the whole Binder runtime closure -- liblog, libbase, libcutils and
+       libcutils_sockets are NOT middleware link edges and are easy to omit for exactly that
+       reason -- and rebuild the image."
+
+        bad_version="$(printf '%s\n' "$report" | grep -F 'version' | grep -F 'not found' || true)"
+        [ -z "$bad_version" ] || die "a staged artefact requires runtime symbol versions this
+       image does not provide:
+           $target
+$(printf '%s\n' "$bad_version" | sed 's/^/           /')
+       This is the build-host-newer-than-guest failure, and it is reported here rather than
+       inside the VM.  Three remedies, in order of preference: (1) select the pinned compiler
+       family inside the guest so the guest's own runtime matches what built the artefacts --
+       pass --toolchain-gcc-major and check GUEST_TOOLCHAIN_PIN_STATE in the manifest, since a
+       state other than 'selected' means the guest is measuring with a different family;
+       (2) build the staged SDK with a compiler no newer than the guest's, or link it with
+       -static-libstdc++ -static-libgcc so it carries its own C++ runtime; (3) raise the guest
+       suite to one whose runtime defines the versions named above.  Do NOT copy the host's
+       libstdc++ into the staged directory as a workaround without also confirming its glibc
+       requirements are met -- that trades one version failure for another."
+    done
+
+    log "staged Binder closure, AIDL stubs and servicemanager all resolve through the image's"
+    log "  own loader: ${#targets[@]} artefacts, no missing library and no missing symbol version"
+}
+
+assert_image_compiler_identity() {
+    local gcc_full gxx_full gcov_line
+    gcc_full="$(chroot_run sh -c 'gcc -dumpfullversion 2>/dev/null || gcc -dumpversion' || true)"
+    gxx_full="$(chroot_run sh -c 'g++ -dumpfullversion 2>/dev/null || g++ -dumpversion' || true)"
+    gcov_line="$(chroot_run sh -c 'gcov --version 2>/dev/null | head -n 1' || true)"
+
+    [ -n "$gcc_full" ] || die "the image's gcc would not report a version.  It is present by
+       name -- the tool loop above passed -- so it is installed and not runnable, which usually
+       means the base tarball and the installed packages are for different architectures.  A
+       guest that cannot run its own compiler cannot build the middleware."
+    [ -n "$gxx_full" ] || die "the image's g++ would not report a version, though it is present
+       by name.  See the gcc message above: an installed-but-not-runnable compiler is normally
+       an architecture mismatch between the base tarball and the package set."
+    [ -n "$gcov_line" ] || die "the image's gcov would not report a version, though it is
+       present by name.  run_coverage.sh runs gcov through lcov inside the guest, so an
+       unrunnable gcov means the guest can build and can never measure."
+
+    GUEST_GCC_VERSION="$gcc_full"
+    GUEST_GXX_VERSION="$gxx_full"
+    GUEST_GCOV_VERSION="$(printf '%s\n' "$gcov_line" | awk '{ print $NF }')"
+
+    log "the guest toolchain, measured inside the image by the names the guest resolves:"
+    log "  gcc  -> $GUEST_GCC_VERSION  ($(chroot_run sh -c "command -v -- gcc" 2>/dev/null || echo '<unresolved>'))"
+    log "  g++  -> $GUEST_GXX_VERSION  ($(chroot_run sh -c "command -v -- g++" 2>/dev/null || echo '<unresolved>'))"
+    log "  gcov -> $GUEST_GCOV_VERSION  ($(chroot_run sh -c "command -v -- gcov" 2>/dev/null || echo '<unresolved>'))"
+    log "  gcov reported it as: $gcov_line"
+
+    [ "$GUEST_GCC_VERSION" = "$GUEST_GXX_VERSION" ] \
+        && [ "$GUEST_GCC_VERSION" = "$GUEST_GCOV_VERSION" ] \
+        || die "the image's gcc ($GUEST_GCC_VERSION), g++ ($GUEST_GXX_VERSION) and gcov
+       ($GUEST_GCOV_VERSION) are not the same version.  gcov demands a notes-file version stamp
+       derived from the GCC major and minor that wrote the file, so this image would build and
+       then measure nothing -- a capture with no counters, discovered after a full QEMU boot and
+       a whole matrix.  Install all three from one family: the packages are gcc-<major> (which
+       carries gcov-<major>) and g++-<major>.  If --toolchain-gcc-major selected a family, check
+       that /usr/local/bin holds all THREE links rather than two."
+
+    # THE PIN COMPARISON. Reported, never fatal -- and the wording distinguishes the three
+    # outcomes so a reader of this log does not have to infer which one happened.
+    local guest_major="${GUEST_GCC_VERSION%%.*}"
+    case "$PINNED_COMPILER_STATE" in
+        'not requested')
+            log "no acceptance family was pinned (--toolchain-gcc-major absent), so the guest"
+            log "  toolchain above is recorded and not compared. It is internally consistent,"
+            log "  which is what its own trace depends on."
+            ;;
+        'selected')
+            if [ "$guest_major" = "$TOOLCHAIN_GCC_MAJOR" ]; then
+                log "the guest MATCHES the pinned acceptance family: GCC major $TOOLCHAIN_GCC_MAJOR,"
+                log "  measured $GUEST_GCC_VERSION. The patch level is recorded, not gated -- no"
+                log "  distribution archive is required to serve one exact patch release."
+            else
+                warn "NAMED LIMITATION: gcc-$TOOLCHAIN_GCC_MAJOR and g++-$TOOLCHAIN_GCC_MAJOR were"
+                warn "  installed and linked into /usr/local/bin, yet a bare gcc measures"
+                warn "  $GUEST_GCC_VERSION, whose major is $guest_major. The selection did not take"
+                warn "  effect for the family it named, so the guest DOES NOT MATCH the pinned"
+                warn "  acceptance family and its figures are not proven comparable with figures"
+                warn "  recorded on that family. Check what else the image supplies at"
+                warn "  /usr/local/bin/gcc."
+            fi
+            ;;
+        *)
+            warn "NAMED LIMITATION: the guest is measuring with GCC $GUEST_GCC_VERSION (major"
+            warn "  $guest_major), NOT with the pinned acceptance family GCC"
+            warn "  $TOOLCHAIN_GCC_MAJOR, because the guest archive does not serve it. The"
+            warn "  guest's figures and branch-arm coordinates are internally consistent and"
+            warn "  comparable across runs of this image; they are NOT proven comparable with"
+            warn "  figures recorded on the pinned family. install_image_pinned_compiler says"
+            warn "  what closes it."
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------------
 # IN-IMAGE ASSERTIONS.  Every tool the guest needs, checked by the name the guest looks it
 # up under, plus the two pkg-config queries configure will make and the dialect probe.
 #
@@ -9097,6 +9585,9 @@ assert_image_toolchain() {
        run_coverage.sh reaches for lcov, genhtml, gcov, awk, find, mktemp, stat, timeout,
        flock and nproc; the build reaches for g++, make and the autotools; the init reaches
        for mount and mknod.  Add the packages that provide them to the image's package set."
+
+    assert_image_compiler_identity
+    assert_image_staged_libraries_loadable
 
     local pkg_config_path=''
     if [ -n "$GTEST_PREFIX_SRC" ]; then
@@ -9269,6 +9760,41 @@ KERNEL_EXPECTATION_EOF
             'set the mode of the image kernel provenance record'
         log "copied the caller-supplied kernel configuration in as build-time provenance"
     fi
+
+    # THE SINK CALLER SOURCE, staged verbatim.  validate_inputs guarantees a readable absolute
+    # path here by either route, so this is unconditional: there is no image in which the guard's
+    # input is absent.
+    #
+    # No banner is prepended, unlike the kernel provenance above. The guard parses this file as
+    # C++ looking for structural facts about two call sites, so anything added to it would be
+    # content the guard has to be taught to ignore -- and a comment that changes what a guard
+    # reads is a worse trade than no comment at all. Provenance goes in the image build record
+    # instead, where nothing parses it.
+    # ONE FILE RATHER THAN THE WHOLE SIBLING COMPONENT, AND DELIBERATELY SO.  The drift guard
+    # reads exactly this source and nothing else from that component, so copying the component
+    # would put a second checkout in the image for no reader.  The two directories are created
+    # because the destination reproduces the SUPERPROJECT LAYOUT -- a sibling of the payload
+    # directory -- which is what lets the guard's own relative candidate resolve even if the
+    # exported variable is ever lost.
+    local sink_rel="${GUEST_SINK_CALLER_SOURCE#/}"
+    confined_mkdir "${GUEST_SINK_COMPONENT_DIR#/}" 0755 \
+        "the image's $GUEST_SINK_COMPONENT_DIR" \
+        'copy the Sink caller source into the image'
+    confined_mkdir "${sink_rel%/*}" 0755 \
+        "the image's ${GUEST_SINK_CALLER_SOURCE%/*}" \
+        'copy the Sink caller source into the image'
+    confined_unlink_if_present "$sink_rel" "the image's $GUEST_SINK_CALLER_SOURCE" \
+        'copy the Sink caller source into the image'
+    confined_create "$sink_rel" 0644 "the image's $GUEST_SINK_CALLER_SOURCE" \
+        'copy the Sink caller source into the image'
+    cat -- "$SINK_CALLER_SOURCE_SRC" | confined_write "$sink_rel" \
+        "the image's $GUEST_SINK_CALLER_SOURCE" \
+        'copy the Sink caller source into the image'
+    confined_chmod "$sink_rel" 0644 "the image's $GUEST_SINK_CALLER_SOURCE" \
+        'set the mode of the image Sink caller source'
+    log "staged the Sink caller source the L1 drift guard reads:"
+    log "  from $SINK_CALLER_SOURCE_SRC"
+    log "  to   $GUEST_SINK_CALLER_SOURCE (exported in-guest as CEC_SINK_CALLER_SOURCE)"
 }
 
 # Harvest what the staged SDK records about its own build.  Nothing here is declared: every
@@ -9392,6 +9918,10 @@ READY_PROBE='$GUEST_READY_PROBE'
 KERNEL_EXPECTATION='$GUEST_KERNEL_EXPECTATION'
 KERNEL_PROVENANCE='$GUEST_KERNEL_PROVENANCE'
 SDK_FLAGS_RECORD='$GUEST_SDK_FLAGS_RECORD'
+# The real Sink plugin source the L1 drift guard reads, staged into this image because the guest
+# cannot see the build host's workspace.  The init exports it as CEC_SINK_CALLER_SOURCE.  It is a
+# required key: an image without it produces a failing guard rather than a skipped one.
+SINK_CALLER_SOURCE='$GUEST_SINK_CALLER_SOURCE'
 BINDER_DEVICE_NODES='$BINDER_DEVICE_NODES'
 READINESS_TIMEOUT_SECONDS='$READINESS_TIMEOUT_SECONDS'
 # The wire protocol this image EXPECTS, and the two build-time artefacts it was derived
@@ -9442,6 +9972,16 @@ IMAGE_CONF_EOF
         printf 'payload_source=%s\n' "$PAYLOAD_DIR"
         printf 'sdk_source=%s\n' "$SDK_DIR"
         printf 'gtest_prefix_source=%s\n' "${GTEST_PREFIX_SRC:-<the image packaging>}"
+        # The Sink caller source the L1 drift guard reads. Recorded with its digest as well as
+        # its provenance, because "a file was staged" and "THIS file was staged" are different
+        # claims and the guard's verdict depends on the second: a stale or wrong revision would
+        # produce a drift failure that looks like a plugin change. Both are read here from the
+        # host-side input validate_inputs resolved, so the record names the same bytes the copy
+        # took.
+        printf 'sink_caller_source=%s\n' "$SINK_CALLER_SOURCE_SRC"
+        printf 'sink_caller_source_staged_at=%s\n' "$GUEST_SINK_CALLER_SOURCE"
+        printf 'sink_caller_source_sha256=%s\n' \
+            "$(sha256sum -- "$SINK_CALLER_SOURCE_SRC" | cut -d' ' -f1)"
     } | confined_write "$record_rel" "the image's $GUEST_IMAGE_RECORD" \
             'write the image build record into the image'
     confined_chmod "$record_rel" 0644 "the image's $GUEST_IMAGE_RECORD" \
@@ -9463,13 +10003,16 @@ IMAGE_CONF_EOF
 # ------------------------------------------------------------------------------------
 write_guest_init() {
     # WRITTEN THROUGH THE CONFINED PRIMITIVE, AND OF EVERY FILE THIS SCRIPT PUTS INTO THE IMAGE
-    # THIS IS THE ONE THAT MATTERS MOST.  It is installed at /sbin/cec-l2-init and the workflow
-    # boots the kernel with init=<that path>, so it is the whole of what the guest executes.  The
-    # old form -- `mkdir -p "$(dirname "$IMAGE_MOUNT$GUEST_INIT_PATH")"`, then `cat >` and two
-    # `cat >>` on that pathname, then `chmod 0755` -- ran as root on the BUILD HOST through a name
-    # whose /sbin comes from the base tarball: a base shipping /sbin as an absolute symbolic link
-    # had this script create a host directory and write a root-owned, mode-0755 executable script
-    # into it.
+    # THIS IS THE ONE THAT MATTERS MOST.  It is installed at $GUEST_INIT_PATH -- /usr/sbin, for
+    # the usr-merge reason recorded at that constant -- and the workflow boots the kernel with
+    # init=<that path>, so it is the whole of what the guest executes.  The old form --
+    # `mkdir -p "$(dirname "$IMAGE_MOUNT$GUEST_INIT_PATH")"`, then `cat >` and two `cat >>` on
+    # that pathname, then `chmod 0755` -- ran as root on the BUILD HOST through a name whose
+    # leading component comes from the base tarball: a base shipping that component as a symbolic
+    # link, absolute or relative, had this script create a host directory and write a root-owned,
+    # mode-0755 executable script into it.  Hence both the confinement AND an anchor that is a
+    # real directory on every layout: the primitive refuses the traversal, and the constant never
+    # asks it to make one.
     #
     # THE THREE PARTS BECOME ONE WRITE.  They were three because a single heredoc of this length
     # is unreadable, and they still are three heredocs in this source -- but they are produced
@@ -9607,7 +10150,7 @@ read_image_conf() {
         case "$key" in
             IMAGE_ARCH|GUEST_WORKSPACE|PAYLOAD_DIR|SDK_DIR|HALIF_PREFIX|HALIF_LIB_DIR| \
             BINDER_SDK_DIR|BINDER_SDK_INCLUDE_DIR|BINDER_LIB_DIR|SERVICEMANAGER_BIN| \
-            GTEST_PREFIX|ARTIFACT_DIR|STATUS_FILE|PROTOCOL_HELPER|READY_PROBE| \
+            GTEST_PREFIX|SINK_CALLER_SOURCE|ARTIFACT_DIR|STATUS_FILE|PROTOCOL_HELPER|READY_PROBE| \
             KERNEL_EXPECTATION|KERNEL_PROVENANCE|SDK_FLAGS_RECORD|BINDER_DEVICE_NODES| \
             READINESS_TIMEOUT_SECONDS|EXPECTED_BINDER_PROTOCOL| \
             PROTOCOL_FROM_KERNEL_CONFIG|PROTOCOL_FROM_SDK_CACHE)
@@ -9623,6 +10166,7 @@ read_image_conf() {
     for required in IMAGE_ARCH PAYLOAD_DIR SDK_DIR HALIF_LIB_DIR BINDER_SDK_DIR \
                     BINDER_SDK_INCLUDE_DIR BINDER_LIB_DIR SERVICEMANAGER_BIN ARTIFACT_DIR \
                     STATUS_FILE PROTOCOL_HELPER READY_PROBE BINDER_DEVICE_NODES \
+                    SINK_CALLER_SOURCE \
                     READINESS_TIMEOUT_SECONDS EXPECTED_BINDER_PROTOCOL; do
         [ -n "${!required}" ] || die "$required is empty in $IMAGE_CONF.  The image is
        incomplete; rebuild it."
@@ -9666,10 +10210,23 @@ teardown() {
     # workflow reads them from the image after the guest is gone.
     sync || true
 
+    # /proc IS DELIBERATELY LEFT MOUNTED, AND THAT IS NOT AN OVERSIGHT IN THE LOOP BELOW.
+    # The only power-off mechanism this image has is /proc/sysrq-trigger -- measured: the image
+    # is a minbase install plus a build toolchain and contains no poweroff, halt, reboot,
+    # shutdown, busybox or systemctl binary at all.  Unmounting /proc here therefore removed
+    # the one way the guest could switch itself off, and power_off_guest() found its guard
+    # false, warned, and idled until the workflow's QEMU timeout expired -- which reports as a
+    # failed job whatever the run actually measured.  /proc holds no data, so keeping it has no
+    # cost to the artifacts: the flush that protects them is the sync above and the read-only
+    # remount below, neither of which involves /proc.
     local index point
     for (( index=${#MOUNTED_POINTS[@]}-1; index>=0; index-- )); do
         point="${MOUNTED_POINTS[index]}"
         [ -n "$point" ] || continue
+        if [ "$point" = '/proc' ]; then
+            log "  leaving /proc mounted: the power-off below is written through it"
+            continue
+        fi
         if mountpoint -q -- "$point" 2>/dev/null; then
             umount -- "$point" 2>/dev/null || umount -l -- "$point" 2>/dev/null \
                 || warn "could not unmount $point during teardown."
@@ -9712,20 +10269,65 @@ stop_servicemanager() {
 }
 
 # Power off through whatever this root filesystem actually provides.  Nothing here can be
-# assumed: a minimal image may have sysvinit's poweroff, systemd's, or neither.
+# assumed: a minimal image may have sysvinit's poweroff, systemd's, or neither -- and the image
+# this builder produces has NEITHER, measured, so the sysrq path below is not a fallback but
+# the whole mechanism.  Three things follow from that, and each is why this function is shaped
+# the way it is rather than a shorter one.
+#
+#   1. /proc MUST BE THERE.  It is left mounted by the teardown for exactly this reason, and
+#      re-mounted here if it is not, so that this function is correct however it is reached.
+#
+#   2. THE SYSRQ POWER-OFF DELEGATES BEFORE IT FORCES.  'o' reaches orderly_poweroff(), which
+#      first runs the program named by kernel.poweroff_cmd -- /sbin/poweroff by default -- and
+#      only forces kernel_power_off() when that fails.  In an image with a real poweroff that
+#      talks to a cooperating init, and with PID 1 here being this script, the delegation
+#      succeeds at exec and then achieves nothing: the kernel sees success and does not force.
+#      So the command is pointed at a path that cannot exist, which makes the forcing arm the
+#      only arm, by construction rather than by luck.
+#
+#   3. IT IS ASYNCHRONOUS, SO THE FAILURE MESSAGE HAS TO WAIT FOR IT.  orderly_poweroff()
+#      schedules work and returns; the old form printed "no power-off mechanism took effect"
+#      on the very next line, which was a diagnosis of the kernel's scheduling latency rather
+#      than of anything wrong.  The wait below is bounded and reports only after it.
+#
 # Reached only from teardown(); see the SC2317 justification above.
 # shellcheck disable=SC2317
 power_off_guest() {
     sync || true
+
+    if ! mountpoint -q -- /proc 2>/dev/null; then
+        mount -t proc proc /proc 2>/dev/null \
+            || warn "could not mount /proc for the power-off; the sysrq path is unavailable."
+    fi
+
     if command -v poweroff >/dev/null 2>&1; then
         poweroff -f 2>/dev/null || true
     fi
     if command -v halt >/dev/null 2>&1; then
         halt -f -p 2>/dev/null || true
     fi
+
     if [ -w /proc/sysrq-trigger ]; then
+        # Point the delegation at a path that cannot exist so the kernel takes its forcing
+        # arm.  Best-effort: an older kernel without this sysctl still reaches the same place
+        # when /sbin/poweroff is absent, which it is in this image.
+        if [ -w /proc/sys/kernel/poweroff_cmd ]; then
+            printf '%s\n' '/nonexistent/cec-l2-no-userspace-poweroff' \
+                > /proc/sys/kernel/poweroff_cmd 2>/dev/null || true
+        fi
+        log "requesting power-off through /proc/sysrq-trigger"
         printf 'o' > /proc/sysrq-trigger 2>/dev/null || true
+
+        # The kernel powers the machine off from a work queue, so give it a bounded moment.
+        # This is not a readiness wait -- there is nothing left to become ready -- it is how
+        # long an asynchronous power-off is allowed to arrive before it is called failed.
+        local waited=0
+        while [ "$waited" -lt 30 ]; do
+            sleep 1
+            waited=$(( waited + 1 ))
+        done
     fi
+
     warn "no power-off mechanism took effect.  Idling rather than returning: an init that"
     warn "  RETURNS panics the kernel, which reports as a crash and can lose the console"
     warn "  tail this job is read from.  The workflow's own timeout on the QEMU process is"
@@ -9781,6 +10383,38 @@ mount_pseudo_filesystems() {
     # /tmp is where the coverage runner mints its private lcov HOME and its Makefile
     # snapshot, so it has to be writable with the usual sticky permissions.
     chmod 1777 /tmp 2>/dev/null || true
+
+    # THE DESCRIPTOR SYMLINKS, WITHOUT WHICH PROCESS SUBSTITUTION DOES NOT WORK AND THE
+    # COVERAGE RUN CANNOT START.  `cmd < <(...)` is compiled by bash into a read of
+    # /dev/fd/<n>, and /dev here is devtmpfs mounted by the kernel (CONFIG_DEVTMPFS_MOUNT):
+    # devtmpfs publishes device nodes and nothing else, so /dev/fd, /dev/stdin, /dev/stdout
+    # and /dev/stderr are absent.  On a normal system they are created by udev or by the
+    # distribution's early boot scripts, and this guest runs neither -- PID 1 is this script.
+    # Measured: the init's own `done < <(find ...)` failed with "/dev/fd/63: No such file or
+    # directory" and took the run down at status 1, and tests/L1Tests/run_coverage.sh uses the
+    # same construct in three places, so the coverage run could not have started either.
+    # Created here rather than in the image, because /dev is replaced by devtmpfs at boot and
+    # anything the image build put there is hidden.
+    local descriptor_link descriptor_name descriptor_target
+    for descriptor_link in fd:/proc/self/fd stdin:/proc/self/fd/0 stdout:/proc/self/fd/1 \
+                           stderr:/proc/self/fd/2; do
+        descriptor_name="/dev/${descriptor_link%%:*}"
+        descriptor_target="${descriptor_link#*:}"
+        if [ -e "$descriptor_name" ] || [ -L "$descriptor_name" ]; then
+            continue
+        fi
+        ln -s -- "$descriptor_target" "$descriptor_name" 2>/dev/null \
+            || warn "could not create $descriptor_name -> $descriptor_target; process
+       substitution and /dev/std* redirection will not work in this guest."
+    done
+    # Asserted rather than assumed: /dev/fd is what the failure above was, and a guest that
+    # reaches the coverage run without it fails much later and much less legibly.
+    [ -e /dev/fd/0 ] || die "/dev/fd does not resolve in this guest even after creating it.
+       Process substitution -- which this init and tests/L1Tests/run_coverage.sh both use --
+       reads /dev/fd/<n>, so the run would fail partway through with an unhelpful
+       'No such file or directory'.  /proc must be mounted for the link to resolve; check the
+       mount lines above."
+    log "  descriptor symlinks resolve: /dev/fd, /dev/stdin, /dev/stdout, /dev/stderr"
 }
 
 # ------------------------------------------------------------------------------------
@@ -9802,6 +10436,27 @@ mount_pseudo_filesystems() {
 #   INTERFACES: /sys/class/net, because it is the kernel's own list and needs no tool.  ip(8)
 #     and ifconfig(8) are not assumed to exist -- the image is a minbase install plus a build
 #     toolchain, and neither is in that set.
+#
+#     BUT "NOT lo" IS NOT THE SAME AS "A NIC", AND READING IT THAT WAY MADE THIS ASSERTION
+#     FIRE ON EVERY RUN.  A kernel creates fallback tunnel interfaces in the initial network
+#     namespace for each tunnel driver built into it, with no NIC underneath and no way to
+#     carry traffic: sit0 from CONFIG_IPV6_SIT, tunl0 from CONFIG_NET_IPIP, gre0/gretap0 from
+#     CONFIG_NET_IPGRE, ip6tnl0, ip_vti0 and their relatives.  Whether they exist is decided
+#     by the kernel configuration, never by how qemu was started -- and this job's own kernel
+#     is built from i386 defconfig, where CONFIG_IPV6_SIT=y, so sit0 is always there.  Judging
+#     on the name alone therefore refused a correctly offline guest: measured, `qemu -nic none`
+#     booted, and the init died naming sit0 as evidence of a NIC.
+#
+#     SO THE TEST IS "IS IT BACKED BY A DEVICE", NOT "IS IT NAMED lo".  A real NIC is a device
+#     on a bus and has /sys/class/net/<name>/device pointing at it -- true of every NIC qemu
+#     can give this guest, the default user-mode e1000 and virtio-net alike, and false of lo
+#     and of every kernel fallback tunnel.  That is the discriminator, and it is still the
+#     kernel's own answer read without a tool.
+#
+#     A PSEUDO INTERFACE IS TOLERATED ONLY WHILE IT IS DOWN.  Presence is the kernel's
+#     decision; being UP is somebody's action.  So the flags word is read too, and IFF_UP on a
+#     non-loopback interface is fatal whether or not anything backs it -- which keeps the
+#     assertion's teeth for the case where something in the guest configures one.
 #   ROUTES: /proc/net/route, parsed directly for the same reason.  Its first line is a header,
 #     so any further line is a route.
 #   RESOLVER: an active 'nameserver' line in /etc/resolv.conf.  The image build replaces that
@@ -9810,14 +10465,45 @@ mount_pseudo_filesystems() {
 # ------------------------------------------------------------------------------------
 assert_guest_offline() {
     local interfaces='' entry name routes='' resolvers=''
+    local pseudo='' pseudo_up='' flags=''
 
     for entry in /sys/class/net/*; do
         [ -e "$entry" ] || continue
         name="$(basename -- "$entry")"
-        [ "$name" = 'lo' ] || interfaces="$interfaces $name"
+        [ "$name" = 'lo' ] && continue
+
+        # Backed by a device on a bus: that is a NIC, and it is what this assertion is for.
+        if [ -e "$entry/device" ]; then
+            interfaces="$interfaces $name"
+            continue
+        fi
+
+        # Nothing backing it, so it is a kernel fallback interface.  Tolerated while DOWN,
+        # refused when UP.  The flags word is hexadecimal ('0x1002'), which the shell's
+        # arithmetic reads directly; IFF_UP is bit 0.
+        flags="$(cat -- "$entry/flags" 2>/dev/null || printf '0x0')"
+        case "$flags" in
+            0x*|0X*|[0-9]*) : ;;
+            *) flags='0x0' ;;
+        esac
+        if [ "$(( flags & 0x1 ))" -ne 0 ]; then
+            pseudo_up="$pseudo_up $name"
+        else
+            pseudo="$pseudo $name"
+        fi
     done
+
+    if [ -n "$pseudo_up" ]; then
+        die "this guest has non-loopback interface(s) administratively UP:${pseudo_up}
+       Nothing on a bus backs them, so they are kernel fallback interfaces rather than NICs --
+       but the kernel leaves those DOWN, so one that is UP was brought up by something in this
+       guest.  This job runs offline by specification, and an interface somebody configured is
+       the beginning of a route.  Refused rather than reported: read the init's own output
+       above for what ran before this point."
+    fi
+
     if [ -n "$interfaces" ]; then
-        die "this guest has non-loopback network interface(s):${interfaces}
+        die "this guest has network interface(s) backed by a device:${interfaces}
        It is specified to run with NO network: every source, binary and library it needs is
        inside the image, nothing is fetched at test time, and the package set was pinned and
        recorded at image-build time.  An interface here means the QEMU invocation gained a NIC
@@ -9852,7 +10538,11 @@ assert_guest_offline() {
        fetch, and this run's reproducibility claim rests on it not being able to."
     fi
 
-    log "offline confirmed: no non-loopback interface, no route, no configured resolver"
+    if [ -n "$pseudo" ]; then
+        log "offline: kernel fallback interface(s) present and DOWN, nothing backing them:${pseudo}"
+        log "  these follow the guest kernel's tunnel drivers, not the qemu command line"
+    fi
+    log "offline confirmed: no interface backed by a device, none UP, no route, no resolver"
 }
 
 # ------------------------------------------------------------------------------------
@@ -10084,12 +10774,19 @@ report_binder_platform() {
         "${PROTOCOL_FROM_SDK_CACHE:-not derivable}"
     printf 'uname: %s\n' "$(uname -srvmo 2>/dev/null || printf 'unavailable')"
     printf '\n'
-    printf '---- kernel binder configuration, as the running guest reports it ----\n'
+    # EVERY SECTION RULE BELOW IS PRINTED AS AN ARGUMENT, NOT AS A FORMAT, AND THAT IS
+    # REQUIRED RATHER THAN STYLISTIC.  bash's printf parses its first word for options, so a
+    # format beginning with '-' is read as one: `printf '---- x\n'` fails with
+    # "printf: --: invalid option" and returns 2.  Measured -- with `set -e` in force that
+    # aborted the init here, mid-record, and the guest exited status 2 having brought binderfs
+    # up and proved nothing.  `printf '%s\n' '---- ...'` puts the text where no option parsing
+    # reaches it and prints the identical line.  Any rule added here must keep that shape.
+    printf '%s\n' '---- kernel binder configuration, as the running guest reports it ----'
     report_kernel_config
     printf 'running_kernel_implies_protocol: %s\n' "${RUNTIME_KERNEL_PROTOCOL:-UNAVAILABLE}"
     printf '  evidence: %s\n' "$RUNTIME_KERNEL_PROTOCOL_EVIDENCE"
     printf '\n'
-    printf '---- runtime evidence ----\n'
+    printf '%s\n' '---- runtime evidence ----'
     printf 'binder_in_proc_filesystems: %s\n' \
         "$(grep -qw binder /proc/filesystems 2>/dev/null && printf 'yes' || printf 'no')"
     printf 'binderfs_mounted_at_/dev/binderfs: %s\n' \
@@ -10097,7 +10794,7 @@ report_binder_platform() {
     printf 'binderfs_entries: %s\n' \
         "$(find /dev/binderfs -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null || printf 'unreadable')"
     printf '\n'
-    printf '---- Binder SDK build flags, as recorded by the staging tree itself ----\n'
+    printf '%s\n' '---- Binder SDK build flags, as recorded by the staging tree itself ----'
     if [ -n "$SDK_FLAGS_RECORD" ] && [ -r "$SDK_FLAGS_RECORD" ]; then
         cat -- "$SDK_FLAGS_RECORD"
     else
@@ -10105,7 +10802,7 @@ report_binder_platform() {
         printf 'reported from this image. It has to come from the job that built the SDK.\n'
     fi
     printf '\n'
-    printf '---- resulting binder protocol version, asked of /dev/binder ----\n'
+    printf '%s\n' '---- resulting binder protocol version, asked of /dev/binder ----'
     if [ "$protocol_status" -eq 0 ]; then
         printf 'binder_protocol_version: %s\n' "$protocol_output"
         printf '  This is the number libbinder compares for EQUALITY when it opens the node, so\n'
@@ -10117,7 +10814,7 @@ report_binder_platform() {
         printf '%s\n' "$protocol_output"
     fi
     printf '\n'
-    printf '---- what this job requires of the guest kernel (expectation, not measurement) ----\n'
+    printf '%s\n' '---- what this job requires of the guest kernel (expectation, not measurement) ----'
     if [ -n "$KERNEL_EXPECTATION" ] && [ -r "$KERNEL_EXPECTATION" ]; then
         cat -- "$KERNEL_EXPECTATION"
     else
@@ -10463,6 +11160,29 @@ export_build_environment() {
     # in-guest run of the L2 runner works too, and the two values are the same path.
     export CEC_FAKE_AIDL_HOST_PATH="$PAYLOAD_DIR/tests/L2Tests/fake_hdmi_cec_aidl_host"
 
+    # THE SINK CALLER SOURCE the L1 drift guard reads, staged into this image at build time.
+    #
+    # Exported as an ABSOLUTE path rather than left to the guard's fallback search, because that
+    # search is relative to the test binary and to the working directory. The image does reproduce
+    # the superproject layout, so the fallback would resolve as well - the export means the guard
+    # does not depend on which directory a run happens to start from. Absent this export the guard
+    # fails naming every path it tried, which is correct behaviour on a host that genuinely has no
+    # source and would be a pure wiring fault here.
+    #
+    # ASSERTED, NOT ASSUMED. The image configuration lists SINK_CALLER_SOURCE as a required key,
+    # so an image built without it never boots this far - but a key that names a file the image
+    # does not actually carry would still reach here, and the guard's own diagnostic for that case
+    # calls it a WIRING FAULT. Catching it in the init makes it one line at boot instead of a red
+    # test after the suites have run.
+    if [ ! -r "$SINK_CALLER_SOURCE" ]; then
+        die "the image configuration names $SINK_CALLER_SOURCE as the Sink caller source the L1
+       drift guard reads, but that file is not readable inside this image.  The image is not
+       internally consistent: aidl-path-tests-rootfs.sh stages this file unconditionally, so an
+       image whose configuration names it while the file is absent was not produced by a matching
+       root-image script.  Rebuild the image."
+    fi
+    export CEC_SINK_CALLER_SOURCE="$SINK_CALLER_SOURCE"
+
     log "build environment exported:"
     log "  HALIF_PREFIX=$HALIF_PREFIX"
     log "  HALIF_LIB_DIR=$HALIF_LIB_DIR"
@@ -10471,6 +11191,7 @@ export_build_environment() {
     log "  GTEST_PREFIX=${GTEST_PREFIX:-<unset: the image packaging supplies gtest.pc>}"
     log "  LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
     log "  CEC_FAKE_AIDL_HOST_PATH=$CEC_FAKE_AIDL_HOST_PATH"
+    log "  CEC_SINK_CALLER_SOURCE=$CEC_SINK_CALLER_SOURCE"
     log "  CEC_TEST_AIDL_MODE is deliberately NOT set: the coverage runner owns it per invocation"
 }
 
@@ -10604,9 +11325,11 @@ CEC_L2_INIT_EOF
     # here would only surface as a kernel panic at boot, with no diagnosis.
     #
     # READ BACK THROUGH THE PRIMITIVE AND PARSED FROM STDIN, rather than `bash -n -- "$path"`.
-    # That form resolved the pathname a second time, so on an image with a symlinked /sbin it
-    # would have syntax-checked a HOST file and reported that THIS image's init parses -- a check
-    # that passes for the wrong object, which is worse than no check at all.  The bytes checked
+    # That form resolved the pathname a second time, so on an image whose init directory is
+    # reached through a symbolic link it would have syntax-checked a HOST file and reported that
+    # THIS image's init parses -- a check that passes for the wrong object, which is worse than no
+    # check at all.  The anchor at /usr/sbin means no such link is on this path today, and the
+    # read stays confined so that remains true of whatever base a caller supplies.  The bytes checked
     # here are the bytes just written, read through a descriptor obtained under the same
     # confinement.
     confined_read "$target_rel" "the image's $target" \
@@ -11131,6 +11854,8 @@ assert_image_carries_no_secret_values() {
     if [ -n "$GTEST_PREFIX_SRC" ]; then
         roots+=( "${GUEST_GTEST_PREFIX#/}" ); shown_roots+=( "$GUEST_GTEST_PREFIX (--gtest-prefix)" )
     fi
+    roots+=( "${GUEST_SINK_COMPONENT_DIR#/}" )
+    shown_roots+=( "$GUEST_SINK_COMPONENT_DIR (--sink-caller-source)" )
 
     log "searching the copied trees inside the image for the ${#needles[@]} confidential value(s)"
     log "  this run holds (the values are passed to the search on a pipe and never appear in an"
@@ -12044,6 +12769,18 @@ write_manifest() {
         printf 'GUEST_SDK_DIR=%s\n' "$GUEST_SDK_DIR"
         printf 'GUEST_GTEST_PREFIX=%s\n' "${GTEST_PREFIX_SRC:+$GUEST_GTEST_PREFIX}"
         printf 'GUEST_IMAGE_CONF=%s\n' "$GUEST_IMAGE_CONF"
+        # THE SINK CALLER SOURCE, in the PUBLISHED manifest and not only in the in-image record.
+        #
+        # The caller reads this file to decide what it boots, and this key is what lets it assert
+        # that the guard's required input was staged WITHOUT mounting the image. The digest is
+        # published beside the path for the reason the in-image record gives: "a file was staged"
+        # and "THIS revision was staged" are different claims, and only the second distinguishes
+        # a genuine plugin drift from a stale copy.
+        printf 'GUEST_SINK_CALLER_SOURCE=%s\n' "$GUEST_SINK_CALLER_SOURCE"
+        printf 'SINK_CALLER_SOURCE_ORIGIN=%s\n' "$SINK_CALLER_SOURCE_SRC"
+        printf 'SINK_CALLER_SOURCE_SHA256=%s\n' \
+            "$(sha256sum -- "$SINK_CALLER_SOURCE_SRC" | cut -d' ' -f1)"
+        printf 'SINK_CALLER_SOURCE_PURPOSE=read by DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource, a REQUIRED acceptance input; the init exports this path as CEC_SINK_CALLER_SOURCE and refuses to continue if it is unreadable\n'
         printf 'GUEST_EXPECTED_KERNEL_CONFIG=%s\n' "$GUEST_KERNEL_EXPECTATION"
         printf 'GUEST_SDK_BUILD_FLAGS_RECORD=%s\n' "$GUEST_SDK_FLAGS_RECORD"
         printf 'REQUIRED_KERNEL_OPTIONS=CONFIG_ANDROID=y CONFIG_ANDROID_BINDER_IPC=y CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder" CONFIG_ANDROID_BINDERFS=y CONFIG_ASHMEM=y\n'
@@ -12087,6 +12824,20 @@ write_manifest() {
             printf 'PACKAGE_SOURCE=%s\n' 'the base tarball sources, unchanged'
         fi
         printf 'READINESS_TIMEOUT_SECONDS=%s\n' "$READINESS_TIMEOUT_SECONDS"
+        # THE TOOLCHAIN THAT WILL PRODUCE THE FIGURES, MEASURED INSIDE THE IMAGE RATHER THAN
+        # NAMED FROM A PACKAGE LIST.  A coverage percentage and a set of (file,line,block,branch)
+        # coordinates are properties of the compiler that wrote them, so an artefact bundle
+        # without these three lines is a bundle whose numbers cannot be attributed later.  The
+        # values come from assert_image_compiler_identity, which read them out of the image by the
+        # unversioned names the guest itself resolves.  GUEST_TOOLCHAIN_PIN records which of the
+        # three outcomes applied - selected, unavailable (a named limitation, not a failure), or
+        # no pin requested - so a reader does not have to infer it from the versions.
+        printf 'GUEST_TOOLCHAIN_GCC=%s\n' "${GUEST_GCC_VERSION:-unmeasured}"
+        printf 'GUEST_TOOLCHAIN_GXX=%s\n' "${GUEST_GXX_VERSION:-unmeasured}"
+        printf 'GUEST_TOOLCHAIN_GCOV=%s\n' "${GUEST_GCOV_VERSION:-unmeasured}"
+        printf 'GUEST_TOOLCHAIN_PIN=%s\n' "${TOOLCHAIN_GCC_MAJOR:-<none requested>}"
+        printf 'GUEST_TOOLCHAIN_PIN_STATE=%s\n' "$PINNED_COMPILER_STATE"
+        printf 'GUEST_TOOLCHAIN_NOTE=gcc, g++ and gcov are asserted to be the same version, which is what the guest trace depends on; agreement with GUEST_TOOLCHAIN_PIN is RECORDED and not asserted, because the guest package archive is the caller pinned one and this builder does not fail an image build for what that archive does not carry\n'
         printf 'GUEST_NETWORK_AT_TEST_TIME=none\n'
         printf 'PAYLOAD_TRANSPORT=copied into the image at build time; artifacts are read back out of the image after the guest powers down\n'
     } > "$manifest"

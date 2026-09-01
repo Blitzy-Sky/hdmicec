@@ -30,7 +30,7 @@ tests/
     │   ├── test_Driver.cpp
     │   ├── test_DriverImpl_Async.cpp
     │   ├── test_Util.cpp
-    │   └── test_DriverAidl.cpp    # AIDL back-end + runtime selection (119 tests)
+    │   └── test_DriverAidl.cpp    # AIDL back-end + runtime selection (123 tests)
     └── osal/                     # OSAL library tests (3 files, 27 tests)
         ├── test_ConditionVariable.cpp
         ├── test_Mutex.cpp
@@ -116,9 +116,12 @@ Four things about that set are worth knowing before you debug it, and `README.md
 - **`-std=c++17` is required**, not preferred: `halcompat.h:73` opens
   `namespace com::rdk::hal::halcompat {`, a nested-namespace definition that does not compile at
   `c++14` at all.  `configure` checks for it and `AM_CXXFLAGS` sets it.
-- **`libbinder`'s closure — `liblog`, `libbase`, `libcutils`, `libcutils_sockets` — must be staged
-  and on the loader path**, at link time as well as at run time, but must never be added as direct
-  edges.
+- **`libbinder`'s closure — `liblog`, `libbase`, `libcutils` — must be staged and on the loader
+  path**, at link time as well as at run time, but must never be added as direct edges.
+- **`libcutils_sockets` is staged alongside that closure without belonging to it.**  Measured
+  `DT_NEEDED`: it names `libc` alone, and nothing staged names it — not `libbinder`, not
+  `libcutils`, not `servicemanager`.  Stage it and leave it loadable; do not treat it as a missing
+  dependency when a link fails, because it never was one.
 
 Do not spell the roots or the edges into `CPPFLAGS`/`LDFLAGS` by hand; pass the prefixes and let
 `configure` derive them, so that this build and the hand-written `ccec/src/Makefile` cannot end up
@@ -143,8 +146,9 @@ export HALIF_PREFIX="${HALIF_PREFIX:-$PWD/../rdk-halif-aidl}"
 : "${BINDER_SDK_INCLUDE_DIR:=$BINDER_SDK_DIR}"
 
 # The loader path, needed to LINK and not only to run: configure's link probe links a program
-# against libbinder, which carries no RUNPATH, so its closure -- liblog, libbase, libcutils,
-# libcutils_sockets -- must be findable before ./configure runs, not after.
+# against libbinder, which carries no RUNPATH, so its closure -- liblog, libbase, libcutils --
+# must be findable before ./configure runs, not after.  (libcutils_sockets is staged in the same
+# directory but is not in that closure; nothing staged has a DT_NEEDED entry for it.)
 export LD_LIBRARY_PATH="$HALIF_LIB_DIR:$BINDER_SDK_DIR/lib/binder${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 mkdir -p stubs/rdk/iarmbus stubs/ccec/drivers/iarmbus
@@ -223,22 +227,25 @@ make
 cd tests/L1Tests
 # INVOCATION A -- the legacy back-end.  The mode is spelled out even though unset means
 # `absent`, and the negative filter is the one part that is NOT optional.
-# Measured: 567 tests from 23 suites ran (the elapsed time varies from run to run;
-# the counts do not), 567 PASSED, exit 0.
+# Measured: 568 tests from 23 suites ran (the elapsed time varies from run to run;
+# the counts do not), 568 PASSED, exit 0.
 CEC_TEST_AIDL_MODE=absent \
   ./run_L1Tests --gtest_filter='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*' \
                 --gtest_print_time=1
 ```
 
 `./run_L1Tests` is the libtool wrapper in this directory, **not** `.libs/run_L1Tests`.  Run it bare
-and it **exits 1** — measured: `602 tests from 25 test suites ran`, `567 PASSED`, **`35 FAILED`**.
+and it **exits 1** — measured: `606 tests from 25 test suites ran`, `568 PASSED`, **`38 FAILED`**.
 The 35 are the two AIDL-only fixtures, which assert in `SetUp` that the AIDL back-end is the
 resolved one and **fail rather than skip** when it is not, deliberately, because a skipped arm is
 indistinguishable from a passing one in an aggregate count.  See
 [Back-End Selection](#back-end-selection-five-invocations).
 
 Root `make check` does **not** run this suite: the top-level `Makefile.am` declares
-`SUBDIRS = osal ccec`, so `check` never descends into `tests/`.  Use
+`SUBDIRS = osal ccec`, so `check` never descends into `tests/`.  **And it does not omit the
+recursion quietly — there is no `check` target at the configured root, so the command fails:
+`make: *** No rule to make target 'check'.  Stop.`, measured exit 2.**  That is `make` reporting a
+target that does not exist, not a broken tree.  Use
 `make -C tests/L1Tests check` from the submodule root when you want automake to drive it — and
 supply the filter as an **environment variable** there, because `make check` runs the binary itself
 and takes no gtest arguments:
@@ -306,7 +313,17 @@ real but this invocation did not establish them, and `--help` enumerates all
 **nine** triggers, of which *"one or more invocations were DEFERRED"* is the
 one a host with no Binder driver always hits.  `--threshold` takes digits or
 digits.digits between 0 and 100, and anything other than 80 is itself
-advisory.  A missing or unusable `flock` and an unsafe artifact-directory
+advisory.  **The range is enforced lexically, on the value's own digits, and it
+is enforced BEFORE the run lock, the tooling pre-flight, the counter zeroing
+and the artifact directory** — so a refused bar never disturbs the tree or an
+existing measurement.  Arbitrarily large values are refused too, including ones
+past the shell's own integer range: `--threshold=9223372036854775808` exits 1
+with *"threshold must be between 0 and 100"*, the same as `101`.  That is worth
+stating because it did not always hold — an arithmetic `[ -gt ]` returns status
+**2**, not false, for a value the shell cannot hold, so such a bar used to pass
+validation untouched and reach `lcov`.  `./run_coverage.sh --selftest` holds
+the guard to both ends of that range as step 3 of 4 and runs no suite.
+A missing or unusable `flock` and an unsafe artifact-directory
 ancestry are **fatal**, not advisory — as is a suite process that **outlives**
 its invocation, which on the L2 tier is the fake service host holding the
 global `"HdmiCec"` registration: it fails that invocation and the run, and is
@@ -332,15 +349,17 @@ selection is already on legacy and a green run proves nothing.
 
 | Inv | Binary | `CEC_TEST_AIDL_MODE` | Selection | Cases |
 |--------|-------------|---------|---------|---------|
-| A | `run_L1Tests` | `absent` | Legacy | 567, measured — the pre-existing 483 plus 84 contract cases |
-| B | `run_L1Tests` | `compatible` | AIDL (local interface) | the AIDL contract arms plus the 308 back-end-neutral cases — 418 selected |
-| C | `run_L1Tests` | `incompatible` | Legacy, rejection logged | 75 contract cases plus the same 308 — 383 selected |
+| A | `run_L1Tests` | `absent` | Legacy | 568, measured — the pre-existing 483 plus 85 contract cases |
+| B | `run_L1Tests` | `compatible` | AIDL (local interface) | the AIDL contract arms plus the 308 back-end-neutral cases — 422, measured green |
+| C | `run_L1Tests` | `incompatible` | Legacy, rejection logged | 76 contract cases plus the same 308 — 384, measured green |
 | D | `run_L2Tests` | `absent` | Legacy | the `DualPath*` round trip through the in-process legacy mock |
 | E | `run_L2Tests` | `remote` | AIDL (remote proxy) | the same round trip over real Binder IPC |
 
-A and D carry measured totals; **483 is the pre-existing legacy-path baseline**, and the binary now
-registers 602 cases in 25 fixtures.  No total is quoted for B, C or E because none has been
-measured.  The counts are documentation, not the gate — `run_coverage.sh` asks the binary how many
+**483 is the pre-existing legacy-path baseline**, and the binary now registers 606 cases in 25
+fixtures.  Every total above is measured: A and D on any host, and B, C and E on the Binder-capable
+guest that `.github/workflows/aidl-path-tests.yml` provisions, where all five invocations ran green
+on 2026-09-01 (E: 14 registered, 8 passed, 6 skipped).  A host without a Binder driver cannot
+reproduce B, C or E at all — `run_coverage.sh` reports those three DEFERRED there, never as passes.  The counts are documentation, not the gate — `run_coverage.sh` asks the binary how many
 cases each filter selects, every time.
 
 The five commands, with the filter each invocation actually uses (`INVOCATION_MATRIX` field 5 in
@@ -353,16 +372,16 @@ both name are `CECFrameTest`, `MessageDecoderTest`, `MessageDecoderTrackingTest`
 
 ```bash
 cd tests/L1Tests
-# A -- measured: 567 selected / 35 excluded / 602 registered; 567 passed, 0 skipped; exit 0.
+# A -- measured: 568 selected / 38 excluded / 606 registered; 568 passed, 0 skipped; exit 0.
 CEC_TEST_AIDL_MODE=absent ./run_L1Tests \
   --gtest_filter='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'
 
 # B -- DEFERRED here; needs a Binder driver.  No pass count is claimed.  The filter itself is
-# valid and selects 418 cases from 15 suites here, measured with --gtest_list_tests.
+# valid and selects 422 cases from 15 suites here, measured with --gtest_list_tests.
 CEC_TEST_AIDL_MODE=compatible ./run_L1Tests \
   --gtest_filter='DriverAidl*:CECFrameTest.*:MessageDecoderTest.*:MessageDecoderTrackingTest.*:MessageEncoderTest.*:OpCodeTest.*:OperandsTest.*:UtilTest.*:ConditionVariableTest.*:MutexTest.*:ThreadTest.*-DriverAidlSelectionTest.*:DriverAidlLegacyArmTest.*'
 
-# C -- DEFERRED here; needs a Binder driver.  No pass count is claimed.  The filter selects 383
+# C -- DEFERRED here; needs a Binder driver.  No pass count is claimed on this host.  It selects 384
 # cases from 13 suites here, measured the same way.
 CEC_TEST_AIDL_MODE=incompatible ./run_L1Tests \
   --gtest_filter='DriverAidlCompatibilityTest.*:DriverAidlPreflightTest.*:DriverAidlLocalInstanceTest.*:CECFrameTest.*:MessageDecoderTest.*:MessageDecoderTrackingTest.*:MessageEncoderTest.*:OpCodeTest.*:OperandsTest.*:UtilTest.*:ConditionVariableTest.*:MutexTest.*:ThreadTest.*'
@@ -371,8 +390,10 @@ cd ../L2Tests
 # D -- measured: 14 executed, 10 PASSED, 4 SKIPPED, exit 0.  The 4 are the DualPathAidlFlowTest
 # cases, which this invocation PERMITS to skip; a skip anywhere else fails it.
 CEC_TEST_AIDL_MODE=absent ./run_L2Tests --gtest_filter='DualPath*'
-# or through automake, which supplies CEC_FAKE_AIDL_HOST_PATH itself:
-make -C tests/L2Tests check      # measured: PASS: run_L2Tests, exit 0
+# or through automake, which supplies CEC_FAKE_AIDL_HOST_PATH itself.  No -C here: this block is
+# already in tests/L2Tests, so make -C tests/L2Tests check would look for a nested path that does
+# not exist and stop with exit 2.
+make check      # measured: PASS: run_L2Tests, "# TOTAL: 1  # PASS: 1", exit 0
 
 # E -- DEFERRED here.  CEC_FAKE_AIDL_HOST_PATH is required by THIS mode only, and 8 of the 14
 # are mandatory: only DualPathLegacyFlowTest.* may skip.
@@ -411,12 +432,17 @@ workflow, script or documented command supplies either:
 
 - **`CEC_FAKE_HOST_READY_FD`** — the pipe write end the host writes one fixed readiness token to.
   The harness does a bounded blocking wait on the read end (30 s) and fails if it expires.
-- **`CEC_FAKE_HOST_CONTROL_FD`** — one end of a `socketpair` carrying a two-request control
-  protocol: **`PING`** answered `PONG`, which proves the channel is live before the run depends on
-  it, and **`DELIVER <hex>`** answered `DELIVERED` when the fake dispatched the frame to the
-  listener captured by `open()`, or `NOLISTENER` when it had none.  Bounded at 5 s per response.
+- **`CEC_FAKE_HOST_CONTROL_FD`** and **`CEC_FAKE_HOST_OBSERVE_FD`** — the control channel, and it is
+  **two separate unidirectional pipes, not a `socketpair`**: `CONTROL_FD` is the **read** end the
+  host takes commands from, `OBSERVE_FD` the **write** end it sends replies back on.  Eight
+  lowercase verbs, one line each: `ping`, `deliver <hex>`, `sent-count`, `last-sent`, `open-count`,
+  `close-count`, `listener` and `shutdown`.  **Every reply begins `OK ` or `ERR `** — `OK pong`,
+  `OK delivered <n>`, `OK last-sent <hex>`, and named failures such as `ERR no-listener`,
+  `ERR bad-hex`, `ERR bad-args <verb>`, `ERR no-controller`.  A reply is awaited at most **10 s**
+  and capped at `PIPE_BUF` (4096) bytes, so it arrives whole or not at all.
   Unset simply means no parent wants to drive events (the standalone-run case); set-but-unusable is
-  a hard failure with its own exit code.  This channel is what lets invocation E assert the
+  a hard failure with its own exit code (**8** for a mis-wired channel, **9** for one that breaks
+  mid-run).  This channel is what lets invocation E assert the
   **inbound** leg, which is why **8 of E's 14 cases are mandatory** -- the 6 `DualPathLegacyFlowTest`
   cases are E's permitted skips, exactly as the 4 `DualPathAidlFlowTest` cases are D's.
 
@@ -441,10 +467,10 @@ claimed anywhere in this file**; they belong to the Binder-capable CI job.
 - **Sources**: 16 test translation units + test_main.cpp + the two mock sources (all listed in
   `run_L1Tests_SOURCES`, which is the only gate on what gets compiled — and the order in that
   list is significant, so append at the end of a group rather than inserting)
-- **Total Tests**: 602 cases registered in 25 fixtures, none disabled — measured with
+- **Total Tests**: 606 cases registered in 25 fixtures, none disabled — measured with
   `./run_L1Tests --gtest_list_tests`.  That is the pre-existing **483 in 18 fixtures**, still
   unmodified, plus the 119 contract cases in `ccec/test_DriverAidl.cpp`.  No single invocation runs
-  all 602: see [Back-End Selection](#back-end-selection-five-invocations).  There are more fixtures
+  all 606: see [Back-End Selection](#back-end-selection-five-invocations).  There are more fixtures
   than translation units because some files declare more than one — `ccec/test_LibCCEC.cpp`
   (`LibCCECTest` and `LibCCECUninitializedTest`) and `ccec/test_MessageDecoder.cpp`
   (`MessageDecoderTest` and `MessageDecoderTrackingTest`) among them
@@ -482,15 +508,26 @@ build, so `configure` fails naming the roots it tried when a prefix does not res
    `./configure --enable-l1tests` with `CPPFLAGS`/`PKG_CONFIG_PATH` and the two prefixes set
 4. Build: `make all` **and then** `make -C tests/L1Tests all` **and then**
    `make -C tests/L2Tests all`
-5. Test — **invocation A**, and both the mode and the filter are part of the command:
-   `CEC_TEST_AIDL_MODE=absent ./run_L1Tests --gtest_filter='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'`
-   from `tests/L1Tests` (measured: 567 of 567 passed, exit 0), or
-   `export GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'` and then
-   `make -C tests/L1Tests check`.  **A bare `./run_L1Tests` exits 1** — see
-   [Run Tests Manually](#run-tests-manually)
-6. Test the L2 tier — **invocation D**: `CEC_TEST_AIDL_MODE=absent ./run_L2Tests` from
-   `tests/L2Tests`, or `make -C tests/L2Tests check` (measured: 14 executed, 10 passed,
-   4 permitted skips, exit 0)
+5. Test — **invocation A**, and both the mode and the filter are part of the command.  Two forms,
+   and **each has its own working directory** — a `make -C tests/L1Tests` issued from inside
+   `tests/L1Tests` looks for a nested `tests/L1Tests` and stops with exit 2:
+   - **from `tests/L1Tests`**, the runner directly:
+     `CEC_TEST_AIDL_MODE=absent ./run_L1Tests --gtest_filter='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'`
+     — measured **568 of 568 passed, exit 0**, and the case counts are the runner's own
+   - **from the submodule root**, through automake:
+     `export GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'` and then
+     `CEC_TEST_AIDL_MODE=absent make -C tests/L1Tests check` — measured `PASS: run_L1Tests`,
+     `# TOTAL: 1  # PASS: 1`, exit 0.  Automake counts **one test, the whole binary**; it does not
+     report the 568, so do not expect the runner's figures from this form
+
+   **A bare `./run_L1Tests` exits 1** — see [Run Tests Manually](#run-tests-manually)
+6. Test the L2 tier — **invocation D**.  Same two forms, same working-directory rule:
+   - **from `tests/L2Tests`**: `CEC_TEST_AIDL_MODE=absent ./run_L2Tests` — measured **14 executed,
+     10 passed, 4 permitted skips, exit 0**.  A bare `make check` from this directory is the same
+     route through automake and also exits 0
+   - **from the submodule root**: `make -C tests/L2Tests check` — measured `PASS: run_L2Tests`,
+     `# TOTAL: 1  # PASS: 1`, exit 0.  Again **one test, the whole binary**: the 14/10/4 belong to
+     the runner form above, not to this one
 
 Or let `./run_coverage.sh --build --run` drive the matrix: it runs A and D here and reports
 **B, C and E as DEFERRED**.

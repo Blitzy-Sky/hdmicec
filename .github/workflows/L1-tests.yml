@@ -9,11 +9,27 @@ name: L1-tests
 # binaries. Then it runs exactly one of the five invocations - A, with no AIDL service
 # reachable, which selects the LEGACY back-end.
 #
-# IT IS NOT DUAL-PATH EVIDENCE, and must not be read as any. Invocations B, C, D and E -
-# the ones that select the AIDL back-end, that exercise present-but-incompatible, and that
-# cross a real Binder transport - cannot run here at all: a hosted GitHub runner has no
-# Binder kernel driver and no servicemanager. Those belong to the binder-capable job in
-# aidl-path-tests.yml, which is the only place the full matrix and the branch gate live.
+# IT IS NOT DUAL-PATH EVIDENCE, and must not be read as any. The other four invocations are
+# absent from this job for TWO DIFFERENT REASONS, and conflating them overstates what a
+# hosted runner is incapable of:
+#
+#   B, C AND E ARE UNSUPPORTED HERE. They are the ones that select the AIDL back-end, that
+#   exercise present-but-incompatible, and that cross a real Binder transport, and a hosted
+#   GitHub runner has no Binder kernel driver and no servicemanager, so none of the three
+#   can run here at all. Both harnesses refuse those three modes BY NAME rather than
+#   downgrading them to legacy, and a refusal is the only safe disposition there is:
+#   reaching the service manager unguarded ABORTS THE PROCESS on the pinned Binder stack
+#   instead of returning an error, which is exactly what the preflight prevents.
+#
+#   D IS UNSCHEDULED HERE, NOT INCAPABLE. It is the LEGACY L2 invocation - fake service host
+#   not launched, legacy back-end selected - so it needs no Binder driver whatsoever.
+#   MEASURED on a driverless host it passes: 14 cases, 10 passed and 4 skipped by design,
+#   exit 0, the four skips being the invocation-E fixtures naming the mode they need. This
+#   job builds the L2 runner and its out-of-process fake service host and stops there; not
+#   running D is a scheduling choice, not a platform limit.
+#
+# B, C and E therefore belong to the binder-capable job in aidl-path-tests.yml, which is the
+# only place the full matrix and the branch gate live, and which runs D alongside them.
 #
 # What this job DOES prove, and both halves are worth having:
 #
@@ -74,21 +90,74 @@ permissions:
 env:
   BUILD_TYPE: Debug
 
+  # THE ACCEPTANCE TOOLCHAIN, PINNED IN ONE PLACE, AND PINNED TO THE MAJOR RATHER THAN THE
+  # PATCH - WHICH IS A STATEMENT ABOUT WHAT IS ENFORCEABLE, NOT A RELAXATION.
+  #
+  # WHY IT IS PINNED AT ALL. The acceptance evidence this migration rests on is
+  # compiler-sensitive in two directions. The line and branch figures are gcov's reading of
+  # notes files a specific GCC wrote, and the per-arm branch gate in tests/L1Tests/run_coverage.sh
+  # compares (file,line,block,branch) coordinates against a checked-in manifest - coordinates
+  # that are a property of the COMPILED source, so a different compiler major renumbers them and
+  # the gate reports arms absent that the code still has. gcov itself is stricter still: it
+  # refuses to read notes files a different major produced. So "whatever the runner image
+  # happens to default to" is not a toolchain choice this job is entitled to make.
+  #
+  # WHY THE MAJOR AND NOT 13.4.0. The documented acceptance patch level is GCC/G++/gcov 13.4.0 -
+  # that is what the reference container provides and what blitzy/documentation/Project Guide.md
+  # §9.1 records as verified. Ubuntu noble's archive supplies the gcc-13 family at
+  # 13.3.0-6ubuntu2~24.04.1, and no distribution archive this job is allowed to use carries
+  # 13.4.0: reaching it would mean an unpinned third-party PPA, which contradicts this file's own
+  # supply-chain posture (every action a full-length SHA, every fetched artefact held to a
+  # publisher-issued digest). A gate that demanded 13.4.0 would therefore fail every run on a
+  # difference nobody can close from an archive, and a gate that CLAIMED 13.4.0 while accepting
+  # 13.3.0 would be a false statement in the one place a reader trusts. So the enforceable pin is
+  # the MAJOR, it is enforced hard, and THE EXACT PATCH LEVEL IS RECORDED WITH THE RESULTS -
+  # printed into the toolchain step's log and into the job summary by "Select and prove the
+  # acceptance toolchain" below, which is what makes a later figure attributable.
+  #
+  # ONE PLACE, so the two jobs cannot drift: this entry is read by every step in this file that
+  # names a compiler, and .github/workflows/aidl-path-tests.yml carries the same value under the
+  # same name for the same reason. Move them together.
+  CEC_TOOLCHAIN_GCC_MAJOR: '13'
+
 jobs:
   L1-tests:
     name: Build and run unit tests
-    runs-on: ubuntu-22.04
+    # ubuntu-24.04 RATHER THAN ubuntu-22.04, AND THE ARCHIVE IS THE WHOLE REASON.
+    #
+    # This job used to run on ubuntu-22.04 and install an unversioned `g++`, so the compiler
+    # that produced every artefact and every coverage counter was whichever one that image
+    # defaulted to. Pinning the family (see CEC_TOOLCHAIN_GCC_MAJOR above) is only possible on a
+    # runner whose distribution archive actually carries it: jammy carries NO gcc-13 family at
+    # all, while noble carries gcc-13 and g++-13 at 13.3.0-6ubuntu2~24.04.1 for amd64 and i386
+    # alike. The alternative - staying on jammy and adding a PPA - would introduce an unpinned
+    # third-party archive into a job that pins every other input to a digest, so it is not one.
+    #
+    # Noble's own default gcc is already the 13 family, which means the versioned install below
+    # is belt and braces rather than a change of compiler; that is deliberate. The selection must
+    # not depend on which default an image happens to carry, and the gate step proves what was
+    # selected either way.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        compiler: [ gcc, clang ]
-        coverage: [ with-coverage, without-coverage ]
-        exclude:
-          - compiler: clang
-            coverage: with-coverage
-          - compiler: clang
-            coverage: without-coverage
-          - compiler: gcc
-            coverage: without-coverage
+        # THE `compiler` DIMENSION IS GONE, AND ITS REMOVAL IS A CORRECTION RATHER THAN A
+        # SIMPLIFICATION.
+        #
+        # It read `compiler: [ gcc, clang ]` and the exclusions then removed both clang
+        # combinations and gcc/without-coverage, so ONE combination ever ran - gcc with
+        # coverage - and the surviving value reached nothing but two artifact names. Nothing in
+        # any step consulted it, no step selected a compiler from it, and clang was never
+        # compiled with. A matrix axis that cannot change what is built is worse than absent: a
+        # reader takes the file at its word and believes two compilers are covered.
+        #
+        # What replaces it is a REAL selection, in "Select and prove the acceptance toolchain"
+        # below, which is the honest form of what this axis pretended to do. The `coverage` axis
+        # stays because it IS consulted - `matrix.coverage` gates the "Generate coverage" step -
+        # and it is spelled with the single value the exclusions already left it with, so the set
+        # of jobs this workflow runs is byte-for-byte what it ran before. The two artifact names
+        # lose their `-gcc-` segment for the same reason: naming a dimension that no longer
+        # exists would leave the same false impression in the artifact list.
+        coverage: [ with-coverage ]
 
     # THE WHOLE OF THE STAGING CONTRACT FOR THE AIDL/BINDER BACK-END, IN ONE PLACE.
     #
@@ -139,7 +208,16 @@ jobs:
       # naming the mode they need. That is their design, chosen over GTEST_SKIP precisely
       # so a skipped arm cannot be mistaken for a passing one in an aggregate count. This
       # filter is therefore what makes invocation A green, and MEASURED, not assumed:
-      # without it the run reports 31 failures on this exact tree.
+      # without it the run on this exact tree reports 38 FAILED and exits 1. Those 38 are every
+      # case those two fixtures register and nothing besides them - DriverAidlSessionTest 26 plus
+      # DriverAidlTransmitTest 12, derived from `--gtest_list_tests` on the built binary (606 cases
+      # in 25 suites registered, 568 in 23 selected once this filter applies) - so the filter
+      # removes the failures and nothing else. Earlier revisions of this comment said 31 and then
+      # 35, each true of an earlier tree; that is precisely why the number is no longer only
+      # written down. The `List available tests and prove the invocation-A filter arithmetic` step below
+      # RE-DERIVES the census on every run and fails the job if the filter's arithmetic does not
+      # close, if it selects or excludes nothing, or if it excludes anything outside those two
+      # fixtures.
       #
       # The filter is taken verbatim from the FIXTURE MANIFEST in
       # tests/L1Tests/ccec/test_DriverAidl.cpp, which is where it is maintained; do not
@@ -148,10 +226,32 @@ jobs:
       # the binary, including the make-driven valgrind run and the subshell in its
       # fallback arm, which an inline assignment in front of `make` does not.
       #
-      # No expected case count is asserted anywhere in this job. The count moves whenever a
-      # test is added, and comparing an executed count against the registered inventory is
-      # run_coverage.sh's job, not this workflow's.
+      # NO EXPECTED CASE COUNT IS RECORDED ANYWHERE IN THIS JOB, and the distinction between
+      # that and asserting nothing at all is worth stating. A recorded total moves whenever a
+      # test is added, so it would either rot into a false comment or fail honest runs -
+      # which is what happened to the 31 above. What the listing step DOES assert is the
+      # filter's internal arithmetic against the inventory it just read out of the binary:
+      # selected + excluded == registered, neither side empty, and nothing excluded beyond
+      # the two AIDL fixtures. None of that has to be edited when a case is added. Comparing
+      # an EXECUTED count against an expected one remains run_coverage.sh's job, not this
+      # workflow's.
       GTEST_FILTER: "-DriverAidlSessionTest.*:DriverAidlTransmitTest.*"
+
+      # THE SINK CALLER SOURCE THE DRIFT GUARD READS.
+      #
+      # An ABSOLUTE path, and it has to be: the guard's fallback search is relative to the test
+      # binary and to `../../..` from the runner's working directory, and neither resolves to the
+      # workspace root from every place a test is started in this job. Setting it here rather
+      # than per-step is what makes it reach every route that starts the binary - the direct run,
+      # `make check`, and valgrind - which a per-step assignment would not.
+      #
+      # The file is produced by the "Checkout the Sink caller source for the L1 drift guard" step and its existence is
+      # asserted by "Verify the pinned dependency checkouts" BEFORE any test runs, so a
+      # set-but-unreadable value is caught by that step rather than by the guard. The guard
+      # nevertheless diagnoses set-but-unreadable separately from not-set-at-all, because the two
+      # call for different fixes; see its two FAIL arms.
+      CEC_SINK_CALLER_SOURCE: >-
+        ${{ github.workspace }}/entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp
 
       # EVERY RUN OF A TEST BINARY IN THIS JOB IS BOUNDED, AND THE BOUNDS LIVE HERE.
       #
@@ -162,8 +262,9 @@ jobs:
       # that regression would present as a job consuming its whole workflow timeout at one
       # step, with no exit status to classify and no annotation to read; bounded, it presents
       # as GNU timeout's 124 (or 137 after the grace period), which the steps below classify
-      # by name. GNU semantics are what a hosted ubuntu-22.04 runner has, so 124 and 137 are
-      # the right contract here.
+      # by name. GNU semantics are what a hosted ubuntu-24.04 runner has - coreutils on any
+      # GitHub-hosted Ubuntu image, and unchanged by the runner label move - so 124 and 137
+      # are the right contract here.
       #
       # The values are generous on purpose - they cannot fire on a slow runner, only on a
       # hang. Measured on this tree, the L1 suite runs in single-digit seconds even
@@ -273,6 +374,18 @@ jobs:
       # aidl-path-tests.yml pins the same commit under the same name; move them together.
       GOOGLETEST_REF: e39786088138f2749d64e9e90e0f9902daa77c40 # v1.15.0
 
+      # THE SINK CALLER SOURCE PIN, held here for the same reason the two above are: one value,
+      # read by the checkout step and asserted by "Verify the pinned dependency checkouts".
+      #
+      # This is the superproject gitlink for entservices-hdmicecsink and it is also the commit
+      # DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource names as
+      # REVIEWED. The three must move together, and moving them is a deliberate act: bumping this
+      # pin is expected to fail the drift guard if the plugin's call-site shape changed, which is
+      # exactly when a human should be deciding whether the modelled call paths must be
+      # re-derived. Keeping it on a branch instead would surrender that property.
+      # aidl-path-tests.yml pins the same commit under the same name; move them together.
+      SINK_CALLER_COMMIT: 2ad7e1a4712908a4d0fb838caebcbfcaabba55d8 # superproject gitlink; reviewed by the drift guard
+
       # THE BINDER SDK SOURCE IS PINNED TO A COMMIT, AND ITS RESOLUTION IS NOW FAIL-CLOSED.
       #
       # WHAT WAS WRONG. This job ran `./build_binder.sh` with BINDER_VERSION unset, and the
@@ -314,6 +427,23 @@ jobs:
       BINDER_SDK_REPOSITORY: rdkcentral/linux_binder_idl
       BINDER_SDK_TAG: '2.6.0'
       BINDER_SDK_COMMIT: e5035dc02d810d3c93e03188ca8e3fb7cb165c95 # tag 2.6.0 (annotated; tag object 1b3148a1297fd4b8ad1c5e94b9e4a7a1b46a360a)
+
+      # THE SINK PLUGIN SOURCE THE L1 SUITE READS, WITHOUT WHICH THIS JOB'S TEST STEPS FAIL.
+      #
+      # tests/L1Tests/ccec/test_DriverAidl.cpp carries a drift guard --
+      # DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource -- that
+      # reads entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp and FAILS HARD when it
+      # cannot find it, deliberately: the difference-3 case it protects asserts against a MODEL
+      # of the plugin's two addLogicalAddress call paths, and a model nothing checks against its
+      # subject is not evidence about a caller. Nothing here compiles or links against this
+      # tree; exactly one file in it is read, by that guard.
+      #
+      # Like rdk-halif-aidl it is a SIBLING SUBMODULE OF THE SUPERPROJECT, so nothing brings it
+      # in implicitly, and the ref is the superproject gitlink commit rather than a branch, so
+      # what the guard reads is a REVIEWED revision. aidl-path-tests.yml carries these two values
+      # under the same two names; move them together.
+      SINK_REPOSITORY: Blitzy-Sky/entservices-hdmicecsink
+      SINK_REF: 2ad7e1a4712908a4d0fb838caebcbfcaabba55d8
 
       # WHERE THE VERIFIED SOURCE TREE LIVES, AND WHY EXACTLY THERE.
       #
@@ -447,11 +577,206 @@ jobs:
       # "Unknown CMake command \"FLEX_TARGET\"", so the "Build the Binder SDK" step below
       # cannot run at all - measured, not anticipated. They belong here rather than in that
       # step because this is the one place this job installs packages.
+      #
+      # gcc-13 AND g++-13 ARE NAMED EXPLICITLY, AND THE BARE `g++` IS GONE. The list used to
+      # carry `build-essential g++`, which installs whichever family the image defaults to and
+      # says nothing about which one this job then uses. Naming the versioned pair puts the
+      # acceptance family on the runner by name; the gcc-13 package is also what supplies
+      # /usr/bin/gcov-13, which the toolchain step below puts first on PATH under the name
+      # `gcov`, because tests/L1Tests/run_coverage.sh resolves gcov from PATH and has no override
+      # knob. build-essential STAYS - it is what provides make, libc6-dev and the rest of the
+      # base build environment, none of which the versioned compiler packages carry - and every
+      # other package in this list is unchanged, clang included: nothing in this job compiles
+      # with clang, but removing a package is not this correction's business.
+      #
+      # The package names are DERIVED from CEC_TOOLCHAIN_GCC_MAJOR rather than spelled, so the
+      # pinned major has exactly one definition point in this file and the packages installed
+      # cannot drift from the ones the gate below then demands.
       - name: Install packages
         run: >
           sudo apt update
           &&
-          sudo apt install -y autoconf automake libtool pkg-config libgtest-dev libgmock-dev libdbus-1-dev build-essential g++ cmake valgrind lcov clang ninja-build flex bison
+          sudo apt install -y autoconf automake libtool pkg-config libgtest-dev libgmock-dev libdbus-1-dev build-essential "gcc-$CEC_TOOLCHAIN_GCC_MAJOR" "g++-$CEC_TOOLCHAIN_GCC_MAJOR" cmake valgrind lcov clang ninja-build flex bison
+
+      # THE TOOLCHAIN GATE. IT RUNS BEFORE ANYTHING IS BUILT, AND IT FAILS THE JOB RATHER THAN
+      # WARNING.
+      #
+      # WHAT WAS WRONG, in three parts, none of which a green tick distinguished from a correct
+      # run. The apt list installed an unversioned compiler; no step exported CC or CXX, so
+      # configure, automake and the hand-written RDK build each picked up whatever the image
+      # defaulted to; and the hand build spelled `CXX="${CXX:-g++}"`, whose fallback is exactly
+      # the ambient default this job must not depend on. There was no gcov selection at all and
+      # no version assertion anywhere, so a compiler-sensitive coverage trace and its BRDA
+      # coordinates could not be shown comparable to the recorded ones - the evidence read as
+      # though it were, which is the defect.
+      #
+      # WHAT THIS STEP ESTABLISHES, in the order it establishes it:
+      #
+      #   1. The three tools EXIST at the versioned names, by absolute path. A missing one is
+      #      named, with the package that provides it, rather than surfacing later as a compile
+      #      error about something else.
+      #   2. Each REPORTS the pinned major. `-dumpversion` is used rather than parsing
+      #      `--version`, because it prints the version and nothing else; gcov has no
+      #      -dumpversion, so its first line is parsed and the parse is shown in the log.
+      #   3. The three AGREE WITH EACH OTHER. This is the check that matters most and the one a
+      #      per-tool assertion misses: gcov refuses to read notes files written by a different
+      #      GCC major, so a gcov that is individually "13" while the compiler is individually
+      #      "13" but from a different family would still be wrong. Comparing them to the pin
+      #      AND to each other is what closes that.
+      #   4. gcov IS PUT FIRST ON PATH UNDER THE NAME `gcov`, through a one-entry shim directory
+      #      containing a symlink to /usr/bin/gcov-13. That indirection is not decoration:
+      #      run_coverage.sh resolves `gcov` from PATH with no override knob, so a shim is the
+      #      only place the selection can be made. It is the same pattern the reference
+      #      container uses (/opt/blitzy-shared/bin/gcov -> /usr/bin/gcov-13).
+      #   5. The EXACT PATCH LEVELS ARE RECORDED - in this step's log and in the job summary, so
+      #      the figures this job publishes carry the toolchain that produced them. The pin is
+      #      the major (see CEC_TOOLCHAIN_GCC_MAJOR in this file's env above, which explains why
+      #      13.4.0 is documented and 13.3.0 is what an archive supplies); the patch level is
+      #      evidence, not a gate.
+      #
+      # CC and CXX ARE EXPORTED THROUGH GITHUB_ENV, which is what makes them reach every later
+      # step - ./configure, the three makes and the hand build - rather than only this one. The
+      # shim goes on GITHUB_PATH for the same reason. Both take effect from the NEXT step onwards,
+      # which is why the assertions here are made against absolute paths and why the step after
+      # this one re-checks the resolution the later steps will actually see.
+      - name: Select and prove the acceptance toolchain
+        run: |
+          set -euo pipefail
+
+          # NO APOSTROPHE IN THIS MESSAGE, AND THAT IS A SHELL CONSTRAINT RATHER THAN A STYLE
+          # CHOICE: bash treats a single quote inside ${var:?word} as opening a quoted string
+          # even within double quotes, which swallows the rest of the script and surfaces as an
+          # unrelated "unbound variable" line further down. Measured while writing this step.
+          major="${CEC_TOOLCHAIN_GCC_MAJOR:?CEC_TOOLCHAIN_GCC_MAJOR is unset. It is the single place this workflow pins the acceptance compiler family; restore it in the env block of this workflow rather than spelling a version into a step.}"
+          cc="/usr/bin/gcc-$major"
+          cxx="/usr/bin/g++-$major"
+          gcov="/usr/bin/gcov-$major"
+
+          for tool in "$cc" "$cxx" "$gcov"; do
+            if [ ! -x "$tool" ]; then
+              echo "::error::$tool is not present on this runner, so the pinned GCC $major acceptance toolchain cannot be selected and this job would silently build with the image default instead. gcc-$major provides gcc-$major and gcov-$major, g++-$major provides g++-$major; both are in ubuntu-24.04's archive. If this runner label was changed, check that the new image's archive carries the gcc-$major family at all - jammy does not."
+              exit 1
+            fi
+          done
+
+          # -dumpfullversion IS THE ONE TO READ, AND -dumpversion IS THE TRAP. Since GCC 7
+          # -dumpversion prints the MAJOR ALONE ("13"), while -dumpfullversion prints the whole
+          # thing ("13.3.0"); gcov has neither option and reports its full version as the last
+          # field of its first line. Reading -dumpversion for the compilers and the full value
+          # for gcov, then comparing them, fails on every correct toolchain - measured while
+          # writing this step, which is why the fallback below is a fallback and not the primary.
+          cc_version="$("$cc" -dumpfullversion 2>/dev/null || "$cc" -dumpversion)"
+          cxx_version="$("$cxx" -dumpfullversion 2>/dev/null || "$cxx" -dumpversion)"
+          gcov_line="$("$gcov" --version | head -n 1)"
+          gcov_version="$(printf '%s\n' "$gcov_line" | awk '{ print $NF }')"
+
+          printf 'CC        : %s  -dumpfullversion -> %s\n' "$cc" "$cc_version"
+          printf 'CXX       : %s  -dumpfullversion -> %s\n' "$cxx" "$cxx_version"
+          printf 'gcov      : %s  first line       -> %s\n' "$gcov" "$gcov_line"
+          printf 'gcov      : parsed version       -> %s\n' "$gcov_version"
+          printf 'pinned    : GCC major %s (patch level recorded, not gated - see CEC_TOOLCHAIN_GCC_MAJOR in the env block)\n' "$major"
+
+          rc=0
+          for pair in "CC:$cc_version" "CXX:$cxx_version" "gcov:$gcov_version"; do
+            name="${pair%%:*}"
+            value="${pair#*:}"
+            case "$value" in
+              "$major"|"$major".*) : ;;
+              *)
+                echo "::error::$name reports version '$value', which is not the pinned GCC major $major. The coverage trace, the per-file line gate and the (file,line,block,branch) manifest the branch gate compares against are all properties of the compiler that produced them, so a different major invalidates the comparison rather than merely changing a number."
+                rc=1
+                ;;
+            esac
+          done
+
+          # AGREEMENT ON THE WHOLE VERSION, not just on the major, and not just conformance to
+          # the pin. Three tools that each satisfy the pin independently can still be three
+          # different installations, and gcov's compatibility check is tighter than the major:
+          # the notes-file version stamp it demands is derived from GCC major AND minor, so it
+          # refuses a trace written by 13.2 when it is itself 13.3, one file at a time, reporting
+          # "version 'B32*' prefer 'B33*'" and reading nothing. All three come out of the same
+          # gcc-<major>/g++-<major> package pair, so equality here is achievable as well as
+          # necessary; if it ever fails, one of the three came from somewhere else.
+          if [ "$cc_version" != "$cxx_version" ] || [ "$cc_version" != "$gcov_version" ]; then
+            echo "::error::the three tools do not agree: gcc $cc_version, g++ $cxx_version, gcov $gcov_version. gcov demands a notes-file version stamp derived from the GCC major and minor that wrote it, so a mismatch here yields either no counters or counters attributed to the wrong lines. Install gcc-$major and g++-$major from one archive and re-run."
+            rc=1
+          fi
+          [ "$rc" -eq 0 ] || exit "$rc"
+
+          # THE SHIM. One directory, one entry, prepended to PATH - because run_coverage.sh and
+          # lcov both invoke a bare `gcov`. RUNNER_TEMP rather than the checkout, so nothing
+          # lands in the tree the close-out diff check inspects.
+          shim="${RUNNER_TEMP:-/tmp}/cec-toolchain-shim"
+          rm -rf -- "$shim"
+          mkdir -p -- "$shim"
+          ln -s -- "$gcov" "$shim/gcov"
+          printf 'gcov shim : %s -> %s\n' "$shim/gcov" "$("$shim/gcov" --version | head -n 1)"
+
+          {
+            echo "CC=$cc"
+            echo "CXX=$cxx"
+            echo "CEC_TOOLCHAIN_GCOV=$gcov"
+          } >> "$GITHUB_ENV"
+          printf '%s\n' "$shim" >> "$GITHUB_PATH"
+
+          # RECORDED WITH THE RESULTS, which is the half of this step that outlives the run. A
+          # figure without the toolchain that produced it is not evidence.
+          {
+            echo "### Acceptance toolchain (pinned to GCC major $major; exact patch recorded, not gated)"
+            echo
+            echo "| Tool | Path | Version |"
+            echo "| --- | --- | --- |"
+            echo "| CC | \`$cc\` | $cc_version |"
+            echo "| CXX | \`$cxx\` | $cxx_version |"
+            echo "| gcov | \`$gcov\` (first on PATH as \`gcov\` via \`$shim\`) | $gcov_version |"
+            echo
+            echo "The documented acceptance patch level is 13.4.0; ubuntu-24.04's archive supplies 13.3.0-6ubuntu2~24.04.1, and no archive this job is permitted to use carries 13.4.0. The pin is therefore the major and the patch above is the measured value for this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # THE SECOND HALF OF THE GATE, AND IT IS NOT REDUNDANT WITH THE FIRST.
+      #
+      # GITHUB_ENV and GITHUB_PATH take effect from the step AFTER the one that writes them, so
+      # the step above could only assert absolute paths. What every later step actually sees is a
+      # RESOLVED name: `gcov` off PATH, `$CC`/`$CXX` out of the environment. This step is the one
+      # place those resolutions are checked, which is what catches a later PATH prepend shadowing
+      # the shim, or an env entry that did not survive.
+      - name: Verify the pinned toolchain reaches every later step
+        run: |
+          set -euo pipefail
+          major="${CEC_TOOLCHAIN_GCC_MAJOR:?}"
+          rc=0
+
+          if [ "${CC:-}" != "/usr/bin/gcc-$major" ]; then
+            echo "::error::CC is '${CC:-<unset>}' in this step's environment, not the pinned /usr/bin/gcc-$major selected by 'Select and prove the acceptance toolchain'. The GITHUB_ENV export did not reach here, so every build below would use the image default."
+            rc=1
+          fi
+          if [ "${CXX:-}" != "/usr/bin/g++-$major" ]; then
+            echo "::error::CXX is '${CXX:-<unset>}' in this step's environment, not the pinned /usr/bin/g++-$major selected by 'Select and prove the acceptance toolchain'. The GITHUB_ENV export did not reach here, so every build below would use the image default."
+            rc=1
+          fi
+          if [ "$rc" -eq 0 ]; then
+            printf 'CC  : %s -> %s\n' "$CC" "$("$CC" -dumpfullversion)"
+            printf 'CXX : %s -> %s\n' "$CXX" "$("$CXX" -dumpfullversion)"
+          fi
+
+          resolved_gcov="$(command -v gcov || true)"
+          if [ -z "$resolved_gcov" ]; then
+            echo "::error::no gcov resolves on PATH at all, so lcov and tests/L1Tests/run_coverage.sh - both of which invoke a bare gcov - have nothing to read counters with."
+            rc=1
+          else
+            resolved_version="$(gcov --version | head -n 1 | awk '{ print $NF }')"
+            printf 'gcov on PATH : %s -> %s\n' "$resolved_gcov" "$resolved_version"
+            case "$resolved_version" in
+              "$major"|"$major".*) : ;;
+              *)
+                echo "::error::the gcov that resolves on PATH is version $resolved_version, not the pinned major $major. Something prepended to PATH after the toolchain step and shadowed the shim; gcov cannot read a GCC $major build's notes files, so coverage would come back empty or wrong."
+                rc=1
+                ;;
+            esac
+          fi
+
+          [ "$rc" -eq 0 ] || exit "$rc"
+          echo "the pinned toolchain reaches this step by resolved name as well as by absolute path"
 
       - name: Checkout hdmicec
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
@@ -521,6 +846,46 @@ jobs:
           # checkout above.
           persist-credentials: false
 
+      # THE SINK CALLER SOURCE, AND WHY IT IS A REQUIRED ACCEPTANCE INPUT RATHER THAN A NICETY.
+      #
+      # DriverAidlSessionTest.AddLogicalAddressFailuresReachBothRealSinkCallPathsAsExpected asserts
+      # that a refused logical address and a transport failure each land in the arm the REAL Sink
+      # plugin would catch them in. That assertion is made against a MODEL of two call sites in
+      # HdmiCecSinkImplementation.cpp - the three-catch shape at :2789-2799 and the enable-time
+      # call outside that try block - and a model nobody checks against its subject is not
+      # evidence about a caller. DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatch
+      # TheRealSinkSource is the check: it reads the plugin source and asserts the structural
+      # facts the model depends on, so a drift in the plugin fails a test here instead of
+      # silently invalidating the model.
+      #
+      # It needs the file. Absent it, that guard FAILS - deliberately, with "IT IS A REQUIRED
+      # ACCEPTANCE INPUT, NOT AN OPTIONAL DIAGNOSTIC" - rather than skipping, because a skip
+      # would be indistinguishable from a pass in an aggregate count. See the SINK_* block in
+      # this job's env for the pinned repository and ref, and CEC_SINK_CALLER_SOURCE there for
+      # the export the guard reads.
+      #
+      # The ref is a COMMIT - the superproject gitlink for entservices-hdmicecsink, and the same
+      # commit the guard names as reviewed. Pinning it is the point: the guard is meant to fail
+      # when somebody DELIBERATELY bumps the pin and a human is present to decide whether the
+      # modelled call paths must be re-derived, and a branch name would instead make it fail
+      # whenever the plugin moved for an unrelated reason - noise that trains people to ignore it.
+      #
+      # Only one file is read, but a sparse checkout is not used: the guard resolves the path
+      # itself and reports every path it tried, so a partial tree buys nothing and costs the
+      # ability to widen the guard later without touching this step. The path is the superproject
+      # layout, so the guard's own relative candidate resolves even if the exported variable is
+      # ever lost.
+      - name: Checkout the Sink caller source for the L1 drift guard
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        with:
+          repository: ${{ env.SINK_REPOSITORY }}
+          path: entservices-hdmicecsink
+          ref: ${{ env.SINK_REF }}
+          # Nothing in this job executes anything out of this tree - one .cpp file is read as
+          # text - but the credential rule is the tree's, not the usage's: see the hdmicec
+          # checkout above.
+          persist-credentials: false
+
       # THE BINDER SDK SOURCE, OBTAINED BY THIS JOB AT AN IMMUTABLE COMMIT.
       #
       # It used to be cloned by build_binder.sh, which resolves it from mutable ref text and
@@ -571,7 +936,8 @@ jobs:
         run: |
           set -euo pipefail
           rc=0
-          for tree in hdmicec googletest rdk-halif-aidl rdk-halif-aidl/build-tools/linux_binder_idl; do
+          for tree in hdmicec googletest rdk-halif-aidl rdk-halif-aidl/build-tools/linux_binder_idl \
+                      entservices-hdmicecsink; do
             dir="$GITHUB_WORKSPACE/$tree"
             [ -d "$dir/.git" ] || { echo "::error::$tree is not a git checkout at $dir, so this job's later steps cannot rely on it."; rc=1; continue; }
             keys="$(git -C "$dir" config --local --name-only --list 2>/dev/null || true)"
@@ -658,6 +1024,30 @@ jobs:
 
           assert_pinned_head googletest "${GOOGLETEST_REF:-}" "GoogleTest"
           assert_pinned_head rdk-halif-aidl/build-tools/linux_binder_idl "${BINDER_SDK_COMMIT:-}" "Binder SDK source"
+          assert_pinned_head entservices-hdmicecsink "${SINK_REF:-}" "Sink caller source (read by the L1 drift guard)"
+
+          # THE TWO NAMES FOR THE SAME PIN MUST AGREE. SINK_REF is what the checkout resolves and
+          # what the assertion above reads; SINK_CALLER_COMMIT is the same commit recorded beside
+          # the guard's rationale. Asserting the tree twice would say nothing new, but letting the
+          # two names drift would leave a reviewer reading a pin the job does not use.
+          if [ "${SINK_CALLER_COMMIT:-}" != "${SINK_REF:-}" ]; then
+            echo "::error::SINK_CALLER_COMMIT is '${SINK_CALLER_COMMIT:-<unset>}' and SINK_REF is '${SINK_REF:-<unset>}'. They name the same reviewed commit of entservices-hdmicecsink and must be moved together; aidl-path-tests.yml carries both under the same names."
+            rc=1
+          fi
+
+          # THE SINK CALLER SOURCE MUST BE READABLE BEFORE ANY TEST RUNS, not discovered missing
+          # by the guard that needs it. Both are checks worth having and they are not the same
+          # check: this one establishes the ENVIRONMENT is wired, the guard establishes the
+          # plugin has not DRIFTED. Failing here names the wiring; failing there names the drift.
+          #
+          # The guard's own set-but-unreadable arm exists for the case this step cannot cover -
+          # something changing the file between here and the test - and says so in terms.
+          if [ ! -r "${CEC_SINK_CALLER_SOURCE:-}" ]; then
+            echo "::error::CEC_SINK_CALLER_SOURCE is '${CEC_SINK_CALLER_SOURCE:-<unset>}', which is not a readable file. It is a REQUIRED acceptance input, not an optional diagnostic: DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource reads it to prove the modelled Sink call paths still match the real plugin, and DriverAidlSessionTest.AddLogicalAddressFailuresReachBothRealSinkCallPathsAsExpected asserts against that model. Without the file the model is unchecked and the second case is not evidence about a caller. The 'Checkout the Sink caller source for the L1 drift guard' step produces it; if that step was skipped, removed or repointed, restore it rather than relaxing this check."
+            rc=1
+          else
+            printf '%-24s %s  %s\n' "Sink caller source" "$(git -C "$GITHUB_WORKSPACE/entservices-hdmicecsink" rev-parse HEAD 2>/dev/null || echo '<unreadable>')" "entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp" | tee -a "$record"
+          fi
 
           # binder_sdk.version IS A GATE HERE, NOT A FALLBACK. build_binder.sh reads the same
           # file and degrades to a hardcoded 2.0.0 when it cannot; this job refuses to build at
@@ -703,6 +1093,37 @@ jobs:
       # symptom that reads like a broken build rather than an incomplete checkout. Three
       # cheap tests turn it into one named line. Every missing root is reported before
       # the step exits, so one run names them all.
+      # THE SINK CALLER SOURCE IS RESOLVED, PROVEN READABLE AND EXPORTED HERE, BEFORE ANY TEST
+      # STEP RUNS.
+      #
+      # The drift guard distinguishes "the variable is set and the file is not there" -- which it
+      # reports as a WIRING FAULT -- from "nothing pointed at the source at all". Exporting a path
+      # this job has not opened would manufacture the first out of a checkout that quietly
+      # produced a different layout, and point a human at a fault that does not exist. So the
+      # file is opened here and CEC_SINK_CALLER_SOURCE is exported only afterwards. Every step
+      # that runs the L1 binary inherits it from the job environment.
+      - name: Verify the Sink caller source and export it
+        run: |
+          set -euo pipefail
+          sink_source="$GITHUB_WORKSPACE/entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp"
+          if [ -L "$sink_source" ]; then
+            echo "::error::$sink_source is a symbolic link rather than the checked-out source. Refused rather than followed."
+            exit 1
+          fi
+          if [ ! -f "$sink_source" ] || [ ! -r "$sink_source" ]; then
+            echo "::error::the Sink plugin source is not readable at $sink_source, so tests/L1Tests' drift guard for the modelled Sink call paths cannot run and the L1 steps below cannot pass. The 'Checkout the Sink caller source for the L1 drift guard' step above is what puts it there; check that it ran and that SINK_REPOSITORY and SINK_REF name a reachable revision."
+            exit 1
+          fi
+          bytes="$(wc -c < "$sink_source")"
+          if [ "$bytes" -le 0 ]; then
+            echo "::error::$sink_source is empty, so the drift guard would read nothing out of it."
+            exit 1
+          fi
+          echo "Sink caller source : $sink_source ($bytes bytes)"
+          echo "  read by tests/L1Tests/ccec/test_DriverAidl.cpp's drift guard, at SINK_REF=$SINK_REF"
+          echo "CEC_SINK_CALLER_SOURCE=$sink_source" >> "$GITHUB_ENV"
+
+
       - name: Verify rdk-halif-aidl source include roots
         run: |
           set -euo pipefail
@@ -757,10 +1178,11 @@ jobs:
       # calls cmake itself, as the googletest build above does, the pinned one is used and
       # no prepend appears. Please do not "simplify" this into a single CMake.
       #
-      # The candidate is MEASURED against the floor, not assumed to meet it: on
-      # ubuntu-22.04 the archive cmake apt-installed above is expected to be 3.22.1 -
-      # exactly the floor - but expected is not measured, and the expectation would rot
-      # silently. If no installed candidate qualifies, a CMake pinned to the floor is
+      # The candidate is MEASURED against the floor, not assumed to meet it, and the runner
+      # label move to ubuntu-24.04 is a live demonstration of why that matters: on jammy the
+      # archive cmake was expected to be 3.22.1, exactly the floor, and on noble it is newer
+      # again. Either satisfies the floor, but neither is asserted here - an expectation
+      # tied to a distribution release rots the moment the label changes, which this one did. If no installed candidate qualifies, a CMake pinned to the floor is
       # fetched into a private prefix under the workspace and that is prepended instead -
       # downloaded to a file, held to the publisher digest committed in this job's env block,
       # and unpacked only after it matches. It is one of the two artefacts this job fetches
@@ -1134,10 +1556,25 @@ jobs:
           # as make variables so they win over anything ambient; no -j, for the reason in
           # the comment above. The output is captured as well as shown, because the link
           # command make echoes is itself evidence and is asserted on below.
+          # THE COMPILER IS THE PINNED ONE, NAMED, AND ASSERTED HERE RATHER THAN DEFAULTED.
+          #
+          # This line used to read CXX="${CXX:-g++}", whose fallback silently handed the
+          # shipping-library build to whatever the runner image defaulted to - the one thing the
+          # toolchain gate exists to prevent. There is no fallback now: CXX is the value
+          # "Select and prove the acceptance toolchain" exported, and if it is unset or is not
+          # the pinned family the step stops here and says so, because the alternative is a
+          # shipping library and a set of coverage notes produced by an unrecorded compiler.
+          expected_cxx="/usr/bin/g++-${CEC_TOOLCHAIN_GCC_MAJOR:?}"
+          if [ "${CXX:-}" != "$expected_cxx" ]; then
+            echo "::error::CXX is '${CXX:-<unset>}', not the pinned $expected_cxx. The hand-written RDK build compiles the library a SOC vendor ships, so it is not built with an unrecorded compiler; check that 'Select and prove the acceptance toolchain' ran before this step."
+            exit 1
+          fi
+          printf 'hand build CXX: %s (%s)\n' "$CXX" "$("$CXX" -dumpversion)"
+
           build_log="$(mktemp)"
           CPATH="$GITHUB_WORKSPACE/hdmicec/mocks:$GITHUB_WORKSPACE/hdmicec/stubs${CPATH:+:$CPATH}" \
             make -C ccec/src \
-              CXX="${CXX:-g++}" \
+              CXX="$CXX" \
               HALIF_PREFIX="$HALIF_PREFIX" \
               HALIF_LIB_DIR="$HALIF_LIB_DIR" \
               BINDER_SDK_DIR="$BINDER_SDK_DIR" \
@@ -1485,8 +1922,8 @@ jobs:
       # unbounded run turns that regression into a job that sits at this step until the
       # workflow-level timeout kills it: no exit status, no classification, no annotation,
       # and a build log whose last line is whatever the suite happened to print. So the run
-      # is wrapped in coreutils `timeout` - GNU semantics, which is what a hosted
-      # ubuntu-22.04 runner has - and the outcome is CLASSIFIED rather than merely tested
+      # is wrapped in coreutils `timeout` - GNU semantics, which is what any hosted
+      # Ubuntu runner has, ubuntu-24.04 included - and the outcome is CLASSIFIED rather than merely tested
       # for zero: 124 is the bound firing, 137 is SIGKILL (timeout's own escalation after
       # the grace period, or an external killer such as the OOM killer - the elapsed time
       # printed with the message is what distinguishes them), 125/126/127 are timeout
@@ -1530,7 +1967,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/hdmicec/tests/L1Tests"
           log="$GITHUB_WORKSPACE/selected_back_end_invocation_A.log"
 
-          # `timeout` is coreutils and is therefore present on ubuntu-22.04 - but an
+          # `timeout` is coreutils and is therefore present on ubuntu-24.04 - but an
           # unbounded run is exactly what this step must not perform, so its absence is a
           # hard failure here rather than a quiet downgrade. tests/L1Tests/run_coverage.sh
           # refuses to run the suite without it for the same reason.
@@ -1685,7 +2122,7 @@ jobs:
         if: ${{ always() && !env.ACT && steps.verify_back_end.conclusion != 'skipped' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 (v4.6.2)
         with:
-          name: selected-back-end-L1-hdmicec-${{ matrix.compiler }}-${{ matrix.coverage }}
+          name: selected-back-end-L1-hdmicec-${{ matrix.coverage }}
           path: selected_back_end_invocation_A.log
           if-no-files-found: error
 
@@ -1695,15 +2132,121 @@ jobs:
       # resolves in LibCCEC::init before main's first case, so this invocation reaches the
       # same preflight that a hang would wedge in. `timeout` sits after the environment
       # assignments so that they still reach the binary through it.
-      - name: List available tests
+      # LIST THE INVENTORY, AND THEN PROVE THE FILTER'S OWN ARITHMETIC AGAINST IT.
+      #
+      # The listing half is unchanged and is for a human reading the log. The second half
+      # exists because a NUMBER WRITTEN IN A COMMENT GOES STALE SILENTLY, and one in this
+      # file did: the job-level env block used to claim the unfiltered run reports 31
+      # failures, which was true of an earlier tree and is not true of this one. Rather
+      # than correct the number and wait for it to rot again, the counts are DERIVED here,
+      # on every run, from the binary that was just built.
+      #
+      # Three things are asserted, and each is an INVARIANT rather than a recorded total,
+      # which is the whole point - none of them has to be edited when a case is added:
+      #
+      #   1. selected + excluded == registered. The filter cannot quietly drop or duplicate
+      #      a case. This is arithmetic on three independently listed inventories, not a
+      #      restatement of one of them.
+      #   2. selected > 0 AND excluded > 0. EMPTY-FILTER DETECTION, in both directions. A
+      #      filter that matches nothing produces a green run of zero cases, which is the
+      #      single most dangerous failure a filtered suite can have; a filter that excludes
+      #      nothing means the two AIDL fixtures have silently stopped being registered, so
+      #      invocation A is no longer proving that the filter is what makes it green.
+      #   3. Every excluded case belongs to DriverAidlSessionTest or DriverAidlTransmitTest.
+      #      This is what makes the filter's INTENT checkable: the two fixtures require the
+      #      AIDL back-end to be the resolved one, and nothing else may be swept out with
+      #      them. A third fixture added to the filter without being added here fails this.
+      #
+      # Fail-closed throughout: `set -euo pipefail`, and the derivation ends in an explicit
+      # comparison rather than in a printed number nobody reads. The measured census is
+      # written to the step summary so the run's own evidence carries it, which is what
+      # replaces the comment that went stale.
+      #
+      # MEASURED AT THE TIME OF WRITING, on this tree: 606 cases in 25 suites registered,
+      # 568 in 23 selected, 38 excluded - DriverAidlSessionTest 26 plus
+      # DriverAidlTransmitTest 12. Those figures are stated as a reader's orientation only;
+      # NOTHING BELOW COMPARES AGAINST THEM, so they cannot fail the job when a case is
+      # added, and the assertions above are what actually holds.
+      - name: List available tests and prove the invocation-A filter arithmetic
         timeout-minutes: 10
-        run: >
-          cd $GITHUB_WORKSPACE/hdmicec/tests/L1Tests
-          &&
-          CEC_TEST_AIDL_MODE=absent
-          LD_LIBRARY_PATH=$GITHUB_WORKSPACE/install/usr/lib:${LD_LIBRARY_PATH}
-          timeout --kill-after="${L1_KILL_GRACE_SECONDS}s" "${L1_LIST_TIMEOUT_SECONDS}s"
-          ./run_L1Tests --gtest_list_tests
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/hdmicec/tests/L1Tests"
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/install/usr/lib:${LD_LIBRARY_PATH}"
+          export CEC_TEST_AIDL_MODE=absent
+
+          # The human-readable listing, unchanged in behaviour and still bounded.
+          timeout --kill-after="${L1_KILL_GRACE_SECONDS}s" "${L1_LIST_TIMEOUT_SECONDS}s" \
+            ./run_L1Tests --gtest_list_tests
+
+          # Qualified case names, one per line, out of --gtest_list_tests. A suite line is a
+          # single token ending in '.', a case line is indented; joining the two gives
+          # 'Suite.Case', which is the same spelling a --gtest_filter uses. Any other output
+          # the binary emits is ignored by construction rather than by blacklist.
+          list_names() {
+            GTEST_FILTER="$1" timeout --kill-after="${L1_KILL_GRACE_SECONDS}s" \
+              "${L1_LIST_TIMEOUT_SECONDS}s" ./run_L1Tests --gtest_list_tests \
+              | awk '
+                  NF == 1 && /^[^[:space:]]+\.$/ { suite = $1; next }
+                  /^[[:space:]]+[A-Za-z_]/       { if (suite != "") print suite $1 }
+                '
+          }
+
+          # '*' rather than an unset variable: the job-level GTEST_FILTER is exported into
+          # this step, so asking for the full inventory means overriding it explicitly.
+          # The three inventories go under RUNNER_TEMP rather than a fixed /tmp path so a
+          # runner hosting more than one job cannot have two of them write the same file,
+          # and `comm` is given sorted input on purpose - it FAILS on unsorted input, which
+          # makes a corrupted inventory an error here rather than a wrong count later.
+          work="${RUNNER_TEMP:-/tmp}"
+          list_names '*'               | sort -u > "$work/l1_registered.txt"
+          list_names "${GTEST_FILTER}" | sort -u > "$work/l1_selected.txt"
+          comm -23 "$work/l1_registered.txt" "$work/l1_selected.txt" > "$work/l1_excluded.txt"
+
+          registered=$(wc -l < "$work/l1_registered.txt")
+          selected=$(wc -l < "$work/l1_selected.txt")
+          excluded=$(wc -l < "$work/l1_excluded.txt")
+          suites=$(sed 's/\.[^.]*$//' "$work/l1_registered.txt" | sort -u | wc -l)
+          suites_selected=$(sed 's/\.[^.]*$//' "$work/l1_selected.txt" | sort -u | wc -l)
+
+          printf 'registered : %s cases in %s suites\n' "$registered" "$suites"
+          printf 'selected   : %s cases in %s suites (GTEST_FILTER=%s)\n' \
+                 "$selected" "$suites_selected" "$GTEST_FILTER"
+          printf 'excluded   : %s cases, which is what an unfiltered run would fail on\n' "$excluded"
+
+          if [ "$registered" -eq 0 ]; then
+            echo "::error::--gtest_list_tests reported no cases at all, so the binary either did not start or printed nothing this step could parse. Nothing below can be trusted; investigate the listing output above before reading any count."
+            exit 1
+          fi
+          if [ "$(( selected + excluded ))" -ne "$registered" ]; then
+            echo "::error::filter arithmetic does not close: selected $selected + excluded $excluded != registered $registered. The filter is dropping or duplicating cases, which means the executed count of invocation A is not the count anyone believes it is."
+            exit 1
+          fi
+          if [ "$selected" -eq 0 ]; then
+            echo "::error::GTEST_FILTER='$GTEST_FILTER' selects ZERO of $registered registered cases. An empty selection runs green while proving nothing, which is exactly what this check exists to catch."
+            exit 1
+          fi
+          if [ "$excluded" -eq 0 ]; then
+            echo "::error::GTEST_FILTER='$GTEST_FILTER' excludes NOTHING, so DriverAidlSessionTest and DriverAidlTransmitTest are no longer registered under the names the filter spells. Invocation A is then green for a reason other than the filter, and the fixture manifest in tests/L1Tests/ccec/test_DriverAidl.cpp has moved without this workflow following it."
+            exit 1
+          fi
+          stray=$(grep -vE '^(DriverAidlSessionTest|DriverAidlTransmitTest)\.' "$work/l1_excluded.txt" || true)
+          if [ -n "$stray" ]; then
+            echo "::error::the invocation-A filter excludes cases outside the two AIDL-back-end fixtures it is documented to exclude. Every case below is being skipped without a stated reason:"
+            printf '::error::  %s\n' $stray
+            exit 1
+          fi
+
+          {
+            printf '### Invocation-A filter, measured on the built binary\n\n'
+            printf '| Inventory | Cases | Suites |\n| --- | --- | --- |\n'
+            printf '| registered | %s | %s |\n' "$registered" "$suites"
+            printf '| selected (invocation A) | %s | %s |\n' "$selected" "$suites_selected"
+            printf '| excluded (need the AIDL back-end) | %s | - |\n\n' "$excluded"
+            printf 'Derived from `--gtest_list_tests`, not recorded in this workflow: '
+            printf 'selected + excluded == registered, the selection is non-empty, and every '
+            printf 'excluded case belongs to `DriverAidlSessionTest` or `DriverAidlTransmitTest`.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # CEC_TEST_AIDL_MODE=absent is invocation A: the harness registers no AIDL service,
       # the preflight finds no usable Binder transport, and the legacy back-end is
@@ -1819,7 +2362,7 @@ jobs:
         if: ${{ !env.ACT }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 (v4.6.2)
         with:
-          name: artifacts-L1-hdmicec-${{ matrix.compiler }}-${{ matrix.coverage }}
+          name: artifacts-L1-hdmicec-${{ matrix.coverage }}
           path: |
             coverage/
             tools/supply-chain-pins.txt

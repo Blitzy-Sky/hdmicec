@@ -19,11 +19,13 @@
 
 #include "fake_hdmi_cec_aidl_service.h"
 #include <binder/IServiceManager.h>
+#include <chrono>
 #include <iostream>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <utils/Errors.h>
@@ -151,6 +153,28 @@ FakeHdmiCecService* FakeHdmiCecService::instance = nullptr;
 ::android::binder::Status FakeHdmiCecController::addLogicalAddresses(const ::std::vector<int32_t>& logicalAddresses,
                                                                     bool* _aidl_return)
 {
+    /*
+     * The optional delay, taken FIRST and with no lock held.  It is read under the instance mutex
+     * and the mutex is dropped before the sleep, so a concurrent capture read on a remote fake
+     * answering on binder threads is never blocked behind it.  Zero is the default and costs one
+     * lock acquisition and a comparison, which is why this is unconditional rather than compiled
+     * out.  See setAddLogicalAddressesDelayMs() for why a real sleep is the only way to reach the
+     * middleware's slow-call threshold.
+     */
+    int32_t delayMs = 0;
+    {
+        ::std::lock_guard<::std::mutex> delayGuard(mutex);
+
+        delayMs = addLogicalAddressesDelayMs;
+    }
+
+    if (delayMs > 0) {
+        std::cout << "[FakeHdmiCecController::addLogicalAddresses] Delaying " << delayMs
+                  << " ms before answering, as configured" << std::endl;
+
+        ::std::this_thread::sleep_for(::std::chrono::milliseconds(delayMs));
+    }
+
     ::std::lock_guard<::std::mutex> guard(mutex);
 
     ++addLogicalAddressesCallCount;
@@ -297,6 +321,21 @@ void FakeHdmiCecController::setRemoveLogicalAddressesResult(bool result)
     ::std::lock_guard<::std::mutex> guard(mutex);
 
     removeLogicalAddressesResult = result;
+}
+
+/**
+ * @copydoc FakeHdmiCecController::setAddLogicalAddressesDelayMs
+ *
+ * Stores the value only; the sleep itself is taken inside addLogicalAddresses(), with the lock
+ * dropped, for the reason recorded on the declaration.  A negative value is stored as given and
+ * treated as "no delay" by the comparison at the point of use, which keeps this setter free of a
+ * clamp a caller would then have to reason about.
+ */
+void FakeHdmiCecController::setAddLogicalAddressesDelayMs(int32_t delayMs)
+{
+    ::std::lock_guard<::std::mutex> guard(mutex);
+
+    addLogicalAddressesDelayMs = delayMs;
 }
 
 /**
@@ -455,6 +494,7 @@ void FakeHdmiCecController::reset()
 
     addLogicalAddressesResult = true;                                                       // Default: address acquired
     removeLogicalAddressesResult = true;                                                    // Default: address removed
+    addLogicalAddressesDelayMs = 0;                                                         // Default: answer immediately
     sendMessageResult = ::com::rdk::hal::hdmicec::SendMessageStatus::ACK_STATE_0;            // Default: ACKed directed frame
 
     addLogicalAddressesBinderStatus = ::android::binder::Status::ok();

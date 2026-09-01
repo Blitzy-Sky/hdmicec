@@ -185,6 +185,18 @@
 #include <utils/StrongPointer.h>
 
 /*
+ * ProcessState, for the ONE observation that establishes the binder threadpool exists.
+ *
+ * Reached only from inside a DriverAidlSessionTest case body, never at file or fixture scope,
+ * and only through selfOrNull(). That matters: on a driverless host merely reaching
+ * ProcessState::self() raises SIGABRT in this pinned build, and DriverAidlSessionTest.* is
+ * excluded from the driverless invocation by the runner's own filter. selfOrNull() adds a
+ * second, independent guarantee -- it returns null rather than creating a ProcessState, so it
+ * cannot open a driver that is not there.
+ */
+#include <binder/ProcessState.h>
+
+/*
  * Spelled with quotes, not angle brackets, because that is how ccec/src/DriverAidlImpl.cpp
  * spells its own include of the same header, and there is nothing to be gained from a second
  * spelling. halcompat.h is not inside either frozen snapshot include root - it lives at
@@ -3512,6 +3524,25 @@ constexpr int kFrameDeliveryTimeoutMs = 3000;
 constexpr int kNonDeliveryWindowMs = 400;
 
 /**
+ * @brief The middleware's slow-synchronous-call threshold, in milliseconds, RESTATED
+ *
+ * Mirrors @c SLOW_HAL_CALL_WARN_MS in @c ccec/src/DriverAidlImpl.cpp. It is restated rather than
+ * read because that constant sits inside the anonymous namespace opened at DriverAidlImpl.cpp:185
+ * and therefore has internal linkage - @c nm finds no dynamic symbol for it - and because
+ * exposing it through the class would be a production change this suite has no business making.
+ *
+ * @warning Restating a production constant is normally a hazard, and here it is safe in the one
+ *          direction that matters. The only case using it delays a HAL call by this value plus a
+ *          margin and asserts that the warning line APPEARS. If production raised its threshold
+ *          above this value, the delay would fall short, no line would be emitted and that case
+ *          would fail - a loud wrong answer rather than a case that had silently stopped
+ *          exercising the arm. If production lowered it, the case still crosses and still passes.
+ *
+ * @see FakeHdmiCecController::setAddLogicalAddressesDelayMs()
+ */
+constexpr int kSlowHalCallWarnMs = 1000;
+
+/**
  * @brief A FrameListener that records the bytes of every frame it is notified of
  *
  * FrameListener::notify is const, so the recording members are mutable - the same shape the
@@ -3596,33 +3627,159 @@ private:
 };
 
 /**
- * @brief The thread-name prefix libbinder gives every threadpool thread it starts
+ * @brief A frame listener that PARKS THE BUS READER inside its notification until released
  *
- * Not an invention of this suite: libbinder names its pool threads "binder:PID_N" through
- * pthread_setname_np, which is what makes the pool observable from outside without a production
- * introspection API being added for the purpose.
+ * Exists for one purpose the recording listener cannot serve: making the incoming queue fill up.
+ * The Bus reader drains that queue as fast as frames are offered - it is normally blocked in
+ * EventQueue::poll() on an empty queue and woken by each offer - so a case that simply delivered
+ * many frames would never see an occupancy above one, and the queue's refusal arm would stay
+ * unreachable however many frames it delivered.
+ *
+ * The mechanism is the reader's own call graph rather than anything injected into the queue. The
+ * reader takes a frame, then notifies each registered listener on its own thread; a notification
+ * that does not return leaves the reader inside it and not back at poll(). Frames offered from
+ * that moment on accumulate, which is precisely the "stalled reader" condition the middleware's
+ * refusal arm exists to survive.
+ *
+ * @warning notify() runs ON THE BUS READER THREAD and blocks it deliberately. A case that
+ *          forgets to call release() hangs its own teardown, so every use must release on every
+ *          exit path - the cases below do it before their assertions, so that an ASSERT_*
+ *          returning early cannot strand the reader.
+ * @warning notify() is @c const in the FrameListener interface, so all of this object's state is
+ *          @c mutable. That is the same accommodation RecordingFrameListener makes.
+ *
+ * @see RecordingFrameListener
+ * @see DriverAidlImpl::offerReceivedFrame()
+ */
+class StallingFrameListener : public FrameListener {
+public:
+    /**
+     * @brief Blocks until release() is called, recording that the reader arrived
+     *
+     * @param [in] frame Frame the Bus reader is delivering. Its bytes are not copied: this
+     *                  listener exists to hold the thread, and the delivered content is asserted
+     *                  by the recording listener a case attaches alongside it where it matters.
+     *
+     * @note Records arrival BEFORE blocking and notifies waiters, so waitUntilParked() cannot
+     *       race ahead of the block.
+     */
+    void notify(const CECFrame &frame) const override {
+        (void)frame;
+
+        std::unique_lock<std::mutex> guard(mutex_);
+
+        ++parkedCount_;
+        condition_.notify_all();
+
+        // Predicate rather than a bare wait, so a spurious wake-up cannot let the reader escape
+        // early and quietly drain the queue this listener is holding full.
+        condition_.wait(guard, [this] { return released_; });
+    }
+
+    /**
+     * @brief Waits until the reader is parked inside notify() at least once
+     *
+     * @param [in] timeoutMs Milliseconds to wait before giving up
+     *
+     * @return bool - true when the reader is parked, false on timeout
+     *
+     * @note A false return means the delivery chain never reached this listener at all, which is
+     *       a different failure from the queue not filling and must be reported as such.
+     */
+    bool waitUntilParked(int timeoutMs) const {
+        std::unique_lock<std::mutex> guard(mutex_);
+
+        return condition_.wait_for(guard, std::chrono::milliseconds(timeoutMs),
+                                   [this] { return parkedCount_ > 0; });
+    }
+
+    /**
+     * @brief Releases the parked reader, and every later notification, immediately
+     *
+     * @return None
+     *
+     * @post notify() returns at once from now on, so this is safe to call more than once and safe
+     *       to call when nothing is parked.
+     */
+    void release() const {
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+
+            released_ = true;
+        }
+
+        condition_.notify_all();
+    }
+
+private:
+    /** @brief Guards the two flags below against the Bus reader thread and the case body. */
+    mutable std::mutex mutex_;
+    /** @brief Signals both directions: parked for the case body, released for the reader. */
+    mutable std::condition_variable condition_;
+    /** @brief How many times the reader has entered notify(). Non-zero means parked. */
+    mutable size_t parkedCount_ = 0;
+    /** @brief Set once by release(); notify() returns immediately once it is set. */
+    mutable bool released_ = false;
+};
+
+/**
+ * @brief The thread-name prefix libbinder gives a threadpool thread ON AN ANDROID BUILD
+ *
+ * Not an invention of this suite: ProcessState::makeBinderThreadName() composes "binder:PID_N"
+ * from the driver name and hands it to Thread::run() for each pool thread it spawns.
+ *
+ * @warning IT IS NOT APPLIED ON THIS LINUX PORT, so a thread carrying it does not exist even when
+ *          the pool is running, and its absence is therefore not evidence about the pool. In the
+ *          pinned Binder SDK, androidCreateRawThreadEtc() takes its threadName parameter as
+ *          `__android_unused`, and the whole block that would honour it -- together with
+ *          thread_data_t::trampoline, the only site that calls androidSetThreadName() for a
+ *          spawned thread -- sits inside `#if defined(__ANDROID__)`, which the CMake build of the
+ *          Binder SDK never defines. prctl(PR_SET_NAME) is therefore never reached and each pool
+ *          thread inherits the process's own `comm`. Measured: a guest with a live binder driver,
+ *          an AIDL back-end open since LibCCEC::init and a pool demonstrably started had no thread
+ *          matching this prefix, and an assertion resting on the prefix failed against correct
+ *          production code; every thread of this runner reports the runner's own name, and so does
+ *          every thread of the fake service host, which also starts a pool. The pool is therefore
+ *          asserted through ProcessState::getThreadPoolMaxThreadCount(), which reads the very flag
+ *          startThreadPool() sets and behaves the same on both platforms; this prefix is what a
+ *          build that DID apply the name would show, so the probe is kept as corroboration and is
+ *          reported rather than asserted -- see processHasABinderThread() below.
  */
 const char *const kBinderThreadNamePrefix = "binder:";
 
 /**
- * @brief Whether this process currently has at least one binder threadpool thread
+ * @brief Whether this process currently has at least one thread named the way libbinder names its
+ *        threadpool threads
  *
  * Reads /proc/self/task, which lists one directory per thread in this process, and compares each
- * thread's `comm` against the prefix libbinder uses. This is the only externally observable
- * consequence of ProcessState::startThreadPool() - the call returns void, it is idempotent, and
- * it deliberately keeps no state the middleware could be asked about - so it is what an assertion
- * about the pool has to look at.
+ * thread's `comm` against the prefix ProcessState::makeBinderThreadName() composes, which
+ * libbinder applies only on an Android build. It is CORROBORATION ONLY: see the warning on
+ * kBinderThreadNamePrefix for why the name is never applied on this port, and
+ * getThreadPoolMaxThreadCount() for what is asserted instead.
  *
  * @param [out] procIsReadable Set to true once /proc/self/task has been opened, and left
  *                            false when it cannot be. Ignored when null.
  *
  * @return bool - Whether a thread named "binder:*" exists in this process.
- * @retval true  - A binder threadpool thread is running.
- * @retval false - None is, or /proc is not mounted, in which case the caller must not read the
- *                 result as evidence either way.
+ * @retval true  - A binder threadpool thread is running AND this build applies the name.
+ * @retval false - No such thread is named, which on this port is the ordinary case whether or not
+ *                 a pool is running, so the caller must not read it as evidence either way.
  *
- * @warning A false result on a host without /proc is indistinguishable from a genuinely absent
- *          pool, so the caller checks @c procIsReadable and reports rather than asserts.
+ * @warning A false result is not evidence that the threadpool is absent, for two distinct reasons,
+ *          and neither is recoverable from inside this process. A host without /proc reports
+ *          nothing at all, which @c procIsReadable distinguishes. And on this Linux port the name
+ *          is never applied to the thread in the first place, for the compile-time reason recorded
+ *          on kBinderThreadNamePrefix above - so a running pool produces threads that carry the
+ *          process's own `comm` and this function returns false. Counting threads instead is not a
+ *          substitute: the runner's thread count moves during a run as cases start and join their
+ *          own workers, measured going 1 to 5 to 6 with different thread ids at equal counts, so a
+ *          count-based inference would be unsound rather than merely imprecise.
+ * @note There is consequently no reliable in-process observation of "the pool was started" on this
+ *       SDK. The evidence that it was is invocation E's, which receives a `oneway` callback on a
+ *       pool thread over real out-of-process IPC - see
+ *       hdmicec/tests/L2Tests/ccec/test_DualPathIntegration.cpp. This function is retained because
+ *       a build that does apply the name, or an SDK that switches to pthread_setname_np, would
+ *       report true, and the caller prints what it observed either way.
  */
 bool processHasABinderThread(bool *procIsReadable) {
     if (procIsReadable != nullptr) {
@@ -5950,6 +6107,77 @@ TEST_F(DriverAidlPreflightTest, TheServiceQueryDeclinesWhenThePathCannotBeResolv
         << "the node was reopened after the re-resolution had already failed";
     EXPECT_EQ(g_syntheticProbe.closeCalls, 1)
         << "the retained descriptor was not released when the re-resolution failed";
+}
+
+// THE STAGE-ONE DECLINE, WHICH IS A DIFFERENT ARM FROM EVERY CASE ABOVE and until now had no
+// case of its own on a host that has a working binder driver.
+//
+// isServiceAvailable() declines in three ordered stages, and its two later ones are what the
+// cases above drive: they let the preflight PASS and then break the re-identification or the
+// liveness re-check, so they reach the transport reason by the second assignment inside the
+// function rather than the first. The arm this case drives is the FIRST one - the preflight
+// itself refusing - and the distinction is not cosmetic, because that arm is the one every
+// legacy-only SOC takes on every boot. It is the single most-travelled path in this file on real
+// hardware and the one whose failure would abort LibCCEC::init() instead of falling back.
+//
+// Why it needed writing at all, stated plainly because the answer is the reason the branch-arm
+// gate exists. On a host with NO binder driver the factory takes this arm unaided: the default
+// path cannot be opened, the preflight declines, and the arm is covered as a side effect of
+// every driverless run. On a host that HAS a usable driver - which is the only kind of host that
+// can run the AIDL invocations at all - the factory never takes it, so the arm silently went
+// unmeasured on exactly the runs that measure everything else. A test that only ever ran where
+// the platform happened to force the arm was not testing the arm.
+//
+// The unusable path is an EMPTY one rather than a plausible-looking absent filename, and that is
+// deliberate: an empty path is rejected by isBinderPreflightOk() before it calls the probe at
+// all, so the two probe-call assertions below can state something no reason-string comparison
+// can - that the decline happened at stage one, ahead of any node work, rather than later on
+// with the same reason text. A nonexistent filename would decline for the right reason at the
+// wrong stage and this case could not tell the difference.
+/**
+ * @brief The service query declines at its FIRST stage when the driver path is unusable, and
+ *        does so before touching the node.
+ * @pre None beyond a constructed local instance. Runs under every invocation, including one on a
+ *      host with a fully working binder driver, which is the point of it.
+ * @note Complements DriverAidlImpl::isBinderPreflightOk()'s own empty-path case: that one
+ *       establishes the predicate refuses, this one establishes isServiceAvailable() ACTS on the
+ *       refusal - returns false, records the transport reason, and issues no lookup.
+ * @note The probe counters are asserted at zero rather than merely "not more than one". They are
+ *       what locates the decline at stage one; the reason text alone is assigned at two
+ *       different stages and cannot distinguish them.
+ * @see DriverAidlImpl::isServiceAvailable()
+ * @see DriverAidlImpl::isBinderPreflightOk()
+ */
+TEST_F(DriverAidlPreflightTest, TheServiceQueryDeclinesAtThePreflightStageWhenTheDriverPathIsUnusable) {
+    // A probe that would answer every question correctly if it were ever asked. That is the
+    // control: a decline recorded here cannot be attributed to a probe rigged to fail, and the
+    // counters below show it was not consulted.
+    resetSyntheticProbe(kSyntheticBinderFd, 0, DriverAidlImpl::expectedBinderProtocolVersion(),
+                        true);
+
+    DriverAidlImpl backEnd;
+
+    EXPECT_FALSE(backEnd.isServiceAvailable(std::string(),
+                                            DriverAidlImpl::DEFAULT_CONTEXT_MANAGER_TIMEOUT_MS,
+                                            syntheticProbe()))
+        << "an unusable binder driver path did not decline. This is the arm a legacy-only SOC "
+           "takes on every boot, and a true return here would send the factory on to a lookup "
+           "against a node it never validated";
+
+    ASSERT_NE(backEnd.unavailabilityReason(), nullptr)
+        << "the preflight declined and recorded no reason, so the selection helper has nothing to "
+           "name in its fallback line and the platform condition becomes undiagnosable";
+    EXPECT_THAT(std::string(backEnd.unavailabilityReason()),
+                ::testing::HasSubstr("binder transport is unavailable"))
+        << "a preflight decline was not reported as a transport condition, so a legacy-only "
+           "platform would be told something other than the truth about why it fell back";
+
+    EXPECT_EQ(g_syntheticProbe.openCalls, 0)
+        << "the node was opened although the path could never have been usable, so the decline is "
+           "happening after stage one rather than at it - and the descriptor custody the later "
+           "stages depend on was taken out for a path that was already refused";
+    EXPECT_EQ(g_syntheticProbe.closeCalls, 0)
+        << "a descriptor was released although none should ever have been opened";
 }
 
 // The pathname still resolves to the validated node, but the descriptor REOPENED for the
@@ -9688,12 +9916,40 @@ TEST_F(DriverAidlLocalInstanceTest, CloseSentinelOverlappingAReceiveHandoffLeave
 // the 256 attempts walk the relative arrival across the window instead of retrying one fixed
 // schedule 256 times.
 //
-// What a passing run guarantees and what it does not. It guarantees that in every overlap that
-// occurred, the invariant held. It does not guarantee that any particular interleaving occurred
-// - no test can, without controlling the scheduler - which is why the census below is printed
-// and why both outcome orders are required to have been observed at least once: a run in which
-// the two producers never actually contended would satisfy the invariants vacuously, and the
-// census is what makes that visible instead of silently green.
+// WHAT A PASSING SWEEP GUARANTEES AND WHAT IT DOES NOT, AND WHY THIS CASE NO LONGER ASSERTS
+// ANYTHING ABOUT THE SCHEDULER. The sweep guarantees that in every overlap that occurred, the
+// invariant held. It cannot guarantee that any particular interleaving occurred - no test can,
+// without controlling the scheduler - so a run in which the two producers never actually
+// contended would satisfy the invariants vacuously, and something has to make that visible.
+//
+// An earlier revision made it visible by ASSERTING the census: both outcome orders had to have
+// been observed at least once across the 256 attempts. With two CPUs available every run
+// produces tens of each, so the assertion looked settled. It is not. Pinned to ONE CPU
+// (`taskset -c 0`) the sweep produces 256 close-first-refused-by-the-state-guard outcomes and
+// nothing else - measured, repeatedly: the close worker runs to completion before the receive
+// worker is scheduled at all - and the case then reports a RED suite on a tree with no product
+// regression whatsoever. A single-CPU runner, a busy shared CI executor and a container with a
+// one-CPU quota are all valid environments, so an assertion on the census makes the verdict a
+// property of the machine rather than of the code. THAT IS THE HOLE THIS REVISION CLOSES, and
+// it is the whole reason the orderings below are CONSTRUCTED and not sampled.
+//
+// So the non-vacuity requirement is discharged where it can be discharged deterministically.
+// PART 1 builds each intended ordering directly and single-threaded, through the seams
+// ReceiveQueueProbe already exposes - postCloseSentinel() for a sentinel that is already queued
+// while the instance is still OPENED, and the real production close() for one that also takes
+// the instance out of OPENED - and asserts the SAME three invariants on each. Every arm
+// therefore runs on every scheduler and on any number of CPUs, and it is the arms rather than
+// the census that establish that the accepted-and-present and refused-and-absent arms of the
+// invariant were exercised at all. PART 2 then keeps the contended sweep exactly as it was,
+// invariants included, because a real overlap is evidence no constructed ordering can supply:
+// it is the only thing in this file that puts the two production producers on the same queue at
+// the same instant. Its census is PRINTED and no longer ASSERTED - it is a report of what this
+// machine happened to sample, which is all it ever was.
+//
+// A LATER READER WILL BE TEMPTED TO SIMPLIFY PART 1 BACK OUT, on the grounds that the sweep
+// reaches the same three outcomes anyway. It does not reach them reliably: which of the three it
+// produces is the scheduler's choice, and on one CPU it produces exactly one of them, 256 times.
+// Deleting Part 1 and restoring an assertion on the census restores the false failure.
 //
 // Measured both ways before it was committed. With `{AutoLock lock_(queueProducerMutex);`
 // deleted from DriverAidlImpl::close() this case fails on the invariant - the handoff reporting
@@ -9705,19 +9961,22 @@ TEST_F(DriverAidlLocalInstanceTest, CloseSentinelOverlappingAReceiveHandoffLeave
 // exactly once after its workers are disposed and its queue drained. Nothing here deletes a
 // frame itself, and nothing leaks if an assertion stops the loop early.
 /**
- * @brief Across many real overlaps, the handoff's report and the queue's contents always
- *        agree, and both outcome orders are observed.
+ * @brief Every intended ordering of close()'s sentinel against the receive handoff is
+ *        constructed and asserted, and a contended sweep then holds the same invariants over
+ *        whatever real overlaps this machine produces.
  * @pre Runs under every invocation, through the harness. This is the case that carries the
  *      weight, because it reasons about no timing at all and fails on a violated invariant.
- * @note The alignment is swept rather than sampled: a burn offset is applied after the
- *       release, alternating which producer carries it and varying its size, so the attempts
- *       walk the relative arrival across the window instead of retrying one fixed schedule.
- * @note What a pass guarantees and what it does not. It guarantees the invariant held in
- *       every overlap that occurred; it cannot guarantee any particular interleaving
- *       occurred, which is why the census is printed and why both outcome orders are required
- *       to have been seen at least once - a run in which the producers never contended would
- *       satisfy the invariants vacuously, and the census is what makes that visible rather
- *       than silently green.
+ * @note Part 1 CONSTRUCTS the three orderings - receive-first accepted, close-first refused by
+ *       the reserved slot, close-first refused by the state guard - single-threaded and through
+ *       the probe's own seams, so each is exercised on every scheduler and on any number of
+ *       CPUs. The non-vacuity requirement is asserted on these arms, and on nothing else.
+ * @note Part 2 sweeps real overlaps. The alignment is varied rather than sampled once: a burn
+ *       offset is applied after the release, alternating which producer carries it and varying
+ *       its size, so the attempts walk the relative arrival across the window instead of
+ *       retrying one fixed schedule. Its invariants are asserted; its census is printed and
+ *       deliberately NOT asserted, because which interleaving a machine produces is the
+ *       scheduler's choice - pinned to one CPU this sweep produces one outcome 256 times, and
+ *       an assertion on the census turned that into a red suite on a tree with no regression.
  * @note Every allocation is accounted for on every path including a failing one: each frame
  *       is registered in the harness ledger as it is allocated and released exactly once
  *       after the workers are disposed and the queue drained, so nothing leaks if an
@@ -9729,8 +9988,315 @@ TEST_F(DriverAidlLocalInstanceTest, ManyRealOverlapsKeepTheHandoffReportAndTheQu
         << "this case needs room for a filled queue, one contending frame and close()'s "
            "sentinel, so a capacity below three cannot express it";
 
-    // The interleaving census. Not an assertion about the scheduler - it is what distinguishes
-    // "the invariant held across real overlaps" from "the producers never met".
+    /* -------------------------------------------------------------------------------------
+     * PART 1 - THE THREE ORDERINGS, CONSTRUCTED RATHER THAN SAMPLED.
+     *
+     * Each arm below produces one of the three outcomes by construction, single-threaded, and
+     * asserts the same three invariants Part 2 asserts on its sampled overlaps. No thread, no
+     * rendezvous and no latch is involved, so no arm can be lost to a scheduler that runs one
+     * runnable thread to completion before it runs the other - which is exactly what a
+     * one-CPU host does, and which is why the sampled census is no longer asserted. The block
+     * comment above this case records that measurement and why this part must not be removed.
+     * ----------------------------------------------------------------------------------- */
+
+    // Which of the three orderings a constructed arm is to produce. The three differ by
+    // exactly one thing - where the close side runs relative to the handoff - so naming that
+    // difference keeps them one shape with one varying step rather than three near-copies.
+    enum ConstructedOrdering {
+        RECEIVE_FIRST_ACCEPTS,        // the handoff reaches the queue below the refusal point
+        CLOSE_FIRST_REFUSED_BY_SLOT,  // the sentinel is already queued, so the handoff refuses
+        CLOSE_FIRST_REFUSED_BY_STATE  // close() has left OPENED, so the handoff raises
+    };
+
+    // The production close(), run into the same three outcome flags the sweep's close worker
+    // writes, so both parts of this case read the close side through one vocabulary. A local
+    // instance holds no service proxy, so the transaction fails and close() raises IOException
+    // AFTER it has offered its sentinel - which is what lets an arm read the sentinel's
+    // arrival from a close() that raised.
+    auto driveProductionClose = [](QueueHandoffOverlapState *shared) {
+        try {
+            shared->probe.close();
+            shared->closeReturnedCleanly = true;
+        }
+        catch (IOException &) {
+            shared->closeRaisedIoException = true;
+        }
+        catch (...) {
+            shared->closeRaisedSomethingElse = true;
+        }
+    };
+
+    // Builds one ordering, asserts it produced that ordering, and asserts the three invariants
+    // on it. EXPECT rather than ASSERT throughout, deliberately: a fatal assertion inside a
+    // lambda returns from the lambda alone, so it would leave the arm's own report unmade and
+    // read as a silently skipped arm rather than as a failure.
+    //
+    // Returns whether the arm really produced the ordering it names, which is the arm's
+    // contribution to the non-vacuity assertion at the end of this case.
+    auto constructOrdering = [&](ConstructedOrdering ordering, const char *arm) -> bool {
+        // The same harness Part 2 uses, for the same reasons: it owns the probe and the frame
+        // ledger off this stack and releases every allocation exactly once on every exit path,
+        // including an early return from a failed expectation. No worker is started here, so
+        // its bounded disposition has nothing to dispose.
+        QueueHandoffOverlapHarness harness;
+        QueueHandoffOverlapState  *shared = &*harness;
+
+        shared->probe.markOpened();
+
+        // The frames the handoff handed back, by identity. Pointers only - the ledger owns them.
+        std::vector<CECFrame *> ownedByCaller;
+
+        // Filled to capacity - 2 through the production handoff, exactly as Part 2 fills it, so
+        // that both the accepted and the refused outcome stay expressible and neither is a
+        // no-op. This fill is also what drives the slot-available side of the reserved-slot
+        // check, capacity - 2 times over on every arm.
+        for (size_t filled = 0; filled < capacity - 2; filled++) {
+            CECFrame *frame = new CECFrame(directedFrame());
+            shared->allocated.push_back(frame);
+
+            if (!shared->probe.offer(frame)) {
+                ownedByCaller.push_back(frame);
+            }
+        }
+
+        EXPECT_TRUE(ownedByCaller.empty())
+            << arm << ": the handoff refused " << ownedByCaller.size() << " frames below its "
+               "refusal point, so this arm is not the ordering it names";
+
+        EXPECT_EQ(shared->probe.occupancy(), capacity - 2)
+            << arm << ": the queue holds " << shared->probe.occupancy() << " entries where this "
+               "arm needs " << (capacity - 2);
+
+        shared->contending = new CECFrame(directedFrame());
+        shared->allocated.push_back(shared->contending);
+
+        // THE CLOSE SIDE, AHEAD OF THE HANDOFF ON TWO OF THE THREE ARMS. This is the whole of
+        // the difference between the arms, and each choice models a real close rather than an
+        // invented state.
+        if (ordering == CLOSE_FIRST_REFUSED_BY_SLOT) {
+            // close()'s sentinel, offered under queueProducerMutex exactly as close() offers
+            // it, reaching the queue BEFORE the handoff does. The instance is deliberately
+            // left OPENED, because the guard runs ahead of the occupancy check: were the state
+            // moved as well, the handoff below would raise from the guard and this arm would
+            // become a second copy of the state-guard arm instead of the occupancy one. This
+            // is the state a close leaves for the window between its sentinel offer and its
+            // own state store, and postCloseSentinel() is the seam that expresses it.
+            shared->probe.postCloseSentinel();
+        }
+        else if (ordering == CLOSE_FIRST_REFUSED_BY_STATE) {
+            // The real production close(), run to completion first: it sets CLOSING, offers
+            // its sentinel under the producer lock, and reports the failed transaction of a
+            // proxyless instance. The handoff below then meets an instance that is no longer
+            // OPENED, which is the earliest form of the close-first order.
+            driveProductionClose(shared);
+        }
+
+        // THE PRODUCTION HANDOFF, reported exactly as it reported it. Nothing is
+        // reinterpreted: the agreement between this report and what the queue really holds is
+        // the property under test.
+        try {
+            shared->contendingAccepted = shared->probe.offer(shared->contending);
+        }
+        catch (InvalidStateException &) {
+            shared->contendingRefusedByStateGuard = true;
+        }
+        catch (...) {
+            shared->contendingRaisedSomethingElse = true;
+        }
+
+        if (ordering == RECEIVE_FIRST_ACCEPTS) {
+            // The close side runs AFTER the accepted handoff on this arm, so its sentinel lands
+            // in the slot the handoff reserved for it - the property that makes the sentinel
+            // undroppable, and the one a full queue would break.
+            driveProductionClose(shared);
+        }
+
+        EXPECT_FALSE(shared->contendingRaisedSomethingElse)
+            << arm << ": the receive handoff raised an exception that is neither "
+               "InvalidStateException nor nothing at all, so what follows cannot be interpreted";
+
+        // The close side's own outcome, on the two arms that drive production close(). The
+        // occupancy arm drives no close at all - its sentinel comes from postCloseSentinel()
+        // for the reason given above - so it has no close outcome to read.
+        if (ordering != CLOSE_FIRST_REFUSED_BY_SLOT) {
+            EXPECT_TRUE(shared->closeRaisedIoException)
+                << arm << ": close() did not report the IOException a proxyless instance must "
+                   "report, so the sentinel this arm reads may not have come from the code path "
+                   "this arm means to exercise";
+
+            EXPECT_FALSE(shared->closeReturnedCleanly)
+                << arm << ": close() returned cleanly on an instance holding no service proxy, "
+                   "so the assertions below are describing a different code path";
+
+            EXPECT_FALSE(shared->closeRaisedSomethingElse)
+                << arm << ": close() raised an exception that is not the IOException a proxyless "
+                   "instance must report, so what follows cannot be interpreted";
+        }
+
+        // The decisive outcome, asserted per arm. This is what makes each arm the ordering it
+        // claims to be rather than whichever ordering the code happened to take, and it is
+        // also the arm's own non-vacuity evidence.
+        bool producedTheOrdering = false;
+
+        switch (ordering) {
+        case RECEIVE_FIRST_ACCEPTS:
+            EXPECT_TRUE(shared->contendingAccepted)
+                << arm << ": the handoff refused a frame offered onto a queue holding "
+                << (capacity - 2) << " of " << capacity << " entries, which is below the "
+                   "reserved-slot refusal point, so the accepted-and-present arm of the "
+                   "invariant was not reached";
+
+            EXPECT_FALSE(shared->contendingRefusedByStateGuard)
+                << arm << ": the handoff was refused by the OPENED-state guard on an arm that "
+                   "closes nothing until after the handoff has returned";
+
+            producedTheOrdering =
+                shared->contendingAccepted && !shared->contendingRefusedByStateGuard;
+            break;
+
+        case CLOSE_FIRST_REFUSED_BY_SLOT:
+            EXPECT_FALSE(shared->contendingAccepted)
+                << arm << ": the handoff accepted a frame offered onto a queue already holding "
+                << (capacity - 1) << " of " << capacity << " entries. The last slot is reserved "
+                   "for close()'s sentinel, and accepting here is what makes a sentinel "
+                   "droppable";
+
+            EXPECT_FALSE(shared->contendingRefusedByStateGuard)
+                << arm << ": the handoff was refused by the OPENED-state guard rather than by "
+                   "occupancy, so this arm did not exercise the reserved-slot refusal it exists "
+                   "for. The instance is left OPENED precisely so that it cannot";
+
+            producedTheOrdering =
+                !shared->contendingAccepted && !shared->contendingRefusedByStateGuard;
+            break;
+
+        case CLOSE_FIRST_REFUSED_BY_STATE:
+            EXPECT_TRUE(shared->contendingRefusedByStateGuard)
+                << arm << ": the handoff did not raise InvalidStateException after a completed "
+                   "close(), so the state guard that keeps a frame out of a queue nobody will "
+                   "drain again was not exercised";
+
+            EXPECT_FALSE(shared->contendingAccepted)
+                << arm << ": the handoff accepted a frame on an instance that is no longer "
+                   "OPENED, so the frame would sit in a queue the Bus reader has already been "
+                   "told to stop draining";
+
+            producedTheOrdering =
+                shared->contendingRefusedByStateGuard && !shared->contendingAccepted;
+            break;
+        }
+
+        // What the queue really holds, by identity. Draining here also leaves the harness's
+        // ownership sweep nothing to drain, which is what keeps each frame released once.
+        std::vector<CECFrame *> takenFromQueue;
+        size_t                  sentinels = 0;
+
+        shared->probe.drainInto(takenFromQueue, sentinels);
+
+        if (!shared->contendingAccepted) {
+            ownedByCaller.push_back(shared->contending);
+        }
+
+        // Invariant 1, as Part 2 asserts it: exactly one sentinel, whatever the order was.
+        EXPECT_EQ(sentinels, 1u)
+            << arm << ": the queue yielded " << sentinels << " NULL sentinels; exactly one is "
+               "offered and it must not be droppable - a swallowed sentinel leaves the Bus "
+               "reader blocked in poll() with nothing left to wake it";
+
+        // Invariant 2, as Part 2 asserts it: reported-accepted if and only if present.
+        size_t contendingInQueue = 0;
+
+        for (size_t entry = 0; entry < takenFromQueue.size(); entry++) {
+            if (takenFromQueue[entry] == shared->contending) {
+                contendingInQueue++;
+            }
+        }
+
+        EXPECT_EQ(contendingInQueue, shared->contendingAccepted ? 1u : 0u)
+            << arm << ": the handoff reported the contending frame "
+            << (shared->contendingAccepted ? "ACCEPTED" : "REFUSED") << " and the drained queue "
+               "held it " << contendingInQueue << " times. The report and the queue must agree: "
+               "acceptance reported for a frame that is not there leaves NOBODY to release it, "
+               "and refusal reported for one that is there has the caller free a frame the queue "
+               "still owns";
+
+        const size_t expectedFrames = (capacity - 2) + (shared->contendingAccepted ? 1u : 0u);
+
+        EXPECT_EQ(takenFromQueue.size(), expectedFrames)
+            << arm << ": the queue yielded " << takenFromQueue.size() << " frames where the "
+               "handoff's reports account for " << expectedFrames;
+
+        // Invariant 3, as Part 2 asserts it: the partition over every allocation, so that "no
+        // owner" and "two owners" are distinguished from each other and from the right answer.
+        size_t frameWithoutAnOwner = 0;
+        size_t frameWithTwoOwners  = 0;
+
+        for (size_t allocation = 0; allocation < shared->allocated.size(); allocation++) {
+            size_t owners = 0;
+
+            for (size_t entry = 0; entry < takenFromQueue.size(); entry++) {
+                if (takenFromQueue[entry] == shared->allocated[allocation]) {
+                    owners++;
+                }
+            }
+
+            for (size_t kept = 0; kept < ownedByCaller.size(); kept++) {
+                if (ownedByCaller[kept] == shared->allocated[allocation]) {
+                    owners++;
+                }
+            }
+
+            if (owners == 0) {
+                frameWithoutAnOwner++;
+            }
+            else if (owners > 1) {
+                frameWithTwoOwners++;
+            }
+        }
+
+        EXPECT_EQ(frameWithoutAnOwner, 0u)
+            << arm << ": " << frameWithoutAnOwner << " frames have NO owner - reported accepted "
+               "and not in the queue, so nothing in the process will ever release them";
+
+        EXPECT_EQ(frameWithTwoOwners, 0u)
+            << arm << ": " << frameWithTwoOwners << " frames have TWO owners - both the queue "
+               "and the caller believe they hold them, which is a double free rather than a leak";
+
+        return producedTheOrdering;
+    };
+
+    // The three arms, each run exactly once, in the order that reads as the story: the handoff
+    // wins; the sentinel wins on occupancy; the sentinel wins on the state. Every one of them
+    // runs on every scheduler, which is the property the sampled census cannot offer.
+    const bool receiveFirstConstructed =
+        constructOrdering(RECEIVE_FIRST_ACCEPTS, "[constructed receive-first]");
+    const bool refusedBySlotConstructed =
+        constructOrdering(CLOSE_FIRST_REFUSED_BY_SLOT, "[constructed close-first, occupancy]");
+    const bool refusedByStateConstructed =
+        constructOrdering(CLOSE_FIRST_REFUSED_BY_STATE, "[constructed close-first, state guard]");
+
+    // The deterministic counterpart of the census below, and the reason it is printed rather
+    // than left implicit: a reader of any run - on any number of CPUs - can see that all three
+    // orderings were reached, which is precisely what the sampled census cannot show. The
+    // assertions at the end of this case are made on these three outcomes.
+    std::cout << "[queue handoff constructed orderings] receive-first accepted: "
+              << (receiveFirstConstructed ? "yes" : "NO")
+              << ", close-first refused by occupancy: "
+              << (refusedBySlotConstructed ? "yes" : "NO")
+              << ", close-first refused by the state guard: "
+              << (refusedByStateConstructed ? "yes" : "NO") << std::endl;
+
+    /* -------------------------------------------------------------------------------------
+     * PART 2 - THE CONTENDED SWEEP, UNCHANGED.
+     *
+     * Real overlaps of the two production producers on one queue, which no constructed
+     * ordering can supply. Its invariants are asserted below exactly as before; its census is
+     * printed and NOT asserted, for the reason the block comment above this case records.
+     * ----------------------------------------------------------------------------------- */
+
+    // The interleaving census. PRINTED, NEVER ASSERTED: which interleaving a machine produces
+    // is the scheduler's choice, and asserting it made a one-CPU host report a false failure.
+    // It stays because a reader of a passing run should be able to see what was sampled.
     size_t overlapsCompleted        = 0;
     size_t receiveFirstOverlaps     = 0;   // the handoff got in below the refusal point
     size_t closeFirstByOccupancy    = 0;   // the sentinel landed first, so the handoff refused
@@ -9966,32 +10532,40 @@ TEST_F(DriverAidlLocalInstanceTest, ManyRealOverlapsKeepTheHandoffReportAndTheQu
     }
 
     // The census, printed rather than inferred, so a reader of a passing run can see which
-    // interleavings it actually sampled.
+    // interleavings it actually sampled. INFORMATIONAL: nothing below asserts these figures,
+    // and a distribution of 0 / 0 / 256 - which is what one CPU produces - is a fact about the
+    // machine rather than a defect. The three constructed arms above are what guarantee each
+    // ordering was exercised.
     std::cout << "[queue handoff overlap stress] " << overlapsCompleted << " of "
               << OVERLAP_STRESS_ITERATIONS << " overlaps completed: " << receiveFirstOverlaps
               << " receive-first, " << closeFirstByOccupancy << " close-first refused by "
                  "occupancy, " << closeFirstByStateGuard << " close-first refused by the state "
-                 "guard" << std::endl;
+                 "guard (informational; the constructed arms carry the non-vacuity requirement)"
+              << std::endl;
 
     EXPECT_EQ(overlapsCompleted, OVERLAP_STRESS_ITERATIONS)
         << "only " << overlapsCompleted << " of " << OVERLAP_STRESS_ITERATIONS
         << " overlaps completed, so the loop stopped early on a failure reported above";
 
-    // Non-vacuity, and it is an assertion about this case rather than about the scheduler: both
-    // orders must have been observed at least once across the run. A run that only ever produced
-    // one order would satisfy every invariant above without the two producers having contended
-    // at all, and would be green for the wrong reason. Measured on this host across repeated
-    // runs, every run produces tens of each; requiring one of each therefore has margin of two
-    // orders of magnitude while still failing a harness that stopped overlapping.
-    EXPECT_GT(receiveFirstOverlaps, 0u)
-        << "no overlap in " << overlapsCompleted << " attempts had the receive handoff reach the "
-           "queue first, so the accepted-and-present arm of the invariant was never exercised. "
-           "The producers are not actually contending";
+    // NON-VACUITY, ASSERTED ON THE CONSTRUCTED ARMS AND NOT ON THE SWEEP. Each arm reports
+    // whether it really produced the ordering it names, so all three orderings are exercised on
+    // every run, on any number of CPUs, and this case fails if an arm stops producing its
+    // ordering - which is what an arm silently degenerating into a copy of another would look
+    // like. The corresponding assertions on the sampled census were removed deliberately: they
+    // made the verdict depend on how many CPUs the runner was given.
+    EXPECT_TRUE(receiveFirstConstructed)
+        << "the constructed receive-first arm did not produce an accepted handoff, so the "
+           "accepted-and-present arm of the invariant was not exercised deterministically";
 
-    EXPECT_GT(closeFirstByOccupancy + closeFirstByStateGuard, 0u)
-        << "no overlap in " << overlapsCompleted << " attempts had close()'s sentinel reach the "
-           "queue first, so the refused-and-absent arm of the invariant was never exercised. "
-           "The producers are not actually contending";
+    EXPECT_TRUE(refusedBySlotConstructed)
+        << "the constructed close-first-by-occupancy arm did not produce a refusal from the "
+           "reserved-slot rule, so the refused-and-absent arm of the invariant was not exercised "
+           "deterministically and the reserved slot is unproven on this run";
+
+    EXPECT_TRUE(refusedByStateConstructed)
+        << "the constructed close-first-by-state-guard arm did not produce an "
+           "InvalidStateException, so the earliest form of the close-first order was not "
+           "exercised deterministically";
 }
 
 // F5. TWO CLOSE SENTINELS IN THE RECEIVE QUEUE, WHICH IS THE STATE THAT USED TO CRASH THE BUS
@@ -12038,6 +12612,320 @@ TEST_F(DriverAidlSessionTest, ReceivedMessageIsAcceptedWhileTheDriverIsOpen) {
            "it";
 }
 
+// AN UNDER-LENGTH MESSAGE IS DISCARDED BEFORE ANYTHING IS ALLOCATED, and the reason this arm is
+// worth a case of its own is that the alternative is not a dropped frame but a dead process.
+//
+// A CECFrame carrying no bytes cannot be decoded: the first thing every consumer does is read
+// byte zero for the header nibbles, and CECFrame::at() raises std::out_of_range when there is no
+// byte zero to read. Neither printFrameDetails() nor Bus::Reader::run() catches that, so it
+// escapes the reader's thread function and takes the process with it. The guard therefore has to
+// sit ahead of the allocation and ahead of the queue, and an empty payload is the only input that
+// reaches it - no canned status, no binder failure and no state can.
+//
+// Why it could not have been covered before. Nothing in the middleware ever produces a zero-byte
+// message; only a HAL can, which is exactly why the guard exists and exactly why a fake is the
+// only way to drive it. On a host with no binder driver the AIDL back-end is never selected and
+// this callback never runs at all, so the arm went unmeasured on every driverless run - and the
+// runs that DO select the AIDL back-end had no case delivering an empty payload.
+//
+// Three things are asserted, and the second is the one that separates "discarded" from "queued
+// and undecodable":
+//
+//   1. nothing escapes into the oneway callback. Letting an exception reach onTransact would be
+//      worse than dropping the frame, which is the disposition the legacy callback also takes.
+//
+//   2. no frame is delivered, waited for rather than checked at one instant. A zero-byte frame
+//      that had been queued would be drained by the reader and would raise inside it, so a
+//      bounded non-delivery window is the observation that the queue never received it.
+//
+//   3. the delivery chain is alive throughout, established by a positive control after the
+//      empty payload. Without it a run where the whole receive path was dead would read as a
+//      correct discard.
+/**
+ * @brief A zero-byte message from the HAL is discarded before allocation, and the receive path
+ *        keeps working afterwards.
+ * @pre Invocation B, with the AIDL back-end resolved and a session open.
+ * @note The guard runs ahead of the allocation and ahead of the queue because a zero-byte
+ *       CECFrame raises std::out_of_range in the Bus reader, which nothing on that thread
+ *       catches - so the alternative to discarding is losing the process, not losing a frame.
+ * @note The positive control after the empty payload is load-bearing: a dead receive chain would
+ *       otherwise be indistinguishable from a correct discard.
+ * @see DriverAidlImpl::EventListener::onMessageReceived()
+ */
+TEST_F(DriverAidlSessionTest, AZeroByteMessageFromTheHalIsDiscardedBeforeAllocation) {
+    RecordingFrameListener applicationListener;
+    ListeningConnection listeningConnection(LogicalAddress(LogicalAddress::UNREGISTERED),
+                                            "DriverAidlSessionTest-receive-too-short",
+                                            applicationListener);
+
+    ASSERT_NE(fake->getListener(), nullptr)
+        << "the fake holds no listener although open() completed, so no callback can arrive and "
+           "this case would prove nothing";
+
+    // The empty payload. fireOnMessageReceived reports only whether a listener was captured, so a
+    // true return here says the callback ran - it says nothing about what the callback did, which
+    // is what the assertions below are for.
+    ASSERT_TRUE(fake->fireOnMessageReceived(std::vector<uint8_t>()))
+        << "no listener was captured, so the trigger was a silent no-op";
+
+    EXPECT_FALSE(applicationListener.waitForFrames(1, kNonDeliveryWindowMs))
+        << "a zero-byte message reached an application listener. It was therefore allocated as a "
+           "CECFrame and queued, and the Bus reader drained it - which means the next consumer to "
+           "read byte zero of an empty frame raises std::out_of_range on the reader thread, where "
+           "nothing catches it. The guard has to discard ahead of the allocation, not after it";
+
+    EXPECT_EQ(applicationListener.frameCount(), 0u)
+        << "the listener holds " << applicationListener.frameCount()
+        << " frame(s) after an empty delivery, where none was expected";
+
+    // The positive control: the same chain, one byte longer, must deliver. This is what makes the
+    // non-delivery above evidence about the guard rather than about a broken receive path.
+    const std::vector<uint8_t> wellFormed{ 0x4F, REPORT_PHYSICAL_ADDRESS, 0x21, 0x00, 0x04 };
+
+    ASSERT_TRUE(fake->fireOnMessageReceived(wellFormed))
+        << "the positive control could not be triggered, so the discard above is unattributable";
+
+    ASSERT_TRUE(applicationListener.waitForFrames(1, kFrameDeliveryTimeoutMs))
+        << "a well-formed frame delivered immediately after the empty one never arrived, so the "
+           "receive path was dead for the whole case and the non-delivery above says nothing "
+           "about the length guard";
+
+    EXPECT_EQ(applicationListener.frameAt(0), wellFormed)
+        << "the frame that did arrive is not the well-formed one, so the empty payload disturbed "
+           "the marshalling of the frame after it";
+}
+
+// THE QUEUE'S REFUSAL ARM, WHICH IS WHAT STOPS A STALLED READER TURNING EVERY FURTHER EVENT INTO
+// A LEAKED FRAME.
+//
+// EventQueue::offer() returns void and silently discards its argument once the queue is full, so
+// a callback that offered and then dropped its pointer would leak one heap CECFrame per event,
+// without bound, for as long as the reader stayed behind. offerReceivedFrame() exists to report
+// the refusal instead, and the callback releases the frame when it is refused. That release is
+// the arm here.
+//
+// Making the queue fill is the whole difficulty, and it is why this case needs a listener that
+// blocks. The reader is normally parked in EventQueue::poll() on an empty queue and woken by each
+// offer, so it drains as fast as frames arrive and the occupancy never leaves one. Parking it
+// inside a notification instead - on its own thread, in its own call graph, with nothing injected
+// into the queue - is what produces the real condition: frames offered from that moment on
+// accumulate exactly as they would behind a slow application.
+//
+// The numbers are the production ones and are not restated as literals here. The queue's capacity
+// reserves its last slot for close()'s wake-the-reader sentinel, so the refusal point is one
+// entry below capacity; the case delivers comfortably more than capacity so that the arm is
+// reached whatever those two constants are, and asserts on the middleware's own refusal line
+// rather than on an occupancy it would have to compute.
+//
+// The refusal is observed in the middleware's log because a released allocation has no other
+// externally visible trace - asserting the absence of a leak would need a heap harness this suite
+// does not have. The reader is released BEFORE the assertions, so an ASSERT_* returning early can
+// never strand it and hang the teardown.
+/**
+ * @brief A frame arriving while the incoming queue is at its refusal point is released rather
+ *        than leaked, and the receive path recovers once the reader moves again.
+ * @pre Invocation B, with the AIDL back-end resolved and a session open.
+ * @note The reader is parked inside a blocking listener on its own thread, which is the only way
+ *       the queue can reach its refusal point at all: it otherwise drains as fast as frames are
+ *       offered and the occupancy never exceeds one.
+ * @note Asserted on the middleware's own refusal line, not on an occupancy: the capacity and the
+ *       reserved sentinel slot are production constants and a test that restated them would
+ *       silently stop testing the arm if either changed.
+ * @note The reader is released before the assertions so that a fatal assertion cannot strand it.
+ * @see DriverAidlImpl::offerReceivedFrame()
+ */
+TEST_F(DriverAidlSessionTest, AFrameArrivingWhileTheQueueIsFullIsReleasedRatherThanLeaked) {
+    StallingFrameListener stallingListener;
+    ListeningConnection listeningConnection(LogicalAddress(LogicalAddress::UNREGISTERED),
+                                            "DriverAidlSessionTest-receive-queue-full",
+                                            stallingListener);
+
+    ASSERT_NE(fake->getListener(), nullptr)
+        << "the fake holds no listener although open() completed, so no callback can arrive";
+
+    const std::vector<uint8_t> filler{ 0x4F, REPORT_PHYSICAL_ADDRESS, 0x21, 0x00, 0x04 };
+
+    // One frame, to get the reader out of poll() and into the notification where it will stay.
+    ASSERT_TRUE(fake->fireOnMessageReceived(filler))
+        << "no listener was captured, so the trigger was a silent no-op";
+
+    if (!stallingListener.waitUntilParked(kFrameDeliveryTimeoutMs)) {
+        stallingListener.release();
+
+        FAIL() << "the Bus reader never reached the listener within " << kFrameDeliveryTimeoutMs
+               << " ms, so it was never parked and the queue could not have filled. That is a "
+                  "broken receive path rather than a queue that refused nothing, and the two must "
+                  "not share a failure message";
+    }
+
+    // Comfortably past the refusal point, whatever the capacity and the reserved slot are. Every
+    // delivery from here is offered onto a queue nothing is draining.
+    const size_t deliveriesWhileParked = 64;
+    size_t triggered = 0;
+    std::string logged;
+    bool captureWasValid = false;
+
+    {
+        StdoutCapture capture;
+
+        // Sampled HERE, before anything reads the capture, because StdoutCapture::read() calls
+        // restore() and a restored capture reports itself invalid from then on. Asking isValid()
+        // after read() therefore always answers false and says nothing about whether the
+        // redirection ever worked - a trap this case fell into and the guest caught.
+        captureWasValid = capture.isValid();
+
+        for (size_t index = 0; index < deliveriesWhileParked; index++) {
+            if (fake->fireOnMessageReceived(filler)) {
+                triggered++;
+            }
+        }
+
+        // Safe when the redirection failed: read() returns an empty string rather than raising,
+        // and the assertion on captureWasValid below is what reports that case.
+        logged = capture.read();
+    }
+
+    // Released before ANY assertion below, so a fatal one cannot leave the Bus reader parked
+    // inside the listener and hang this fixture's teardown.
+    stallingListener.release();
+
+    ASSERT_TRUE(captureWasValid)
+        << "stdout could not be redirected, so the middleware's own refusal line - the only "
+           "externally visible trace a released allocation leaves - could not be read";
+
+    EXPECT_EQ(triggered, deliveriesWhileParked)
+        << "only " << triggered << " of " << deliveriesWhileParked
+        << " deliveries reached the middleware's callback, so the listener was lost part way "
+           "through and the queue was not driven to its refusal point";
+
+    // Two substrings of the production line rather than one token, and neither is a function
+    // name: the line names the CONDITION and the DISPOSITION, and both are what a log reader
+    // acts on. Asserting the refusal alone would pass on a line that reported a refusal and said
+    // nothing about the frame, which is the defect that matters - a refused frame the callback
+    // did not release is a leak per event, and the log is the only trace it leaves.
+    EXPECT_THAT(logged, ::testing::HasSubstr("refused the frame at its"))
+        << "none of " << deliveriesWhileParked
+        << " frames delivered onto a queue nothing was draining was refused. Either the queue "
+           "accepted every one of them - in which case EventQueue::offer() discarded the "
+           "surplus silently and each discarded frame is a leak - or the refusal happened and "
+           "went unreported, which is the same defect from a log reader's point of view";
+
+    EXPECT_THAT(logged, ::testing::HasSubstr("rather than leaking it"))
+        << "the queue reported a refusal but the line does not say the frame was released, so "
+           "either the callback kept a frame the queue never took - one leaked heap CECFrame per "
+           "refused event, without bound while the reader stays behind - or the disposition went "
+           "unrecorded, and a reader has no way to tell those two apart";
+
+    // The chain recovers. A refusal that also broke the receive path would be a different defect
+    // from a refusal that did not, and this is what distinguishes them.
+    RecordingFrameListener recoveredListener;
+    ListeningConnection recoveredConnection(LogicalAddress(LogicalAddress::UNREGISTERED),
+                                            "DriverAidlSessionTest-receive-queue-recovered",
+                                            recoveredListener);
+
+    ASSERT_TRUE(fake->fireOnMessageReceived(filler))
+        << "the recovery delivery could not be triggered";
+
+    EXPECT_TRUE(recoveredListener.waitForFrames(1, kFrameDeliveryTimeoutMs))
+        << "no frame arrived after the reader was released, so the refusal left the receive path "
+           "wedged rather than merely dropping the frames it could not take";
+}
+
+// THE SLOW-CALL DIAGNOSTIC, WHICH IS A THRESHOLD AND NOT A TIMEOUT, and the distinction is the
+// whole point of the case.
+//
+// Crossing it abandons nothing, raises nothing and changes no return value: it leaves one
+// LOG_WARN line where a stall would otherwise be completely silent. B4 records that the
+// underlying synchronous binder call cannot be bounded at all on the pinned libbinder, so this
+// line is the entire mitigation that is in scope, and a mitigation nothing exercises is a
+// mitigation nobody knows works.
+//
+// It cannot be reached by any canned result or status, because none of them takes time. Only a
+// call that is genuinely slow reaches it, which is why the fake gained a delay knob rather than a
+// flag - and why this case pays real wall-clock time. The delay is set just past the threshold
+// rather than comfortably past it, so the case costs the least it can while still crossing.
+//
+// What is asserted, and what deliberately is not. The warning must appear, and the call must
+// still succeed unchanged - a diagnostic that altered the outcome it describes would be a defect
+// far worse than a missing log line. The elapsed figure in the line is NOT asserted: it is a real
+// measurement on a shared machine and pinning it would make the case flaky without testing
+// anything the presence of the line does not already establish.
+/**
+ * @brief A synchronous AIDL call that outlives the slow-call threshold is reported, and its
+ *        result is unaffected.
+ * @pre Invocation B, with the AIDL back-end resolved and a session open. Costs real wall-clock
+ *      time, just past the production threshold.
+ * @note A threshold and not a timeout: nothing is abandoned and nothing raises. The line is the
+ *       whole of the in-scope mitigation for an unbounded synchronous call, so it is asserted
+ *       directly rather than inferred.
+ * @note The elapsed figure in the line is deliberately not asserted - it is a real measurement on
+ *       a shared machine, and pinning it would buy flakiness rather than evidence.
+ * @see DriverAidlImpl::addLogicalAddress()
+ * @see FakeHdmiCecController::setAddLogicalAddressesDelayMs()
+ */
+TEST_F(DriverAidlSessionTest, ASynchronousCallPastTheSlowThresholdIsReportedWithoutChangingItsResult) {
+    ::android::sp<FakeHdmiCecController> controllerFake = fake->getController();
+
+    ASSERT_NE(controllerFake, nullptr)
+        << "the controller fake is not reachable, so no delay can be installed and this case "
+           "cannot make a call slow";
+
+    // Just past the production threshold. The production constant lives in the anonymous
+    // namespace at DriverAidlImpl.cpp:185 and has no dynamic symbol, so it cannot be read from
+    // here and is restated in kSlowHalCallWarnMs instead. That restatement is safe in the only
+    // direction that matters: if production ever raised its threshold above this value, the
+    // delay would fall short, no line would be emitted and the assertion below would FAIL - a
+    // loud wrong answer rather than a case that had quietly stopped testing the arm.
+    const int32_t delayMs = static_cast<int32_t>(kSlowHalCallWarnMs) + 150;
+
+    controllerFake->setAddLogicalAddressesDelayMs(delayMs);
+    controllerFake->setAddLogicalAddressesResult(true);
+
+    std::string logged;
+    int addResult = -1;
+    bool captureWasValid = false;
+
+    {
+        StdoutCapture capture;
+
+        // Sampled before the read, for the reason recorded in the queue-refusal case above:
+        // StdoutCapture::read() restores fd 1 and the capture reports itself invalid afterwards,
+        // so an isValid() asked after read() answers false whatever the redirection did.
+        captureWasValid = capture.isValid();
+
+        addResult = Driver::getInstance().addLogicalAddress(
+            LogicalAddress(LogicalAddress::PLAYBACK_DEVICE_1));
+
+        logged = capture.read();
+    }
+
+    // Cleared immediately, so no later case in this fixture inherits the delay.
+    controllerFake->setAddLogicalAddressesDelayMs(0);
+
+    ASSERT_TRUE(captureWasValid)
+        << "stdout could not be redirected, so the diagnostic line could not be read";
+
+    EXPECT_EQ(addResult, 1)
+        << "a call that crossed the slow-call threshold returned " << addResult
+        << " where success was expected. The diagnostic is a threshold and not a timeout: it must "
+           "leave the outcome, the status translation and the return value entirely alone";
+
+    EXPECT_THAT(logged, ::testing::HasSubstr("past the"))
+        << "a synchronous AIDL call that took " << delayMs << " ms, past the "
+        << kSlowHalCallWarnMs
+        << " ms threshold, produced no diagnostic line. That line is the whole of the in-scope "
+           "mitigation for a call the pinned libbinder cannot bound, so its absence means a "
+           "stalling HAL leaves no trace at all";
+
+    EXPECT_THAT(logged, ::testing::HasSubstr("NO DEADLINE WAS ENFORCED"))
+        << "the diagnostic line does not state that nothing was enforced, so a log reader could "
+           "mistake it for evidence of a mitigation that abandoned or bounded the call";
+
+    EXPECT_THAT(logged, ::testing::HasSubstr("addLogicalAddresses"))
+        << "the diagnostic line does not name the operation that was slow, so it cannot be acted "
+           "on: a reader learns that something stalled but not what";
+}
+
 // The closing-state rejection, which is the arm that stops a frame leaking per rejected
 // message - and the arm that stops a frame arriving too late being delivered to an application
 // that has torn its session down.
@@ -12414,19 +13302,34 @@ TEST_F(DriverAidlSessionTest, DiagnosticCallbacksAreReportedWithoutDisturbingThe
 // never-started condition is covered by the process's first open, inside LibCCEC::init: a
 // failure there would abort initialization and no case in this binary would run at all.
 //
-// And the pool is asserted to exist, which the rest of this case cannot establish. Every other
-// assertion here would hold against a back-end that never called startThreadPool() at all,
+// What this case cannot establish from the frames alone, and how it establishes it instead. Every
+// other assertion here would hold against a back-end that never called startThreadPool() at all,
 // because an in-process fake resolves to the local BBinder and its trigger runs the callback on
 // the calling thread - so frames arrive whether or not a pool was ever started, and the omission
-// would only surface on a real device, where nothing would ever be received. The pool leaves
-// exactly one externally observable trace, a thread libbinder names "binder:*", so that is what
-// is looked at.
+// would only surface on a real device, where nothing would ever be received. The pool's existence
+// therefore needs an observation from outside the frames, and of the two that inspect the process
+// from the OUTSIDE, neither is sound on this SDK:
 //
-// What it does not prove. That a callback arrived on such a thread is invocation E's evidence,
-// over real IPC, in hdmicec/tests/L2Tests/ccec/test_DualPathIntegration.cpp; this asserts only
-// that the pool the production open() is obliged to start does exist. The two together are what
-// discharge the obligation - a pool with no callback and a callback with no pool are both
-// consistent with a broken receive path on a device.
+//   - By thread name. ProcessState::makeBinderThreadName() composes "binder:PID_N", but
+//     androidCreateRawThreadEtc() discards it - its threadName parameter is `__android_unused`
+//     and the block that would apply it, along with the only androidSetThreadName() call site for
+//     a spawned thread, is `#if defined(__ANDROID__)`, which the SDK's CMake build never defines.
+//     Measured: every thread of this runner, and every thread of the fake service host, carries
+//     its own process name. So the name cannot be looked for.
+//   - By thread count. The runner's count moves during a run as cases start and join their own
+//     workers - measured going 1 to 5 to 6, with different thread ids at equal counts - so
+//     inferring the pool from a count, or from a count that does not grow when startThreadPool()
+//     is called redundantly, would be unsound.
+//
+// So neither of those is what the assertion looks at: it asks libbinder itself.
+// getThreadPoolMaxThreadCount() returns the configured maximum once mThreadPoolStarted is set and
+// zero while it is not - exactly the flag startThreadPool() sets - read through a public API and
+// behaving identically on both platforms. The thread-name probe is kept and PRINTED rather than
+// asserted, with the reason, because it is still corroboration on a build that applies the name.
+// The real-thread evidence is invocation E's: it receives a `oneway` callback on a pool thread over
+// real out-of-process IPC, which no in-process fake can produce. The two tiers together discharge
+// the obligation - a pool with no callback and a callback with no pool are both consistent with a
+// broken receive path on a device - and this case owns the idempotency half.
 /**
  * @brief open() succeeds and keeps delivering when a binder threadpool has already been started
  *        in the process.
@@ -12436,32 +13339,74 @@ TEST_F(DriverAidlSessionTest, DiagnosticCallbacksAreReportedWithoutDisturbingThe
  * @note This is the case a naive local flag would break: no back-end-local state can detect a
  *       pool another component started, and lowering an already-established maximum can abort the
  *       process, which is why startThreadPool() is the whole of the obligation.
- * @note The pool observation is conditional on the thread listing being readable, and its absence
- *       is reported rather than silently skipped; the idempotency assertions are unaffected. The
- *       real-thread evidence is invocation E's.
+ * @note The pool is observed through ProcessState::getThreadPoolMaxThreadCount(), which reads
+ *       the flag startThreadPool() sets and is portable; the "binder:*" thread name is reported
+ *       as corroboration only, because the pinned SDK's libutils applies it solely on an Android
+ *       build. The real-thread evidence is invocation E's.
+ * @note Counting threads is NOT the substitute, and was measured and rejected rather than
+ *       assumed: the runner's count moves during a run as cases start and join their own workers
+ *       - 1 to 5 to 6, with different thread ids at equal counts - so inferring the pool from a
+ *       count, or from a count that does not grow when startThreadPool() is called redundantly,
+ *       would be unsound. The idempotency assertions below are unaffected either way.
  */
 TEST_F(DriverAidlSessionTest, OpenSucceedsAndDeliversWhenAThreadPoolWasAlreadyStarted) {
     // The pool the process's first open was obliged to start, observed before anything here
     // touches the session - so this is evidence about production's own open during
     // LibCCEC::init, not about a pool this case might have caused.
+    //
+    // ASKED OF libbinder ITSELF RATHER THAN OF THE THREAD LIST. getThreadPoolMaxThreadCount()
+    // returns the configured maximum once mThreadPoolStarted is set and zero while it is not,
+    // so a non-zero answer IS the observation that startThreadPool() ran - the same flag, read
+    // through a public API, on both platforms. selfOrNull() is used rather than self() so that
+    // this line cannot create a ProcessState, and a null answer means no pool can exist.
+    const ::android::sp<::android::ProcessState> processState =
+        ::android::ProcessState::selfOrNull();
+    const size_t poolMaxThreads =
+        (processState != nullptr) ? processState->getThreadPoolMaxThreadCount() : 0u;
+
+    EXPECT_GT(poolMaxThreads, 0u)
+        << "libbinder reports no started threadpool in this process - although the AIDL back-end "
+           "has been open since LibCCEC::init, and DriverAidlImpl::open() is obliged to call "
+           "ProcessState::self()->startThreadPool(), which sets exactly the flag this value "
+           "reads. Nothing else in this case would notice: an in-process fake dispatches its "
+           "trigger on the CALLING thread, so frames arrive regardless, and the omission would "
+           "first appear on a real device as a receive path that never delivers anything at all"
+        << (processState == nullptr
+                ? ". ProcessState::selfOrNull() returned null, so no ProcessState was ever "
+                  "created in this process at all - which means the back-end never reached "
+                  "libbinder, not merely that it skipped the pool"
+                : "");
+
+    // CORROBORATION ONLY, reported and not asserted: on this port a running pool produces threads
+    // that carry the process's own name, so a false result here is the ordinary case and asserting
+    // on it would fail against a correct back-end. The line is printed either way, so that a build
+    // which does apply the name is visible in the log rather than silently indistinguishable. The
+    // assertion above rests on the reported maximum; the real-thread evidence is invocation E's,
+    // in hdmicec/tests/L2Tests/ccec/test_DualPathIntegration.cpp.
     bool procIsReadable = false;
     const bool poolExists = processHasABinderThread(&procIsReadable);
 
-    if (procIsReadable) {
-        EXPECT_TRUE(poolExists)
-            << "this process has no thread named " << kBinderThreadNamePrefix
-            << "*, so the binder threadpool was never started - although the AIDL back-end has "
-               "been open since LibCCEC::init, and DriverAidlImpl::open() is obliged to call "
-               "ProcessState::self()->startThreadPool(). Nothing else in this case would notice: "
-               "an in-process fake dispatches its trigger on the CALLING thread, so frames arrive "
-               "regardless, and the omission would first appear on a real device as a receive "
-               "path that never delivers anything at all";
+    if (!procIsReadable) {
+        std::cout << "[DriverAidlSessionTest] /proc/self/task could not be read, so no thread "
+                     "listing was available on this run."
+                  << std::endl;
+    }
+    else if (poolExists) {
+        std::cout << "[DriverAidlSessionTest] a thread named " << kBinderThreadNamePrefix
+                  << "* is present, so this build applies the name "
+                     "ProcessState::makeBinderThreadName() composes and the binder threadpool is "
+                     "directly observable."
+                  << std::endl;
     }
     else {
-        std::cout << "[DriverAidlSessionTest] /proc/self/task could not be read, so the presence "
-                     "of a binder threadpool thread was not asserted on this run. The idempotency "
-                     "assertions below are unaffected; the real-thread evidence is invocation E's, "
-                     "in hdmicec/tests/L2Tests/ccec/test_DualPathIntegration.cpp."
+        std::cout << "[DriverAidlSessionTest] no thread named " << kBinderThreadNamePrefix
+                  << "* is present. Expected on this port and NOT evidence that the threadpool is "
+                     "absent: androidCreateRawThreadEtc() discards the name outside __ANDROID__ "
+                     "builds, so a running pool inherits the process's own comm. The evidence that "
+                     "DriverAidlImpl::open() started the pool is invocation E's, which receives a "
+                     "oneway callback on a pool thread over real out-of-process IPC, in "
+                     "hdmicec/tests/L2Tests/ccec/test_DualPathIntegration.cpp. The idempotency "
+                     "assertions below are unaffected."
                   << std::endl;
     }
 

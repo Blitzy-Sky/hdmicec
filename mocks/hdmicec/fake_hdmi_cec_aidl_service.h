@@ -343,6 +343,36 @@ public:
     void setRemoveLogicalAddressesResult(bool result);
 
     /**
+     * @brief Makes addLogicalAddresses() take at least @p delayMs milliseconds to answer.
+     *
+     * Exists to reach the middleware's slow-HAL-call diagnostic, which is a THRESHOLD and not a
+     * timeout: DriverAidlImpl brackets every synchronous AIDL call with a monotonic clock read and
+     * emits one LOG_WARN line when the call outlives its threshold, abandoning nothing and raising
+     * nothing.  That warning arm cannot be reached by any canned result or status, because none of
+     * them takes time; only a call that is genuinely slow reaches it.  A test that asserted the
+     * warning without making a call slow would be asserting nothing.
+     *
+     * addLogicalAddresses() rather than another method because it is the shortest complete round
+     * trip a test can drive through the public Driver interface, so the delay is paid once and no
+     * session state changes around it.
+     *
+     * @param [in] delayMs                    - Milliseconds to sleep before answering.  Zero or
+     *                                          negative disables the delay
+     *
+     * @post Default is 0, so every other case pays nothing.  Cleared by reset().
+     *
+     * @warning The sleep is taken with NO LOCK HELD, deliberately: the instance mutex guards the
+     *          canned responses and the captures, and holding it across a sleep would stall a
+     *          concurrent capture read on a remote fake answering on binder threads.  The delay
+     *          value is read under the lock and the lock is dropped before sleeping.
+     * @warning Real wall-clock time, so a caller pays it in test duration.  Keep it just above the
+     *          middleware's threshold rather than comfortably above it.
+     *
+     * @see addLogicalAddresses()
+     */
+    void setAddLogicalAddressesDelayMs(int32_t delayMs);
+
+    /**
      * @brief Selects the SendMessageStatus sendMessage() reports.
      *
      * Exists to reach every arm of the adapter's status translation, whose sense inverts between a
@@ -549,6 +579,10 @@ private:
 
     /** @brief Canned removeLogicalAddresses() result.  Default: address removed. */
     bool removeLogicalAddressesResult = true;
+
+    /** @brief Milliseconds addLogicalAddresses() sleeps before answering, with no lock held.
+     *         Default: 0, so no case pays for it unless it asks. */
+    int32_t addLogicalAddressesDelayMs = 0;
 
     /** @brief Canned sendMessage() status.  Default: ACK_STATE_0, acknowledged for a directed frame. */
     ::com::rdk::hal::hdmicec::SendMessageStatus sendMessageResult =

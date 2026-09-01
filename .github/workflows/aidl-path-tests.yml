@@ -25,11 +25,29 @@ name: aidl-path-tests
 # generated onTransact writes the compiled-in constants. Hence C has no L2 counterpart.
 #
 # .github/workflows/L1-tests.yml RUNS INVOCATION A ONLY. Its green tick is build-plus-legacy
-# evidence and IS NOT DUAL-PATH EVIDENCE. It cannot run B, C, D or E: a hosted GitHub runner
-# has no binder kernel driver and no servicemanager - measured on an equivalent host as kernel
-# 6.12.85+, "binder" absent from /proc/filesystems, no /dev/binder*, and
-# "# CONFIG_ANDROID_BINDER_IPC is not set". That is also why this job boots a guest kernel of
-# its own instead of borrowing the hosted one.
+# evidence and IS NOT DUAL-PATH EVIDENCE. Two different reasons keep the other four out of it,
+# and they must not be merged into one sentence - an earlier revision of this comment said it
+# "cannot run B, C, D or E", which is wrong about D and understates the case about the rest:
+#
+#   B, C AND E ARE UNSUPPORTED THERE. All three select the AIDL back-end, which needs a binder
+#   kernel driver and a running servicemanager. A hosted GitHub runner has neither - measured on
+#   an equivalent host as kernel 6.12.85+, "binder" absent from /proc/filesystems, no
+#   /dev/binder*, "# CONFIG_ANDROID_BINDER_IPC is not set", no /lib/modules to load one from, no
+#   /dev/kvm and no vmx/svm to virtualise one, and `mount -t binder` refused even with full
+#   effective capabilities. Those three harnesses refuse BY NAME rather than downgrading to
+#   legacy, so on that runner they would fail, not skip.
+#
+#   D IS UNSCHEDULED THERE, NOT INCAPABLE. D is the LEGACY L2 invocation: CEC_TEST_AIDL_MODE
+#   =absent, no fake host launched, no binder anything. It runs on a driverless host perfectly
+#   well - measured on such a host as 14 cases from 3 suites, 10 passed and 4 permitted
+#   DualPathAidlFlowTest skips, exit 0. The hosted job simply does not schedule it, which is a
+#   scope decision rather than a capability one: that job is specified to run invocation A only,
+#   so adding D would change what its green tick means. D is therefore run HERE, in the matrix,
+#   beside the arms it is meant to be compared against. Reading D as blocked by the kernel would
+#   send somebody looking for a driver to fix a job that needs a step added.
+#
+# The kernel is still why this job boots a guest of its own instead of borrowing the hosted one;
+# that reason applies to B, C and E, which is the grouping used at the matrix table below.
 #
 # INVOCATION A IS REPEATED HERE RATHER THAN IMPORTED FROM THE HOSTED JOB, BECAUSE GCOV
 # COUNTERS CANNOT ACCUMULATE ACROSS MACHINES. The back-end selection resolves ONCE PER
@@ -155,10 +173,14 @@ name: aidl-path-tests
 # coverage met the bar. Exit 1 is a failure. EXIT 3 IS ADVISORY AND IS NOT A PASS - the script
 # says so in terms, and the image manifest's STATUS_FILE_FORMAT repeats it.
 #
-# ITS BRANCH_MANIFEST IS POPULATED, AND AN EMPTY ENTRY IS A REGRESSION. All 92 records - 90
-# required arms plus 2 recorded unreachable by construction, selection.reason-unrecorded and
-# compat.client-era-frozen - carry measured line, block and branch coordinates, read out of a
-# real unfiltered trace and cross-checked against `gcov -b -c -t`. apply_branch_gate treats an
+# ITS BRANCH_MANIFEST IS POPULATED, AND AN EMPTY ENTRY IS A REGRESSION. All 92 records - 89
+# required arms plus 3 recorded unreachable by construction, selection.reason-unrecorded,
+# compat.client-era-frozen and halcall.clock-unreadable - carry measured line, block and branch
+# coordinates, read out of a real unfiltered trace and cross-checked against `gcov -b -c -t`.
+# TWO OF THEM CARRY PER-ARC-LAYOUT ALTERNATIVES rather than a bare arc index, because gcc emits a
+# different arc count for halcompat.h:168 on x86-64 (three block arcs) than on i386 (two), and a
+# manifest holding one set reports a false ABSENT on the other architecture. The gate resolves
+# them against the arc count in the trace it is judging; see resolve_branch_alternates(). apply_branch_gate treats an
 # unpopulated record as an arm that was added without being measured and says so, so there are
 # no empty fields to go hunting for: populating coordinates is not a step this job's first run
 # leaves behind.
@@ -179,10 +201,10 @@ name: aidl-path-tests
 #     one of those did not come up and the console log's BINDER PLATFORM RECORD says which.
 #
 #   * EXIT 3, THE DEFERRED ARMS, when those same deferrals happen while the line figures still
-#     clear the bar. 31 of the 90 required arms carry a prerequisite - 29 need invocation B, one
+#     clear the bar. 30 of the 89 required arms carry a prerequisite - 28 need invocation B, one
 #     needs invocation C, and one needs a usable binder driver with no service registered on it,
 #     which is a condition rather than an invocation letter - so a matrix that did not run them
-#     leaves those 31 unmeasured. The remaining 59 required arms carry no prerequisite at all:
+#     leaves those 30 unmeasured. The remaining 59 required arms carry no prerequisite at all:
 #     they are enforced and measured on every run, including one on a host with no binder driver,
 #     so a zero on one of those is a failure here and now rather than a deferral. The gate
 #     reports each deferred arm by name with the prerequisite it needed, never as a pass and
@@ -306,6 +328,41 @@ permissions:
   contents: read
 
 env:
+  # THE ACCEPTANCE TOOLCHAIN, PINNED IN ONE PLACE, AND PINNED TO THE MAJOR RATHER THAN THE
+  # PATCH - WHICH IS A STATEMENT ABOUT WHAT IS ENFORCEABLE, NOT A RELAXATION.
+  #
+  # WHY IT IS PINNED AT ALL, AND WHY THIS JOB CARES MORE THAN THE OTHER ONE. This is the job
+  # that produces the accumulated trace, the line gate and the per-arm branch gate. That gate
+  # compares (file,line,block,branch) coordinates against a manifest checked into
+  # tests/L1Tests/run_coverage.sh, and those coordinates are a property of the COMPILED source:
+  # a different compiler major renumbers blocks and the gate then reports arms ABSENT that the
+  # code still has - the loudest possible failure for the least interesting reason. gcov is
+  # stricter still, refusing notes files whose version stamp does not match its own. So the
+  # compiler is not something this job may inherit from whatever image it lands on.
+  #
+  # WHY THE MAJOR AND NOT 13.4.0. The documented acceptance patch level is GCC/G++/gcov 13.4.0,
+  # which is what the reference container provides and what blitzy/documentation/Project Guide.md
+  # §9.1 records. Ubuntu noble's archive supplies the gcc-13 family at
+  # 13.3.0-6ubuntu2~24.04.1, and no distribution archive this job may use carries 13.4.0;
+  # reaching it would mean adding an unpinned third-party PPA to a job that holds every other
+  # fetched artefact to a publisher-issued digest. A gate demanding 13.4.0 would therefore fail
+  # every run on a difference nobody can close from an archive, and a gate CLAIMING 13.4.0 while
+  # accepting 13.3.0 would be a false statement in the place a reader trusts most. So the pin is
+  # the MAJOR, enforced hard, and THE EXACT PATCH LEVEL IS RECORDED WITH THE RESULTS by "Select
+  # and prove the acceptance toolchain" below - into the step log, the job summary, and (for the
+  # guest) the image's own toolchain record.
+  #
+  # THE GUEST IS A SEPARATE ARCHIVE AND IS HANDLED SEPARATELY, not silently assumed to match:
+  # this value is passed to the image builder as --toolchain-gcc-major, which selects the
+  # versioned compiler when the guest's pinned Debian archive provides it and RECORDS A NAMED
+  # LIMITATION when it does not. The guest's own gcc and gcov must agree with each other - that
+  # is what its trace depends on - and whether they agree with THIS value is reported rather
+  # than presumed.
+  #
+  # ONE PLACE, so the two jobs cannot drift: .github/workflows/L1-tests.yml carries the same
+  # value under the same name for the same reason. Move them together.
+  CEC_TOOLCHAIN_GCC_MAJOR: '13'
+
   # rdk-halif-aidl is a SIBLING SUBMODULE OF THE SUPERPROJECT, not of hdmicec: hdmicec has no
   # .gitmodules of its own and actions/checkout fetches no submodules, so nothing brings this
   # tree in implicitly. The ref is a COMMIT SHA on purpose - it is the superproject gitlink,
@@ -313,6 +370,25 @@ env:
   # ambiguous: .gitmodules says "blitzy", the workspace README says "develop", and a worktree
   # reports "main". No token or secret is named anywhere in this file.
   AIDL_REPOSITORY: Blitzy-Sky/rdk-halif-aidl
+
+  # THE SINK PLUGIN SOURCE, WHICH THE L1 SUITE READS AND WITHOUT WHICH INVOCATION A CANNOT
+  # PASS. tests/L1Tests/ccec/test_DriverAidl.cpp carries a drift guard --
+  # DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource -- that
+  # reads entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp and FAILS HARD when it
+  # cannot find it. That is deliberate on the test's part: the difference-3 case it protects
+  # asserts against a MODEL of the plugin's two addLogicalAddress call paths, and a model
+  # nothing checks against its subject is not evidence about a caller. Measured: without this
+  # checkout the guest built the whole instrumented tree under emulation and then failed
+  # invocation A on that one case, 566 of the 567 cases invocation A selected when that was
+  # measured. The contract suite has grown since, so re-measure the pair rather than adjusting it.
+  #
+  # Like rdk-halif-aidl this is a SIBLING SUBMODULE OF THE SUPERPROJECT, so nothing brings it
+  # in implicitly, and the ref is the superproject gitlink commit rather than a branch: the
+  # guard's value comes from reading a REVIEWED revision, so a drift is noticed when somebody
+  # deliberately bumps this pin and a human is present to decide whether the model must be
+  # re-derived. Bumping it without re-deriving the model is what the guard exists to catch.
+  SINK_REPOSITORY: Blitzy-Sky/entservices-hdmicecsink
+  SINK_REF: 2ad7e1a4712908a4d0fb838caebcbfcaabba55d8
   AIDL_REF: 3ff17d171a46805decc7408fa69f545c80226d4b
 
   # GOOGLETEST IS PINNED TO A COMMIT, AND THE TAG SURVIVES ONLY AS THE COMMENT BESIDE IT.
@@ -335,6 +411,26 @@ env:
   # value, so a pin that is edited without the tree agreeing fails there by name rather than
   # silently building something else. L1-tests.yml pins the same commit; move them together.
   GOOGLETEST_REF: e39786088138f2749d64e9e90e0f9902daa77c40 # v1.15.0
+
+  # THE SINK CALLER SOURCE PIN, and the absolute path the host-side invocations read it from.
+  #
+  # SINK_CALLER_COMMIT is the superproject gitlink for entservices-hdmicecsink and is the commit
+  # DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource names as
+  # REVIEWED. Bumping it is expected to fail that guard whenever the plugin's call-site shape
+  # changed - which is the property the pin exists for, since that is precisely when a human
+  # should decide whether the modelled call paths must be re-derived. L1-tests.yml pins the same
+  # commit under the same name; move them together.
+  #
+  # CEC_SINK_CALLER_SOURCE is absolute because the guard's fallback search is relative to the
+  # test binary and to ../../.. from the working directory, and neither resolves to this
+  # workspace root from every place this job starts a test. Declared at workflow level so it
+  # reaches every host-side route that starts the binary. THE GUEST DOES NOT INHERIT IT - a VM
+  # cannot see this filesystem - so the guest's copy is staged into the image by
+  # aidl-path-tests-rootfs.sh --sink-caller-source and exported by the init script.
+  SINK_CALLER_REPOSITORY: Blitzy-Sky/entservices-hdmicecsink
+  SINK_CALLER_COMMIT: 2ad7e1a4712908a4d0fb838caebcbfcaabba55d8 # superproject gitlink; reviewed by the drift guard
+  CEC_SINK_CALLER_SOURCE: >-
+    ${{ github.workspace }}/entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp
 
   # THE BINDER SDK SOURCE IS PINNED TO A COMMIT, AND ITS RESOLUTION IS NOW FAIL-CLOSED.
   #
@@ -500,10 +596,31 @@ env:
   GUEST_KERNEL_SHA256_FOR_VERSION: '5.15.148'
 
   # Debian bookworm i386. bookworm rather than an older suite is a REQUIREMENT, not a
-  # preference: the staged i386 libraries are compiled on this runner against its own i386
-  # glibc, and a guest whose glibc were older than the runner's would fail to load them.
-  # bookworm's i386 glibc is newer than ubuntu-22.04's, which is the safe direction. i386 is
-  # a fully supported architecture in this suite.
+  # preference: the staged i386 libraries are compiled on this runner and then loaded inside
+  # the guest, so the guest's runtime has to define every symbol version they reference.
+  #
+  # AN EARLIER REVISION OF THIS COMMENT JUSTIFIED THAT BY COMPARING SUITE VINTAGES - bookworm's
+  # i386 glibc being newer than ubuntu-22.04's, "the safe direction". That test was wrong twice
+  # over and is replaced rather than patched. It is wrong in FACT for this job now, because the
+  # runner moved to ubuntu-24.04 to reach the pinned GCC 13 family and noble's glibc is newer
+  # than bookworm's. And it was wrong in PRINCIPLE even when it held: an ELF does not require
+  # the glibc it was built on, it requires the versions its referenced symbols were introduced
+  # at, which for ordinary C++17 code sit far below any current release - measured on a
+  # gcc-13-built 32-bit C++17 object using std::string, std::vector, std::mutex and exceptions:
+  # GLIBC_2.0, GLIBC_2.1.3, GLIBC_2.4, GLIBCXX_3.4, GLIBCXX_3.4.11, GLIBCXX_3.4.21, CXXABI_1.3,
+  # GCC_3.0 - every one satisfied by a bookworm i386 userspace with room to spare. So a newer
+  # build host is usually harmless and occasionally fatal, and which one it is cannot be read
+  # off two suite names.
+  #
+  # WHAT REPLACES THE ARGUMENT IS A MEASUREMENT. aidl-path-tests-rootfs.sh asks the IMAGE'S OWN
+  # LOADER, in assert_image_staged_libraries_loadable: it runs `ldd` inside the image over the
+  # six-library Binder closure, both AIDL stub libraries and servicemanager, and fails the image
+  # build - naming the artefact, the unmet requirement and the three remedies - on a library the
+  # loader cannot find or a symbol version the guest's runtime does not define. That check runs
+  # after ldconfig has registered the staged directories, and it is what makes the guest's
+  # gate-and-record compiler pin safe rather than merely documented.
+  #
+  # i386 is a fully supported architecture in this suite.
   GUEST_DEBIAN_SUITE: bookworm
   GUEST_ARCH: i386
 
@@ -558,7 +675,23 @@ env:
 jobs:
   aidl-path-tests:
     name: Build both HAL back-ends and run the full A-E matrix on a binder-capable guest
-    runs-on: ubuntu-22.04
+    # ubuntu-24.04 RATHER THAN ubuntu-22.04, AND THE ARCHIVE IS THE WHOLE REASON.
+    #
+    # This job used to run on ubuntu-22.04 and install an unversioned `g++`, so the compiler that
+    # produced the host-side staging - and, through CC/CXX, everything CMake picked up for the
+    # i386 cross-compiles below - was whichever one that image defaulted to. Pinning the family
+    # (see CEC_TOOLCHAIN_GCC_MAJOR in this file's env) is only possible on a runner whose archive
+    # carries it: jammy carries NO gcc-13 family at all, while noble carries gcc-13 and g++-13 at
+    # 13.3.0-6ubuntu2~24.04.1 for amd64 AND i386 - the second half mattering here specifically,
+    # because this job stages an all-32-bit guest userspace and needs the multilib variants of
+    # the same family. Staying on jammy and adding a PPA would introduce an unpinned third-party
+    # archive into a job that pins every other input to a digest, so it is not an alternative.
+    #
+    # Noble's own default gcc is already the 13 family, so the versioned install below is belt
+    # and braces rather than a change of compiler. That is deliberate: the selection must not
+    # depend on which default an image happens to carry, and the gate step proves what was
+    # selected either way.
+    runs-on: ubuntu-24.04
 
     # A hosted runner's ceiling is 360 minutes. This is set just below it, and it is an honest
     # allowance rather than a promise: under TCG emulation the in-guest build plus five
@@ -800,6 +933,23 @@ jobs:
       # guest. They need no glib - the guest's glib comes from its own Debian i386 archive -
       # so the restricted i386 subset of Ubuntu's archive is not involved.
       #
+      # gcc-13, g++-13 AND THEIR MULTILIB VARIANTS ARE NAMED EXPLICITLY, AND THE BARE `g++` IS
+      # GONE. The list used to carry `build-essential g++`, which installs whichever family the
+      # image defaults to and states nothing about which one this job then uses. The versioned
+      # four put the acceptance family on the runner by name - gcc-13 is also what supplies
+      # /usr/bin/gcov-13 - and the multilib pair is the same requirement one architecture down:
+      # -m32 needs the 32-bit libgcc and libstdc++ OF THE SELECTED FAMILY, not of the default
+      # one, and the unversioned gcc-multilib/g++-multilib metapackages track the archive
+      # default rather than this pin. Both spellings are kept: the metapackages because they are
+      # what the i386 staging has always been provisioned with, and the versioned pair because
+      # they are what the pinned compiler actually needs. The toolchain gate below does not take
+      # any of that on trust - it compiles and links a -m32 translation unit with the selected
+      # g++, which is the only check that distinguishes "the package installed" from "-m32
+      # works".
+      # build-essential STAYS: it provides make, libc6-dev and the rest of the base build
+      # environment, which no compiler package carries. Every other package here is unchanged,
+      # clang included.
+      #
       # debootstrap, e2fsprogs, util-linux and qemu-system-x86 provision and boot the guest.
       # bc, bison, flex, libelf-dev, libssl-dev, cpio and rsync are the guest kernel's build
       # prerequisites. The perl modules are lcov 2.x's.
@@ -807,11 +957,209 @@ jobs:
       # The distribution's own lcov package is deliberately NOT installed on the runner: this
       # job needs 2.x, the archive ships 1.x, and a 1.x binary on PATH beside the one built
       # below is a confusion this job does not need. run_coverage.sh never runs on the runner.
+      #
+      # The four versioned package names are DERIVED from CEC_TOOLCHAIN_GCC_MAJOR rather than
+      # spelled, so the pinned major has exactly one definition point in this file and what is
+      # installed cannot drift from what the gate below demands. The unversioned gcc-multilib
+      # and g++-multilib stay beside them: they track the archive default and carry the 32-bit
+      # libc pieces, which is a different thing from the versioned compiler's own 32-bit
+      # runtime, and the -m32 probe in the gate is what proves the pair actually works.
       - name: Install packages
         run: >
           sudo apt-get update
           &&
-          sudo apt-get install -y --no-install-recommends autoconf automake libtool pkg-config libdbus-1-dev libglib2.0-dev build-essential g++ gcc-multilib g++-multilib cmake ninja-build flex bison valgrind clang file binutils curl ca-certificates xz-utils debootstrap e2fsprogs util-linux qemu-system-x86 bc libelf-dev libssl-dev cpio rsync perl libcapture-tiny-perl libdatetime-perl libjson-xs-perl libperlio-gzip-perl libtimedate-perl
+          sudo apt-get install -y --no-install-recommends autoconf automake libtool pkg-config libdbus-1-dev libglib2.0-dev build-essential "gcc-$CEC_TOOLCHAIN_GCC_MAJOR" "g++-$CEC_TOOLCHAIN_GCC_MAJOR" gcc-multilib g++-multilib "gcc-$CEC_TOOLCHAIN_GCC_MAJOR-multilib" "g++-$CEC_TOOLCHAIN_GCC_MAJOR-multilib" cmake ninja-build flex bison valgrind clang file binutils curl ca-certificates xz-utils debootstrap e2fsprogs util-linux qemu-system-x86 bc libelf-dev libssl-dev cpio rsync perl libcapture-tiny-perl libdatetime-perl libjson-xs-perl libperlio-gzip-perl libtimedate-perl
+
+      # THE TOOLCHAIN GATE. IT RUNS BEFORE ANYTHING IS BUILT, AND IT FAILS THE JOB RATHER THAN
+      # WARNING.
+      #
+      # WHAT WAS WRONG, in three parts, none of which a green tick distinguished from a correct
+      # run. The apt list installed an unversioned compiler; no step exported CC or CXX, so the
+      # four host-side CMake builds, the two i386 GoogleTest/SDK stagings and the hand-written
+      # RDK build each took whatever the image defaulted to; and the hand build spelled
+      # CXX="${CXX:-g++}", whose fallback IS that default. There was no gcov selection and no
+      # version assertion anywhere - so the trace this job exists to produce, and the BRDA
+      # coordinates the branch gate compares against a checked-in manifest, could not be shown
+      # comparable to the recorded ones. The evidence read as though they were.
+      #
+      # WHAT THIS STEP ESTABLISHES, in order:
+      #
+      #   1. gcc-<major>, g++-<major> and gcov-<major> EXIST, by absolute path, with the package
+      #      that provides each named in the failure.
+      #   2. Each REPORTS the pinned major. -dumpfullversion is what is read: since GCC 7
+      #      -dumpversion prints the major alone, so comparing it against gcov's full version
+      #      fails on every correct toolchain.
+      #   3. The three AGREE ON THE WHOLE VERSION. gcov demands a notes-file version stamp
+      #      derived from the GCC major AND minor that wrote the file, so three tools that each
+      #      satisfy the pin separately can still be three installations that cannot read each
+      #      other's counters. All three come from one package pair, so equality is achievable.
+      #   4. -m32 ACTUALLY WORKS with the selected compiler - compiled and linked, not inferred
+      #      from a package name. This job stages an all-32-bit guest userspace, and a missing
+      #      g++-<major>-multilib presents as a link failure deep inside the i386 GoogleTest
+      #      build forty minutes later otherwise.
+      #   5. gcov GOES FIRST ON PATH UNDER THE NAME `gcov`, through a one-entry shim directory.
+      #      Not decoration: tests/L1Tests/run_coverage.sh resolves `gcov` from PATH and has no
+      #      override knob. The guest runs its own copy of that script against its own toolchain,
+      #      which is why the image builder is given the pin separately - this shim is the
+      #      runner's half only.
+      #   6. THE EXACT PATCH LEVELS ARE RECORDED, in this step's log and in the job summary, so
+      #      the figures this job publishes carry the toolchain that produced them.
+      #
+      # CC and CXX GO INTO GITHUB_ENV, which is what makes them reach the CMake steps (CMake
+      # honours both), ./configure, the three makes and the hand build - rather than only this
+      # step. GITHUB_ENV and GITHUB_PATH take effect from the NEXT step onwards, which is why the
+      # assertions here use absolute paths and why the step after this one re-checks the
+      # resolution later steps will actually see.
+      - name: Select and prove the acceptance toolchain
+        run: |
+          set -euo pipefail
+
+          # NO APOSTROPHE IN THIS MESSAGE, AND THAT IS A SHELL CONSTRAINT RATHER THAN A STYLE
+          # CHOICE: bash treats a single quote inside ${var:?word} as opening a quoted string
+          # even within double quotes, which swallows the rest of the script and surfaces as an
+          # unrelated "unbound variable" line further down. Measured while writing this step.
+          major="${CEC_TOOLCHAIN_GCC_MAJOR:?CEC_TOOLCHAIN_GCC_MAJOR is unset. It is the single place this workflow pins the acceptance compiler family; restore it in the env block of this workflow rather than spelling a version into a step.}"
+          cc="/usr/bin/gcc-$major"
+          cxx="/usr/bin/g++-$major"
+          gcov="/usr/bin/gcov-$major"
+
+          for tool in "$cc" "$cxx" "$gcov"; do
+            if [ ! -x "$tool" ]; then
+              echo "::error::$tool is not present on this runner, so the pinned GCC $major acceptance toolchain cannot be selected and this job would silently build - and measure - with the image default instead. gcc-$major provides gcc-$major and gcov-$major, g++-$major provides g++-$major, and the -m32 staging additionally needs gcc-$major-multilib and g++-$major-multilib; all are in ubuntu-24.04's archive. If this runner label was changed, check that the new image's archive carries the gcc-$major family at all - jammy does not."
+              exit 1
+            fi
+          done
+
+          cc_version="$("$cc" -dumpfullversion 2>/dev/null || "$cc" -dumpversion)"
+          cxx_version="$("$cxx" -dumpfullversion 2>/dev/null || "$cxx" -dumpversion)"
+          gcov_line="$("$gcov" --version | head -n 1)"
+          gcov_version="$(printf '%s\n' "$gcov_line" | awk '{ print $NF }')"
+
+          printf 'CC        : %s  -dumpfullversion -> %s\n' "$cc" "$cc_version"
+          printf 'CXX       : %s  -dumpfullversion -> %s\n' "$cxx" "$cxx_version"
+          printf 'gcov      : %s  first line       -> %s\n' "$gcov" "$gcov_line"
+          printf 'gcov      : parsed version       -> %s\n' "$gcov_version"
+          printf 'pinned    : GCC major %s (patch level recorded, not gated - see CEC_TOOLCHAIN_GCC_MAJOR in the env block)\n' "$major"
+
+          rc=0
+          for pair in "CC:$cc_version" "CXX:$cxx_version" "gcov:$gcov_version"; do
+            name="${pair%%:*}"
+            value="${pair#*:}"
+            case "$value" in
+              "$major"|"$major".*) : ;;
+              *)
+                echo "::error::$name reports version '$value', which is not the pinned GCC major $major. The accumulated trace, the line gate and the (file,line,block,branch) manifest the per-arm branch gate compares against are all properties of the compiler that produced them: a different major renumbers the coordinates and the gate reports arms ABSENT that the code still has."
+                rc=1
+                ;;
+            esac
+          done
+
+          if [ "$cc_version" != "$cxx_version" ] || [ "$cc_version" != "$gcov_version" ]; then
+            echo "::error::the three tools do not agree: gcc $cc_version, g++ $cxx_version, gcov $gcov_version. gcov demands a notes-file version stamp derived from the GCC major and minor that wrote it, so a mismatch here yields either no counters or counters attributed to the wrong lines. Install gcc-$major and g++-$major from one archive and re-run."
+            rc=1
+          fi
+          [ "$rc" -eq 0 ] || exit "$rc"
+
+          # -m32, COMPILED AND LINKED RATHER THAN ASSUMED FROM A PACKAGE NAME. The guest
+          # userspace is all-32-bit and every staged artefact is refused by the image builder if
+          # its ELF class disagrees, so this is the cheapest place to learn that the selected
+          # family has no 32-bit runtime. <string> is included deliberately: a C++ link is what
+          # needs the 32-bit libstdc++, which is the half a bare C probe would pass without.
+          probe_dir="$(mktemp -d)"
+          printf '%s\n' '#include <string>' 'int main() { return std::string("m32").size() == 3 ? 0 : 1; }' \
+            > "$probe_dir/m32-probe.cpp"
+          if ! "$cxx" -m32 -o "$probe_dir/m32-probe" "$probe_dir/m32-probe.cpp" 2> "$probe_dir/m32-probe.log"; then
+            echo "::error::$cxx cannot compile and link a -m32 C++ translation unit, so the i386 staging this job depends on cannot be built with the pinned family. Install gcc-$major-multilib and g++-$major-multilib: the unversioned gcc-multilib/g++-multilib metapackages track the archive default and do not necessarily carry the 32-bit runtime for THIS family. Compiler output follows."
+            cat "$probe_dir/m32-probe.log"
+            rm -rf -- "$probe_dir"
+            exit 1
+          fi
+          m32_class="$(file -b -- "$probe_dir/m32-probe" | cut -d, -f1)"
+          printf '%s\n' "-m32 probe : linked, and file reports: $m32_class"
+          case "$m32_class" in
+            *ELF\ 32-bit*) : ;;
+            *)
+              echo "::error::the -m32 probe linked but produced '$m32_class' rather than an ELF 32-bit object, so -m32 is being ignored. Every staged artefact would then be refused by the image builder for the right reason and the wrong cause."
+              rm -rf -- "$probe_dir"
+              exit 1
+              ;;
+          esac
+          rm -rf -- "$probe_dir"
+
+          # THE SHIM. One directory, one entry, prepended to PATH, in RUNNER_TEMP rather than in
+          # the checkout so nothing lands in the tree the close-out diff check inspects.
+          shim="${RUNNER_TEMP:-/tmp}/cec-toolchain-shim"
+          rm -rf -- "$shim"
+          mkdir -p -- "$shim"
+          ln -s -- "$gcov" "$shim/gcov"
+          printf 'gcov shim : %s -> %s\n' "$shim/gcov" "$("$shim/gcov" --version | head -n 1)"
+
+          {
+            echo "CC=$cc"
+            echo "CXX=$cxx"
+            echo "CEC_TOOLCHAIN_GCOV=$gcov"
+          } >> "$GITHUB_ENV"
+          printf '%s\n' "$shim" >> "$GITHUB_PATH"
+
+          {
+            echo "### Runner acceptance toolchain (pinned to GCC major $major; exact patch recorded, not gated)"
+            echo
+            echo "| Tool | Path | Version |"
+            echo "| --- | --- | --- |"
+            echo "| CC | \`$cc\` | $cc_version |"
+            echo "| CXX | \`$cxx\` | $cxx_version |"
+            echo "| gcov | \`$gcov\` (first on PATH as \`gcov\` via \`$shim\`) | $gcov_version |"
+            echo
+            echo "\`-m32\` probe: linked with \`$cxx\`, $m32_class."
+            echo
+            echo "The documented acceptance patch level is 13.4.0; ubuntu-24.04's archive supplies 13.3.0-6ubuntu2~24.04.1, and no archive this job is permitted to use carries 13.4.0. The pin is therefore the major and the patch above is the measured value for this run. **The guest is a different archive**: the image builder is passed this same major as \`--toolchain-gcc-major\` and records the guest's own compiler and gcov versions, plus a named limitation where its archive cannot supply the pinned family."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # THE SECOND HALF OF THE GATE, AND IT IS NOT REDUNDANT WITH THE FIRST.
+      #
+      # GITHUB_ENV and GITHUB_PATH take effect from the step AFTER the one that writes them, so
+      # the step above could only assert absolute paths. What every later step actually sees is a
+      # RESOLVED name: `gcov` off PATH, `$CC`/`$CXX` out of the environment. This step is the one
+      # place those resolutions are checked, which is what catches a later PATH prepend shadowing
+      # the shim - and this job does prepend to PATH again, for CMake - or an env entry that did
+      # not survive.
+      - name: Verify the pinned toolchain reaches every later step
+        run: |
+          set -euo pipefail
+          major="${CEC_TOOLCHAIN_GCC_MAJOR:?}"
+          rc=0
+
+          if [ "${CC:-}" != "/usr/bin/gcc-$major" ]; then
+            echo "::error::CC is '${CC:-<unset>}' in this step's environment, not the pinned /usr/bin/gcc-$major selected by 'Select and prove the acceptance toolchain'. The GITHUB_ENV export did not reach here, so every build below - including the four CMake ones, which read CC and CXX - would use the image default."
+            rc=1
+          fi
+          if [ "${CXX:-}" != "/usr/bin/g++-$major" ]; then
+            echo "::error::CXX is '${CXX:-<unset>}' in this step's environment, not the pinned /usr/bin/g++-$major selected by 'Select and prove the acceptance toolchain'. The GITHUB_ENV export did not reach here, so every build below - including the four CMake ones, which read CC and CXX - would use the image default."
+            rc=1
+          fi
+          if [ "$rc" -eq 0 ]; then
+            printf 'CC  : %s -> %s\n' "$CC" "$("$CC" -dumpfullversion)"
+            printf 'CXX : %s -> %s\n' "$CXX" "$("$CXX" -dumpfullversion)"
+          fi
+
+          resolved_gcov="$(command -v gcov || true)"
+          if [ -z "$resolved_gcov" ]; then
+            echo "::error::no gcov resolves on PATH at all. Nothing on the runner reads counters - the guest measures - but this is the earliest sign the shim step did not take effect."
+            rc=1
+          else
+            resolved_version="$(gcov --version | head -n 1 | awk '{ print $NF }')"
+            printf 'gcov on PATH : %s -> %s\n' "$resolved_gcov" "$resolved_version"
+            case "$resolved_version" in
+              "$major"|"$major".*) : ;;
+              *)
+                echo "::error::the gcov that resolves on PATH is version $resolved_version, not the pinned major $major. Something prepended to PATH after the toolchain step and shadowed the shim."
+                rc=1
+                ;;
+            esac
+          fi
+
+          [ "$rc" -eq 0 ] || exit "$rc"
+          echo "the pinned toolchain reaches this step by resolved name as well as by absolute path"
 
       - name: Checkout hdmicec
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
@@ -909,6 +1257,44 @@ jobs:
           ref: ${{ env.AIDL_REF }}
           persist-credentials: false
 
+      # THE SINK CALLER SOURCE, FOR THE L1 DRIFT GUARD AND FOR NOTHING ELSE. A REQUIRED
+      # ACCEPTANCE INPUT ON EVERY INVOCATION, INCLUDING THE ONES THAT RUN IN THE GUEST.
+      #
+      # Only one file in it is read - plugin/HdmiCecSinkImplementation.cpp - and only by the
+      # guard; nothing in this job compiles or links against this tree. The path is the
+      # superproject layout, so the guard's own relative candidate resolves even if the exported
+      # variable is ever lost.
+      #
+      # DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource reads
+      # entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp and asserts the structural
+      # facts that DriverAidlSessionTest.AddLogicalAddressFailuresReachBothRealSinkCallPathsAs
+      # Expected models. Without the file the guard FAILS by design - it will not skip, because a
+      # skip is indistinguishable from a pass in an aggregate count - and the modelled call paths
+      # become an unchecked model rather than evidence about a caller.
+      #
+      # THIS JOB NEEDS IT IN TWO PLACES, WHICH IS WHY THE CHECKOUT ALONE IS NOT ENOUGH HERE. The
+      # host side runs the L1 binary directly and reads it from this checkout through
+      # CEC_SINK_CALLER_SOURCE, exactly as the hosted job does. The GUEST side runs invocations
+      # inside a VM that cannot see this workspace at all, so the file is passed to
+      # aidl-path-tests-rootfs.sh with --sink-caller-source, staged into the image, and exported
+      # to the guest's own CEC_SINK_CALLER_SOURCE by the init script. Both routes resolve the same
+      # pinned bytes; neither is optional.
+      #
+      # The ref is the superproject gitlink and the commit the guard names as reviewed. L1-tests
+      # .yml pins the same commit under the same names - move them together, and the verification
+      # step below fails the job if SINK_REF and SINK_CALLER_COMMIT ever disagree.
+      #
+      # persist-credentials: false for the same reason as every other checkout in this job, and
+      # with the same force as the payload tree: this tree's content is copied into the guest
+      # image, which is uploaded as an artifact.
+      - name: Checkout the Sink caller source for the L1 drift guard
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
+        with:
+          repository: ${{ env.SINK_REPOSITORY }}
+          path: entservices-hdmicecsink
+          ref: ${{ env.SINK_REF }}
+          persist-credentials: false
+
       # THE BINDER SDK SOURCE, OBTAINED BY THIS JOB AT AN IMMUTABLE COMMIT, ONCE PER STAGING.
       #
       # It used to be cloned by build_binder.sh, which resolves it from mutable ref text and
@@ -967,6 +1353,7 @@ jobs:
           set -euo pipefail
           rc=0
           for tree in hdmicec hdmicec-payload googletest rdk-halif-aidl rdk-halif-aidl-i386 \
+                      entservices-hdmicecsink \
                       rdk-halif-aidl/build-tools/linux_binder_idl \
                       rdk-halif-aidl-i386/build-tools/linux_binder_idl; do
             dir="$GITHUB_WORKSPACE/$tree"
@@ -1057,6 +1444,32 @@ jobs:
           assert_pinned_head googletest "${GOOGLETEST_REF:-}" "GoogleTest"
           assert_pinned_head rdk-halif-aidl/build-tools/linux_binder_idl "${BINDER_SDK_COMMIT:-}" "Binder SDK source"
           assert_pinned_head rdk-halif-aidl-i386/build-tools/linux_binder_idl "${BINDER_SDK_COMMIT:-}" "Binder SDK source i386"
+          assert_pinned_head entservices-hdmicecsink "${SINK_REF:-}" "Sink caller source (read by the L1 drift guard)"
+
+          # THE TWO NAMES FOR THE SAME PIN MUST AGREE. SINK_REPOSITORY/SINK_REF are what the
+          # checkout resolves and what the assertion above reads; SINK_CALLER_REPOSITORY/
+          # SINK_CALLER_COMMIT are the same repository and commit recorded beside the guard's
+          # rationale, and are what aidl-path-tests-rootfs.sh's manifest records. Asserting the
+          # tree twice would say nothing new, but letting the names drift would leave a reviewer
+          # reading a pin the job does not use.
+          if [ "${SINK_CALLER_COMMIT:-}" != "${SINK_REF:-}" ] || [ "${SINK_CALLER_REPOSITORY:-}" != "${SINK_REPOSITORY:-}" ]; then
+            echo "::error::the Sink caller pin is recorded under two names that disagree - SINK_REPOSITORY='${SINK_REPOSITORY:-<unset>}' SINK_REF='${SINK_REF:-<unset>}' versus SINK_CALLER_REPOSITORY='${SINK_CALLER_REPOSITORY:-<unset>}' SINK_CALLER_COMMIT='${SINK_CALLER_COMMIT:-<unset>}'. They name the same reviewed revision of entservices-hdmicecsink and must be moved together; L1-tests.yml carries the same names."
+            rc=1
+          fi
+
+          # THE SINK CALLER SOURCE, ASSERTED BEFORE ANY TEST RUNS ON EITHER SIDE OF THE BOUNDARY.
+          #
+          # Two distinct checks, and both are needed: this one establishes the ENVIRONMENT is
+          # wired, the drift guard establishes the plugin has not DRIFTED. Failing here names the
+          # wiring; failing there names the drift, which is the outcome a pin bump is meant to
+          # produce. The guest's copy is checked separately, after the image is built, because a
+          # readable file here says nothing about what was staged into the image.
+          if [ ! -r "${CEC_SINK_CALLER_SOURCE:-}" ]; then
+            echo "::error::CEC_SINK_CALLER_SOURCE is '${CEC_SINK_CALLER_SOURCE:-<unset>}', which is not a readable file. It is a REQUIRED acceptance input on every invocation, not an optional diagnostic: without it DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource fails and the modelled Sink call paths become a model nothing has checked against its subject. The 'Checkout the Sink caller source for the L1 drift guard' step produces it; restore that step rather than relaxing this check."
+            rc=1
+          else
+            printf '%-24s %s  %s\n' "Sink caller source" "$(git -C "$GITHUB_WORKSPACE/entservices-hdmicecsink" rev-parse HEAD 2>/dev/null || echo '<unreadable>')" "entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp" | tee -a "$record"
+          fi
 
           # binder_sdk.version IS A GATE HERE, NOT A FALLBACK, AND IT IS CHECKED IN BOTH
           # STAGINGS because each Binder SDK build reads the copy in its own tree.
@@ -1100,6 +1513,45 @@ jobs:
       # used above, so this assertion exists to turn a future sparse pattern into a named
       # failure here instead of a mysterious "halcompat.h: No such file" hundreds of lines
       # later. Both checkouts are asserted, because a partial second tree would fail equally.
+      # THE SINK CALLER SOURCE IS RESOLVED, PROVEN READABLE AND EXPORTED HERE, BEFORE ANYTHING
+      # CONSUMES IT.
+      #
+      # Two consumers, and they take it two different ways. The image builder takes the host
+      # path as --sink-caller-source and copies the file into the guest, where the init exports
+      # it to the suite; and any host-side use of the L1 runner takes CEC_SINK_CALLER_SOURCE
+      # directly. Both are set from the one resolution below, so they cannot disagree.
+      #
+      # THE READABILITY CHECK IS NOT REDUNDANT WITH THE CHECKOUT. The drift guard distinguishes
+      # "the variable is set and the file is not there" -- which it reports as a WIRING FAULT --
+      # from "nothing pointed at the source at all". Exporting a path this job has not opened
+      # would manufacture the first of those out of a checkout that silently produced a
+      # different layout, and point a human at the wrong fault. So the file is opened here and
+      # the variable is exported only afterwards.
+      - name: Verify the Sink caller source and export it
+        run: |
+          set -euo pipefail
+          sink_source="$GITHUB_WORKSPACE/entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp"
+          if [ -L "$sink_source" ]; then
+            echo "::error::$sink_source is a symbolic link rather than the checked-out source. Refused rather than followed."
+            exit 1
+          fi
+          if [ ! -f "$sink_source" ] || [ ! -r "$sink_source" ]; then
+            echo "::error::the Sink plugin source is not readable at $sink_source, so tests/L1Tests' drift guard for the modelled Sink call paths cannot run and invocation A cannot pass. The 'Checkout the Sink caller source for the L1 drift guard' step above is what puts it there; check that it ran and that SINK_REPOSITORY and SINK_REF name a reachable revision."
+            exit 1
+          fi
+          bytes="$(wc -c < "$sink_source")"
+          if [ "$bytes" -le 0 ]; then
+            echo "::error::$sink_source is empty, so the drift guard would read nothing out of it."
+            exit 1
+          fi
+          echo "Sink caller source : $sink_source ($bytes bytes)"
+          echo "  read by tests/L1Tests/ccec/test_DriverAidl.cpp's drift guard, at SINK_REF=$SINK_REF"
+          {
+            echo "SINK_CALLER_SOURCE=$sink_source"
+            echo "CEC_SINK_CALLER_SOURCE=$sink_source"
+          } >> "$GITHUB_ENV"
+
+
       - name: Verify rdk-halif-aidl source include roots
         run: |
           set -euo pipefail
@@ -1125,10 +1577,12 @@ jobs:
       # :279 and :289, build_modules.sh at :651, :660, :663, :700 and :723, and a grep across
       # both for CMAKE_BIN / CMAKE_COMMAND / "command -v cmake" / CMAKE= returns nothing. There
       # is no override hook, so an absolute path is not implementable for those scripts and a
-      # step-scoped PATH prepend is the only mechanism. An apt cmake on ubuntu-22.04 is
-      # EXPECTED to satisfy the SDK floor, which is why this step measures it rather than
-      # trusting it, records both versions, and downloads a known-good build if neither
-      # candidate qualifies.
+      # step-scoped PATH prepend is the only mechanism. An apt cmake on a hosted Ubuntu runner
+      # is EXPECTED to satisfy the SDK floor - it did on jammy at 3.22.1 and does by a wider
+      # margin on the ubuntu-24.04 this job now uses - which is exactly why this step MEASURES
+      # it rather than trusting it, records both versions, and downloads a known-good build if
+      # neither candidate qualifies. An expectation tied to a distribution release is one
+      # runner-label change away from being false.
       - name: Resolve the CMake installations
         run: |
           set -euo pipefail
@@ -1828,10 +2282,23 @@ jobs:
           #    for the reason in the comment above. The output is captured as well as shown,
           #    because the link command make echoes is itself evidence and step 6b asserts on
           #    it.
+          #    THE COMPILER IS THE PINNED ONE, NAMED, AND ASSERTED RATHER THAN DEFAULTED. This
+          #    line used to read CXX="${CXX:-g++}", whose fallback handed the shipping-library
+          #    build to whatever the runner image defaulted to - the one thing the toolchain gate
+          #    exists to prevent. There is no fallback now, and a CXX that is unset or is not the
+          #    pinned family stops the step here rather than producing a library and a set of
+          #    notes files from an unrecorded compiler.
+          expected_cxx="/usr/bin/g++-${CEC_TOOLCHAIN_GCC_MAJOR:?}"
+          if [ "${CXX:-}" != "$expected_cxx" ]; then
+            echo "::error::CXX is '${CXX:-<unset>}', not the pinned $expected_cxx. The hand-written RDK build compiles the library a SOC vendor ships; check that 'Select and prove the acceptance toolchain' ran before this step."
+            exit 1
+          fi
+          printf '  hand build CXX: %s (%s)\n' "$CXX" "$("$CXX" -dumpfullversion)"
+
           build_log="$(mktemp)"
           CPATH="$GITHUB_WORKSPACE/hdmicec/mocks:$GITHUB_WORKSPACE/hdmicec/stubs${CPATH:+:$CPATH}" \
             make -C ccec/src \
-              CXX="${CXX:-g++}" \
+              CXX="$CXX" \
               HALIF_PREFIX="$HALIF_PREFIX" \
               HALIF_LIB_DIR="$HALIF_LIB_DIR" \
               BINDER_SDK_DIR="$BINDER_SDK_DIR" \
@@ -2872,6 +3339,17 @@ jobs:
           sudo install -d -o root -g root -m 0755 -- "$publish_dir"
           echo "publication directory: $publish_dir ($(sudo stat -c '%U:%G %a' -- "$publish_dir"))"
 
+          # --toolchain-gcc-major CARRIES THIS JOB'S PIN INTO A DIFFERENT ARCHIVE, AND IT IS A
+          # RECORD-AND-REPORT INPUT RATHER THAN A DEMAND. The guest is Debian bookworm i386 at a
+          # pinned snapshot, whose default GCC family is not this job's, and whether that
+          # snapshot offers the pinned one at all is a property of the archive rather than of
+          # this file. So the value is passed rather than restated: the builder installs the
+          # versioned compiler when the archive has it, selects it for the in-guest build,
+          # RECORDS the guest's own gcc/g++/gcov versions in the image and the manifest either
+          # way, and prints a NAMED limitation when the guest cannot match. What it asserts hard
+          # is the property the guest's own trace depends on - that the guest's gcov and its
+          # compiler are the same family. Spelling a version here instead of passing this
+          # variable is what would let the two drift.
           sudo env "TMPDIR=$builder_tmp" bash "$script" \
             --output "$GUEST_IMAGE" \
             --payload "$GITHUB_WORKSPACE/guest-payload" \
@@ -2879,11 +3357,14 @@ jobs:
             --base-tarball "$WORK_DIR/host/base-i386.tar" \
             --lcov-tarball "$LCOV_TARBALL" \
             --gtest-prefix "$GTEST_PREFIX_I386" \
+            --sink-caller-source "$SINK_CALLER_SOURCE" \
             --kernel-config "$GUEST_KERNEL_CONFIG" \
+            --sink-caller-source "$CEC_SINK_CALLER_SOURCE" \
             --arch "$GUEST_ARCH" \
             --size "$GUEST_IMAGE_SIZE_MIB" \
             --apt-mirror "deb $GUEST_DEBIAN_MIRROR $GUEST_DEBIAN_SUITE main" \
-            --readiness-timeout "$GUEST_READINESS_TIMEOUT_SECONDS"
+            --readiness-timeout "$GUEST_READINESS_TIMEOUT_SECONDS" \
+            --toolchain-gcc-major "$CEC_TOOLCHAIN_GCC_MAJOR"
 
           # POST-BUILDER CUSTODY, AND IT IS A DESCRIPTOR RATHER THAN A PATHNAME FROM HERE ON.
           #
@@ -2987,6 +3468,27 @@ jobs:
               *=) echo "::error::the manifest does not name ${pair%=}, which this job needs in order to boot the guest and find its results."; exit 1 ;;
             esac
           done
+
+          # THE GUARD'S REQUIRED INPUT WAS STAGED, ASSERTED FROM THE MANIFEST RATHER THAN ASSUMED
+          # FROM THE FLAG THIS JOB PASSED.
+          #
+          # --sink-caller-source was passed above, and the builder refuses to build without the
+          # file by either route - so this is not a second guess at the same fact. It closes the
+          # gap between "the builder was told" and "the image carries it": the builder writes this
+          # key only after the staged copy is in place, so reading it back here is evidence about
+          # the IMAGE. Without it, the first sign of a staging fault would be a red
+          # TheModelledSinkCallPathsStillMatchTheRealSinkSource inside the guest, an hour later,
+          # reported as a plugin drift when nothing had drifted.
+          #
+          # The digest is checked against the host-side input as well, because a staged file of
+          # the wrong revision fails the guard in exactly the way a genuine drift does, and the
+          # two must not be confusable.
+          sink_staged="$(manifest_value GUEST_SINK_CALLER_SOURCE)"
+          sink_digest="$(manifest_value SINK_CALLER_SOURCE_SHA256)"
+          [ -n "$sink_staged" ] || { echo "::error::the manifest does not name GUEST_SINK_CALLER_SOURCE, so this image records no staged Sink caller source. DriverAidlLocalInstanceTest.TheModelledSinkCallPathsStillMatchTheRealSinkSource reads that file and is a REQUIRED acceptance input: without it the guard fails inside the guest and the modelled Sink call paths become a model nothing has checked. The builder stages it unconditionally, so a manifest without this key was not produced by a matching root-image script."; exit 1; }
+          expected_digest="$(sha256sum -- "$CEC_SINK_CALLER_SOURCE" | cut -d' ' -f1)"
+          [ "$sink_digest" = "$expected_digest" ] || { echo "::error::the image staged a Sink caller source with digest '$sink_digest', but the pinned checkout this job passed has digest '$expected_digest'. A staged copy of the wrong revision fails the drift guard in exactly the way a real plugin change does, so the two must not be allowed to differ. Establish which is wrong rather than adjusting either to match."; exit 1; }
+          echo "guard input staged at $sink_staged (sha256 $sink_digest, matches the pinned checkout)"
           {
             echo "GUEST_INIT_PATH=$guest_init"
             echo "GUEST_ARTIFACT_DIR=$artifact_dir"
@@ -3286,7 +3788,7 @@ jobs:
               echo "branch-arm gate's own output are in the uploaded artifacts and in the console log."
               ;;
             3)
-              echo "::error::run_coverage.sh exited 3, which is ADVISORY AND IS NOT A PASS. The figures met the bar but something reduced this run to measuring what it did not establish, and the COVERAGE ADVISORY block in the console log names every reason it recorded - read that first, because it is the diagnosis rather than a hint. The likely one for this job is a DEFERRED INVOCATION: if the guest's binder transport did not come up, invocations B, C and E do not run, which also leaves 31 of the 90 required branch arms unmeasured (29 need invocation B, one needs invocation C, and one needs a usable binder driver with no service registered on it) - the branch-arm gate lists each by name with the prerequisite it needed and prints its own census, and the other 59 required arms are enforced on this run whatever the transport did. Cross-read the BINDER PLATFORM RECORD in the console log for binderfs, the device nodes, the protocol agreement and servicemanager. The other advisory sources are a weakened gate (COVERAGE_MIN other than 80, --no-per-file-gate, COVERAGE_GATE_EXEMPT_FILES, GTEST_EXTRA_ARGS, or a capture without --run - this job sets none of them), an unclassified dependency-header record in the line gate's trace, and a BRANCH_MANIFEST entry added without its measured line, block and branch coordinates. None of them is fixed by treating this status as a pass."
+              echo "::error::run_coverage.sh exited 3, which is ADVISORY AND IS NOT A PASS. The figures met the bar but something reduced this run to measuring what it did not establish, and the COVERAGE ADVISORY block in the console log names every reason it recorded - read that first, because it is the diagnosis rather than a hint. The likely one for this job is a DEFERRED INVOCATION: if the guest's binder transport did not come up, invocations B, C and E do not run, which also leaves 30 of the 89 required branch arms unmeasured (28 need invocation B, one needs invocation C, and one needs a usable binder driver with no service registered on it) - the branch-arm gate lists each by name with the prerequisite it needed and prints its own census, and the other 59 required arms are enforced on this run whatever the transport did. Cross-read the BINDER PLATFORM RECORD in the console log for binderfs, the device nodes, the protocol agreement and servicemanager. The other advisory sources are a weakened gate (COVERAGE_MIN other than 80, --no-per-file-gate, COVERAGE_GATE_EXEMPT_FILES, GTEST_EXTRA_ARGS, or a capture without --run - this job sets none of them), an unclassified dependency-header record in the line gate's trace, and a BRANCH_MANIFEST entry added without its measured line, block and branch coordinates. None of them is fixed by treating this status as a pass."
               exit 1
               ;;
             1)
@@ -3298,6 +3800,161 @@ jobs:
               exit 1
               ;;
           esac
+
+      # THE COMPLETENESS GATE FOR THE THREE UPLOADS BELOW, AND IT IS NOT REDUNDANT WITH THEIR
+      # `if-no-files-found: error`.
+      #
+      # WHAT THAT SETTING DOES AND DOES NOT DO, measured against the pinned
+      # actions/upload-artifact commit this job uses: it fails only when the WHOLE discovered
+      # set is empty, because its implementation tests `filesToUpload.length === 0`. Two of the
+      # three uploads below discover a set rather than a file - one names a DIRECTORY
+      # (coverage-artifacts/) and one AGGREGATES six paths into a single multiline `path:` - so
+      # deleting a mandatory member of either leaves the set non-empty and the upload passes.
+      # That was reproduced on this action at this pin: with the required
+      # rdkTestResults_invocation_E.json removed the coverage upload still discovered 16 files
+      # and succeeded, and with the mandatory kernel configuration removed the provisioning
+      # upload still discovered five and succeeded. This job's ENTIRE PURPOSE is to be the
+      # evidence that invocations A through E ran on a binder-capable guest, so an upload that
+      # publishes fifteen of sixteen members as a green run is worse than no upload: a later
+      # reader has an artifact bundle that looks authoritative and is missing the member their
+      # question turns on. Hence an explicit gate over the named set, which is the only place
+      # the required set is written down as a list.
+      #
+      # WHY IT SITS HERE, IMMEDIATELY BEFORE THE UPLOADS, AND WHY MOVING IT AFTER THEM WOULD BE
+      # A REGRESSION. All three uploads below are `if: always()`, so a failure in THIS step does
+      # not skip any of them: the evidence that does exist is still attached to the run, still
+      # downloadable, and still the thing a reader needs in order to diagnose what is missing -
+      # while the job itself correctly fails. Put this step after the uploads instead and it
+      # still fails the job, but a reader loses nothing here and gains nothing either; put it
+      # before them WITHOUT `if: always()` on the uploads and a missing member would suppress
+      # the very artifacts that explain it. The ordering is the whole point, so it is stated
+      # rather than left to be rediscovered.
+      #
+      # UNCONDITIONAL, AND NOT KEYED TO THE VERDICT. It does not ask whether the verdict step
+      # passed, because a set that is incomplete must be impossible to publish as a success
+      # whatever the verdict said - and because when an earlier step failed, the list of missing
+      # members is the cheapest description of how far the run got. The five letters A through E
+      # are the full matrix and every one of them is mandatory on this job: a run whose guest
+      # deferred B, C or E has already failed at the verdict step above, and this gate failing
+      # beside it names which artifacts are absent, which is additional information rather than
+      # a duplicate complaint.
+      #
+      # EVERY PATH BELOW COMES FROM THE JOB-LEVEL `env:` BLOCK OR FROM THE RUNNER'S OWN
+      # $GITHUB_WORKSPACE. No `${{ }}` is interpolated into this body, which is this file's rule
+      # without exception. The image manifest is derived from $GUEST_IMAGE and the kernel
+      # configuration is $GUEST_KERNEL_CONFIG rather than being re-spelled as literals, because
+      # a second spelling of a path that is already a job-level value is a second source of
+      # truth and it will drift from the first.
+      - name: Assert every mandatory artifact is present before uploading
+        if: always()
+        run: |
+          set -euo pipefail
+          rc=0
+          checked=0
+
+          # ONE CHECK PER MANDATORY PATH, AND IT NEVER STOPS AT THE FIRST FAILURE. `rc` is
+          # accumulated exactly as the other multi-assertion steps in this file accumulate it,
+          # so a run that is missing three artifacts names all three in one go. A gate that
+          # reported only the first would make a reader re-run a 350-minute job to discover the
+          # second.
+          #
+          # THE SYMBOLIC-LINK ARM IS FIRST, in the same style and for the same reason as the
+          # extract and boot steps: this step reads the very paths those steps published, under
+          # a workspace whose root is owned by the runner account, and `-f`/`-s` both FOLLOW a
+          # link - so a link substituted at one of these names would otherwise be reported as
+          # a present, non-empty artifact while the bytes uploaded came from wherever it
+          # pointed. Refused rather than followed, and named.
+          require_artifact() {
+            local path="$1" why="$2" empty_policy="${3:-must-not-be-empty}"
+            if [ -L "$path" ]; then
+              echo "::error::the mandatory artifact $path is a symbolic link rather than the artifact itself ($why). Refused rather than followed: the uploads below would publish whatever it points at under this name. Find what created the link - nothing in this job does - and remove it; the producing step must write a regular file at this exact path."
+              rc=1
+              return 0
+            fi
+            if [ ! -f "$path" ]; then
+              echo "::error::the mandatory artifact $path is MISSING ($why). It is required evidence for this job and the uploads below cannot be allowed to publish a set without it."
+              rc=1
+              return 0
+            fi
+            # THE NON-EMPTY RULE, AND THE ONE ARTIFACT EXEMPT FROM IT. A zero-byte coverage.info
+            # or a zero-byte per-invocation result is not evidence - it is a file whose producer
+            # was interrupted - so presence alone is not enough for anything except the artifact
+            # whose CONTENT is a report of absences; see uncovered_lines.txt below.
+            if [ "$empty_policy" != 'may-be-empty' ] && [ ! -s "$path" ]; then
+              echo "::error::the mandatory artifact $path is present but ZERO BYTES ($why). An empty file is not evidence: its producer was interrupted between creating it and writing it, so treat this as a truncated run rather than a complete one and read the console log at the point this artifact was due."
+              rc=1
+              return 0
+            fi
+            printf '  ok  %10s bytes  %s\n' "$(stat -Lc '%s' -- "$path")" "$path"
+            checked=$((checked + 1))
+          }
+
+          echo "--- the coverage set, all under $EXTRACTED_ARTIFACTS ---"
+          # THESE NAMES ARE FIXED BY run_coverage.sh, not by this workflow: only the directory
+          # is overridable, and the guest is given --output-dir with the artifact directory the
+          # image builder created. They are listed individually here precisely because the
+          # upload names the directory.
+          require_artifact "$EXTRACTED_ARTIFACTS/run_coverage.status" \
+            "the guest's verbatim run_coverage.sh exit status, which is what the verdict step above read"
+          require_artifact "$EXTRACTED_ARTIFACTS/coverage.info" \
+            "the UNFILTERED trace, which is what the branch-arm gate reads and what its manifest coordinates are re-derived from"
+          require_artifact "$EXTRACTED_ARTIFACTS/filtered_coverage.info" \
+            "the filtered derivative of the trace"
+          require_artifact "$EXTRACTED_ARTIFACTS/line_gate_coverage.info" \
+            "the line gate's own input, the trace with the dependency headers removed"
+          require_artifact "$EXTRACTED_ARTIFACTS/per_file_coverage.tsv" \
+            "the per-file LINE/FUNCTION/BRANCH table the per-file gate is read from"
+          # THE ONE EXEMPTION FROM THE NON-EMPTY RULE, and it is deliberate rather than an
+          # oversight: this file enumerates the source lines that were never executed, so a run
+          # that leaves nothing uncovered legitimately has nothing to enumerate. Its presence is
+          # required - its absence means the report was never produced - but its emptiness is a
+          # complete answer, not a truncated one.
+          require_artifact "$EXTRACTED_ARTIFACTS/uncovered_lines.txt" \
+            "the uncovered-line enumeration; empty is a legitimate result when nothing is uncovered" \
+            may-be-empty
+          require_artifact "$EXTRACTED_ARTIFACTS/coverage/index.html" \
+            "the HTML report's entry point - the guest runs the coverage runner without --no-html, so the report is produced"
+          # ALL FIVE INVOCATIONS, EACH AS TWO ARTIFACTS. A through E is the full matrix and none
+          # of the five is optional on this job; this loop is what makes "invocation E was
+          # deferred" impossible to publish as a complete evidence set.
+          for label in A B C D E; do
+            require_artifact "$EXTRACTED_ARTIFACTS/rdkTestResults_invocation_${label}.json" \
+              "invocation $label's machine-readable result"
+            require_artifact "$EXTRACTED_ARTIFACTS/run_invocation_${label}.log" \
+              "invocation $label's own output, including its selected-back-end line"
+          done
+
+          echo "--- the console log ---"
+          # CHECKED HERE TOO, even though its own upload names a single file and is therefore
+          # already fail-closed. This step is the single place a reader can see the whole
+          # required set written out; a list that silently omits a member because some other
+          # mechanism happens to cover it is a list that will be read as complete when it is
+          # not, and one duplicated check costs a stat.
+          require_artifact "$GUEST_CONSOLE_LOG" \
+            "the only place the BINDER PLATFORM RECORD, the protocol agreement verdict and the branch-arm gate's output exist"
+
+          echo "--- the provisioning records ---"
+          require_artifact "$GUEST_IMAGE.manifest" \
+            "the published root image's manifest, derived from GUEST_IMAGE rather than re-spelled"
+          require_artifact "$GUEST_KERNEL_CONFIG" \
+            "the kernel configuration that was actually built, which is where a reader checks the binder options and the protocol"
+          require_artifact "$GITHUB_WORKSPACE/tools/supply-chain-pins.txt" \
+            "the resolved pins that fix WHICH source was compiled"
+          require_artifact "$GITHUB_WORKSPACE/tools/i386-protocol7-toolchain.cmake" \
+            "one of the two records that fix the wire protocol on the userspace side"
+          require_artifact "$GITHUB_WORKSPACE/tools/i386-binder-CMakeCache.txt" \
+            "the other userspace protocol record, the Binder SDK's own resolved cache"
+          require_artifact "$GITHUB_WORKSPACE/kernel-src/binder-ipc32-restore.patch" \
+            "the patch that makes protocol 7 reachable at all, uploaded so the applied bytes can be inspected"
+
+          if [ "$rc" -ne 0 ]; then
+            # TWO DIAGNOSES, AND A READER NEEDS TO KNOW WHICH ONE THEY ARE IN before they chase
+            # any individual name above.
+            echo "::error::the mandatory artifact set is INCOMPLETE and every missing, empty or substituted member is named above. Read it one of two ways. If an EARLIER step in this job already failed, THAT failure is the primary one and these absences are its consequence - the guest never got as far as producing them - so read the first ::error:: in this log and fix that, not this list. If every earlier step passed, then this run LOOKS complete and is not: the named member is what to chase, in the console log around the point it was due and in run_coverage.sh's own output for the invocation it belongs to. Either way this job does not publish a partial evidence set as a success. The three uploads below still run, because they are if: always() as well, so whatever evidence DOES exist is attached to this run and can be downloaded while this is diagnosed."
+          fi
+          [ "$rc" -eq 0 ] || exit 1
+
+          echo "artifact completeness: all $checked mandatory artifacts are present, are regular files, and carry bytes - with uncovered_lines.txt exempt from the last of those for the reason recorded above."
 
       # THE CONSOLE LOG IS EVIDENCE, NOT A CONVENIENCE. It is the only place the BINDER PLATFORM
       # RECORD exists - the kernel binder configuration the guest read from itself, the SDK
