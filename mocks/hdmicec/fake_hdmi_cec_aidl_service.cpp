@@ -241,9 +241,11 @@ FakeHdmiCecService* FakeHdmiCecService::instance = nullptr;
 /**
  * @copydoc FakeHdmiCecController::getInterfaceVersion
  *
- * The divergence trace is defensive.  With no setter for this value it can fire only if this fake is
- * later given one, and it then says so at the moment it would matter rather than leaving a silent
- * metadata change to be inferred from a failing selection.
+ * The divergence trace fires only when the reported version differs from the compiled-in one, so an
+ * ordinary run prints nothing here and the line that does appear names the moment this controller was
+ * made to report something the snapshot would not - rather than leaving a silent metadata change to be
+ * inferred from whatever failed afterwards.  setInterfaceVersion() is what installs such a value, and
+ * the cases in DriverAidlCompatibilityTest that drive it are what make this branch a reached one.
  */
 int32_t FakeHdmiCecController::getInterfaceVersion()
 {
@@ -260,7 +262,8 @@ int32_t FakeHdmiCecController::getInterfaceVersion()
 /**
  * @copydoc FakeHdmiCecController::getInterfaceHash
  *
- * Carries the same defensive divergence trace as getInterfaceVersion(), for the same reason.
+ * Carries the same divergence trace as getInterfaceVersion(), on the same terms and driven by
+ * setInterfaceHash().
  */
 std::string FakeHdmiCecController::getInterfaceHash()
 {
@@ -345,6 +348,39 @@ void FakeHdmiCecController::setSendMessageBinderStatus(const ::android::binder::
 }
 
 /**
+ * @copydoc FakeHdmiCecController::setInterfaceHash
+ *
+ * Traces the value it replaces alongside the value it installs, in the same shape as the service's
+ * setter, so one line records where in a run this controller was made to report a divergent hash.  No
+ * validation is applied: the string is stored as given, because the caller owns which value it wants
+ * reported.
+ */
+void FakeHdmiCecController::setInterfaceHash(std::string hash)
+{
+    ::std::lock_guard<::std::mutex> guard(mutex);
+
+    std::cout << "[FakeHdmiCecController::setInterfaceHash] Hash set from \"" << interfaceHashResult
+              << "\" to \"" << hash << "\"" << std::endl;
+    interfaceHashResult = ::std::move(hash);
+}
+
+/**
+ * @copydoc FakeHdmiCecController::setInterfaceVersion
+ *
+ * Traces the replaced and the installed version for the same reason the hash setter traces its pair,
+ * and stores the value without validation: any int32_t is a value the caller may want this controller
+ * to report.
+ */
+void FakeHdmiCecController::setInterfaceVersion(int32_t version)
+{
+    ::std::lock_guard<::std::mutex> guard(mutex);
+
+    std::cout << "[FakeHdmiCecController::setInterfaceVersion] Version set from "
+              << interfaceVersionResult << " to " << version << std::endl;
+    interfaceVersionResult = version;
+}
+
+/**
  * @copydoc FakeHdmiCecController::getLastAddedLogicalAddresses
  */
 ::std::vector<int32_t> FakeHdmiCecController::getLastAddedLogicalAddresses() const
@@ -410,7 +446,8 @@ int32_t FakeHdmiCecController::getSendMessageCallCount() const
  * One critical section restores all three canned results, all three canned statuses and both metadata
  * values, and clears all three captures and all three counters, so no case can observe a
  * half-restored controller.  Each default is spelled beside the line that restores it, which is what
- * keeps a documented default and the code that reinstates it together.
+ * keeps a documented default and the code that reinstates it together.  Restoring the metadata pair is
+ * what stops a case that installed a divergent hash or version deciding the outcome of the next one.
  */
 void FakeHdmiCecController::reset()
 {
@@ -662,8 +699,9 @@ FakeHdmiCecService::~FakeHdmiCecService()
 /**
  * @copydoc FakeHdmiCecService::getInterfaceVersion
  *
- * Carries the same defensive divergence trace as the controller's version getter: with no setter for
- * this value it can fire only if one is added later, and it then names the change at the moment it
+ * Carries the same divergence trace as the controller's version getter, driven by
+ * setInterfaceVersion(): it fires only when the reported version differs from the compiled-in one, so
+ * an ordinary run prints nothing here and the line that does appear names the change at the moment it
  * would matter.
  */
 int32_t FakeHdmiCecService::getInterfaceVersion()
@@ -794,6 +832,23 @@ void FakeHdmiCecService::setInterfaceHash(std::string hash)
 }
 
 /**
+ * @copydoc FakeHdmiCecService::setInterfaceVersion
+ *
+ * Traces the value it replaces alongside the value it installs, exactly as the hash setter does, so
+ * the one line a run prints here is the record of where in that run this service was made to report a
+ * divergent version.  Held in a member of its own, so installing a version disturbs neither the hash
+ * nor any canned response.
+ */
+void FakeHdmiCecService::setInterfaceVersion(int32_t version)
+{
+    ::std::lock_guard<::std::mutex> guard(mutex);
+
+    std::cout << "[FakeHdmiCecService::setInterfaceVersion] Version set from "
+              << interfaceVersionResult << " to " << version << std::endl;
+    interfaceVersionResult = version;
+}
+
+/**
  * @copydoc FakeHdmiCecService::getController
  *
  * The strong pointer is copied out under the lock, so the controller outlives the call whatever the
@@ -906,11 +961,12 @@ int32_t FakeHdmiCecService::getUnregisterEventListenerCallCount() const
 /**
  * @copydoc FakeHdmiCecService::reset
  *
- * One critical section restores every canned response, clears both captures and zeroes all seven
- * counters, so no case can observe a half-reset fake.  Each default is spelled beside the line that
- * restores it, which is what keeps the restored value and the documented default from drifting apart.
- * The owned controller is deliberately not touched here, for the reason the warning on the declaration
- * gives.
+ * One critical section restores every canned response and both metadata values, clears both captures
+ * and zeroes all seven counters, so no case can observe a half-reset fake.  Each default is spelled
+ * beside the line that restores it, which is what keeps the restored value and the documented default
+ * from drifting apart.  Restoring the metadata pair is what stops a case that installed a divergent
+ * hash or version deciding the outcome of the next one.  The owned controller is deliberately not
+ * touched here, for the reason the warning on the declaration gives.
  */
 void FakeHdmiCecService::reset()
 {

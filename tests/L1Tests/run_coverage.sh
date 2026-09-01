@@ -3909,12 +3909,12 @@ readonly LEGACY_BOUND_SUITES='BusTest.*:ConnectionTest.*:IntegrationFlowTest.*:D
 # The contract suite's own fixtures, partitioned by which back-end each one requires.  Read
 # from the FIXTURE MANIFEST in tests/L1Tests/ccec/test_DriverAidl.cpp, which is the authority
 # for its own case set, and cross-checked against the built binary.
-#   back-end independent  Compatibility 19, Preflight 27, LocalInstance 25  = 71, under A, B and C
+#   back-end independent  Compatibility 23, Preflight 27, LocalInstance 25  = 75, under A, B and C
 #   legacy back-end only  Selection 4, LegacyArm 5                          =  9, under A only
 #   AIDL back-end only    Session 23, Transmit 12                           = 35, under B only
-# That is 115 contract cases, so run_L1Tests registers 598 in total: the 483 pre-existing cases
-# plus these 115.  Under the filters below that comes out as 563 selected and 35 excluded on
-# invocation A, 414 and 184 on B, and 379 and 219 on C -- figures the reconciliation in
+# That is 119 contract cases, so run_L1Tests registers 602 in total: the 483 pre-existing cases
+# plus these 119.  Under the filters below that comes out as 567 selected and 35 excluded on
+# invocation A, 418 and 184 on B, and 383 and 219 on C -- figures the reconciliation in
 # run_one_invocation measures from the binary rather than reading from here.
 readonly CONTRACT_ANY_BACKEND_SUITES='DriverAidlCompatibilityTest.*:DriverAidlPreflightTest.*:DriverAidlLocalInstanceTest.*'
 readonly CONTRACT_LEGACY_ONLY_SUITES='DriverAidlSelectionTest.*:DriverAidlLegacyArmTest.*'
@@ -6814,7 +6814,7 @@ per_file_report() {
 # seam that ccec/src/DriverAidlImpl.hpp declares and isBinderPreflightOk() takes as a defaulted
 # third parameter, so their `needs` fields are empty and their counts are real.  A seam rather
 # than syscall interposition is what makes that true without a driver and without redefining
-# ioctl() or mmap() for a 563-case process.  The receive path's own two guards and the
+# ioctl() or mmap() for a 567-case process.  The receive path's own two guards and the
 # slow-call diagnostic are in the deferred set, because a
 # listener callback and a synchronous AIDL call both need a live session; the queue handoff's
 # reserved-slot arithmetic and the context-manager timeout ceiling are NOT, because a
@@ -6944,12 +6944,12 @@ readonly BRANCH_MANIFEST=(
     #   * the pre-lookup re-verification stage, mapped in GROUP 3b, sits on a line of FOUR for
     #     the same reason as the transport stage.
     #     same reason as 3826.
-    "availability.transport-declined|ccec/src/DriverAidlImpl.cpp|3347|0|2|the preflight-false arm, read at its source: invocation A on a driverless host, or invocation A-NB on a binder-capable one (measured taken 2)|required||if (!isBinderPreflightOk(binderDriverPath, contextManagerTimeoutMs, probe,"
-    "availability.transport-usable|ccec/src/DriverAidlImpl.cpp|3347|0|3|the preflight-TRUE arm. NO LONGER DEFERRED: the custody and re-verification cases drive isServiceAvailable() through a synthetic BinderPreflightProbe that passes, so this arm is measured on a driverless host and its needs field is now empty (measured taken 4)|required||if (!isBinderPreflightOk(binderDriverPath, contextManagerTimeoutMs, probe,"
-    "availability.service-absent|ccec/src/DriverAidlImpl.cpp|3379|0|2|invocation A on a host WITH a usable binder transport: it registers nothing, so the lookup reaches the service manager and returns null. This is the service-NOT-FOUND arm AAP section 0.9.3 requires by name. Its reacher is the host-aware NO-SERVICE token, so it is DEFERRED rather than failed where there is no transport for A to reach|required|binder|if (service == 0) {"
-    "availability.service-present|ccec/src/DriverAidlImpl.cpp|3379|0|3|invocations B, C and E: each registers a service under the production name, so the lookup returns non-null and the query proceeds to the compatibility stage. This is the service-FOUND arm|required|B|if (service == 0) {"
-    "availability.service-incompatible|ccec/src/DriverAidlImpl.cpp|3391|0|0|invocation C: a registered service whose metadata halcompat rejects. The compatibility verdict is now taken into a named local so the F10 elapsed-time diagnostic can bracket the call, so the branch is the negation of that local and carries two arcs rather than the call/throw pair the inline call produced|required|C|if (!compatible) {"
-    "availability.service-compatible|ccec/src/DriverAidlImpl.cpp|3391|0|1|invocation B, and invocation E in the L2 tier: halcompat accepts the registered service and the AIDL back-end becomes selectable. Same named-local shape as the sibling arm above|required|B|if (!compatible) {"
+    "availability.transport-declined|ccec/src/DriverAidlImpl.cpp|3559|0|2|the preflight-false arm, read at its source: invocation A on a driverless host, or invocation A-NB on a binder-capable one (measured taken 2)|required||if (!isBinderPreflightOk(binderDriverPath, contextManagerTimeoutMs, probe,"
+    "availability.transport-usable|ccec/src/DriverAidlImpl.cpp|3559|0|3|the preflight-TRUE arm. NO LONGER DEFERRED: the custody and re-verification cases drive isServiceAvailable() through a synthetic BinderPreflightProbe that passes, so this arm is measured on a driverless host and its needs field is now empty (measured taken 4)|required||if (!isBinderPreflightOk(binderDriverPath, contextManagerTimeoutMs, probe,"
+    "availability.service-absent|ccec/src/DriverAidlImpl.cpp|3591|0|2|invocation A on a host WITH a usable binder transport: it registers nothing, so the lookup reaches the service manager and returns null. This is the service-NOT-FOUND arm AAP section 0.9.3 requires by name. Its reacher is the host-aware NO-SERVICE token, so it is DEFERRED rather than failed where there is no transport for A to reach|required|binder|if (service == 0) {"
+    "availability.service-present|ccec/src/DriverAidlImpl.cpp|3591|0|3|invocations B, C and E: each registers a service under the production name, so the lookup returns non-null and the query proceeds to the compatibility stage. This is the service-FOUND arm|required|B|if (service == 0) {"
+    "availability.service-incompatible|ccec/src/DriverAidlImpl.cpp|3603|0|0|invocation C: a registered service whose metadata halcompat rejects. The compatibility verdict is now taken into a named local so the F10 elapsed-time diagnostic can bracket the call, so the branch is the negation of that local and carries two arcs rather than the call/throw pair the inline call produced|required|C|if (!compatible) {"
+    "availability.service-compatible|ccec/src/DriverAidlImpl.cpp|3603|0|1|invocation B, and invocation E in the L2 tier: halcompat accepts the registered service and the AIDL back-end becomes selectable. Same named-local shape as the sibling arm above|required|B|if (!compatible) {"
 
     # ---- GROUP 2: halcompat's compatibility predicate, arm by arm.
     # The template form is what the selection calls; the reject arms are only reachable
@@ -7039,43 +7039,43 @@ readonly BRANCH_MANIFEST=(
     # arms with a synthetic probe on any host, with no binder driver and without touching a real
     # node.  The remaining arms use a real path chosen by the test.  DriverAidlPreflightTest is
     # back-end independent and runs under A, B and C.
-    "preflight.empty-path|ccec/src/DriverAidlImpl.cpp|2505|0|0|unit test, DriverAidlPreflightTest.DeclinesAnEmptyDriverPath, and the same arm inside .EveryPreflightArmReleasesExactlyTheDescriptorsItOpened (measured taken 3)|required||if (binderDriverPath.empty()) {"
-    "preflight.path-given|ccec/src/DriverAidlImpl.cpp|2505|0|1|every other preflight case, and every production initialization (measured taken 33)|required||if (binderDriverPath.empty()) {"
-    "preflight.node-unopenable|ccec/src/DriverAidlImpl.cpp|2513|0|0|unit test, DriverAidlPreflightTest.DeclinesANonexistentDriverPath -- still the ONE arc a missing node and an unopenable node share, because both decline the predicate and the verdict is what this gate maps. They no longer share the MESSAGE: a nested test on errno inside this arm reports ENOENT as a legacy-only platform and every other errno as a platform fault. That nested branch changes no verdict, so it is not a further negative arm and is deliberately not a record of its own; the ENOENT side is the one every case here drives (measured taken 8, which includes the driverless host's own production preflight)|required||if (driverFd < 0) {"
-    "preflight.node-opened|ccec/src/DriverAidlImpl.cpp|2513|0|1|unit tests, DriverAidlPreflightTest.DeclinesAPathThatOpensButIsNotABinderDriver and every synthetic-probe case (measured taken 25)|required||if (driverFd < 0) {"
-    "preflight.version-unreadable|ccec/src/DriverAidlImpl.cpp|2629|0|2|unit test, DriverAidlPreflightTest.DeclinesAPathThatOpensButIsNotABinderDriver: a real node that opens and answers no BINDER_VERSION ioctl (measured taken 2)|required||if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {"
-    "preflight.version-read|ccec/src/DriverAidlImpl.cpp|2629|0|3|every synthetic-probe case that survives the node-identity gates, which reports a version and so reaches the comparison (measured taken 16)|required||if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {"
-    "preflight.protocol-mismatch|ccec/src/DriverAidlImpl.cpp|2655|0|2|unit test, DriverAidlPreflightTest.DeclinesANodeWhoseProtocolVersionDiffersFromThisBuild, driving expected+1 through the synthetic probe (measured taken 3)|required||if (protocolVersion != expectedBinderProtocolVersion()) {"
-    "preflight.protocol-equal|ccec/src/DriverAidlImpl.cpp|2655|0|3|unit tests, DriverAidlPreflightTest.DeclinesAMatchingProtocolWhoseContextManagerNeverAnswers and .AcceptsANodeWhoseProtocolMatchesAndWhoseContextManagerAnswers, plus every custody and service-query case that needs the preflight to pass (measured taken 13)|required||if (protocolVersion != expectedBinderProtocolVersion()) {"
-    "preflight.context-manager-answers|ccec/src/DriverAidlImpl.cpp|2679|0|1|unit test, DriverAidlPreflightTest.AcceptsANodeWhoseProtocolMatchesAndWhoseContextManagerAnswers -- the whole-predicate TRUE verdict. THE CONDITION IS NOW WRITTEN NEGATED, if (!contextManagerReachable), because the positive arm falls through to the custody hand-off rather than to a return, so this arm is index 1 where it used to be index 0 (measured taken 8)|required||if (!contextManagerReachable) {"
-    "preflight.context-manager-silent|ccec/src/DriverAidlImpl.cpp|2679|0|0|unit test, DriverAidlPreflightTest.DeclinesAMatchingProtocolWhoseContextManagerNeverAnswers, which also asserts the caller's deadline reached the probe. Index 0 of the negated condition, per the sibling arm above (measured taken 5)|required||if (!contextManagerReachable) {"
+    "preflight.empty-path|ccec/src/DriverAidlImpl.cpp|2643|0|0|unit test, DriverAidlPreflightTest.DeclinesAnEmptyDriverPath, and the same arm inside .EveryPreflightArmReleasesExactlyTheDescriptorsItOpened (measured taken 3)|required||if (binderDriverPath.empty()) {"
+    "preflight.path-given|ccec/src/DriverAidlImpl.cpp|2643|0|1|every other preflight case, and every production initialization (measured taken 33)|required||if (binderDriverPath.empty()) {"
+    "preflight.node-unopenable|ccec/src/DriverAidlImpl.cpp|2651|0|0|unit test, DriverAidlPreflightTest.DeclinesANonexistentDriverPath -- still the ONE arc a missing node and an unopenable node share, because both decline the predicate and the verdict is what this gate maps. They no longer share the MESSAGE: a nested test on errno inside this arm reports ENOENT as a legacy-only platform and every other errno as a platform fault. That nested branch changes no verdict, so it is not a further negative arm and is deliberately not a record of its own; the ENOENT side is the one every case here drives (measured taken 8, which includes the driverless host's own production preflight)|required||if (driverFd < 0) {"
+    "preflight.node-opened|ccec/src/DriverAidlImpl.cpp|2651|0|1|unit tests, DriverAidlPreflightTest.DeclinesAPathThatOpensButIsNotABinderDriver and every synthetic-probe case (measured taken 25)|required||if (driverFd < 0) {"
+    "preflight.version-unreadable|ccec/src/DriverAidlImpl.cpp|2767|0|2|unit test, DriverAidlPreflightTest.DeclinesAPathThatOpensButIsNotABinderDriver: a real node that opens and answers no BINDER_VERSION ioctl (measured taken 2)|required||if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {"
+    "preflight.version-read|ccec/src/DriverAidlImpl.cpp|2767|0|3|every synthetic-probe case that survives the node-identity gates, which reports a version and so reaches the comparison (measured taken 16)|required||if (0 != probe.readProtocolVersion(driverFd, &protocolVersion)) {"
+    "preflight.protocol-mismatch|ccec/src/DriverAidlImpl.cpp|2793|0|2|unit test, DriverAidlPreflightTest.DeclinesANodeWhoseProtocolVersionDiffersFromThisBuild, driving expected+1 through the synthetic probe (measured taken 3)|required||if (protocolVersion != expectedBinderProtocolVersion()) {"
+    "preflight.protocol-equal|ccec/src/DriverAidlImpl.cpp|2793|0|3|unit tests, DriverAidlPreflightTest.DeclinesAMatchingProtocolWhoseContextManagerNeverAnswers and .AcceptsANodeWhoseProtocolMatchesAndWhoseContextManagerAnswers, plus every custody and service-query case that needs the preflight to pass (measured taken 13)|required||if (protocolVersion != expectedBinderProtocolVersion()) {"
+    "preflight.context-manager-answers|ccec/src/DriverAidlImpl.cpp|2817|0|1|unit test, DriverAidlPreflightTest.AcceptsANodeWhoseProtocolMatchesAndWhoseContextManagerAnswers -- the whole-predicate TRUE verdict. THE CONDITION IS NOW WRITTEN NEGATED, if (!contextManagerReachable), because the positive arm falls through to the custody hand-off rather than to a return, so this arm is index 1 where it used to be index 0 (measured taken 8)|required||if (!contextManagerReachable) {"
+    "preflight.context-manager-silent|ccec/src/DriverAidlImpl.cpp|2817|0|0|unit test, DriverAidlPreflightTest.DeclinesAMatchingProtocolWhoseContextManagerNeverAnswers, which also asserts the caller's deadline reached the probe. Index 0 of the negated condition, per the sibling arm above (measured taken 5)|required||if (!contextManagerReachable) {"
 
     # ---- GROUP 4: THE ONE-ELEMENT ADDRESS ARRAYS, add and remove, both arcs of both decisions.
     # These are AIDL-path arms: they need the AIDL back-end resolved, so invocation B is their
     # reacher and a driverless host reports them DEFERRED rather than passed or failed.  Both
     # arcs of each decision are recorded, which is also what makes the TRUE/FALSE labels safe on
     # a host that cannot execute the line: a label the wrong way round still gates both arms.
-    "addlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2208|0|0|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions: a non-ok binder Status -> IOException|required|B|if (!txn.isOk()) {"
-    "addlogical.status-ok|ccec/src/DriverAidlImpl.cpp|2208|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMarshalsExactlyOneElement|required|B|if (!txn.isOk()) {"
-    "addlogical.refused|ccec/src/DriverAidlImpl.cpp|2212|0|0|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions: added == false -> AddressNotAvailableException|required|B|else if (!added) {"
-    "addlogical.accepted|ccec/src/DriverAidlImpl.cpp|2212|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMarshalsExactlyOneElement: the address is appended to the local list|required|B|else if (!added) {"
-    "removelogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2168|0|0|invocation B, DriverAidlSessionTest.RemoveLogicalAddressIgnoresTransportFailureAndStillRemovesLocally|required|B|if (!txn.isOk()) {"
-    "removelogical.status-ok|ccec/src/DriverAidlImpl.cpp|2168|0|1|invocation B, DriverAidlSessionTest.RemoveLogicalAddressSucceedsMarshalsOneElementAndDropsItLocally|required|B|if (!txn.isOk()) {"
-    "removelogical.refused|ccec/src/DriverAidlImpl.cpp|2171|0|0|invocation B, DriverAidlSessionTest.RemoveLogicalAddressMarshalsOneElementAndIgnoresHalRefusal: removed == false is logged at LOG_EXP and ignored|required|B|else if (!removed) {"
-    "removelogical.accepted|ccec/src/DriverAidlImpl.cpp|2171|0|1|invocation B, DriverAidlSessionTest.RemoveLogicalAddressSucceedsMarshalsOneElementAndDropsItLocally|required|B|else if (!removed) {"
+    "addlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2312|0|0|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions: a non-ok binder Status -> IOException|required|B|if (!txn.isOk()) {"
+    "addlogical.status-ok|ccec/src/DriverAidlImpl.cpp|2312|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMarshalsExactlyOneElement|required|B|if (!txn.isOk()) {"
+    "addlogical.refused|ccec/src/DriverAidlImpl.cpp|2316|0|0|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions: added == false -> AddressNotAvailableException|required|B|else if (!added) {"
+    "addlogical.accepted|ccec/src/DriverAidlImpl.cpp|2316|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMarshalsExactlyOneElement: the address is appended to the local list|required|B|else if (!added) {"
+    "removelogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2272|0|0|invocation B, DriverAidlSessionTest.RemoveLogicalAddressIgnoresTransportFailureAndStillRemovesLocally|required|B|if (!txn.isOk()) {"
+    "removelogical.status-ok|ccec/src/DriverAidlImpl.cpp|2272|0|1|invocation B, DriverAidlSessionTest.RemoveLogicalAddressSucceedsMarshalsOneElementAndDropsItLocally|required|B|if (!txn.isOk()) {"
+    "removelogical.refused|ccec/src/DriverAidlImpl.cpp|2275|0|0|invocation B, DriverAidlSessionTest.RemoveLogicalAddressMarshalsOneElementAndIgnoresHalRefusal: removed == false is logged at LOG_EXP and ignored|required|B|else if (!removed) {"
+    "removelogical.accepted|ccec/src/DriverAidlImpl.cpp|2275|0|1|invocation B, DriverAidlSessionTest.RemoveLogicalAddressSucceedsMarshalsOneElementAndDropsItLocally|required|B|else if (!removed) {"
 
     # ---- GROUP 5: getLogicalAddresses, every cardinality plus the transport failure.
-    "getlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2056|0|0|invocation B, DriverAidlSessionTest.GetLogicalAddressReportsZeroOnTransportFailureWithoutRaising|required|B|if (!txn.isOk()) {"
-    "getlogical.status-ok|ccec/src/DriverAidlImpl.cpp|2056|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|if (!txn.isOk()) {"
-    "getlogical.empty|ccec/src/DriverAidlImpl.cpp|2059|0|0|invocation B, DriverAidlSessionTest.EmptyAddressResultReportsZeroSoTheExistingCallerSignalSurvives|required|B|else if (halAddresses.empty()) {"
-    "getlogical.non-empty|ccec/src/DriverAidlImpl.cpp|2059|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|else if (halAddresses.empty()) {"
-    "getlogical.more-than-one|ccec/src/DriverAidlImpl.cpp|2071|0|0|invocation B, DriverAidlSessionTest.MultipleReturnedAddressesUseEntryZeroAndAreLogged|required|B|if (halAddresses.size() > 1) {"
-    "getlogical.exactly-one|ccec/src/DriverAidlImpl.cpp|2071|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|if (halAddresses.size() > 1) {"
+    "getlogical.status-not-ok|ccec/src/DriverAidlImpl.cpp|2160|0|0|invocation B, DriverAidlSessionTest.GetLogicalAddressReportsZeroOnTransportFailureWithoutRaising|required|B|if (!txn.isOk()) {"
+    "getlogical.status-ok|ccec/src/DriverAidlImpl.cpp|2160|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|if (!txn.isOk()) {"
+    "getlogical.empty|ccec/src/DriverAidlImpl.cpp|2163|0|0|invocation B, DriverAidlSessionTest.EmptyAddressResultReportsZeroSoTheExistingCallerSignalSurvives|required|B|else if (halAddresses.empty()) {"
+    "getlogical.non-empty|ccec/src/DriverAidlImpl.cpp|2163|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|else if (halAddresses.empty()) {"
+    "getlogical.more-than-one|ccec/src/DriverAidlImpl.cpp|2175|0|0|invocation B, DriverAidlSessionTest.MultipleReturnedAddressesUseEntryZeroAndAreLogged|required|B|if (halAddresses.size() > 1) {"
+    "getlogical.exactly-one|ccec/src/DriverAidlImpl.cpp|2175|0|1|invocation B, DriverAidlSessionTest.GetLogicalAddressReadsEntryZeroFromTheServiceInterface|required|B|if (halAddresses.size() > 1) {"
 
     # ---- GROUP 6: the frame-length guard, both sides.  The over-length side is difference 1
     # of the authorized observable differences, so both arms are evidence rather than trivia.
-    "framelen.over-contract|ccec/src/DriverAidlImpl.cpp|1942|0|0|invocation B, DriverAidlTransmitTest.FramesOverTheAidlLimitAreRefusedWithoutBeingSentOrTruncated|required|B|if (length > AIDL_MAX_MESSAGE_LENGTH) {"
-    "framelen.within-contract|ccec/src/DriverAidlImpl.cpp|1942|0|1|invocation B, every DriverAidlTransmitTest case that transmits, beginning with .DirectedFrameAcknowledgedByTheFollowerSucceeds|required|B|if (length > AIDL_MAX_MESSAGE_LENGTH) {"
+    "framelen.over-contract|ccec/src/DriverAidlImpl.cpp|2010|0|0|invocation B, DriverAidlTransmitTest.FramesOverTheAidlLimitAreRefusedWithoutBeingSentOrTruncated|required|B|if (length > AIDL_MAX_MESSAGE_LENGTH) {"
+    "framelen.within-contract|ccec/src/DriverAidlImpl.cpp|2010|0|1|invocation B, every DriverAidlTransmitTest case that transmits, beginning with .DirectedFrameAcknowledgedByTheFollowerSucceeds|required|B|if (length > AIDL_MAX_MESSAGE_LENGTH) {"
     # ---- GROUP 7: THE RECEIVE PATH'S TWO GUARDS.  Both were added because an out-of-process
     # HAL can deliver what an in-process one never could.
     #
@@ -7110,16 +7110,16 @@ readonly BRANCH_MANIFEST=(
     # would leave the Bus reader blocked in EventQueue::poll() with nothing coming to wake it,
     # so the receive path stops one entry early.  Measured on this host: 10 refusals and 7876
     # acceptances across the five F02 cases.
-    "offer.no-slot|ccec/src/DriverAidlImpl.cpp|2350|0|0|invocation A, DriverAidlLocalInstanceTest.ReceiveQueueReservesTheLastSlotForCloseSentinelAndRefusesTheFrameThatWouldTakeIt and .EveryFrameOfferedToAFullReceiveQueueHasExactlyOneOwner (measured taken 11)|required||if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {"
-    "offer.slot-available|ccec/src/DriverAidlImpl.cpp|2350|0|1|invocation A, every accepted offer in the five F02 cases (measured taken 7878)|required||if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {"
+    "offer.no-slot|ccec/src/DriverAidlImpl.cpp|2488|0|0|invocation A, DriverAidlLocalInstanceTest.ReceiveQueueReservesTheLastSlotForCloseSentinelAndRefusesTheFrameThatWouldTakeIt and .EveryFrameOfferedToAFullReceiveQueueHasExactlyOneOwner (measured taken 11)|required||if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {"
+    "offer.slot-available|ccec/src/DriverAidlImpl.cpp|2488|0|1|invocation A, every accepted offer in the five F02 cases (measured taken 7878)|required||if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {"
 
     # ---- GROUP 9: THE CONTEXT-MANAGER TIMEOUT CEILING.  isBinderPreflightOk() takes its bound
     # as an unsigned int, so a caller can name a figure larger than any plausible servicemanager
     # start-up delay and every millisecond of it would be time LibCCEC::init() spends blocked.
     # The clamp is measured driverlessly through the probe seam, which records the bound it was
     # actually handed, so both arms are enforced here rather than deferred.
-    "preflight.timeout-clamped|ccec/src/DriverAidlImpl.cpp|2671|0|0|invocation A, DriverAidlPreflightTest.ClampsAContextManagerTimeoutAboveTheCeilingToTheCeiling (measured taken 1)|required||if (effectiveTimeoutMs > MAX_CONTEXT_MANAGER_TIMEOUT_MS) {"
-    "preflight.timeout-within-ceiling|ccec/src/DriverAidlImpl.cpp|2671|0|1|invocation A, every other preflight case including .PassesAContextManagerTimeoutAtTheCeilingThroughUnchanged (measured taken 12)|required||if (effectiveTimeoutMs > MAX_CONTEXT_MANAGER_TIMEOUT_MS) {"
+    "preflight.timeout-clamped|ccec/src/DriverAidlImpl.cpp|2809|0|0|invocation A, DriverAidlPreflightTest.ClampsAContextManagerTimeoutAboveTheCeilingToTheCeiling (measured taken 1)|required||if (effectiveTimeoutMs > MAX_CONTEXT_MANAGER_TIMEOUT_MS) {"
+    "preflight.timeout-within-ceiling|ccec/src/DriverAidlImpl.cpp|2809|0|1|invocation A, every other preflight case including .PassesAContextManagerTimeoutAtTheCeilingThroughUnchanged (measured taken 12)|required||if (effectiveTimeoutMs > MAX_CONTEXT_MANAGER_TIMEOUT_MS) {"
 
     # ---- GROUP 10: THE SLOW-HAL-CALL DIAGNOSTIC.  A THRESHOLD, NOT A TIMEOUT: crossing it
     # abandons nothing and raises nothing, it only leaves a LOG_WARN line where a stall would
@@ -7147,12 +7147,12 @@ readonly BRANCH_MANIFEST=(
     # driverlessly through the same BinderPreflightProbe seam the rest of GROUP 3 uses: the
     # object behind the descriptor can be identified at all, it is a CHARACTER DEVICE, and it is
     # owned by ROOT.  Each is a real refusal with its own verdict, so each is one arc pair.
-    "preflight.identity-unreadable|ccec/src/DriverAidlImpl.cpp|2554|0|2|unit test, DriverAidlPreflightTest.DeclinesANodeWhoseDescriptorCannotBeIdentified: without an identity there is nothing to re-verify before libbinder opens the same name, so the predicate declines rather than proceeding on an unverifiable node (measured taken 2)|required||if (0 != probe.identifyDescriptor(driverFd, &identity)) {"
-    "preflight.identity-read|ccec/src/DriverAidlImpl.cpp|2554|0|3|every synthetic-probe case whose node identifies, which is every case that reaches the type and owner gates below (measured taken 23)|required||if (0 != probe.identifyDescriptor(driverFd, &identity)) {"
-    "preflight.not-character-device|ccec/src/DriverAidlImpl.cpp|2571|0|0|unit test, DriverAidlPreflightTest.DeclinesANodeThatIsNotACharacterDevice. Every supported binder layout publishes a character device -- a devtmpfs node under /dev, or a binderfs node reached directly or through a symlink -- so a regular file at that name is the shape a substitution takes and is refused rather than handed to libbinder (measured taken 3)|required||if ((identity.mode & BINDER_NODE_MODE_TYPE_MASK) != BINDER_NODE_MODE_CHARACTER_DEVICE) {"
-    "preflight.character-device|ccec/src/DriverAidlImpl.cpp|2571|0|1|every case whose node is the expected character device (measured taken 20)|required||if ((identity.mode & BINDER_NODE_MODE_TYPE_MASK) != BINDER_NODE_MODE_CHARACTER_DEVICE) {"
-    "preflight.owner-not-root|ccec/src/DriverAidlImpl.cpp|2587|0|0|unit test, DriverAidlPreflightTest.DeclinesACharacterDeviceThatIsNotOwnedByRoot. devtmpfs and binderfs both create the node as root, so a node owned by anyone else is one an unprivileged process could have created, and selecting the AIDL path against it would put every transmitted and every delivered frame behind whatever registered there (measured taken 2)|required||if (identity.uid != BINDER_NODE_REQUIRED_OWNER_UID) {"
-    "preflight.owner-root|ccec/src/DriverAidlImpl.cpp|2587|0|1|every case whose node is root-owned (measured taken 18)|required||if (identity.uid != BINDER_NODE_REQUIRED_OWNER_UID) {"
+    "preflight.identity-unreadable|ccec/src/DriverAidlImpl.cpp|2692|0|2|unit test, DriverAidlPreflightTest.DeclinesANodeWhoseDescriptorCannotBeIdentified: without an identity there is nothing to re-verify before libbinder opens the same name, so the predicate declines rather than proceeding on an unverifiable node (measured taken 2)|required||if (0 != probe.identifyDescriptor(driverFd, &identity)) {"
+    "preflight.identity-read|ccec/src/DriverAidlImpl.cpp|2692|0|3|every synthetic-probe case whose node identifies, which is every case that reaches the type and owner gates below (measured taken 23)|required||if (0 != probe.identifyDescriptor(driverFd, &identity)) {"
+    "preflight.not-character-device|ccec/src/DriverAidlImpl.cpp|2709|0|0|unit test, DriverAidlPreflightTest.DeclinesANodeThatIsNotACharacterDevice. Every supported binder layout publishes a character device -- a devtmpfs node under /dev, or a binderfs node reached directly or through a symlink -- so a regular file at that name is the shape a substitution takes and is refused rather than handed to libbinder (measured taken 3)|required||if ((identity.mode & BINDER_NODE_MODE_TYPE_MASK) != BINDER_NODE_MODE_CHARACTER_DEVICE) {"
+    "preflight.character-device|ccec/src/DriverAidlImpl.cpp|2709|0|1|every case whose node is the expected character device (measured taken 20)|required||if ((identity.mode & BINDER_NODE_MODE_TYPE_MASK) != BINDER_NODE_MODE_CHARACTER_DEVICE) {"
+    "preflight.owner-not-root|ccec/src/DriverAidlImpl.cpp|2725|0|0|unit test, DriverAidlPreflightTest.DeclinesACharacterDeviceThatIsNotOwnedByRoot. devtmpfs and binderfs both create the node as root, so a node owned by anyone else is one an unprivileged process could have created, and selecting the AIDL path against it would put every transmitted and every delivered frame behind whatever registered there (measured taken 2)|required||if (identity.uid != BINDER_NODE_REQUIRED_OWNER_UID) {"
+    "preflight.owner-root|ccec/src/DriverAidlImpl.cpp|2725|0|1|every case whose node is root-owned (measured taken 18)|required||if (identity.uid != BINDER_NODE_REQUIRED_OWNER_UID) {"
     # THE PERMISSION OBSERVATION IS VERDICT-NEUTRAL, AND BOTH ARMS ARE STILL REQUIRED.  A
     # permissive binder node is REPORTED and then accepted, because binder requires the node to
     # be openable by every client that uses it and rejecting a broadly-accessible node would
@@ -7167,8 +7167,8 @@ readonly BRANCH_MANIFEST=(
     # counters puts branch 0 at taken 1 and branch 1 at taken 0, so branch 0 is the arm that
     # reports.  gcov's "(fallthrough)" annotation does NOT identify the true arm consistently
     # across sites in this file -- verify by running one case, never by reading the label.
-    "preflight.node-writable-beyond-owner|ccec/src/DriverAidlImpl.cpp|2622|0|0|unit test, DriverAidlPreflightTest.AcceptsAWorldWritableNodeAndReportsItsPermissionBits: a 0666 root-owned character device is ACCEPTED and its permission bits are reported once (measured taken 1)|required||if (0u != (identity.mode & (BINDER_NODE_MODE_GROUP_WRITE | BINDER_NODE_MODE_WORLD_WRITE))) {"
-    "preflight.node-owner-only|ccec/src/DriverAidlImpl.cpp|2622|0|1|every other case reaching this point, whose synthetic node is not writable beyond its owner and which must emit nothing (measured taken 22)|required||if (0u != (identity.mode & (BINDER_NODE_MODE_GROUP_WRITE | BINDER_NODE_MODE_WORLD_WRITE))) {"
+    "preflight.node-writable-beyond-owner|ccec/src/DriverAidlImpl.cpp|2760|0|0|unit test, DriverAidlPreflightTest.AcceptsAWorldWritableNodeAndReportsItsPermissionBits: a 0666 root-owned character device is ACCEPTED and its permission bits are reported once (measured taken 1)|required||if (0u != (identity.mode & (BINDER_NODE_MODE_GROUP_WRITE | BINDER_NODE_MODE_WORLD_WRITE))) {"
+    "preflight.node-owner-only|ccec/src/DriverAidlImpl.cpp|2760|0|1|every other case reaching this point, whose synthetic node is not writable beyond its owner and which must emit nothing (measured taken 22)|required||if (0u != (identity.mode & (BINDER_NODE_MODE_GROUP_WRITE | BINDER_NODE_MODE_WORLD_WRITE))) {"
 
     # ---- GROUP 3b: THE PRE-LOOKUP RE-VERIFICATION, which is the other half of the F3 custody
     # path and the whole of the F4 mitigation that IS implementable.  reverifyBinderNodeBeforeLookup()
@@ -7187,10 +7187,10 @@ readonly BRANCH_MANIFEST=(
     # first is driven by a probe whose identify fails only on its SECOND call, and the second
     # cannot be driven on a driverless host at all, because a re-verification that SUCCEEDS is
     # followed immediately by the real getService(), which needs a driver.
-    "reverify.path-unresolvable|ccec/src/DriverAidlImpl.cpp|3045|0|2|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenThePathCannotBeResolvedBeforeTheLookup: the name stopped resolving between the preflight and the lookup (measured taken 1)|required||if (0 != probe.identifyPath(binderDriverPath.c_str(), &observed)) {"
-    "reverify.path-resolved|ccec/src/DriverAidlImpl.cpp|3045|0|3|every case that reaches the identity comparison below (measured taken 3)|required||if (0 != probe.identifyPath(binderDriverPath.c_str(), &observed)) {"
-    "reverify.identity-changed|ccec/src/DriverAidlImpl.cpp|3057|0|3|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenTheNameResolvesToADifferentNodeBeforeTheLookup: the substituted-node case this whole custody path exists for (measured taken 1)|required||if (!binderNodeIdentitiesMatch(validated, observed)) {"
-    "reverify.identity-unchanged|ccec/src/DriverAidlImpl.cpp|3057|0|2|every case whose node is still the validated one (measured taken 1)|required||if (!binderNodeIdentitiesMatch(validated, observed)) {"
+    "reverify.path-unresolvable|ccec/src/DriverAidlImpl.cpp|3183|0|2|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenThePathCannotBeResolvedBeforeTheLookup: the name stopped resolving between the preflight and the lookup (measured taken 1)|required||if (0 != probe.identifyPath(binderDriverPath.c_str(), &observed)) {"
+    "reverify.path-resolved|ccec/src/DriverAidlImpl.cpp|3183|0|3|every case that reaches the identity comparison below (measured taken 3)|required||if (0 != probe.identifyPath(binderDriverPath.c_str(), &observed)) {"
+    "reverify.identity-changed|ccec/src/DriverAidlImpl.cpp|3195|0|3|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenTheNameResolvesToADifferentNodeBeforeTheLookup: the substituted-node case this whole custody path exists for (measured taken 1)|required||if (!binderNodeIdentitiesMatch(validated, observed)) {"
+    "reverify.identity-unchanged|ccec/src/DriverAidlImpl.cpp|3195|0|2|every case whose node is still the validated one (measured taken 1)|required||if (!binderNodeIdentitiesMatch(validated, observed)) {"
     # THE FIVE-ATTRIBUTE COMPARISON IS MEASURED HERE, AT ITS CALLER, AND DELIBERATELY NOT AT THE
     # `if (0u == divergence)` DECISION INSIDE binderNodeIdentitiesMatch() ITSELF.  The helper is
     # inlined at some call sites and not others, so the arcs on its out-of-line body move with the
@@ -7203,12 +7203,12 @@ readonly BRANCH_MANIFEST=(
     # ...IsRePermissionedBeforeTheLookup, uid by ...IsReOwnedBeforeTheLookup, device/inode/rdev by
     # the pre-existing substitution cases, and the all-match path by
     # ...AcceptsAnUnchangedNodeOnAllFiveIdentityAttributes.
-    "reverify.reopened-unidentifiable|ccec/src/DriverAidlImpl.cpp|3080|0|3|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenTheReopenedDescriptorCannotBeIdentified, whose probe fails identifyDescriptor on its SECOND call only. THE ARC POLARITY IS PROVEN RATHER THAN ASSUMED: this is a short-circuited OR, and index 2 -- the operand-FALSE arc -- carries exactly the number of times the second operand was evaluated at all, which is the call count recorded on the next line, so index 3 is the operand-TRUE arc this record maps|required||if ((0 != probe.identifyDescriptor(freshFd, &reopened)) ||"
-    "reverify.reopened-identified|ccec/src/DriverAidlImpl.cpp|3080|0|2|every case whose reopened descriptor identifies, which is every case that goes on to compare it against the validated identity (measured taken 2). The second operand's own arc pair, on the continuation line, is deliberately NOT mapped: both of its arcs are taken exactly once by this suite, so nothing in the trace distinguishes the match arm from the mismatch arm, and a record that named one of them would be a guess wearing a coordinate|required||if ((0 != probe.identifyDescriptor(freshFd, &reopened)) ||"
-    "reverify.context-manager-silent|ccec/src/DriverAidlImpl.cpp|3102|0|0|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenTheContextManagerStopsAnsweringBeforeTheLookup. This is the F4 mitigation measured: driver present and servicemanager wedged becomes a DECLINED selection instead of an unbounded wait inside defaultServiceManager() (measured taken 1)|required||if (!contextManagerReachable) {"
-    "reverify.context-manager-answers|ccec/src/DriverAidlImpl.cpp|3102|0|1|invocations B, C and E: a re-verification that succeeds is followed immediately by the real halcompat::getService(), so this arm needs a binder driver and cannot be driven on a driverless host|required|B|if (!contextManagerReachable) {"
-    "availability.reverify-declined|ccec/src/DriverAidlImpl.cpp|3366|0|2|the caller's side of the same decision: every re-verification refusal above reaches isServiceAvailable() through this arc and declines the AIDL path nonfatally (measured taken 4)|required||if (!reverifyBinderNodeBeforeLookup(binderDriverPath, contextManagerTimeoutMs, probe,"
-    "availability.reverify-passed|ccec/src/DriverAidlImpl.cpp|3366|0|3|invocations B, C and E: the arm that proceeds to the service lookup, which needs a binder driver|required|B|if (!reverifyBinderNodeBeforeLookup(binderDriverPath, contextManagerTimeoutMs, probe,"
+    "reverify.reopened-unidentifiable|ccec/src/DriverAidlImpl.cpp|3218|0|3|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenTheReopenedDescriptorCannotBeIdentified, whose probe fails identifyDescriptor on its SECOND call only. THE ARC POLARITY IS PROVEN RATHER THAN ASSUMED: this is a short-circuited OR, and index 2 -- the operand-FALSE arc -- carries exactly the number of times the second operand was evaluated at all, which is the call count recorded on the next line, so index 3 is the operand-TRUE arc this record maps|required||if ((0 != probe.identifyDescriptor(freshFd, &reopened)) ||"
+    "reverify.reopened-identified|ccec/src/DriverAidlImpl.cpp|3218|0|2|every case whose reopened descriptor identifies, which is every case that goes on to compare it against the validated identity (measured taken 2). The second operand's own arc pair, on the continuation line, is deliberately NOT mapped: both of its arcs are taken exactly once by this suite, so nothing in the trace distinguishes the match arm from the mismatch arm, and a record that named one of them would be a guess wearing a coordinate|required||if ((0 != probe.identifyDescriptor(freshFd, &reopened)) ||"
+    "reverify.context-manager-silent|ccec/src/DriverAidlImpl.cpp|3240|0|0|unit test, DriverAidlPreflightTest.TheServiceQueryDeclinesWhenTheContextManagerStopsAnsweringBeforeTheLookup. This is the F4 mitigation measured: driver present and servicemanager wedged becomes a DECLINED selection instead of an unbounded wait inside defaultServiceManager() (measured taken 1)|required||if (!contextManagerReachable) {"
+    "reverify.context-manager-answers|ccec/src/DriverAidlImpl.cpp|3240|0|1|invocations B, C and E: a re-verification that succeeds is followed immediately by the real halcompat::getService(), so this arm needs a binder driver and cannot be driven on a driverless host|required|B|if (!contextManagerReachable) {"
+    "availability.reverify-declined|ccec/src/DriverAidlImpl.cpp|3578|0|2|the caller's side of the same decision: every re-verification refusal above reaches isServiceAvailable() through this arc and declines the AIDL path nonfatally (measured taken 4)|required||if (!reverifyBinderNodeBeforeLookup(binderDriverPath, contextManagerTimeoutMs, probe,"
+    "availability.reverify-passed|ccec/src/DriverAidlImpl.cpp|3578|0|3|invocations B, C and E: the arm that proceeds to the service lookup, which needs a binder driver|required|B|if (!reverifyBinderNodeBeforeLookup(binderDriverPath, contextManagerTimeoutMs, probe,"
 
     # ---- GROUP 5a: THE LOGICAL-ADDRESS RANGE GATE, added with F7.  getLogicalAddress() used to
     # convert entry zero of the HAL's array with an unchecked cast, so any int32 the HAL returned
@@ -7220,10 +7220,10 @@ readonly BRANCH_MANIFEST=(
     # It is a short-circuited `||`, so the first operand's pair is on the `if` line and the
     # second operand's pair follows it there; the polarity is fixed by the count, exactly as in
     # GROUP 3b -- index 0 carries the number of times the second operand was evaluated.
-    "getlogical.address-below-min|ccec/src/DriverAidlImpl.cpp|2075|0|1|invocation A, DriverAidlLocalInstanceTest.TheLogicalAddressReadAcceptsOnlyContractRangeValues: the -1 and INT32_MIN rows (measured taken 2)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
-    "getlogical.address-at-or-above-min|ccec/src/DriverAidlImpl.cpp|2075|0|0|every row at or above 0x0, which is every row that reaches the upper-bound test (measured taken 11)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
-    "getlogical.address-above-max|ccec/src/DriverAidlImpl.cpp|2075|0|3|invocation A, the 0xF, 0x10, 256, 271 and INT32_MAX rows of the same case -- including the two that a post-conversion check would have accepted (measured taken 5)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
-    "getlogical.address-within-contract|ccec/src/DriverAidlImpl.cpp|2075|0|2|invocation A, the 0x0, 0x1, 0x4 and 0xE rows plus the multi-address case's entry zero: the only values converted (measured taken 6)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
+    "getlogical.address-below-min|ccec/src/DriverAidlImpl.cpp|2179|0|1|invocation A, DriverAidlLocalInstanceTest.TheLogicalAddressReadAcceptsOnlyContractRangeValues: the -1 and INT32_MIN rows (measured taken 2)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
+    "getlogical.address-at-or-above-min|ccec/src/DriverAidlImpl.cpp|2179|0|0|every row at or above 0x0, which is every row that reaches the upper-bound test (measured taken 11)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
+    "getlogical.address-above-max|ccec/src/DriverAidlImpl.cpp|2179|0|3|invocation A, the 0xF, 0x10, 256, 271 and INT32_MAX rows of the same case -- including the two that a post-conversion check would have accepted (measured taken 5)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
+    "getlogical.address-within-contract|ccec/src/DriverAidlImpl.cpp|2179|0|2|invocation A, the 0x0, 0x1, 0x4 and 0xE rows plus the multi-address case's entry zero: the only values converted (measured taken 6)|required||if ((rawAddress < HAL_LOGICAL_ADDRESS_MIN) || (rawAddress > HAL_LOGICAL_ADDRESS_MAX)) {"
 
     # ---- GROUP 6a: THE TRANSMIT-STATUS SWITCH, added with F8.  write() used to decide the
     # transmit outcome with an if/else-if chain over SendMessageStatus, so a value that was
@@ -7237,8 +7237,8 @@ readonly BRANCH_MANIFEST=(
     # are taken exactly twice each, so nothing in the trace tells BUSY from ACK_STATE_1, and
     # naming either would be a guess.  Their behaviour is asserted by the tests regardless;
     # what is missing is only a coordinate this gate could hold them to.
-    "transmit.status-unknown|ccec/src/DriverAidlImpl.cpp|1987|0|3|invocation A, DriverAidlLocalInstanceTest.AnUndocumentedTransmitStatusIsTreatedAsAFailedTransmit: 3, 4, 99, -1, INT32_MAX and INT32_MIN crossed with a directed and a broadcast destination, all twelve raising IOException instead of reporting a completed send (measured taken 12)|required||switch (sendResult) {"
-    "transmit.status-ack-state-0|ccec/src/DriverAidlImpl.cpp|1987|0|2|invocation A, DriverAidlLocalInstanceTest.EveryDocumentedTransmitStatusKeepsItsLegacyMapping: the directed-ACK row, the CEC-CTS-9-3-3 broadcast row and the non-CTS broadcast row (measured taken 3)|required||switch (sendResult) {"
+    "transmit.status-unknown|ccec/src/DriverAidlImpl.cpp|2055|0|3|invocation A, DriverAidlLocalInstanceTest.AnUndocumentedTransmitStatusIsTreatedAsAFailedTransmit: 3, 4, 99, -1, INT32_MAX and INT32_MIN crossed with a directed and a broadcast destination, all twelve raising IOException instead of reporting a completed send (measured taken 12)|required||switch (sendResult) {"
+    "transmit.status-ack-state-0|ccec/src/DriverAidlImpl.cpp|2055|0|2|invocation A, DriverAidlLocalInstanceTest.EveryDocumentedTransmitStatusKeepsItsLegacyMapping: the directed-ACK row, the CEC-CTS-9-3-3 broadcast row and the non-CTS broadcast row (measured taken 3)|required||switch (sendResult) {"
 
     # ---- GROUP 7a: THE RECEIVE FLUSH'S NULL CHECK, added with F5.  read()'s flush arm dequeued
     # and dereferenced without checking, while close() offers a NULL sentinel on every transition
@@ -7251,8 +7251,8 @@ readonly BRANCH_MANIFEST=(
     # zeroed counter set puts 1 on arc 0 and 0 on arc 1, and that case's flush drains exactly one
     # entry and that entry is a sentinel -- so arc 0 is the SKIPPED-SENTINEL arm.  A reader who
     # assumes the shape rather than repeating that measurement will map these two backwards.
-    "read.flush-sentinel-skipped|ccec/src/DriverAidlImpl.cpp|1853|0|0|invocation A, DriverAidlLocalInstanceTest.TheReceiveFlushSurvivesASecondCloseSentinel: the second sentinel is skipped rather than dereferenced (measured taken 1)|required||if (inFrame != 0) {"
-    "read.flush-frame-drained|ccec/src/DriverAidlImpl.cpp|1853|0|1|invocation A, DriverAidlLocalInstanceTest.TheReceiveFlushReleasesARealFrameQueuedBehindTheCloseSentinel: the parity arm, where the flush meets a real frame and copies and releases it exactly as it did before the null check existed|required||if (inFrame != 0) {"
+    "read.flush-sentinel-skipped|ccec/src/DriverAidlImpl.cpp|1887|0|0|invocation A, DriverAidlLocalInstanceTest.TheReceiveFlushSurvivesASecondCloseSentinel: the second sentinel is skipped rather than dereferenced (measured taken 1)|required||if (inFrame != 0) {"
+    "read.flush-frame-drained|ccec/src/DriverAidlImpl.cpp|1887|0|1|invocation A, DriverAidlLocalInstanceTest.TheReceiveFlushReleasesARealFrameQueuedBehindTheCloseSentinel: the parity arm, where the flush meets a real frame and copies and releases it exactly as it did before the null check existed|required||if (inFrame != 0) {"
 )
 
 # Set by apply_branch_gate and folded into apply_gate's own failure count, so the script keeps

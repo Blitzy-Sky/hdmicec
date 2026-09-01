@@ -115,14 +115,24 @@ than translation units because `ccec/test_LibCCEC.cpp` declares `LibCCECTest` an
 and `MessageDecoderTrackingTest`.
 
 Everything above is the **legacy-path baseline**: the units enumerated in this section, unmodified.
-The binary also registers the AIDL contract suite from `ccec/test_DriverAidl.cpp` -- **91 cases in
-7 fixtures**, so `run_L1Tests` now registers **574 cases in 25 fixtures** -- and the L2 tier is a
+The binary also registers the AIDL contract suite from `ccec/test_DriverAidl.cpp` -- **119 cases in
+7 fixtures**, so `run_L1Tests` now registers **602 cases in 25 fixtures** -- and the L2 tier is a
 separate binary again, with **14 cases in 3 fixtures**.
+
+**Those 119 are counted here and nowhere else in this guide**, so that no second copy of the total
+can drift away from this one: a passage below that splits them names this same total and points
+back here, and carries no count of its own.  Measured with `--gtest_list_tests`, the seven fixtures
+group by the back-end each one needs resolved -- `DriverAidlCompatibilityTest` (23),
+`DriverAidlPreflightTest` (27) and `DriverAidlLocalInstanceTest` (25) are back-end independent and
+run under every L1 invocation, which is 75 cases; `DriverAidlSelectionTest` (4) and
+`DriverAidlLegacyArmTest` (5) need the legacy back-end resolved, 9; `DriverAidlSessionTest` (23)
+and `DriverAidlTransmitTest` (12) need the AIDL back-end resolved, 35.  Those sum to the 119 above,
+and the 84 the default invocation selects is the first two groups: 75 + 9.
 
 **Registered is not run, and this guide keeps the two apart everywhere.**  No single invocation
 runs the whole set, because a fixture cannot opt into a different back-end from its own `SetUp`
 -- see [Back-End Selection](#back-end-selection-the-invocation-matrix).  The default invocation
-selects **539 of the 574** and a measured run passes all 539; the other 35 are the two AIDL-only
+selects **567 of the 602** and a measured run passes all 567; the other 35 are the two AIDL-only
 fixtures.  Re-measure with `--gtest_list_tests` on your own build rather than trusting any figure
 here, per the note above.
 
@@ -276,8 +286,8 @@ follows is that same sequence by hand.
 
 **On a host with no Binder driver, expect that command to exit `1`, and expect exactly one file to
 be named.**  Measured on this tree, where only invocations A and D could run: **32 source files,
-84.2% line coverage (2242/2663), 91.2% function, 49.6% branch** — the aggregate clears the 80% bar
-— while the **per-file half fails** on `ccec/src/DriverAidlImpl.cpp` at **41.9%** (216/515).  That
+86.0% line coverage (2405/2795), 91.6% function, 52.5% branch** — the aggregate clears the 80% bar
+— while the **per-file half fails** on `ccec/src/DriverAidlImpl.cpp` at **58.6%** (379/647).  That
 figure is a property of the host rather than of the test set: the file is reached largely from the
 deferred invocations, and the cases that reach it exist and are compiled in, but their invocations
 are **deferred** — no binary is launched for them, so GoogleTest never sees them and they move no
@@ -436,7 +446,7 @@ argument, for one reason: it then reaches *every* way the binary is started, inc
 ```bash
 # The default invocation's filter.  Not optional -- see above, and see
 # "Back-End Selection" below for what the other invocations are.  With it set,
-# expect 539 tests from 23 test suites, 539 passed, 0 skipped, exit 0.
+# expect 567 tests from 23 test suites, 567 passed, 0 skipped, exit 0.
 export GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'
 
 # Run all tests through automake, from the hdmicec submodule root
@@ -536,9 +546,9 @@ later one cannot overwrite an earlier one's evidence:
 
 | Inv | Binary | Fake service | Expected selection | Cases | Has it run? |
 |--------|-------------|---------|---------|---------|---------|
-| A | `run_L1Tests` | not reachable | Legacy | 539 selected, 35 excluded | **Yes: measured 539 of 539 from 23 suites, exit `0`** |
-| B | `run_L1Tests` | in-process, compatible | AIDL, via the local interface | 382 selected, 184 excluded | **No — never executed on any host** |
-| C | `run_L1Tests` | in-process, **incompatible** — reports interface hash `"-1"` | Legacy, with the incompatibility logged | 347 selected, 219 excluded | **No — never executed on any host** |
+| A | `run_L1Tests` | not reachable | Legacy | 567 selected, 35 excluded | **Yes: measured 567 of 567 from 23 suites, exit `0`** |
+| B | `run_L1Tests` | in-process, compatible | AIDL, via the local interface | 418 selected, 184 excluded | **No — never executed on any host** |
+| C | `run_L1Tests` | in-process, **incompatible** — reports interface hash `"-1"` | Legacy, with the incompatibility logged | 383 selected, 219 excluded | **No — never executed on any host** |
 | D | `run_L2Tests` | host not launched | Legacy | 14 registered | **Yes: measured 10 passed, 4 skipped, exit `0`** |
 | E | `run_L2Tests` | host launched and ready | AIDL, over a real remote proxy | 14 registered | **No — never executed on any host** |
 
@@ -571,20 +581,24 @@ defect: **physical-address retrieval is unavailable on the AIDL back-end**, pend
 device-settings HAL contract that governs the read (tracked as blocked item **B1**).  No workaround
 is delivered and none should be added; the assertion for it therefore runs on the legacy arm only.
 
-**Of the contract suite's 83 cases, 48 run under the default invocation and 35 do not**, and the
-difference is worth holding on to when reading anything below:
+**Of the contract suite's 119 cases, 84 run under the default invocation and 35 do not** -- the
+same 119, partitioned the same way, as [Test Coverage](#test-coverage) above rather than a second
+count of them -- and the difference is worth holding on to when reading anything below:
 
-- **Established, inside the default invocation's measured 539.**  All 12 `DriverAidlPreflightTest`
+- **Established, inside the default invocation's measured 567.**  All 27 `DriverAidlPreflightTest`
   cases, covering *every* decision arm of the bounded preflight -- the protocol-version mismatch
   and the matching driver whose context manager never answers included, plus a **positive**
   verdict, all reached through a probe seam the predicate takes as a defaulted parameter, which is
-  what puts them within reach of a host with no Binder driver at all.  All 19 compatibility arms,
-  accept and reject.  All 11 local-instance arms, on a `DriverAidlImpl` whose constructor touches
+  what puts them within reach of a host with no Binder driver at all.  All 23 compatibility arms,
+  accept and reject.  All 25 local-instance arms, on a `DriverAidlImpl` whose constructor touches
   no Binder -- every `status != OPENED` guard, the `writeAsync` prelude ordering, and
-  `getPhysicalAddress`'s B1 block.  The 5 legacy arms, including a **measured receive-path delivery
-  case** that drives a frame from the HAL mock through to an application listener, which is what
-  makes the observation machinery the AIDL arms depend on something demonstrated rather than
-  assumed.  And a structural guard that reads the **real** HDMI CEC Sink plugin source and checks
+  `getPhysicalAddress`'s B1 block.  The 4 selection cases -- the absent-service fallback, the
+  selected-path log line, the factory returning the same object on every call, and a mid-process
+  registration that leaves the resolved back-end alone.  The 5 legacy arms, including a **measured
+  receive-path delivery case** that drives a frame from the HAL mock through to an application
+  listener, which is what makes the observation machinery the AIDL arms depend on something
+  demonstrated rather than assumed.  And, one of those 25 local-instance arms rather than a case
+  beyond them, a structural guard that reads the **real** HDMI CEC Sink plugin source and checks
   that the call-path shapes the AIDL session fixture models still match it.  That source is a
   **required acceptance input**, read at a reviewed revision: the case **fails** when it cannot be
   found, naming `CEC_SINK_CALLER_SOURCE` and every path it tried, and both CI workflows check the
@@ -1346,7 +1360,7 @@ The L1 unit test framework provides:
   vendor conditional** -- the choice is made at run time, so the suites are run once per selection
   outcome (see [Back-End Selection](#back-end-selection-the-invocation-matrix))
 - ⚠️ **Both back-ends are not yet both *executed*.**  The legacy selection has run and is measured
-  green -- invocation A at 539 of 539, invocation D at 10 passed and 4 skipped of 14.  The three
+  green -- invocation A at 567 of 567, invocation D at 10 passed and 4 skipped of 14.  The three
   binder-dependent invocations (B, C, E) have **never been executed on any host in this work**, for
   want of a Binder kernel; their cases are compiled in and assert real outcomes, and they are
   **compile-verified only** until the binder-capable job runs them.  Of those three only **B and E**

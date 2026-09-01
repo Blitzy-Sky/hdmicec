@@ -512,11 +512,16 @@ std::string describeWaitStatus(int status)
  * @brief Reaps a child process, blocking until it has been collected.
  *
  * Called only once the child is known to be on its way out - either because end of file on
- * a descriptor it held says it has closed its descriptors, or because it has been sent a
- * signal it cannot block - so the block here is short by construction rather than by
- * hope. Reaping is not optional: an unreaped child becomes a zombie that outlives the
- * suite, and the whole point of owning a child's lifecycle is that nothing survives the
- * run that started it.
+ * a descriptor it held says it has closed its descriptors, or because it has been sent
+ * SIGKILL, which no process can catch, block or ignore - so the block here is short by
+ * construction rather than by hope. Reaping is not optional: an unreaped child becomes a
+ * zombie that outlives the suite, and the whole point of owning a child's lifecycle is
+ * that nothing survives the run that started it.@n
+ * Every caller honours that precondition, which is what makes this the bounded end of an
+ * unbounded primitive: terminateAndReapChildProcess() reaches it only after an observed
+ * exit or after its own SIGKILL, and EpipeProbeResources' destructor sends SIGKILL
+ * immediately before calling it. It is never reached on the strength of a SIGTERM alone,
+ * because a child is free to handle SIGTERM and one of this harness's children does.
  *
  * @param [in]  childPid                  - Pid of the child to collect
  * @param [out] description               - Receives how the process ended, or why it could
@@ -1570,9 +1575,11 @@ void closeHostControlChannel()
  *
  * Bounded, and free of any timer: while the child is alive it holds the write end of the
  * pipe open, so end of file on the read end happens when and only when the child process
- * has gone. Waiting on that is a real wait on the real event, where polling
- * waitpid() with WNOHANG around a sleep would be a guess about how long death takes -
- * slow to notice a prompt exit and pure delay when the child is wedged.
+ * has gone. Waiting on that is a real wait on the real event, which is why it is preferred
+ * over waitForChildExitByPolling(): a WNOHANG poll around a sleep asks repeatedly instead
+ * of being told, so it notices a prompt exit up to one interval late and does a little work
+ * while nothing is happening. Both are bounded by their timeoutMs; this one is simply the
+ * more precise of the two, and it is available only for a child that holds such a pipe.
  *
  * The descriptor is a parameter rather than the module-scope readiness one so that this
  * function serves every child this harness owns: the host's death channel is its readiness
@@ -1591,7 +1598,12 @@ void closeHostControlChannel()
  * @retval false                                  - The bound expired, or the descriptor
  *                                                  failed, or none was ever opened
  *
- * @see terminateAndReapChildProcess()
+ * @note This is the preferred of the two bounded waits and not the only one. A child that
+ *       was never given a death channel is waited for by waitForChildExitByPolling()
+ *       instead, so that the bound belongs to terminateAndReapChildProcess() rather than
+ *       to what its caller happened to have available.
+ *
+ * @see terminateAndReapChildProcess(), waitForChildExitByPolling()
  */
 bool waitForChildExitViaPipeEof(int pipeReadFd, int timeoutMs)
 {
@@ -1652,6 +1664,165 @@ bool waitForChildExitViaPipeEof(int pipeReadFd, int timeoutMs)
 }
 
 /**
+ * @brief How long to sleep between two WNOHANG waits while polling for a child's exit.
+ *
+ * Ten milliseconds, and the number matters only as the worst case by which a poll notices
+ * an exit that has already happened: one interval. Against the grace periods this file
+ * uses - five seconds for the fake service host, two for the broken-pipe probe child -
+ * that lateness is invisible, and an ordinary termination costs a handful of wake-ups
+ * rather than a busy loop. A much smaller value would spin a core to shave a delay
+ * nothing measures; a much larger one would make a prompt exit look slow and, on the
+ * escalation path, delay the SIGKILL past the grace period the caller asked for.
+ *
+ * It is deliberately not an alternative to the end-of-file channel. Where a child holds a
+ * pipe open for its lifetime, waitForChildExitViaPipeEof() waits on the real event with no
+ * interval at all and is what terminateAndReapChildProcess() uses; this interval governs
+ * only the fallback for a child that was given no such channel, where there is no event to
+ * wait on and the choice is between polling and not bounding the wait at all.
+ */
+const int CHILD_EXIT_POLL_INTERVAL_MS = 10;
+
+/**
+ * @brief How a bounded poll for a child's exit ended.
+ *
+ * Three outcomes rather than a boolean, because the caller must do three different things
+ * with them and two of the three are not "the child is gone". A collected child has
+ * already been reaped by the poll itself and must not be waited for again; a child still
+ * running has to be escalated to SIGKILL; and a wait that was refused means this process
+ * cannot collect that pid at all, which is a reported failure rather than something a
+ * stronger signal would fix.
+ */
+enum class PolledChildExit {
+    Collected,    /**< @brief Exited within the bound and was reaped here; no further wait is owed. */
+    StillRunning, /**< @brief The bound expired with the child alive; it has not been reaped.       */
+    WaitFailed    /**< @brief waitpid() refused, so this process cannot collect that pid.           */
+};
+
+/**
+ * @brief Waits, bounded, for a child to exit by polling waitpid(), and reaps it if it does.
+ *
+ * The fallback bounded wait, for a child that holds no pipe this harness can watch for end
+ * of file. It exists so that the bound on terminate-and-reap is a property of
+ * terminateAndReapChildProcess() itself rather than of whether its caller happened to have
+ * a death channel to pass: without it, a child with no channel would be waited for by an
+ * unbounded blocking reap, and for any child that handles, blocks or ignores SIGTERM - the
+ * fake service host installs a SIGTERM handler - that wait has no bound at all.
+ *
+ * It is the second choice and not the first, which is why waitForChildExitViaPipeEof()
+ * still exists and is still what a child with a channel gets. End of file on a pipe is the
+ * real event, observed the moment it happens; a WNOHANG poll around a sleep is a repeated
+ * question, so it notices an exit up to one CHILD_EXIT_POLL_INTERVAL_MS late and does a
+ * small amount of work while nothing is happening. Both are bounded by the same
+ * timeoutMs, which is the property the caller's guarantee rests on.
+ *
+ * Reaping here rather than reporting "it has exited" and leaving the collection to the
+ * caller is forced by the mechanism: WNOHANG cannot tell that a child has exited without
+ * collecting it, so the poll that observes the exit is the reap. That is why Collected is
+ * distinguished from StillRunning at all - a caller that went on to wait again on a pid
+ * this call had already collected would get ECHILD and would have to report a child it in
+ * fact collected as one it lost.
+ *
+ * @param [in]  childPid                  - Pid of the child to wait for. Must be positive;
+ *                                          the caller refuses a non-positive pid before it
+ *                                          signals anything
+ * @param [in]  timeoutMs                 - Longest time to wait, in milliseconds. A
+ *                                          non-positive value performs exactly one
+ *                                          non-blocking check, which is the honest reading
+ *                                          of a zero-length grace period
+ * @param [out] description               - Receives how the process ended on Collected, or
+ *                                          why it could not be collected on WaitFailed. Left
+ *                                          untouched on StillRunning, where the caller's
+ *                                          escalation and blocking reap produce it instead
+ *
+ * @return PolledChildExit                        - Which of the three outcomes occurred
+ * @retval PolledChildExit::Collected             - Exited within the bound and was reaped;
+ *                                                  the caller owes it no further waitpid()
+ * @retval PolledChildExit::StillRunning          - The bound expired; the child is alive and
+ *                                                  unreaped, and SIGKILL is the next step
+ * @retval PolledChildExit::WaitFailed            - waitpid() refused - in practice ECHILD,
+ *                                                  meaning the pid is not this process's
+ *                                                  child or has already been collected
+ *
+ * @pre childPid is a child of this process that has been signalled, or is about to be.
+ *
+ * @post On Collected no child exists for childPid and nothing further may be waited on it.
+ *
+ * @warning Interrupted waits are retried rather than reported: EINTR here means a signal
+ *          arrived, not that the child is unreachable, and a wait that gave up on it would
+ *          hand back StillRunning for a child that had exited and escalate to SIGKILL for
+ *          no reason.
+ *
+ * @see terminateAndReapChildProcess(), waitForChildExitViaPipeEof(), describeWaitStatus()
+ */
+PolledChildExit waitForChildExitByPolling(pid_t childPid, int timeoutMs,
+                                          std::string &description)
+{
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+
+    for (;;) {
+        int status = 0;
+        const pid_t observed = ::waitpid(childPid, &status, WNOHANG);
+
+        if (observed > 0) {
+            /*
+             * Collected, and the status is this child's: waitpid() asked for one positive
+             * pid returns that pid, 0 or -1 and nothing else. The test is on the sign
+             * rather than on equality with childPid because those three are the whole of
+             * the domain, and an equality test would imply a fourth branch - "some other
+             * pid was collected" - that cannot occur and that nothing here could do
+             * anything useful about.
+             */
+            description = describeWaitStatus(status);
+            return PolledChildExit::Collected;
+        }
+
+        if (observed < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            /*
+             * The same sentence reapChildBlocking() produces for the same condition, so
+             * that an outcome string reads identically whichever of the two waits reported
+             * it. In practice this is ECHILD: the pid is not a child of this process, or
+             * something else has already collected it.
+             */
+            description = std::string("could not be reaped: ") + std::strerror(errno);
+            return PolledChildExit::WaitFailed;
+        }
+
+        /*
+         * Zero: the child exists and has not changed state. The deadline is re-read from
+         * the monotonic clock rather than counted in iterations, so a sleep the kernel cut
+         * short by a signal, or ran long under load, cannot stretch or shrink the bound.
+         */
+        const std::chrono::milliseconds remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+
+        if (remaining.count() <= 0) {
+            return PolledChildExit::StillRunning;
+        }
+
+        /*
+         * poll() with no descriptors is this file's sleep: it is already the primitive
+         * every other bounded wait here uses, it needs nothing this translation unit does
+         * not already include, and it takes its interval in the same milliseconds as every
+         * other bound in the file. The interval is clamped to what is left of the deadline
+         * so the last sleep cannot overrun it, and a sleep interrupted by a signal simply
+         * returns early to a loop that re-checks both the child and the clock.
+         */
+        const long long remainingMs = static_cast<long long>(remaining.count());
+        const int sleepMs           = (remainingMs < CHILD_EXIT_POLL_INTERVAL_MS)
+                                          ? static_cast<int>(remainingMs)
+                                          : CHILD_EXIT_POLL_INTERVAL_MS;
+
+        ::poll(nullptr, 0, sleepMs);
+    }
+}
+
+/**
  * @brief Signals a child, waits for it within a bound, escalates if it stays, and reaps it.
  *
  * The whole of the terminate-and-reap contract, in one place and free of module-scope state, so
@@ -1668,33 +1839,59 @@ bool waitForChildExitViaPipeEof(int pipeReadFd, int timeoutMs)
  * hold the production service name and make the next run fail on a stale registration, turning
  * one failure into a series of them.
  *
+ * @par The bound is this function's, on every path
+ * The wait and the escalation run unconditionally, and the observation descriptor selects only
+ * how the grace period is spent, never whether there is one. With a descriptor the wait is
+ * end of file on a pipe the child holds for its lifetime - the real event, observed the instant
+ * it happens, and the path the broken-pipe seam exercises. Without one the same gracePeriodMs
+ * is spent polling waitpid() with WNOHANG, which notices an exit up to one
+ * CHILD_EXIT_POLL_INTERVAL_MS late and reaps it in the act of noticing. Either way the grace
+ * period is bounded by gracePeriodMs, and the final blocking reap is bounded because it is
+ * reached only after the child has been observed to exit or has been sent SIGKILL, which no
+ * process can catch, block or ignore.@n
+ * That is a deliberate change of where the guarantee lives. An earlier form ran the wait and the
+ * escalation only when a descriptor was supplied and let an unbounded blocking reap serve as the
+ * wait otherwise, justified by the claim that a child without a channel leaves SIGTERM at
+ * SIG_DFL. That claim is a property of particular children rather than of this function - the
+ * fake service host installs a SIGTERM handler, so for that child SIGTERM is not
+ * default-terminating - and it made a termination guarantee depend on an invariant held in
+ * whichever caller assigned the descriptor. A child that handles or ignores SIGTERM is now
+ * bounded whether or not it was given a death channel, and no caller has to know that to be
+ * safe.
+ *
  * @param [in]  childPid                  - Pid of the child to end. Must be positive
  * @param [in]  description               - How to name the child in traces and in the outcome,
  *                                          e.g. "the fake HDMI CEC AIDL service host"
  * @param [in]  exitObservationFd         - Read end of a pipe whose only write end the child
  *                                          holds, used to observe its exit without a timer.
  *                                          Negative when the child has no such channel, in
- *                                          which case the bounded wait is skipped and the
- *                                          blocking reap below is what waits
+ *                                          which case the same grace period is served by
+ *                                          polling waitpid() instead. The wait is never
+ *                                          skipped
  * @param [in]  gracePeriodMs             - How long the child has to exit after SIGTERM before
- *                                          SIGKILL is sent. Ignored when there is no
- *                                          observation descriptor, because nothing could then
- *                                          say whether the grace period had been used
+ *                                          SIGKILL is sent. Applied on both paths
  * @param [out] outcome                   - Receives how the child ended, or why it could not
  *                                          be collected, in both cases as a phrase
  *
  * @return bool                                   - Whether the child was collected
- * @retval true                                   - Reaped; outcome names how it ended
+ * @retval true                                   - Reaped, by the polling wait or by the
+ *                                                  blocking reap; outcome names how it ended
  * @retval false                                  - childPid was not a usable pid, or waitpid()
- *                                                  failed; outcome says which
+ *                                                  refused; outcome says which
  *
- * @post No child exists for childPid, so nothing this call was given can become a zombie.
+ * @post No child exists for childPid, so nothing this call was given can become a zombie -
+ *       except where waitpid() itself refused the pid, which is reported as false because no
+ *       signal can remedy it.
  *
  * @warning The caller owns the descriptors. This function closes none of them, because the two
  *          callers hold different ones for different lifetimes and a close here would be
  *          invisible to whichever of them still needed it.
+ * @warning A child collected by the polling wait must not be waited on again: a second
+ *          waitpid() on a reaped pid fails with ECHILD, which would report a child that was in
+ *          fact collected as one this harness lost. The blocking reap below is therefore
+ *          skipped on exactly that path, and on no other.
  *
- * @see reapChildBlocking(), waitForChildExitViaPipeEof()
+ * @see reapChildBlocking(), waitForChildExitViaPipeEof(), waitForChildExitByPolling()
  */
 bool terminateAndReapChildProcess(pid_t childPid, const std::string &description,
                                   int exitObservationFd, int gracePeriodMs, std::string &outcome)
@@ -1728,23 +1925,68 @@ bool terminateAndReapChildProcess(pid_t childPid, const std::string &description
                   "reaped below regardless" << std::endl;
     }
 
+    /*
+     * The bounded wait, in whichever of its two forms this child's descriptor selects. Both
+     * spend the same gracePeriodMs and both are bounded; what the descriptor buys is precision,
+     * not the bound. End of file on a pipe the child holds for its lifetime is the real event
+     * and is noticed the instant it happens, so it stays the preferred form and remains the one
+     * the broken-pipe seam drives; polling waitpid() with WNOHANG is what a child with no such
+     * channel gets, and it reaps in the act of observing, which is why its outcome is tracked
+     * separately below.
+     */
+    bool exitObserved    = false;
+    bool collectedByPoll = false;
+    bool waitRefused     = false;
+
     if (exitObservationFd >= 0) {
-        if (!waitForChildExitViaPipeEof(exitObservationFd, gracePeriodMs)) {
+        exitObserved = waitForChildExitViaPipeEof(exitObservationFd, gracePeriodMs);
+    } else {
+        switch (waitForChildExitByPolling(childPid, gracePeriodMs, outcome)) {
+        case PolledChildExit::Collected:
+            exitObserved    = true;
+            collectedByPoll = true;
+            break;
+
+        case PolledChildExit::StillRunning:
+            break;
+
+        case PolledChildExit::WaitFailed:
+            /*
+             * waitpid() has disowned the pid - ECHILD in practice, meaning it is not a child of
+             * this process or something else has already collected it. Neither SIGKILL nor a
+             * blocking reap can improve on that, and signalling a pid this process does not own
+             * is a hazard rather than a precaution, because the operating system is free to have
+             * reused the number. So the escalation and the reap are both skipped and the outcome
+             * the poll produced is what gets reported.
+             */
+            waitRefused = true;
+            break;
+        }
+    }
+
+    bool reaped = collectedByPoll;
+
+    if (!waitRefused) {
+        if (!exitObserved) {
             std::cout << TRACE_PREFIX << "Pid " << pidForTrace << " had not exited "
                       << gracePeriodMs << " ms after SIGTERM; escalating to SIGKILL so it cannot "
                       "outlive this run" << std::endl;
             ::kill(childPid, SIGKILL);
         }
-    }
 
-    /*
-     * Without an observation descriptor the blocking reap below is the wait, and that is sound
-     * for the one child that has none: the seam's child installs SIG_DFL for SIGTERM itself
-     * before it blocks, so the signal above terminates it rather than depending on whatever
-     * disposition it inherited. A future child that could ignore SIGTERM must be given a death
-     * channel, which is why the parameter exists rather than being assumed absent.
-     */
-    const bool reaped = reapChildBlocking(childPid, outcome);
+        /*
+         * The blocking reap, and it blocks only for as long as it takes the kernel to hand over a
+         * status that already exists or is about to: it is reached either after the child was
+         * observed to exit, or after SIGKILL, which cannot be caught, blocked or ignored, so the
+         * child is dead or dying in both cases. It is skipped on exactly one path - where the
+         * polling wait above already collected the child - because a second waitpid() on a reaped
+         * pid fails with ECHILD, and reporting that as a failure would describe a child this
+         * harness did collect as one it lost.
+         */
+        if (!reaped) {
+            reaped = reapChildBlocking(childPid, outcome);
+        }
+    }
 
     std::cout << TRACE_PREFIX << description << " pid " << pidForTrace << " " << outcome
               << std::endl;
@@ -1908,7 +2150,9 @@ std::string terminateAndReapFakeServiceHost()
  * lives, so end of file on the parent's read end means the child has exited. That is exactly the
  * shape of the host's readiness pipe, and it lets the probe hand a real death channel to
  * terminateAndReapChildProcess() so that its bounded wait and its SIGKILL escalation are the ones a
- * teardown uses rather than a degenerate path.
+ * teardown uses rather than the polling fallback a channel-less child would take. Both of that
+ * function's waits are bounded, so the fallback would be sound; it would simply not be the path
+ * under test.
  *
  * What it never touches: g_hostControlWriteFd, g_hostObserveReadFd, g_hostPid,
  * g_hostReadinessReadFd, g_hostReportedReady and the SIGPIPE disposition itself. Under invocation E

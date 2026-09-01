@@ -1797,6 +1797,40 @@ void  DriverAidlImpl::close(void) noexcept(false)
  * re-deriving is the specification, because any other divergence here would be a
  * divergence in the Bus reader's behaviour.
  *
+ * REGISTERED DEPARTURE FROM A DIRECTIVE, STATED AT METHOD LEVEL SO IT IS NOT ONLY VISIBLE
+ * TO A READER WHO REACHES THE FLUSH LOOP. AAP section 0.3.3 specifies this method as
+ * byte-identical to `ccec/src/DriverImpl.cpp:156-192`, and the null check inside the flush
+ * loop is a deliberate departure from that directive - the one place this method is not the
+ * copy the directive asks for.
+ *
+ * WHAT THE DIRECTIVE WOULD HAVE REQUIRED, AND WHY IT IS NOT DONE. The legacy flush arm -
+ * `ccec/src/DriverImpl.cpp:179-183` - dequeues into `inFrame` and immediately evaluates
+ * `frame = *inFrame` with no null test, while the only entries that reach it are received
+ * frames and close()'s NULL sentinels. close() offers a sentinel on each transition out of
+ * OPENED, so a stop/reopen/close, or a close racing a second close, leaves two: the checked
+ * poll at the top of the loop consumes the first and the flush then meets the second and
+ * dereferences NULL. That is an unfixed defect in the legacy back-end, and it is out of this
+ * migration's scope for a reason that is not discretionary - `ccec/src/DriverImpl.hpp` and
+ * `ccec/src/DriverImpl.cpp` are reference-only contracts here and are not modified by this
+ * work. Reproducing the defect faithfully on the AIDL path would put a null dereference on
+ * the Bus reader thread, the one thread in the middleware whose death silently ends all CEC
+ * reception, so the copy is departed from rather than the fault reproduced.
+ *
+ * IT IS NOT AN OBSERVABLE BEHAVIOUR CHANGE, which is why it is registered as a departure
+ * from a directive and not as a fourth observable difference. The only entry whose handling
+ * this check can alter is a NULL one, and the previous handling of a NULL one was undefined
+ * behaviour rather than a defined behaviour a caller could have depended on. Every non-NULL
+ * entry takes exactly the path it took before - copied into @p frame, then released - the
+ * method still raises InvalidStateException after draining, and a dropped second sentinel
+ * has nothing left to signal because the loop has already established that the driver is no
+ * longer OPENED. The flush loop's own comment carries that argument in full.
+ *
+ * The departure is recorded here for the specification owner alongside the three registered
+ * observable differences on offerReceivedFrame(), getLogicalAddress() and write(), so that
+ * every place this back-end is not what the plan literally specifies is stated on the method
+ * that carries it.
+ *
+ * @see DriverAidlImpl::close() - the producer of the NULL sentinels this method drains
  * @see DriverImpl::read()
  */
 void  DriverAidlImpl::read(CECFrame &frame)  noexcept(false)
@@ -1923,6 +1957,40 @@ void  DriverAidlImpl::writeAsync(const CECFrame &frame)  noexcept(false)
  * outside the three documented enumerators can arrive, and it is logged by number and
  * raises IOException rather than being reported to the caller as a completed transmit.
  *
+ * REGISTERED OBSERVABLE DIFFERENCE FROM THE LEGACY BACK-END, AND NOT ONE OF THE THREE THE
+ * PLAN AUTHORIZES - the default arm above, and only it. Every documented arm is the legacy
+ * mapping unchanged; what has no legacy counterpart is the treatment of a status that is
+ * documented by neither side. DriverImpl::write() - `ccec/src/DriverImpl.cpp:265-274` -
+ * tests the HAL's result against a closed set of five failure values and takes no action at
+ * all on anything else, so an unrecognised status falls through its guards and the transmit
+ * RETURNS NORMALLY, which the caller reads as delivered. This back-end raises IOException
+ * for the same case. A middleware caller can therefore see a failure where the legacy path
+ * reported success, and that is registered rather than presented as parity.
+ *
+ * IT IS REACHABLE ONLY ON A HAL CONTRACT VIOLATION. `SendMessageStatus` has exactly three
+ * enumerators - `ACK_STATE_0`, `ACK_STATE_1` and `BUSY` - and all three have their own arm
+ * above. A conformant HAL cannot reach the default arm, so no behaviour a conformant
+ * platform exhibits differs between the two back-ends. It is nonetheless reachable in
+ * practice rather than theoretically: the generated proxy fills `sendResult` from an
+ * `int32_t` read out of the parcel, and nothing on the wire constrains what an
+ * out-of-process HAL puts there.
+ *
+ * THE REJECTION STAYS, AND THE DIRECTION OF THE ERROR IS WHY. Reporting an unknown status as
+ * a completed transmit is the one wrong answer a caller cannot recover from: a caller told
+ * the frame reached the bus does not retry, so a suppressed transmit would look - from
+ * Bus's writer thread, through Connection, up to the plugins - exactly like a delivered one,
+ * with no diagnostic anywhere and the CEC exchange simply not happening. IOException is the
+ * category the legacy back-end already uses for a transmit that did not complete, so callers
+ * handle it today, and the numeric value the HAL reported is preserved in the LOG_EXP line.
+ * Matching the legacy fall-through would reproduce a defect on a transport where it is
+ * reachable, which is not what behaviour preservation is for.
+ *
+ * AAP section 0.8.2.1 enumerates exactly three authorized observable differences - this
+ * method's 16-byte frame limit, writeAsync()'s OperationNotSupportedException and
+ * addLogicalAddress()'s coarser failure category - and this is not among them. It is
+ * recorded here in that section's terms rather than silently adopted; admitting it to that
+ * list, or requiring the legacy fall-through, is the specification owner's decision.
+ *
  * @see DriverAidlImpl::poll()
  * @see DriverImpl::write()
  */
@@ -2031,7 +2099,43 @@ void  DriverAidlImpl::write(const CECFrame &frame)  noexcept(false)
  * cannot carry is recorded; one of them is a first entry outside the AIDL contract range
  * 0x0..0xE, which is rejected on the raw `int32_t` rather than converted.
  *
+ * REGISTERED OBSERVABLE DIFFERENCE FROM THE LEGACY BACK-END, AND NOT ONE OF THE THREE THE
+ * PLAN AUTHORIZES. That rejection has no legacy counterpart. DriverImpl::getLogicalAddress()
+ * - `ccec/src/DriverImpl.cpp:290-301` - calls `HdmiCecGetLogicalAddress()` at :296, ignores
+ * its return value and returns whatever the HAL left in the local, so a legacy HAL that
+ * reports 0x1F or -1 hands that value to the caller. This back-end returns 0 for it instead.
+ * A middleware caller can therefore see a different answer for the same misbehaving HAL, and
+ * that is registered rather than presented as parity.
+ *
+ * IT IS REACHABLE ONLY ON A HAL CONTRACT VIOLATION. `IHdmiCec.getLogicalAddresses()` returns
+ * addresses drawn from the CEC address space, and `IHdmiCecController.addLogicalAddresses()`
+ * documents `0x0..0xE` for it - see HAL_LOGICAL_ADDRESS_MAX for the range and for why the
+ * raw parcel value is what gets checked. A conformant HAL never produces a value this arm can
+ * reject, so no behaviour a conformant platform exhibits differs between the two back-ends.
+ *
+ * ZERO IS NOT A NEW SENTINEL, WHICH IS WHY THE REJECTION COSTS NOTHING A CALLER RELIED ON.
+ * Zero is the existing "no address" signal on both back-ends: the legacy implementation
+ * initializes its local to zero and returns it whenever the HAL writes nothing, and
+ * LibCCEC::getLogicalAddress() - `ccec/src/LibCCEC.cpp:162-168` - turns a zero return into
+ * InvalidStateException. So an out-of-contract address is reported through the one channel
+ * every caller above this method already handles, and the value the HAL actually named is
+ * preserved in the LOG_EXP line rather than lost.
+ *
+ * THE VALIDATION STAYS. Passing the value through instead would hand `LogicalAddress`'s
+ * narrowing constructor an integer it was never meant to see, and the result is not a
+ * detectable error but a plausible wrong address - 256 arrives as 0x0 and 271 as 0xF - which
+ * then propagates into frame headers and into isValidLogicalAddress() as if the HAL had
+ * reported it. Reporting no address is both correct and diagnosable; silently substituting a
+ * different device's address is neither.
+ *
+ * AAP section 0.8.2.1 enumerates exactly three authorized observable differences - write()'s
+ * 16-byte frame limit, writeAsync()'s OperationNotSupportedException and
+ * addLogicalAddress()'s coarser failure category - and this is not among them. It is
+ * recorded here in that section's terms rather than silently adopted; admitting it to that
+ * list, or requiring the value be passed through, is the specification owner's decision.
+ *
  * @see DriverAidlImpl::isValidLogicalAddress()
+ * @see HAL_LOGICAL_ADDRESS_MAX - the contract range and why the raw value is checked
  * @see DriverImpl::getLogicalAddress()
  */
 int DriverAidlImpl::getLogicalAddress(int devType)
@@ -2318,8 +2422,42 @@ DriverAidlImpl::IncomingQueue & DriverAidlImpl::getIncomingQueue(void)
  * `osal/include/osal/EventQueue.hpp` is out of bounds for this migration, so the silent
  * discard it performs at capacity is worked around here rather than fixed there.
  *
+ * REGISTERED OBSERVABLE DIFFERENCE FROM THE LEGACY BACK-END, AND NOT ONE OF THE THREE THE
+ * PLAN AUTHORIZES. Both back-ends run a 32-entry incoming queue: the legacy one takes
+ * `CCEC_OSAL::EventQueue`'s default, `EventQueue(size_t cap = 32)` in
+ * `osal/include/osal/EventQueue.hpp`, and this one passes INCOMING_QUEUE_CAPACITY - the same
+ * number - explicitly. What differs is what the receive path may do with those 32 slots.
+ * DriverImpl's receive callback offers straight onto the queue and so fills all 32; this
+ * method refuses at 31, because the thirty-second slot belongs to close()'s NULL sentinel.
+ * A middleware caller can observe that. Under a sustained receive burst that outruns the Bus
+ * reader, this back-end drops the frame that would have taken the last slot where the legacy
+ * back-end still accepts it, so the burst depth at which the first frame is lost is 31
+ * events here against 32 there. That condition is the whole of the reachability: while the
+ * queue has a free slot the two back-ends behave identically, and the frame this method
+ * refuses is never a frame the caller was told had been accepted - the return value reports
+ * the refusal and leaves ownership with the caller, which is what the receive callback
+ * releases it on.
+ *
+ * THE RESERVE STAYS, and what removing it would cost is the reason. With all 32 slots
+ * available to received frames, close()'s sentinel offer can land on a full queue, where
+ * `EventQueue::offer()` discards it silently and reports nothing; the Bus reader then stays
+ * blocked in `EventQueue::poll()` with nothing left to wake it, and it is the one thread in
+ * the middleware whose death silently ends all CEC reception. One frame of receive depth
+ * under burst is the smaller loss of the two, and it is bounded and reported where the lost
+ * wakeup is neither.
+ *
+ * AAP section 0.8.2.1 enumerates exactly three authorized observable differences - write()'s
+ * 16-byte frame limit, writeAsync()'s OperationNotSupportedException and
+ * addLogicalAddress()'s coarser failure category - and this is not among them. It is
+ * recorded here in that section's terms rather than silently adopted: the delivered
+ * behaviour is as described above, and whether the difference is admitted to that list or
+ * met some other way is the specification owner's decision, taken with the liveness
+ * argument in the preceding paragraph in front of them.
+ *
  * @see DriverAidlImpl::close() - the other producer, serialized on the same lock
  * @see DriverAidlImpl::EventListener::onMessageReceived()
+ * @see DriverAidlImpl::INCOMING_QUEUE_CAPACITY - the same effective-depth arithmetic stated
+ *      from the constant's side, in `ccec/src/DriverAidlImpl.hpp`
  */
 bool DriverAidlImpl::offerReceivedFrame(CECFrame *frame)
 {
@@ -3173,6 +3311,15 @@ std::string sanitizedInterfaceHash(const std::string &hash)
  * unfrozen development marker, without the code claiming to know which of halcompat's
  * rules did the rejecting.
  *
+ * The three phrases restate halcompat's own hash classification because halcompat exposes no
+ * entry point for a hash alone - not a public one and not an internal one. Its public
+ * `isCompatible<I>()` and `atLeast<I>()` apply the empty, `"-1"` and `"notfrozen"` gates
+ * internally and return only a verdict, and `namespace detail` at
+ * `rdk-halif-aidl/common/current/halcompat.h:80` holds nothing that takes a hash. The
+ * markers named here are therefore read from halcompat's own gate order rather than invented,
+ * and nothing in this function decides anything.
+ *
+ * @see DriverAidlImpl::observedMetadataWouldBeAccepted() - the public/internal surface, in full
  * @see DriverAidlImpl::isServiceAvailable()
  */
 const char *DriverAidlImpl::describeObservedInterfaceHash(const std::string &hash)
@@ -3202,7 +3349,52 @@ const char *DriverAidlImpl::describeObservedInterfaceHash(const std::string &has
  * not accepted because production calls the predicate with its `allowUnfrozen` default of
  * false.
  *
+ * DELIBERATE USE OF A HALCOMPAT ENTRY POINT THAT HALCOMPAT MARKS INTERNAL, ANNOTATED HERE
+ * BECAUSE NO PUBLIC EQUIVALENT EXISTS FOR EITHER HALF OF THIS OBSERVATION.
+ * `rdk-halif-aidl/common/current/halcompat.h:26-27` states that client code never calls
+ * `getInterfaceVersion()`/`getInterfaceHash()` directly, and its `namespace detail` at :80,
+ * opened by the "Internal encoding machinery" note above it, holds the version predicate
+ * this function calls. Both statements are read as written, and this is the one place in
+ * this file that departs from them.
+ *
+ * WHAT THE PUBLIC SURFACE ACTUALLY OFFERS, enumerated so the departure can be checked rather
+ * than taken on trust. halcompat's public API is exactly three templates: `getService<I>()`
+ * at :143, `isCompatible<I>(service, allowUnfrozen)` at :158 and
+ * `atLeast<I>(service, era, major, minor, bugfix, allowUnfrozen)` at :181. All three take a
+ * SERVICE PROXY. There is no public predicate over an already-observed version, no public
+ * accessor for an observed hash or version, and no public entry point of any kind for a hash
+ * alone - so neither half of this observation can be expressed publicly: the version half has
+ * only the internal predicate, and the hash half has no halcompat entry point at all, public
+ * or internal, which is why its three gates are restated here in halcompat's own order.
+ *
+ * WHY `atLeast()` IS NOT THE PUBLIC ROUTE IT LOOKS LIKE. It takes a proxy and would therefore
+ * re-read `getInterfaceHash()` and `getInterfaceVersion()` from the server itself - a SECOND
+ * REMOTE ROUND TRIP, to a server this code has already established is misbehaving, at
+ * initialization, inside the fallback path. That breaks the one-snapshot rule this diagnostic
+ * is built on: the caller reads the hash and the version exactly once each and every
+ * statement it emits is a property of that one pair, precisely so that a predicate result
+ * cannot be paired with separately retried values and blame the version rule for a rejection
+ * it did not cause. It would also change the question asked, since `atLeast()` gates a named
+ * feature release rather than evaluating this client's own `VERSION`.
+ *
+ * THE DECISION IS UNAFFECTED, AND THAT IS THE LINE THIS ANNOTATION DRAWS. The compatibility
+ * VERDICT is taken by the public `halcompat::isCompatible<IHdmiCec>()` call in
+ * isServiceAvailable(), which is the sole decision and reads its own metadata. Nothing here
+ * or in its callers re-decides anything; the internal entry points are reached only by the
+ * post-rejection attribution, on a path taken after the verdict is recorded, and the
+ * predicate they reach is `constexpr` over two `int32_t`s and performs no transaction.
+ *
+ * WHAT WOULD MAKE THIS A PUBLIC CALL. Either a public predicate in halcompat taking an
+ * already-observed version pair - the `detail::isCompatible(int32_t, int32_t)` shape at :108,
+ * promoted out of `detail` - or a public accessor returning the hash and version halcompat
+ * itself read while deciding. The first removes the internal-namespace use; the second
+ * removes it and the observation's second read as well, since the values the decision used
+ * would then be recoverable instead of unobtainable. Owning that surface belongs to the
+ * halcompat owner in `rdk-halif-aidl`, which is a reference-only consumed header here; this
+ * annotation records the dependency so the use is visible to them rather than silent.
+ *
  * @see DriverAidlImpl::describeObservedInterfaceHash()
+ * @see DriverAidlImpl::emitCompatibilityRejectionDiagnostic()
  * @see DriverAidlImpl::isServiceAvailable()
  */
 bool DriverAidlImpl::observedMetadataWouldBeAccepted(const std::string &hash,
@@ -3223,6 +3415,26 @@ bool DriverAidlImpl::observedMetadataWouldBeAccepted(const std::string &hash,
  * Every line below is bounded independently against the log buffer, and the body's own
  * comments record which bound each one is written against.
  *
+ * DIRECT `getInterfaceHash()`/`getInterfaceVersion()` READS, WHICH HALCOMPAT MARKS INTERNAL,
+ * ANNOTATED HERE RATHER THAN LEFT AS AN INCIDENTAL CALL.
+ * `rdk-halif-aidl/common/current/halcompat.h:26-27` states that client code never calls those
+ * two directly, and the snapshot below does. It is deliberate and it is confined to
+ * attribution: halcompat's whole public API - `getService<I>()`, `isCompatible<I>()` and
+ * `atLeast<I>()` - takes a service proxy and returns a verdict, and exposes no accessor for
+ * the metadata it read while reaching that verdict, so there is no public way to observe what
+ * a rejected server reported. The values halcompat used are locals inside a template in a
+ * read-only consumed header and cannot be recovered; reading them here is the only way the
+ * diagnostic can name anything about the server at all, which is why every line it emits is
+ * labelled an observation rather than a cause. observedMetadataWouldBeAccepted() carries the
+ * full enumeration of that public surface and of what would have to appear in halcompat for
+ * these two reads to become unnecessary.
+ *
+ * The decision itself is untouched by any of this: the verdict is the public
+ * `halcompat::isCompatible<IHdmiCec>()` call in isServiceAvailable(), the cause is recorded
+ * there before this function is entered, and this function is static so it cannot reach
+ * availabilityReason to relabel it.
+ *
+ * @see DriverAidlImpl::observedMetadataWouldBeAccepted() - the public/internal surface, in full
  * @see DriverAidlImpl::isServiceAvailable()
  */
 void DriverAidlImpl::emitCompatibilityRejectionDiagnostic(

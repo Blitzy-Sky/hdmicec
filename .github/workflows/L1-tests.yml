@@ -329,8 +329,8 @@ jobs:
     # EVERY ACTION IN THIS JOB IS PINNED TO A FULL-LENGTH COMMIT SHA, AND THE TAG SURVIVES
     # ONLY AS A COMMENT.
     #
-    # A tag is a MUTABLE reference. `actions/checkout@v3` resolves through a moving major-
-    # version tag that its publisher repoints at each new v3.x, so the code this job runs
+    # A tag is a MUTABLE reference. `actions/checkout@v4` resolves through a moving major-
+    # version tag that its publisher repoints at each new v4.x, so the code this job runs
     # can change without a single byte changing in this file - and an action runs with
     # access to the job's filesystem and environment. A 40-character commit SHA is the one
     # reference GitHub's own hardening guidance calls immutable, and it is what every `uses:`
@@ -340,7 +340,7 @@ jobs:
     # `git ls-remote`. Both are LIGHTWEIGHT tags, so the value the tag resolves to IS a
     # commit SHA rather than a tag object:
     #
-    #   actions/checkout            a37ce9120846195fa4ece8f58b268e6043cb2f26   = v3 = v3.7.0
+    #   actions/checkout            11bd71901bbe5b1630ceea73d27597364c9af683   = v4 = v4.2.2
     #   actions/upload-artifact     ea165f8d65b6e75b540449e92b4886f43607fa02   = v4 = v4.6.2
     #
     # There used to be a third, jwlawson/actions-setup-cmake, and it is gone rather than
@@ -358,6 +358,25 @@ jobs:
     # different release is worse than no comment. aidl-path-tests.yml pins the same two
     # actions to the same two SHAs deliberately; move them together or the two jobs stop
     # being comparable.
+    #
+    # RUNTIME LINEAGE IS PART OF THE PIN, AND IT IS WHY THE actions/checkout SHA ABOVE IS THE
+    # ONE IT IS. The pin this file used to carry was actions/checkout 3.7.0, on the v3 lineage,
+    # which runs on the Node 16 action runtime - a runtime GitHub has deprecated, and one that
+    # makes an action still running on it emit a deprecation warning in every job that uses it.
+    # v4.2.2 runs on Node 20, which is the lineage actions/upload-artifact is already pinned to
+    # at v4.6.2, so the two actions in this file now share one runtime generation instead of
+    # straddling a deprecated one and a current one. The retired release is named here in prose
+    # and nowhere as a pin, which is the state a pin audit expects: grepping this file for the
+    # old digest, or for the old release as the `# vN (vN.N.N)` comment spelled it, comes back
+    # empty.
+    #
+    # THAT MAKES A RE-PIN TWO CHECKS RATHER THAN ONE. A committed digest is valid for exactly
+    # ONE release, which is why the SHA and its trailing version comment always move together
+    # - that part is the update policy above. The runtime the new release runs on is the
+    # second check and does not follow from the first: when GitHub retires Node 20, this same
+    # move is needed again, and nothing in this file will say so, because a pin can be
+    # perfectly current as a digest and stale as a runtime while reading identically either
+    # way. Re-check the lineage when the pin is next reviewed, not only the digest.
     steps:
       # THE JOB-WIDE CMAKE, FETCHED HERE AND VERIFIED BEFORE IT IS UNPACKED.
       #
@@ -435,7 +454,7 @@ jobs:
           sudo apt install -y autoconf automake libtool pkg-config libgtest-dev libgmock-dev libdbus-1-dev build-essential g++ cmake valgrind lcov clang ninja-build flex bison
 
       - name: Checkout hdmicec
-        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 (v3.7.0)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
         with:
           path: hdmicec
           # NO ACTIONS CREDENTIAL IS LEFT IN ANY CHECKOUT IN THIS JOB.
@@ -456,7 +475,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout googletest
-        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 (v3.7.0)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
         with:
           repository: google/googletest
           path: googletest
@@ -491,7 +510,7 @@ jobs:
       # still need a token supplied by the platform owner, passed as a `token:` input rather
       # than persisted into the tree.
       - name: Checkout rdk-halif-aidl
-        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 (v3.7.0)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
         with:
           repository: Blitzy-Sky/rdk-halif-aidl
           path: rdk-halif-aidl
@@ -516,7 +535,7 @@ jobs:
       #
       # persist-credentials: false for the same reason as every other checkout in this job.
       - name: Checkout the Binder SDK source
-        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 (v3.7.0)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4 (v4.2.2)
         with:
           repository: ${{ env.BINDER_SDK_REPOSITORY }}
           path: rdk-halif-aidl/build-tools/linux_binder_idl

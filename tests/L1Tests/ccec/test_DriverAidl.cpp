@@ -340,7 +340,7 @@ namespace halcompat = ::com::rdk::hal::halcompat;
  *
  *   Fixture                       Cases  Invocation  CEC_TEST_AIDL_MODE  Binder driver
  *   ---------------------------------------------------------------------------------
- *   DriverAidlCompatibilityTest      19  A, B, C     any                 no
+ *   DriverAidlCompatibilityTest      23  A, B, C     any                 no
  *   DriverAidlPreflightTest          27  A, B, C     any                 no
  *   DriverAidlSelectionTest           4  A           absent              no
  *   DriverAidlLocalInstanceTest      25  A, B, C     any                 no
@@ -348,9 +348,9 @@ namespace halcompat = ::com::rdk::hal::halcompat;
  *   DriverAidlSessionTest            23  B           compatible          yes
  *   DriverAidlTransmitTest           12  B           compatible          yes
  *   ---------------------------------------------------------------------------------
- *                                   115  of which 80 run under invocation A
+ *                                   119  of which 84 run under invocation A
  *
- * The 80 are the first five fixtures, 19 + 27 + 4 + 25 + 5. The two that invocation A
+ * The 84 are the first five fixtures, 23 + 27 + 4 + 25 + 5. The two that invocation A
  * excludes are DriverAidlSessionTest, 23 cases, and DriverAidlTransmitTest, 12 - the 35 in
  * the excluded column below - because both require the AIDL back-end to be the resolved one.
  *
@@ -359,11 +359,11 @@ namespace halcompat = ::com::rdk::hal::halcompat;
  *
  *   invocation   registered   selected   excluded
  *   ------------------------------------------------
- *   A                   598        563         35
- *   B                   598        414        184
- *   C                   598        379        219
+ *   A                   602        567         35
+ *   B                   602        418        184
+ *   C                   602        383        219
  *
- * Registered is 598 = 483 pre-existing + the 115 above. Every figure in that table is measured
+ * Registered is 602 = 483 pre-existing + the 119 above. Every figure in that table is measured
  * on this host, with the runner's own filters, by
  *
  *   ./run_L1Tests --gtest_list_tests --gtest_filter=<filter> | grep -cE '^  [A-Za-z]'
@@ -375,7 +375,7 @@ namespace halcompat = ::com::rdk::hal::halcompat;
  * left unclassified.
  *
  * What is not measured here is the pass/fail outcome of invocations B and C. Only invocation A
- * has been executed on this host: 563 selected, 563 passed, exit 0. A binder-capable runner must
+ * has been executed on this host: 567 selected, 567 passed, exit 0. A binder-capable runner must
  * produce B's and C's outcomes; the counts above tell it what to expect, and a mismatch there
  * means a filter or a classification has drifted rather than that a test failed.
  *
@@ -599,6 +599,47 @@ const char *const kBrokenInterfaceHash = "-1";
 /** @brief The hash a pre-freeze development server reports (halcompat.h:168-170). */
 const char *const kUnfrozenInterfaceHash = "notfrozen";
 
+/**
+ * @brief The controller interface's compiled-against version, copied into this translation unit.
+ *
+ * The copy is required for exactly the reason kClientInterfaceVersion documents, and the
+ * reason applies verbatim here: IHdmiCecController::VERSION is declared in-class with no
+ * out-of-line definition, so odr-using it in a comparison macro fails to link. This copy is
+ * what the fake-metadata cases compare the controller's reported version against.
+ *
+ * @see kClientInterfaceVersion
+ */
+constexpr int32_t kControllerClientInterfaceVersion = cechal::IHdmiCecController::VERSION;
+
+/**
+ * @brief The controller interface's frozen hash (IHdmiCecController.h), copied alongside.
+ *
+ * Needs none of the treatment the version copy above does, and is copied for the same
+ * symmetry kFrozenInterfaceHash is: every comparison in this file names a local constant.
+ *
+ * @see kFrozenInterfaceHash
+ */
+const char *const kControllerFrozenInterfaceHash = cechal::IHdmiCecController::HASHVALUE;
+
+/**
+ * @brief A version no interface in this snapshot reports, installed to make a fake diverge.
+ *
+ * Deliberately not one of the halcompat table values below: those exist to select an arm of the
+ * compatibility rule, whereas this one exists only to differ from whatever constant a fake would
+ * otherwise report, which is the condition its divergence trace fires on. Using a table value
+ * here would suggest the metadata cases were making a compatibility claim, and they are not.
+ */
+constexpr int32_t kDivergentReportedVersion = 4242;
+
+/**
+ * @brief A well-formed hash that is not the frozen one, installed for the same purpose.
+ *
+ * Forty hex characters, so it is the shape of a real hash rather than a sentinel: the fake stores
+ * whatever it is given, and a value that looked like an error code would invite the reading that
+ * only error codes can be installed.
+ */
+const char *const kDivergentReportedHash = "0000000000000000000000000000000000000000";
+
 /** @brief A server version inside this client's era and major, newer than it: must be accepted. */
 constexpr int32_t kNewerCompatibleVersion = 1010;
 
@@ -696,6 +737,14 @@ static_assert(!halcompat::detail::isCompatible(kOlderSameMajorClient, kOlderSame
     "cross-major conjunct and merely re-covers a case already covered. Do not substitute it for "
     "this one. And do not look for an equivalent pair for this client - unreachable path 1 in "
     "the file block proves none exists.");
+
+static_assert(kDivergentReportedVersion != cechal::IHdmiCec::VERSION
+                  && kDivergentReportedVersion != cechal::IHdmiCecController::VERSION,
+    "kDivergentReportedVersion now equals a compiled-in interface version. The fake-metadata "
+    "cases install it precisely because it differs: each fake's version getter traces only when "
+    "the value it reports differs from its own compiled-in constant, so an equal value would "
+    "drive the quiet arm while the cases still passed - the exact false green the divergence "
+    "trace exists to prevent. Pick another value; nothing else depends on which.");
 
 static_assert(static_cast<int32_t>(cechal::SendMessageStatus::ACK_STATE_0) == 0
               && static_cast<int32_t>(cechal::SendMessageStatus::ACK_STATE_1) == 1
@@ -3707,9 +3756,18 @@ private:
  * @brief Compatibility-rejection coverage, per branch, by direct call.
  *
  * Runs under every invocation because it needs nothing from the environment: no registered
- * service, no binder driver, no resolved back-end and no HAL. Every case calls
- * halcompat::isCompatible<IHdmiCec>() against a locally constructed double and asserts the
- * answer.
+ * service, no binder driver, no resolved back-end and no HAL. Most cases call
+ * halcompat::isCompatible<IHdmiCec>() against a locally constructed double and assert the
+ * answer; the rest drive the production rejection diagnostic directly, and the last four
+ * drive the fake service's and fake controller's own interface-metadata controls - the inputs
+ * every compatibility arm above is arranged with - against locally constructed fakes.
+ *
+ * Nothing in this fixture is ever registered with the service manager, and that is a hard
+ * constraint rather than a preference: registering a name calls defaultServiceManager(),
+ * which opens the binder driver, and on the pinned stack that aborts the process where the
+ * driver node is absent - which is this host. Local construction alone is what makes the
+ * metadata controls testable here, and it is sufficient, because those controls take effect
+ * under local dispatch and only under local dispatch.
  *
  * No driver precondition is established here, and that is a deliberate departure from the
  * fixture idiom the driver-facing suites in this directory use. Those fixtures open the
@@ -4618,6 +4676,338 @@ TEST_F(DriverAidlCompatibilityTest, AFailedObservationEmitsTheFallbackMessageAnd
         << "the emitter changed an instance's recorded unavailability reason. It is static and "
            "must be incapable of that; if this ever fails, the emitter has grown access to "
            "instance state and the preserve-cause guarantee is no longer structural";
+}
+
+// The four cases below are about the fake's own interface-metadata controls rather than about
+// halcompat, and they are here rather than in a fixture of their own for a concrete reason: a
+// new fixture would sit outside run_coverage.sh's classification constants, and a fixture in
+// none of those lists is what breaks its selected-plus-excluded reconciliation. This one is
+// already classified CONTRACT_ANY_BACKEND_SUITES, which is exactly right for cases that need
+// no registered service, no binder driver and no resolved back-end.
+//
+// What they establish, and why it is not ceremony. Each fake's two metadata getters trace when
+// - and only when - the value they report differs from their own compiled-in constant. Those
+// three traces (the controller's version and hash getters, and the service's version getter)
+// had no caller that could make them fire, because the setters that install a divergent value
+// did not exist: the fake carried one hash setter, on the service. The controls now exist
+// because AAP 0.4.1 requires the fake to offer overridable getInterfaceHash/getInterfaceVersion,
+// and these cases are what make each of the three a branch that is reached rather than one that
+// is merely reachable. A control nothing exercises is indistinguishable from a control that does
+// not work.
+//
+// Each case asserts three things per class, in this order: the getter reports the compiled-in
+// constant and stays quiet before any override, which pins the trace's false arm and is what
+// stops an ordinary run being flooded; the getter then reports exactly what the setter installed
+// and the trace names it, which is the true arm; and reset() puts both values back and returns
+// both getters to silence. The setters are traced too, and asserted, because a control that
+// changed a value without saying so leaves a captured log in which a later divergence line has
+// no cause anywhere above it.
+//
+// Never registered, in any of the four. Registration calls defaultServiceManager(), which opens
+// the binder driver and aborts on this host, so a case that registered would take the whole
+// binary down rather than fail.
+/**
+ * @brief The fake service reports the interface metadata installed on it, and says when it
+ *        diverges.
+ *
+ * @pre Runs under every invocation. The fake is constructed locally and never registered, so
+ *      nothing here touches the service manager or the binder driver.
+ * @note Evidence: before any override both getters report the compiled-in constants and print
+ *       no divergence line; after each setter the matching getter reports the installed value
+ *       and the divergence line names it. The version half is what drives the service's
+ *       previously unreachable version-divergence trace - unreachable because no
+ *       setInterfaceVersion existed to install a differing value. A wrong implementation is a
+ *       setter that stores nowhere the getter reads (the getter would keep reporting the
+ *       constant), or a getter that reports a literal rather than the member (the same
+ *       symptom, with reset() also silently a no-op).
+ * @see FakeHdmiCecService::setInterfaceVersion(), FakeHdmiCecService::setInterfaceHash()
+ */
+TEST_F(DriverAidlCompatibilityTest, TheServiceFakeReportsTheInterfaceMetadataInstalledOnIt) {
+    const ::android::sp<FakeHdmiCecService> fake = ::android::sp<FakeHdmiCecService>::make();
+    ASSERT_TRUE(fake != nullptr);
+
+    // Defaults first, under capture, so the quiet arm of both traces is pinned rather than
+    // assumed. A fake that traced unconditionally would print here.
+    int32_t defaultVersion = 0;
+    std::string defaultHash;
+    std::string defaultOutput;
+    {
+        StdoutCapture capture;
+        ASSERT_TRUE(capture.isValid())
+            << "stdout could not be redirected, so the divergence traces cannot be read; "
+               "failing rather than asserting against an empty capture";
+
+        defaultVersion = fake->getInterfaceVersion();
+        defaultHash = fake->getInterfaceHash();
+
+        defaultOutput = capture.read();
+    }
+
+    EXPECT_EQ(defaultVersion, kClientInterfaceVersion)
+        << "an unconfigured fake service did not report the compiled-in interface version, so "
+           "every AIDL-selected invocation would be driving a service the middleware must "
+           "refuse - and the compatible case would have no way to occur";
+    EXPECT_EQ(defaultHash, std::string(kFrozenInterfaceHash))
+        << "an unconfigured fake service did not report the compiled-in interface hash";
+    EXPECT_THAT(defaultOutput, ::testing::Not(::testing::HasSubstr("overridden")))
+        << "a fake reporting its own compiled-in metadata still printed a divergence line. The "
+           "trace is conditional precisely so that the one line a run does print marks the "
+           "moment the fake was made to diverge";
+
+    // The hash half. This is the control the L1 harness's incompatible mode uses, so the value
+    // installed here is the value that mode installs.
+    int32_t versionAfterHash = 0;
+    std::string installedHash;
+    std::string hashOutput;
+    {
+        StdoutCapture capture;
+        ASSERT_TRUE(capture.isValid());
+
+        fake->setInterfaceHash(std::string(kBrokenInterfaceHash));
+        installedHash = fake->getInterfaceHash();
+        versionAfterHash = fake->getInterfaceVersion();
+
+        hashOutput = capture.read();
+    }
+
+    EXPECT_EQ(installedHash, std::string(kBrokenInterfaceHash))
+        << "the fake service did not report the hash installed on it, so invocation C's "
+           "present-but-incompatible arm could not be arranged at all";
+    EXPECT_EQ(versionAfterHash, kClientInterfaceVersion)
+        << "installing a hash disturbed the reported version. The two are separate members "
+           "deliberately: a case that installs one must be able to rely on the other";
+    EXPECT_THAT(hashOutput, ::testing::HasSubstr("setInterfaceHash] Hash set from"))
+        << "the hash setter installed a value without tracing it, so a captured log would carry "
+           "a divergence line below with no cause anywhere above it";
+    EXPECT_THAT(hashOutput, ::testing::HasSubstr("getInterfaceHash] Reporting overridden hash"))
+        << "the hash getter reported a divergent value without tracing it";
+
+    // The version half: the previously unreachable trace.
+    int32_t installedVersion = 0;
+    std::string hashAfterVersion;
+    std::string versionOutput;
+    {
+        StdoutCapture capture;
+        ASSERT_TRUE(capture.isValid());
+
+        fake->setInterfaceVersion(kDivergentReportedVersion);
+        installedVersion = fake->getInterfaceVersion();
+        hashAfterVersion = fake->getInterfaceHash();
+
+        versionOutput = capture.read();
+    }
+
+    EXPECT_EQ(installedVersion, kDivergentReportedVersion)
+        << "the fake service did not report the interface version installed on it. AAP 0.4.1 "
+           "requires this control, and without it the service's version-divergence trace has no "
+           "caller that can reach it";
+    EXPECT_EQ(hashAfterVersion, std::string(kBrokenInterfaceHash))
+        << "installing a version reverted or disturbed the hash installed earlier";
+    EXPECT_THAT(versionOutput, ::testing::HasSubstr("setInterfaceVersion] Version set from"))
+        << "the version setter installed a value without tracing it";
+    // The value is spelled from the constant rather than as a literal, so changing the constant
+    // cannot leave this expectation matching a number nothing installs any more.
+    EXPECT_THAT(versionOutput,
+                ::testing::HasSubstr("getInterfaceVersion] Reporting overridden version: "
+                                     + std::to_string(kDivergentReportedVersion)))
+        << "the service's version-divergence trace did not fire for a divergent version. That "
+           "branch is the one this case exists to drive, and a getter that reported the "
+           "installed value without tracing it would leave it unreached";
+}
+
+/**
+ * @brief The fake service restores both metadata values on reset(), so an override cannot
+ *        outlive the case that installed it.
+ *
+ * @pre Runs under every invocation, on a locally constructed and never registered fake.
+ * @note Evidence: both values are installed and observed changed, then reset() is called and
+ *       both getters report the compiled-in constants again and print no divergence line. This
+ *       matters beyond tidiness: the harness registers one fake for the whole process because
+ *       the selection resolves once, so a metadata value that survived a reset would decide the
+ *       outcome of every later case. A wrong implementation is a reset() that restores the hash
+ *       and forgets the version, which would leave the version-divergence trace firing for the
+ *       remainder of the run with nothing naming the cause.
+ * @see FakeHdmiCecService::reset()
+ */
+TEST_F(DriverAidlCompatibilityTest, TheServiceFakeRestoresBothMetadataValuesOnReset) {
+    const ::android::sp<FakeHdmiCecService> fake = ::android::sp<FakeHdmiCecService>::make();
+    ASSERT_TRUE(fake != nullptr);
+
+    fake->setInterfaceHash(std::string(kDivergentReportedHash));
+    fake->setInterfaceVersion(kDivergentReportedVersion);
+
+    // The premise: both values really did change. Without this the case could pass on a fake
+    // whose setters never worked.
+    ASSERT_EQ(fake->getInterfaceHash(), std::string(kDivergentReportedHash))
+        << "the hash was not installed, so this case would assert restoration of a value that "
+           "was never disturbed";
+    ASSERT_EQ(fake->getInterfaceVersion(), kDivergentReportedVersion)
+        << "the version was not installed, for the same reason";
+
+    fake->reset();
+
+    int32_t restoredVersion = 0;
+    std::string restoredHash;
+    std::string afterReset;
+    {
+        StdoutCapture capture;
+        ASSERT_TRUE(capture.isValid());
+
+        restoredVersion = fake->getInterfaceVersion();
+        restoredHash = fake->getInterfaceHash();
+
+        afterReset = capture.read();
+    }
+
+    EXPECT_EQ(restoredHash, std::string(kFrozenInterfaceHash))
+        << "reset() did not restore the compiled-in interface hash, so a case that made the "
+           "service incompatible would leave every later case running against a service the "
+           "middleware refuses";
+    EXPECT_EQ(restoredVersion, kClientInterfaceVersion)
+        << "reset() did not restore the compiled-in interface version. The hash and the version "
+           "are restored by the same critical section, so one surviving means the pair has "
+           "drifted apart";
+    EXPECT_THAT(afterReset, ::testing::Not(::testing::HasSubstr("overridden")))
+        << "a getter still reported divergence after reset(), which means it is reporting a "
+           "value reset() did not reach";
+}
+
+/**
+ * @brief The fake controller reports the interface metadata installed on it, and says when it
+ *        diverges.
+ *
+ * @pre Runs under every invocation, on a controller constructed directly rather than obtained
+ *      from a service: the controls are the controller's own, and nothing about them needs a
+ *      session. Never registered - a controller is never published under a name in any case,
+ *      since a client obtains one from open()'s out-parameter.
+ * @note Evidence: both getters report the compiled-in constants and stay quiet before any
+ *       override, then each reports the value installed on it and traces the divergence. These
+ *       two are the controller's previously unreachable traces - unreachable because the class
+ *       carried no metadata setter at all. A wrong implementation is a setter that writes the
+ *       service's member instead of the controller's, which would leave both traces here
+ *       unreached while appearing to work.
+ * @note What this does NOT establish, stated so the case is not over-read: the middleware's
+ *       compatibility check reads the service interface's metadata alone, so a divergent value
+ *       installed here decides no selection outcome and this case makes no compatibility claim.
+ *       Its subject is the control and the fake's own reporting of it.
+ * @see FakeHdmiCecController::setInterfaceVersion(), FakeHdmiCecController::setInterfaceHash()
+ */
+TEST_F(DriverAidlCompatibilityTest, TheControllerFakeReportsTheInterfaceMetadataInstalledOnIt) {
+    const ::android::sp<FakeHdmiCecController> controller =
+        ::android::sp<FakeHdmiCecController>::make();
+    ASSERT_TRUE(controller != nullptr);
+
+    int32_t defaultVersion = 0;
+    std::string defaultHash;
+    std::string defaultOutput;
+    {
+        StdoutCapture capture;
+        ASSERT_TRUE(capture.isValid())
+            << "stdout could not be redirected, so the divergence traces cannot be read; "
+               "failing rather than asserting against an empty capture";
+
+        defaultVersion = controller->getInterfaceVersion();
+        defaultHash = controller->getInterfaceHash();
+
+        defaultOutput = capture.read();
+    }
+
+    EXPECT_EQ(defaultVersion, kControllerClientInterfaceVersion)
+        << "an unconfigured fake controller did not report the compiled-in controller interface "
+           "version";
+    EXPECT_EQ(defaultHash, std::string(kControllerFrozenInterfaceHash))
+        << "an unconfigured fake controller did not report the compiled-in controller interface "
+           "hash";
+    EXPECT_THAT(defaultOutput, ::testing::Not(::testing::HasSubstr("overridden")))
+        << "a controller reporting its own compiled-in metadata still printed a divergence line";
+
+    int32_t installedVersion = 0;
+    std::string installedHash;
+    std::string divergentOutput;
+    {
+        StdoutCapture capture;
+        ASSERT_TRUE(capture.isValid());
+
+        controller->setInterfaceHash(std::string(kDivergentReportedHash));
+        controller->setInterfaceVersion(kDivergentReportedVersion);
+
+        installedHash = controller->getInterfaceHash();
+        installedVersion = controller->getInterfaceVersion();
+
+        divergentOutput = capture.read();
+    }
+
+    EXPECT_EQ(installedHash, std::string(kDivergentReportedHash))
+        << "the fake controller did not report the hash installed on it. AAP 0.4.1 requires the "
+           "fake to offer overridable metadata, and this class had no metadata setter at all";
+    EXPECT_EQ(installedVersion, kDivergentReportedVersion)
+        << "the fake controller did not report the version installed on it";
+    EXPECT_THAT(divergentOutput, ::testing::HasSubstr("setInterfaceHash] Hash set from"))
+        << "the controller's hash setter installed a value without tracing it";
+    EXPECT_THAT(divergentOutput, ::testing::HasSubstr("setInterfaceVersion] Version set from"))
+        << "the controller's version setter installed a value without tracing it";
+    EXPECT_THAT(divergentOutput,
+                ::testing::HasSubstr("FakeHdmiCecController::getInterfaceHash] Reporting "
+                                     "overridden hash"))
+        << "the controller's hash-divergence trace did not fire for a divergent hash. That "
+           "branch is one of the two this case exists to drive";
+    EXPECT_THAT(divergentOutput,
+                ::testing::HasSubstr("FakeHdmiCecController::getInterfaceVersion] Reporting "
+                                     "overridden version: "
+                                     + std::to_string(kDivergentReportedVersion)))
+        << "the controller's version-divergence trace did not fire for a divergent version. That "
+           "branch is the other one, and the class-qualified prefix is asserted so that the "
+           "service's identically worded line cannot satisfy this expectation";
+}
+
+/**
+ * @brief The fake controller restores both metadata values on reset().
+ *
+ * @pre Runs under every invocation, on a locally constructed controller.
+ * @note Evidence: both values are installed and observed changed, then reset() is called and
+ *       both getters report the compiled-in constants again and print no divergence line. The
+ *       controller is reset separately from its service - the service's reset() deliberately
+ *       does not touch the controller it owns - so a case that configures both must reset both,
+ *       and a reset that missed either value would leak an override into the next case through
+ *       the one long-lived controller the registered fake hands out.
+ * @see FakeHdmiCecController::reset(), FakeHdmiCecService::reset()
+ */
+TEST_F(DriverAidlCompatibilityTest, TheControllerFakeRestoresBothMetadataValuesOnReset) {
+    const ::android::sp<FakeHdmiCecController> controller =
+        ::android::sp<FakeHdmiCecController>::make();
+    ASSERT_TRUE(controller != nullptr);
+
+    controller->setInterfaceHash(std::string(kDivergentReportedHash));
+    controller->setInterfaceVersion(kDivergentReportedVersion);
+
+    ASSERT_EQ(controller->getInterfaceHash(), std::string(kDivergentReportedHash))
+        << "the hash was not installed, so this case would assert restoration of a value that "
+           "was never disturbed";
+    ASSERT_EQ(controller->getInterfaceVersion(), kDivergentReportedVersion)
+        << "the version was not installed, for the same reason";
+
+    controller->reset();
+
+    int32_t restoredVersion = 0;
+    std::string restoredHash;
+    std::string afterReset;
+    {
+        StdoutCapture capture;
+        ASSERT_TRUE(capture.isValid());
+
+        restoredVersion = controller->getInterfaceVersion();
+        restoredHash = controller->getInterfaceHash();
+
+        afterReset = capture.read();
+    }
+
+    EXPECT_EQ(restoredHash, std::string(kControllerFrozenInterfaceHash))
+        << "reset() did not restore the controller's compiled-in interface hash";
+    EXPECT_EQ(restoredVersion, kControllerClientInterfaceVersion)
+        << "reset() did not restore the controller's compiled-in interface version, so an "
+           "override would outlive the case that installed it";
+    EXPECT_THAT(afterReset, ::testing::Not(::testing::HasSubstr("overridden")))
+        << "a getter still reported divergence after reset()";
 }
 
 /**

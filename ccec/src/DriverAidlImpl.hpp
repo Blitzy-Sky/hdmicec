@@ -154,8 +154,26 @@ CCEC_BEGIN_NAMESPACE
  * Three observable differences from the legacy back-end are authorized, each forced by
  * the AIDL contract and each documented on the method that carries it: the 16-byte
  * frame limit enforced by write(), the OperationNotSupportedException raised by
- * writeAsync(), and the coarser failure category reported by addLogicalAddress(). Any
- * other observable difference is a defect.
+ * writeAsync(), and the coarser failure category reported by addLogicalAddress().
+ *
+ * Three further differences are DELIVERED AND REGISTERED WITHOUT BEING AUTHORIZED, which
+ * is stated here so that the authorized list above is not read as the complete set. Each
+ * is a defensive guard the AIDL transport makes necessary, each is documented in full on
+ * the method that carries it, and each is registered for the specification owner rather
+ * than silently adopted:
+ * - offerReceivedFrame() reserves one of the incoming queue's 32 slots for close()'s NULL
+ *   sentinel, so a sustained receive burst loses its first frame one event earlier than on
+ *   the legacy path, which fills all 32;
+ * - getLogicalAddress() reports no address when the HAL names one outside the AIDL
+ *   contract range 0x0..0xE, where the legacy back-end returns whatever the HAL wrote;
+ * - write() raises IOException on a `SendMessageStatus` value outside the three documented
+ *   enumerators, where the legacy back-end treats an unrecognised status as success.
+ * The last two are reachable only when the HAL violates its own contract. A fourth
+ * registration, of a deliberate departure from the plan's byte-identical directive rather
+ * than of a behaviour change, sits on read().
+ *
+ * Any observable difference that is neither authorized above nor registered on its method
+ * is a defect.
  *
  * The AIDL surface is split across two interfaces and only nine of its thirteen
  * methods are consumed. `IHdmiCec` supplies open(), close() and getLogicalAddresses();
@@ -1687,9 +1705,52 @@ public:
  * state-setting API would add real middleware surface, which the plan forbids. Declaration order
  * here matches DriverImpl's, so the two back-ends diff cleanly against one another.
  *
- * None of this adds to the middleware public API - `ccec/src/DriverAidlImpl.hpp` is not an
- * installed header, nothing in production derives from this class, and no consumer can reach a
- * protected member. Nothing outside `ccec/src` and the test suites may use any of it.
+ * REGISTERED DEVIATION FROM A SPECIFIED ACCESS LEVEL. AAP section 0.3.2.1 specifies the binder
+ * preflight predicate as a "private static" member of this class. It is declared `static` as
+ * specified and `public` rather than `private`, and the state and queue members that support
+ * the receive-path contract above are `protected` rather than `private`. Both are deliberate,
+ * both are recorded here rather than left to be discovered from the class body, and the
+ * specification owner owns the decision to restate the requirement or to accept this layout.
+ *
+ * STRICT PRIVACY IS NOT AVAILABLE, AND THE SAME AAP SECTION IS WHY. Section 0.3.2.1 also
+ * requires that a test translation unit reach the predicate through the relative-path include
+ * this header's own file comment names - `#include "../../../ccec/src/DriverAidlImpl.hpp"` -
+ * and pass it a synthesized probe, so that the predicate's negative arms can be exercised on a
+ * host with no binder driver. Those two requirements cannot both hold at `private`: a private
+ * static is unreachable from a non-friend translation unit, and the nested types the injected
+ * probe is built from have to be nameable from outside the class as well. That second
+ * constraint is not hypothetical - `tests/L1Tests/ccec/test_DriverAidl.cpp` declares
+ * NAMESPACE-SCOPE objects of type `DriverAidlImpl::BinderNodeIdentity` and free functions
+ * whose parameter and return types are `DriverAidlImpl::BinderNodeIdentity *` and
+ * `DriverAidlImpl::BinderPreflightProbe`. None of those declarations can name the type at all
+ * if it is protected or private, because they are not members of any subclass of this class.
+ * So `public` on the predicate and on the two nested types is what the specified test route
+ * costs, and the requirement to be reachable is the half of section 0.3.2.1 that decides it.
+ *
+ * WHAT EACH GROUP CARRIES, AND WHY THE GROUPING IS THE NARROWEST ONE THAT WORKS.
+ * - `public`: the twelve CCEC::Driver overrides and the constructor and destructor, which are
+ *   public in the interface this class implements and cannot be narrowed; the lifecycle enum
+ *   and the IncomingQueue typedef, which appear in those signatures and in members below; the
+ *   named constants; isServiceAvailable() and unavailabilityReason(), which the factory in
+ *   `ccec/src/Driver.cpp` calls from outside the class; and the test-reachable preflight
+ *   surface - isBinderPreflightOk(), defaultBinderProbe(), expectedBinderProtocolVersion(),
+ *   BinderNodeIdentity and BinderPreflightProbe - plus the three static compatibility
+ *   diagnostics, which are static, take everything they use as parameters and hold no state.
+ * - `protected`: everything that carries instance state or the receive-path invariant - the
+ *   EventListener class, getIncomingQueue(), offerReceivedFrame(), the lifecycle state, the
+ *   incoming queue, both locks, the local address list, the two session proxies, the listener
+ *   pointer and the recorded availability reason. These are reachable only by deriving, which
+ *   is what the test-local subclass does and what nothing in production does.
+ * - `private`: the copy constructor and copy assignment operator, declared and never defined.
+ * Moving any protected member to private would remove the only coverage the receive-path
+ * contract has on a driverless host, and moving any public member to protected would break
+ * either the Driver interface, the factory, or the namespace-scope test declarations above.
+ *
+ * None of this adds to the middleware public API, at any of the three access levels -
+ * `ccec/src/DriverAidlImpl.hpp` is not an installed header, it is absent from the
+ * `nobase_include_HEADERS` list at `hdmicec/Makefile.am:23` exactly as `DriverImpl.hpp` is,
+ * nothing in production derives from this class, and no consumer can reach a protected member.
+ * Nothing outside `ccec/src` and the test suites may use any of it.
  */
 protected:
 	/**

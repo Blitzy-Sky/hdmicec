@@ -73,8 +73,10 @@
  * Two dispatch modes matter and behave differently:
  * - In-process: libbinder resolves a name registered in the calling process to the local BBinder, so
  *   interface_cast hands back this object and every call, including getInterfaceVersion() and
- *   getInterfaceHash(), dispatches virtually here.  This is the only mode in which the one settable
- *   metadata value - the service's interface hash - takes effect.
+ *   getInterfaceHash(), dispatches virtually here.  This is the only mode in which the four settable
+ *   metadata values - each class's interface hash and interface version - take effect, and of those
+ *   four only the service's hash can change a selection outcome, because the middleware's
+ *   compatibility check reads the service interface's metadata alone.
  * - Out-of-process: the client holds a real proxy, transactions cross the binder driver and event
  *   callbacks arrive on the client's binder threadpool.  The generated onTransact() answers the
  *   metadata transactions from the compiled-in constants, so the metadata overrides are inert here.
@@ -268,35 +270,40 @@ public:
      * BnHdmiCecController already implements this method concretely, from the same compiled-in
      * ::com::rdk::hal::hdmicec::IHdmiCecController::VERSION, so the interface's pure-virtual
      * declaration is satisfied without an override and this one is not required.  It is kept so that
-     * both metadata methods on both fake classes answer from a member that reset() restores, which
-     * gives the pair one shape and one place to restore.@n
-     * The member behind it is written by the constructor's initialiser and by reset() and by nothing
-     * else: there is deliberately no setter, because the middleware's compatibility check runs
-     * against the service interface alone and a divergent version reported here could not change any
-     * outcome under test.
+     * both metadata methods on both fake classes answer from a member that setInterfaceVersion()
+     * installs and reset() restores, which gives the pair one shape and one place to restore.@n
+     * The value reported is whatever setInterfaceVersion() last installed, defaulting to the
+     * compiled-in constant.  What that value can and cannot decide is stated on the setter, and it is
+     * narrower than the service interface's version: the middleware's compatibility check reads the
+     * service interface's metadata alone.
      *
-     * @return int32_t                                - The compiled-in interface version
+     * @return int32_t                                - The reported interface version.  The
+     *                                                  compiled-in constant until
+     *                                                  setInterfaceVersion() installs another
      *
      * @warning Effective under local (in-process) dispatch only.  Across a binder transaction the
      *          generated onTransact() answers from the compiled-in constant instead.
      *
-     * @see reset()
+     * @see setInterfaceVersion(), reset()
      */
     int32_t getInterfaceVersion() override;
 
     /**
      * @brief Reports the interface hash this fake claims.
      *
-     * Overrides the concrete implementation BnHdmiCecController supplies, answering the same
-     * compiled-in ::com::rdk::hal::hdmicec::IHdmiCecController::HASHVALUE, and is no more required
-     * and no more settable than the version is, for the same reasons.
+     * Overrides the concrete implementation BnHdmiCecController supplies, answering the hash
+     * setInterfaceHash() last installed and defaulting to the same compiled-in
+     * ::com::rdk::hal::hdmicec::IHdmiCecController::HASHVALUE.  It is no more required than the
+     * version override is, and is settable on exactly the same terms.
      *
-     * @return std::string                            - The compiled-in interface hash
+     * @return std::string                            - The reported interface hash.  The compiled-in
+     *                                                  constant until setInterfaceHash() installs
+     *                                                  another
      *
      * @warning Effective under local (in-process) dispatch only, exactly as for
      *          getInterfaceVersion().
      *
-     * @see reset()
+     * @see setInterfaceHash(), reset()
      */
     std::string getInterfaceHash() override;
 
@@ -396,14 +403,55 @@ public:
      */
     void setSendMessageBinderStatus(const ::android::binder::Status& status);
 
-    /*
-     * There is deliberately no metadata setter on this class.  The middleware's compatibility check
-     * reads the service interface's metadata alone - IHdmiCec - so a divergent version or hash
-     * reported by the controller could not change a selection outcome, and a setter for one would
-     * suggest coverage that cannot exist.  The two overrides above answer the same compiled-in
-     * constants BnHdmiCecController already answers, so neither is required to satisfy the interface;
-     * they exist only to keep both metadata values on a member that reset() restores.
+    /**
+     * @brief Overrides the interface hash this fake controller claims.
+     *
+     * The controller half of the metadata pair, and its reach is narrower than the service's, which
+     * is the first thing to know about it.  The middleware's compatibility check reads the service
+     * interface's metadata alone - IHdmiCec - so a hash installed here decides no selection outcome
+     * and must not be read as a second route to the present-but-incompatible arm; what it does is
+     * make the value this class reports observable and changeable, so the divergence trace on
+     * getInterfaceHash() is reached by a test rather than left as an unreachable defensive branch.
+     * The parameter is an arbitrary string, exactly as on the service's setter, because no value is
+     * privileged here.
+     *
+     * @param [in] hash                       - Hash string to report
+     *
+     * @post Default is ::com::rdk::hal::hdmicec::IHdmiCecController::HASHVALUE, the real frozen hash
+     *       compiled into the snapshot, so an unconfigured controller reports the compatible value.
+     *       reset() restores that default, so an override cannot leak into the next case.
+     *
+     * @warning Effective under local (in-process) dispatch only.  A remotely served fake cannot
+     *          report divergent metadata at all, because the generated onTransact() answers the
+     *          metadata transactions from the compiled-in constants, so this setter has no effect on
+     *          the out-of-process invocation and must not be judged redundant on the evidence of a
+     *          remote run ignoring it.
+     *
+     * @see getInterfaceHash(), setInterfaceVersion(), reset(), FakeHdmiCecService::setInterfaceHash()
      */
+    void setInterfaceHash(std::string hash);
+
+    /**
+     * @brief Overrides the interface version this fake controller claims.
+     *
+     * The version half of the same pair, on the same terms and with the same reach: the compatibility
+     * check never reads it, so it decides no selection outcome, and its job is to make the divergence
+     * trace on getInterfaceVersion() reachable and reached.  No validation is applied - any int32_t
+     * is installed as given - because the whole point of the control is to report a value the
+     * snapshot would not.
+     *
+     * @param [in] version                    - Interface version to report
+     *
+     * @post Default is ::com::rdk::hal::hdmicec::IHdmiCecController::VERSION, the version compiled
+     *       into the snapshot, so an unconfigured controller reports the compatible value.  reset()
+     *       restores that default.
+     *
+     * @warning Effective under local (in-process) dispatch only, exactly as for setInterfaceHash().
+     *
+     * @see getInterfaceVersion(), setInterfaceHash(), reset(),
+     *      FakeHdmiCecService::setInterfaceVersion()
+     */
+    void setInterfaceVersion(int32_t version);
 
     // Observation accessors for test access
 
@@ -523,13 +571,15 @@ private:
     int32_t removeLogicalAddressesCallCount = 0;
     int32_t sendMessageCallCount = 0;
 
-    /** @brief Interface version getInterfaceVersion() reports.  Written by this initialiser and by
-     *         reset() only, there being no setter; it is a member rather than a literal in the getter
-     *         so that reset() has one place to restore and the getter has one value to return. */
+    /** @brief Interface version getInterfaceVersion() reports.  Written by this initialiser, by
+     *         setInterfaceVersion() and by reset(); it is a member rather than a literal in the
+     *         getter so that reset() has one place to restore and the getter has one value to
+     *         return.  Default: the frozen version. */
     int32_t interfaceVersionResult = ::com::rdk::hal::hdmicec::IHdmiCecController::VERSION;
 
-    /** @brief Interface hash getInterfaceHash() reports.  Written by this initialiser and by reset()
-     *         only, exactly as the version is. */
+    /** @brief Interface hash getInterfaceHash() reports.  Written by this initialiser, by
+     *         setInterfaceHash() and by reset(), exactly as the version is.  Default: the frozen
+     *         hash. */
     ::std::string interfaceHashResult = ::com::rdk::hal::hdmicec::IHdmiCecController::HASHVALUE;
 };
 
@@ -782,18 +832,20 @@ public:
      * BnHdmiCec already implements this method concretely, from the same compiled-in
      * ::com::rdk::hal::hdmicec::IHdmiCec::VERSION, so the override is not what satisfies the
      * interface's pure-virtual declaration; it exists so that the version is answered from a member
-     * alongside the hash, which is the metadata value a harness genuinely needs to override.@n
-     * The member behind it is written by the constructor's initialiser and by reset() and by nothing
-     * else: there is deliberately no setter, because the version arms of the middleware's
-     * compatibility check are exercised by locally constructed doubles at unit level rather than
-     * through the registered fake, for the reason setInterfaceHash() records.
+     * alongside the hash, both installable and both restored together.@n
+     * The value reported is whatever setInterfaceVersion() last installed, defaulting to the
+     * compiled-in constant.  Which arms of the middleware's compatibility check this control can and
+     * cannot reach is stated on that setter: the harness's incompatible mode drives the hash, and the
+     * version arms of the check are covered at unit level by locally constructed doubles.
      *
-     * @return int32_t                                - The compiled-in interface version
+     * @return int32_t                                - The reported interface version.  The
+     *                                                  compiled-in constant until
+     *                                                  setInterfaceVersion() installs another
      *
      * @warning Effective under local (in-process) dispatch only.  Across a binder transaction the
      *          generated onTransact() answers from the compiled-in constant instead.
      *
-     * @see reset(), setInterfaceHash()
+     * @see setInterfaceVersion(), reset(), setInterfaceHash()
      */
     int32_t getInterfaceVersion() override;
 
@@ -801,16 +853,16 @@ public:
      * @brief Reports the interface hash this fake claims.
      *
      * Answers the hash the harness installed, which defaults to the compiled-in
-     * ::com::rdk::hal::hdmicec::IHdmiCec::HASHVALUE.  This is the one metadata answer the suite has a
-     * reason to divert, and overriding the concrete BnHdmiCec implementation is the only way to
-     * divert it.
+     * ::com::rdk::hal::hdmicec::IHdmiCec::HASHVALUE.  This is the metadata answer the suite has the
+     * strongest reason to divert - it is what the harness's incompatible mode installs - and
+     * overriding the concrete BnHdmiCec implementation is the only way to divert it.
      *
      * @return std::string                            - The reported interface hash
      *
      * @warning Effective under local (in-process) dispatch only, exactly as for
      *          getInterfaceVersion().
      *
-     * @see setInterfaceHash()
+     * @see setInterfaceHash(), reset()
      */
     std::string getInterfaceHash() override;
 
@@ -923,15 +975,16 @@ public:
     /**
      * @brief Overrides the interface hash this fake claims.
      *
-     * The one metadata control on either fake class, and it exists for one job: to publish a service
-     * the middleware must find and then refuse, so that the factory-level fallback from a present but
-     * incompatible service can be observed.  The parameter is an arbitrary string, because the value
-     * that produces that outcome belongs to the harness rather than to this fake.
+     * The metadata control with a production-path consumer, and it exists for one job: to publish a
+     * service the middleware must find and then refuse, so that the factory-level fallback from a
+     * present but incompatible service can be observed.  The parameter is an arbitrary string,
+     * because the value that produces that outcome belongs to the harness rather than to this fake.
      *
      * @param [in] hash                       - Hash string to report
      *
      * @post Default is ::com::rdk::hal::hdmicec::IHdmiCec::HASHVALUE, the real frozen hash compiled
-     *       into the snapshot, so an unconfigured fake is the compatible case.
+     *       into the snapshot, so an unconfigured fake is the compatible case.  reset() restores that
+     *       default, so an override cannot leak into the next case.
      *
      * @warning Effective under local (in-process) dispatch only.  A remotely served fake cannot report
      *          divergent metadata at all, because the generated onTransact() answers the metadata
@@ -939,17 +992,46 @@ public:
      *          out-of-process invocation and must not be judged redundant on the evidence of a remote
      *          run ignoring it.
      *
-     * @note The one consumer is the L1 harness in tests/L1Tests/test_main.cpp, whose `incompatible`
-     *       mode installs the broken hash "-1" here before the middleware's selection resolves, which
-     *       is what makes the factory-level fallback observable.  The other rejection arms - the empty
-     *       hash, the "notfrozen" development hash and every version arm - are covered at unit level
-     *       by locally constructed doubles in tests/L1Tests/ccec/test_DriverAidl.cpp, precisely
-     *       because a served Bn* object cannot report bad metadata; nothing reaches those arms through
-     *       this setter, and this note must not be widened to claim otherwise.
+     * @note The one consumer that changes a selection outcome is the L1 harness in
+     *       tests/L1Tests/test_main.cpp, whose `incompatible` mode installs the broken hash "-1" here
+     *       before the middleware's selection resolves, which is what makes the factory-level
+     *       fallback observable.  The other rejection arms - the empty hash, the "notfrozen"
+     *       development hash and every version arm - are covered at unit level by locally constructed
+     *       doubles in tests/L1Tests/ccec/test_DriverAidl.cpp, precisely because a served Bn* object
+     *       cannot report bad metadata; nothing reaches those arms through this setter, and this note
+     *       must not be widened to claim otherwise.  The same file additionally drives this setter and
+     *       the three below it directly, on locally constructed and never registered fakes, which is
+     *       what makes each getter's divergence trace a reached branch rather than a reachable one.
      *
-     * @see getInterfaceHash()
+     * @see getInterfaceHash(), setInterfaceVersion(), reset()
      */
     void setInterfaceHash(std::string hash);
+
+    /**
+     * @brief Overrides the interface version this fake claims.
+     *
+     * The version half of the service's metadata pair, and its reach is deliberately smaller than the
+     * hash's: it decides no selection outcome under test.  The middleware's compatibility check does
+     * read this interface's version - the check reads the service interface's metadata and nothing
+     * else - but every version arm of it is exercised at unit level by locally constructed doubles
+     * rather than through the registered fake, so no harness mode installs a version here.  What this
+     * control does is make the value this class reports observable and changeable, which is what makes
+     * the divergence trace on getInterfaceVersion() a branch a test reaches rather than a defensive
+     * one nothing can drive.  No validation is applied - any int32_t is installed as given - because
+     * the whole point of the control is to report a version the snapshot would not.
+     *
+     * @param [in] version                    - Interface version to report
+     *
+     * @post Default is ::com::rdk::hal::hdmicec::IHdmiCec::VERSION, the version compiled into the
+     *       snapshot, so an unconfigured fake is the compatible case.  reset() restores that default,
+     *       so an override cannot leak into the next case.
+     *
+     * @warning Effective under local (in-process) dispatch only, exactly as for setInterfaceHash().
+     *
+     * @see getInterfaceVersion(), setInterfaceHash(), reset(),
+     *      FakeHdmiCecController::setInterfaceVersion()
+     */
+    void setInterfaceVersion(int32_t version);
 
     // Observation accessors for test access
 
@@ -1291,12 +1373,13 @@ private:
     /** @brief unregisterEventListener() invocation count; expected to stay zero. */
     int32_t unregisterEventListenerCallCount = 0;
 
-    /** @brief Interface version getInterfaceVersion() reports.  Written by this initialiser and by
-     *         reset() only, there being no setter for it. */
+    /** @brief Interface version getInterfaceVersion() reports.  Default: the compiled-in frozen
+     *         version; setInterfaceVersion() is the one control that changes it, and reset() restores
+     *         it. */
     int32_t interfaceVersionResult = ::com::rdk::hal::hdmicec::IHdmiCec::VERSION;
 
     /** @brief Interface hash getInterfaceHash() reports.  Default: the compiled-in frozen hash;
-     *         setInterfaceHash() is the one control that changes it. */
+     *         setInterfaceHash() is the one control that changes it, and reset() restores it. */
     ::std::string interfaceHashResult = ::com::rdk::hal::hdmicec::IHdmiCec::HASHVALUE;
 
     /** @brief The fake published for this process, or nullptr.  Cleared by the destructor. */
