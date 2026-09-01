@@ -1825,10 +1825,21 @@ void  DriverAidlImpl::close(void) noexcept(false)
  * has nothing left to signal because the loop has already established that the driver is no
  * longer OPENED. The flush loop's own comment carries that argument in full.
  *
- * The departure is recorded here for the specification owner alongside the three registered
- * observable differences on offerReceivedFrame(), getLogicalAddress() and write(), so that
- * every place this back-end is not what the plan literally specifies is stated on the method
- * that carries it.
+ * The departure is recorded here for the specification owner alongside the two registered
+ * observable differences, on getLogicalAddress() and write(), so that every place this
+ * back-end is not what the plan literally specifies is stated on the method that carries it.
+ * offerReceivedFrame() carried a third until its difference was closed rather than registered -
+ * the incoming queue is sized one entry larger than the legacy one, so its reserved slot costs
+ * no receive depth - and it is named here only for a reader arriving from an older revision of
+ * this comment.
+ *
+ * THIS DEPARTURE IS REACHABLE WITHOUT ANY HAL MISBEHAVIOUR, which distinguishes it from the
+ * other two: those need the HAL to report an address or a status its own contract forbids,
+ * whereas close() offers a sentinel on each transition out of OPENED, so an ordinary stop,
+ * reopen and close - or a close racing a second close - is enough to leave two of them. What
+ * the check changes is nonetheless not a caller-visible outcome: the only entry whose handling
+ * differs is a NULL one, and its previous handling was a dereference, which is undefined
+ * behaviour rather than a behaviour a caller could have depended on.
  *
  * @see DriverAidlImpl::close() - the producer of the NULL sentinels this method drains
  * @see DriverImpl::read()

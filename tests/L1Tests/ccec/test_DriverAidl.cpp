@@ -8923,6 +8923,23 @@ TEST_F(DriverAidlLocalInstanceTest, ReceiveQueueReservesTheLastSlotForCloseSenti
         << "the capacity leaves no room for both a received frame and close()'s sentinel, so "
            "this case cannot mean what it says";
 
+    // LEGACY PARITY, PINNED TO A LITERAL AND NOT TO THE PRODUCTION CONSTANT. Everything else in
+    // this case derives from `capacity`, which is what makes it a test of the reserve rather than
+    // of the depth: it would pass just as happily against a 32-entry queue that refused at 31,
+    // which is precisely the difference this back-end is required not to have. So the depth is
+    // asserted here against the number the legacy back-end actually gets - 32, the default
+    // `EventQueue(size_t cap = 32)` gives DriverImpl's queue, all of which its receive callback
+    // may fill. A change to either side of the arithmetic fails here.
+    //
+    // The same equality is a static_assert in `ccec/src/DriverAidlImpl.hpp`, so the production
+    // header cannot be edited into the difference at all. This assertion is not redundant with
+    // it: the static_assert proves the arithmetic, and this proves that the code path actually
+    // honours the arithmetic - the loop below accepts 32 frames and the 33rd offer is refused.
+    ASSERT_EQ(capacity - 1, 32u)
+        << "the depth available to received frames is " << (capacity - 1) << ", not the 32 the "
+           "legacy back-end gets from EventQueue's default capacity. close()'s reserved slot must "
+           "come out of an extra queue entry, never out of the depth a caller sees";
+
     ReceiveQueueProbe probe;
     probe.markOpened();
 

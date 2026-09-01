@@ -411,6 +411,38 @@ public:
 	static constexpr size_t INCOMING_QUEUE_CAPACITY = 33;
 
 	/**
+	 * @brief Pins the receive depth to the legacy contract, at compile time
+	 *
+	 * The parity this class claims against DriverImpl is a property of the ARITHMETIC
+	 * between two independent facts - this capacity, and offerReceivedFrame()'s refusal at
+	 * one below it - and neither fact states the depth on its own. That makes the depth
+	 * silently editable: lowering the capacity to 32 while leaving the refusal where it is
+	 * takes the reserved slot back out of the caller's share and restores the difference,
+	 * and no test can catch it, because every case that exercises the reserve derives its
+	 * own expectations from INCOMING_QUEUE_CAPACITY and would simply expect the smaller
+	 * number.
+	 *
+	 * So the depth is pinned here to a LITERAL, deliberately not to an expression over the
+	 * constant above, and the number is not arbitrary: 32 is the capacity
+	 * `CCEC_OSAL::EventQueue`'s own default constructor gives the legacy back-end, at
+	 * `EventQueue(size_t cap = 32)` in `osal/include/osal/EventQueue.hpp`, and legacy lets
+	 * received frames fill all of it. Anything that changes the depth available to received
+	 * frames on this back-end therefore fails to compile rather than shipping, whichever
+	 * side of the arithmetic is edited.
+	 *
+	 * @warning If the OSAL default is ever changed, this is the assertion that must be
+	 *          re-derived, and it should move with the same reasoning rather than simply
+	 *          being relaxed: the number to pin is whatever depth the legacy receive path
+	 *          gets, not whatever this back-end happens to give.
+	 * @see INCOMING_QUEUE_CAPACITY
+	 * @see offerReceivedFrame()
+	 */
+	static_assert(INCOMING_QUEUE_CAPACITY - 1 == 32,
+	              "the depth available to received frames must equal the 32 the legacy back-end "
+	              "gets from EventQueue's default capacity; the reserved slot for close()'s "
+	              "sentinel must come out of an extra entry, never out of the caller's share");
+
+	/**
 	 * @brief Constructs the AIDL back-end without touching binder
 	 *
 	 * Initializes the state to CLOSED, the legacy handle field to 0 and the local
