@@ -1206,6 +1206,52 @@ TOOLCHAIN_GCC_MAJOR=''
 # of: 'not requested', 'selected', or 'unavailable'.  Declared here so `set -u` cannot make a
 # read of it fatal on a path where the installer did not run.
 PINNED_COMPILER_STATE='not requested'
+# --staging-gcc-version and --staging-toolchain-state: WHICH COMPILER FAMILY BUILT THE ARTEFACTS
+# THIS IMAGE CARRIES, which is a different question from which family will compile inside it and
+# is recorded separately for that reason.
+#
+# TOOLCHAIN_GCC_MAJOR above governs the IN-GUEST build and the coverage instrumentation.  These
+# two describe the staged Binder closure, the AIDL stub libraries and servicemanager -- objects
+# that are compiled BEFORE this script runs, by the caller, and merely copied in here.  Those
+# two builds can legitimately be done by different families: the staged artefacts have to be
+# LOADABLE and LINKABLE against the guest's own glibc and libstdc++, which means built by a
+# toolchain no newer than the guest's, while the coverage instrumentation has to match the
+# (file,line,block,branch) manifest the branch gate compares against, which means the pinned
+# acceptance family.  On a bookworm guest with a major-13 pin those two requirements name
+# different compilers, so the deviation is REPORTED rather than reconciled -- the same
+# gate-and-record posture install_image_pinned_compiler takes, and for the same reason: this
+# script does not fail an image build for what an archive can or cannot serve.
+#
+# Both are optional and neither acquires a default.  Absent, the records say the caller did not
+# state it, which is a weaker claim than a wrong one.  write_sdk_build_flags_record puts them in
+# the image beside the SDK's own harvested build flags, and write_manifest carries them out.
+STAGING_GCC_VERSION=''
+STAGING_TOOLCHAIN_STATE=''
+# --provenance-revision-superproject / --provenance-revision-hdmicec /
+# --provenance-revision-entservices-hdmicecsink: THE COMMITS THE GUEST CANNOT READ FOR ITSELF.
+#
+# The payload is staged into the image WITHOUT its .git (see copy_guest_payload and the
+# workflow's "Stage the guest payload without its Git metadata"), which is deliberate -- the
+# image is published as an artifact and history has no business travelling with it.  The cost is
+# that tests/L1Tests/run_coverage.sh, which writes provenance.txt from `git rev-parse`, has
+# nothing to ask inside the guest and records every repository row as unavailable.  An artefact
+# whose own verification procedure says "compare the revision above with `git rev-parse HEAD`"
+# is then impossible to follow, which is the defect these three options close.
+#
+# THE INTERFACE IS THE RUNNER'S, NOT THIS SCRIPT'S.  run_coverage.sh consults an environment
+# variable per repository named CEC_PROVENANCE_REVISION_<LABEL>, where <LABEL> is its own
+# provenance label upper-cased with '-' mapped to '_', and it consults it ONLY when git cannot
+# answer for that path.  This script's job is to carry the values in and have the init export
+# them under exactly those names; it does not decide when they are used.
+#
+# EACH IS OPTIONAL AND AN ABSENT ONE DEGRADES TO TODAY'S BEHAVIOUR -- the row stays unavailable,
+# which is the truth when nobody supplied a revision.  A MALFORMED one is refused at the
+# boundary rather than passed through, because a value the runner then rejects with its own
+# diagnostic would have this script report success for an image that cannot produce the
+# provenance it was given the inputs for.
+PROVENANCE_REVISION_SUPERPROJECT=''
+PROVENANCE_REVISION_HDMICEC=''
+PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK=''
 # The guest's own measured versions, filled in by assert_image_toolchain and recorded in the
 # manifest.  Measured inside the image rather than inferred from a package name.
 GUEST_GCC_VERSION=''
@@ -1501,6 +1547,41 @@ OPTIONAL
                            consistency is still asserted; only the comparison against a family
                            nobody named is skipped.  The measured versions and the outcome are
                            logged, and written to the manifest as GUEST_TOOLCHAIN_*.
+      --staging-gcc-version V  The MEASURED version of the compiler family that built the
+                           artefacts named by --sdk-dir and --gtest-prefix.  A DIFFERENT
+                           QUESTION from --toolchain-gcc-major, which governs what compiles
+                           INSIDE the guest: the staged libraries are compiled before this
+                           script runs and merely copied in, and they must be loadable and
+                           linkable against the GUEST's glibc and libstdc++ -- which means built
+                           by a toolchain no newer than the guest's, not by the acceptance pin.
+                           Recorded, never gated: it is written into the image beside the SDK's
+                           own harvested build flags and into the manifest, so the guest's
+                           provenance says which family built what it is running.
+      --staging-toolchain-state S  How that measured version stands against the caller's pin.
+                           One of matches-pin, deviates-from-pin or unknown -- a closed set, so
+                           the image's provenance can be compared mechanically rather than read.
+                           A deviation is an expected outcome for a guest whose archive cannot
+                           serve the pinned family, and recording it is the point.
+      --provenance-revision-superproject SHA
+      --provenance-revision-hdmicec SHA
+      --provenance-revision-entservices-hdmicecsink SHA
+                           The commit revisions of the trees the payload was staged from, for
+                           the repositories tests/L1Tests/run_coverage.sh names in its
+                           provenance artifact.  THE GUEST CANNOT READ THEM FOR ITSELF: the
+                           payload is staged without its .git, deliberately, so the runner's
+                           `git rev-parse` has nothing to ask and every repository row in
+                           provenance.txt reads "unavailable (not a repository)" -- which makes
+                           the artifact's own instruction to compare those revisions against
+                           `git rev-parse HEAD` impossible to follow.  Passing them here writes
+                           them into the in-guest configuration; the init exports each as
+                           CEC_PROVENANCE_REVISION_<LABEL> (the runner's own provenance label,
+                           upper-cased, '-' mapped to '_'), and the runner consults that
+                           variable ONLY where git could not answer.  Each value must be a
+                           40-character lower-case hexadecimal sha, optionally suffixed
+                           '-dirty'; anything else is refused HERE rather than carried into the
+                           guest for the runner to reject.  Each is independent and each is
+                           OPTIONAL: an omitted one leaves that row exactly as it is today,
+                           because "nobody supplied a revision" is the truth in that case.
   -h, --help               This message.
       --self-test          Run this script's own checked-in regression cases and exit.  Takes
                            no other argument, needs no root, and returns BEFORE anything
@@ -1602,6 +1683,16 @@ parse_args() {
             --readiness-timeout=*) READINESS_TIMEOUT_SECONDS="${1#*=}" ;;
             --toolchain-gcc-major) require_option_value "$1" $#; TOOLCHAIN_GCC_MAJOR="$2"; shift ;;
             --toolchain-gcc-major=*) TOOLCHAIN_GCC_MAJOR="${1#*=}" ;;
+            --staging-gcc-version) require_option_value "$1" $#; STAGING_GCC_VERSION="$2"; shift ;;
+            --staging-gcc-version=*) STAGING_GCC_VERSION="${1#*=}" ;;
+            --staging-toolchain-state) require_option_value "$1" $#; STAGING_TOOLCHAIN_STATE="$2"; shift ;;
+            --staging-toolchain-state=*) STAGING_TOOLCHAIN_STATE="${1#*=}" ;;
+            --provenance-revision-superproject) require_option_value "$1" $#; PROVENANCE_REVISION_SUPERPROJECT="$2"; shift ;;
+            --provenance-revision-superproject=*) PROVENANCE_REVISION_SUPERPROJECT="${1#*=}" ;;
+            --provenance-revision-hdmicec) require_option_value "$1" $#; PROVENANCE_REVISION_HDMICEC="$2"; shift ;;
+            --provenance-revision-hdmicec=*) PROVENANCE_REVISION_HDMICEC="${1#*=}" ;;
+            --provenance-revision-entservices-hdmicecsink) require_option_value "$1" $#; PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK="$2"; shift ;;
+            --provenance-revision-entservices-hdmicecsink=*) PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK="${1#*=}" ;;
             -h|--help)            usage; exit 0 ;;
             --)                   shift; break ;;
             # An unknown option is REFUSED rather than ignored.  Silently accepting one
@@ -1770,6 +1861,41 @@ require_sha256_hex() { # $1=value  $2=what it is
     case "$1" in
         *[!0-9a-fA-F]*) die "$2 contains a character that is not hexadecimal.  A digest that
        cannot be parsed is refused rather than coerced." ;;
+    esac
+}
+
+# A GIT COMMIT REVISION AS THE COVERAGE RUNNER WILL ACCEPT IT, AND NOT ONE CHARACTER WIDER.
+#
+# THE FORM IS FIXED BY THE CONSUMER, not chosen here: tests/L1Tests/run_coverage.sh accepts a
+# 40-character LOWER-CASE hexadecimal sha, optionally suffixed '-dirty', and refuses anything
+# else with its own named diagnostic.  So this check is deliberately the same shape rather than
+# a looser one -- a value this script waved through and the runner then rejected would make the
+# image build report success for an image whose provenance cannot be written, which is precisely
+# the class of defect the three options exist to remove.
+#
+# WHY LOWER CASE ONLY, unlike require_sha256_hex above which accepts either case: that one
+# compares against a digest THIS script measures with sha256sum, so it may normalise; this one
+# is a string the guest hands to another program, and normalising it here would mean the value
+# recorded in the image is not the value the caller passed.  `git rev-parse` emits lower case,
+# so the strict form costs a correct caller nothing.
+#
+# The value reaches a diagnostic on every arm and is caller-supplied, so it is rendered rather
+# than interpolated.  See render_untrusted().
+require_commit_revision() { # $1=value  $2=what it is
+    local core="$1"
+    case "$core" in
+        *-dirty) core="${core%-dirty}" ;;
+    esac
+    [ "${#core}" -eq 40 ] || die "$2 must be a 40-character lower-case hexadecimal commit sha,
+       optionally suffixed '-dirty'; got $(render_untrusted "$1"), whose sha part is
+       ${#core} characters.  tests/L1Tests/run_coverage.sh refuses any other form, so a value
+       of the wrong shape would be carried all the way into the guest and rejected there --
+       pass a well-formed revision or pass none at all."
+    case "$core" in
+        *[!0-9a-f]*) die "$2 must be a 40-character LOWER-CASE hexadecimal commit sha,
+       optionally suffixed '-dirty'; got $(render_untrusted "$1").  It is passed through to the
+       guest unchanged rather than normalised, because the recorded provenance has to be the
+       value the caller supplied." ;;
     esac
 }
 
@@ -5497,6 +5623,47 @@ validate_inputs() {
     # pin that is not a number would compose package names like "gcc-thirteen" and fail three
     # phases later on something that reads as an archive problem.
     [ -z "$TOOLCHAIN_GCC_MAJOR" ] || require_positive_integer "$TOOLCHAIN_GCC_MAJOR" '--toolchain-gcc-major'
+
+    # THE STAGING TOOLCHAIN RECORD.  Both halves are optional and independent of each other --
+    # a caller may know the version and not have decided a state, or the reverse -- so neither
+    # implies the other and neither is required.  What IS refused is a value of the wrong shape,
+    # because both are written into records inside the published image and a record nobody can
+    # parse is worse than an absent one.
+    #
+    # The version is held to a dotted numeric form: it is a compiler version, and anything else
+    # in that field means the caller measured something other than a compiler.
+    if [ -n "$STAGING_GCC_VERSION" ]; then
+        case "$STAGING_GCC_VERSION" in
+            *[!0-9.]*|.*|*.|'') die "--staging-gcc-version must be a dotted numeric compiler
+       version such as 12.2.0, got $(render_untrusted "$STAGING_GCC_VERSION").  It is the
+       measured version of the family that built the staged i386 artefacts, recorded in the
+       image beside the SDK's own build flags; a value that is not a version would be published
+       as provenance nobody can act on." ;;
+        esac
+    fi
+    # The state is a CLOSED SET rather than free text, so a reader of the image's provenance can
+    # compare it mechanically instead of interpreting prose.  'matches-pin' and 'deviates-from-pin'
+    # are the two the caller can establish; 'unknown' is what an honest caller passes when it
+    # measured the staging compiler but has no pin to compare it against.
+    if [ -n "$STAGING_TOOLCHAIN_STATE" ]; then
+        case "$STAGING_TOOLCHAIN_STATE" in
+            matches-pin|deviates-from-pin|unknown) : ;;
+            *) die "--staging-toolchain-state must be one of matches-pin, deviates-from-pin or
+       unknown, got $(render_untrusted "$STAGING_TOOLCHAIN_STATE").  It is a closed set on
+       purpose: the image's provenance record is read mechanically and free text there cannot be
+       compared." ;;
+        esac
+    fi
+
+    # THE THREE PROVENANCE REVISIONS.  Each is optional; each is refused if malformed.  See
+    # require_commit_revision for why the form is the runner's rather than this script's.
+    [ -z "$PROVENANCE_REVISION_SUPERPROJECT" ] || \
+        require_commit_revision "$PROVENANCE_REVISION_SUPERPROJECT" '--provenance-revision-superproject'
+    [ -z "$PROVENANCE_REVISION_HDMICEC" ] || \
+        require_commit_revision "$PROVENANCE_REVISION_HDMICEC" '--provenance-revision-hdmicec'
+    [ -z "$PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK" ] || \
+        require_commit_revision "$PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK" \
+            '--provenance-revision-entservices-hdmicecsink'
 
     [ -n "$OUTPUT_IMAGE" ] || die "--output is required: this script has no default place to
        write a root image and will not invent one.  Run '$SCRIPT_PATH --help'."
@@ -9944,12 +10111,24 @@ READY_PROBE_EOF
 # BECAUSE NOTHING ELSE CAN ANSWER IT.
 #
 # The staged Binder closure, the two AIDL stub libraries and servicemanager are compiled ON THE
-# BUILD RUNNER against the runner's own 32-bit runtime, and then run inside an image built from
-# a different distribution with a different glibc and a different libstdc++.  The workflow that
-# calls this script used to justify that arrangement by comparing SUITE VINTAGES -- the guest's
-# runtime being newer than the runner's, so "the safe direction".  That reasoning is both
-# fragile and no longer true of the runner it now runs on, and the honest replacement is not a
-# better argument: it is to ASK THE LOADER, in the image, before a QEMU cycle is spent.
+# BUILD HOST and then run inside an image built from a different distribution, with its own glibc
+# and its own libstdc++.  The workflow that calls this script used to justify that arrangement by
+# comparing SUITE VINTAGES -- the guest's runtime being newer than the runner's, so "the safe
+# direction".  That reasoning is both fragile and no longer true of the runner it now runs on,
+# and the honest replacement is not a better argument: it is to ASK THE LOADER, in the image,
+# before a QEMU cycle is spent.
+#
+# WHAT CHANGED SINCE, AND WHY THIS CHECK IS STILL HERE.  aidl-path-tests.yml no longer stages
+# artefacts built by the RUNNER's own compiler: it debootstraps a build chroot from the same
+# pinned snapshot and suite the guest is built from and compiles the i386 SDK, the AIDL stubs and
+# GoogleTest inside it, so the artefacts are built by the guest's own glibc and libstdc++ by
+# construction.  That removes the CAUSE this check was written for -- and this check stays,
+# unweakened, for three reasons: --sdk-dir is a path any caller may point anywhere, a guest-
+# matched chroot is a property of one workflow rather than of this script, and a check that
+# passes is the evidence that the staging was in fact guest-matched.  The workflow additionally
+# refuses the same class of artefact on the HOST, at staging time, so on that path this arm
+# should now be unreachable; reaching it means the host-side check was bypassed or an artefact
+# arrived from elsewhere, and the diagnostic below says so.
 #
 # WHY VINTAGE COMPARISON WAS THE WRONG TEST ANYWAY.  An ELF does not require "the glibc it was
 # built on".  It requires the specific symbol versions its referenced symbols were introduced
@@ -10018,15 +10197,49 @@ $(printf '%s\n' "$unresolved" | sed 's/^/           /')
            $target
 $(printf '%s\n' "$bad_version" | sed 's/^/           /')
        This is the build-host-newer-than-guest failure, and it is reported here rather than
-       inside the VM.  Three remedies, in order of preference: (1) select the pinned compiler
-       family inside the guest so the guest's own runtime matches what built the artefacts --
-       pass --toolchain-gcc-major and check GUEST_TOOLCHAIN_PIN_STATE in the manifest, since a
-       state other than 'selected' means the guest is measuring with a different family;
-       (2) build the staged SDK with a compiler no newer than the guest's, or link it with
-       -static-libstdc++ -static-libgcc so it carries its own C++ runtime; (3) raise the guest
-       suite to one whose runtime defines the versions named above.  Do NOT copy the host's
-       libstdc++ into the staged directory as a workaround without also confirming its glibc
-       requirements are met -- that trades one version failure for another."
+       inside the VM.
+
+       THE REMEDY THAT WORKS, and it is one rather than three: BUILD THE STAGED ARTEFACTS WITH A
+       TOOLCHAIN WHOSE glibc AND libstdc++ ARE NO NEWER THAN THIS GUEST'S -- in practice, inside
+       a chroot debootstrapped from the same pinned snapshot and suite this image was built from.
+       .github/workflows/aidl-path-tests.yml now stages every i386 artefact that way, in 'Create
+       the guest-matched i386 build chroot', and it re-checks the result on the host before the
+       image build in 'Verify the guest's staged artefacts need no symbol version the guest
+       lacks'.  SO A FAILURE HERE ON THAT PATH MEANS ONE OF THOSE TWO STEPS WAS BYPASSED OR AN
+       ARTEFACT REACHED --sdk-dir FROM SOMEWHERE ELSE; establish which before changing anything
+       in this script.
+
+       THREE THINGS THAT LOOK LIKE REMEDIES AND ARE NOT, each measured on the ubuntu-24.04 /
+       bookworm-i386 pair this project uses:
+
+         * --toolchain-gcc-major DOES NOT CLOSE IT, although an earlier revision of this message
+           listed it first.  It selects the compiler used INSIDE the guest and has no bearing on
+           what compiled the artefacts already staged; and the pinned family is precisely what
+           the guest archive cannot serve -- bookworm's default is GCC 12 -- which is why that
+           option is gate-and-record in the first place.  It is still worth checking
+           GUEST_TOOLCHAIN_PIN_STATE in the manifest, but for attributing the coverage figures,
+           not for this failure.
+         * -static-libstdc++ -static-libgcc IS NOT SUFFICIENT ON ITS OWN.  It does remove the
+           GLIBCXX_3.4.32 requirement that g++-13 -m32 emits for any translation unit including
+           <iostream> (the std::ios_base_library_init() reference).  It leaves the artefact
+           requiring GLIBC_2.38 all the same, because the host's PREBUILT 32-bit libstdc++.a
+           itself references __isoc23_strtoul@GLIBC_2.38 -- measured in its eh_alloc.o and
+           debug.o members -- and a static archive is linked in as it was compiled, not
+           recompiled.  --sysroot fails for the same reason.
+         * SUPPRESSING THE C23 ALIASES WITH A -D IS IMPOSSIBLE.  __isoc23_strtol,
+           __isoc23_sscanf and their family are emitted by any _GNU_SOURCE translation unit
+           compiled against a glibc at or above 2.38 -- and g++ always defines _GNU_SOURCE, as
+           does libcutils explicitly.  /usr/include/features.h #undefs __GLIBC_USE_C23_STRTOL
+           and re-derives it from __GLIBC_USE(ISOC23), which _GNU_SOURCE forces on, so a
+           -D__GLIBC_USE_C23_STRTOL=0 on the command line is discarded before any header reads
+           it.  The guest's glibc 2.36 defines ZERO __isoc23_* symbols, so every such reference
+           is fatal at link time and there is no flag that removes it.
+
+       Raising GUEST_DEBIAN_SUITE to one whose runtime defines the versions named above is a
+       real alternative, and it is a decision about the guest rather than about the staging: it
+       changes the guest's compiler family, its package set and therefore its coverage figures.
+       Do NOT copy the host's libstdc++ into the staged directory as a workaround without also
+       confirming its glibc requirements are met -- that trades one version failure for another."
     done
 
     log "staged Binder closure, AIDL stubs and servicemanager all resolve through the image's"
@@ -10397,6 +10610,31 @@ write_sdk_build_flags_record() {
             "$SDK_REL_BINDER_BUILD" "$SDK_REL_BINDER_TARGET"
         printf '\n'
 
+        printf '## WHICH COMPILER FAMILY BUILT WHAT THIS IMAGE IS RUNNING\n'
+        printf '# Two different builds, two different pins, and conflating them is what this\n'
+        printf '# block exists to prevent.\n'
+        printf '#\n'
+        printf '#   staged_*        the Binder closure, the AIDL stub libraries and\n'
+        printf '#                   servicemanager BELOW.  Compiled by the caller before this\n'
+        printf '#                   script ran and copied in as they stand.  They have to LOAD\n'
+        printf '#                   and LINK against this guest glibc and libstdc++, so they\n'
+        printf '#                   must be built by a toolchain no NEWER than the guest\n'
+        printf '#                   userspace -- which on a bookworm guest is not the\n'
+        printf '#                   acceptance pin, and that deviation is recorded rather than\n'
+        printf '#                   reconciled.  Measured on the build host, not here.\n'
+        printf '#   guest_toolchain the compiler that will build the instrumented tree INSIDE\n'
+        printf '#                   this image and write its coverage notes files.  Recorded by\n'
+        printf '#                   assert_image_toolchain and carried in the manifest as\n'
+        printf '#                   GUEST_TOOLCHAIN_GCC / _GXX / _GCOV.\n'
+        printf '#\n'
+        printf '# An empty staged_compiler_gcc_version means the caller did not state it, which\n'
+        printf '# is a weaker claim than a wrong one and is left as such.\n'
+        printf 'staged_compiler_gcc_version=%s\n' "${STAGING_GCC_VERSION:-not stated by the caller}"
+        printf 'staged_compiler_state_against_pin=%s\n' "${STAGING_TOOLCHAIN_STATE:-not stated by the caller}"
+        printf 'guest_toolchain_pin=%s\n' "${TOOLCHAIN_GCC_MAJOR:-none requested}"
+        printf 'guest_toolchain_pin_state=%s\n' "$PINNED_COMPILER_STATE"
+        printf '\n'
+
         printf '## the staged readiness marker and the architecture of what was staged\n'
         if [ -f "$SDK_BINDER_TARGET/.sdk_ready" ]; then
             printf 'sdk_ready_marker=present\n'
@@ -10434,8 +10672,19 @@ write_image_conf() {
         'write the in-guest configuration into the image'
     confined_create "$target_rel" 0644 "the image's $target" \
         'write the in-guest configuration into the image'
-    confined_write "$target_rel" "the image's $target" \
-        'write the in-guest configuration into the image' <<IMAGE_CONF_EOF
+    # THE BLOCK IS ASSEMBLED IN A GROUP AND PIPED, rather than fed to confined_write as a bare
+    # heredoc, for exactly one reason: three of its keys are OPTIONAL and a heredoc has no
+    # conditional.  Writing them always, with empty values, would be the easy alternative and it
+    # is the wrong one -- read_image_conf initialises every key it knows about, so an empty
+    # PROVENANCE_REVISION_HDMICEC and an ABSENT one already mean the same thing to the init, and
+    # a conf file that lists a key it has no value for reads as a value that failed to arrive.
+    # Omitting the line says "not supplied", which is what happened.
+    #
+    # The destination and the confinement are unchanged: the bytes still go down a pipe to the
+    # descriptor confined_write opened, and the heredoc below is still the one this script
+    # expands (the delimiter is unquoted), so nothing about the security properties moves.
+    {
+    cat <<IMAGE_CONF_EOF
 # Generated by $SCRIPT_NAME.  Read by $GUEST_INIT_PATH.
 # Every value is a fixed property of this image; nothing here selects a code path, and in
 # particular there is no back-end selection of any kind -- both HDMI CEC HAL back-ends are
@@ -10473,6 +10722,32 @@ EXPECTED_BINDER_PROTOCOL='$DERIVED_BINDER_PROTOCOL'
 PROTOCOL_FROM_KERNEL_CONFIG='$PROTOCOL_FROM_KERNEL_CONFIG'
 PROTOCOL_FROM_SDK_CACHE='$PROTOCOL_FROM_SDK_CACHE'
 IMAGE_CONF_EOF
+    # THE THREE OPTIONAL PROVENANCE REVISIONS, written only for the ones the caller supplied.
+    #
+    # The payload travels without its .git, so `git rev-parse` inside the guest cannot answer for
+    # any of these trees and tests/L1Tests/run_coverage.sh records them as unavailable.  These
+    # keys are how the revisions reach it instead: the init exports each as
+    # CEC_PROVENANCE_REVISION_<LABEL> and the runner consults that variable only where git could
+    # not answer.  Each value was held to the runner's own accepted form
+    # (require_commit_revision) at the point it entered this script, so the single quoting below
+    # cannot be broken out of -- a 40-character lower-case hex sha with an optional '-dirty'
+    # suffix contains no quote, no newline and no metacharacter.
+    #
+    # An omitted key is the honest record of an omitted input, and read_image_conf treats a key
+    # it never saw exactly as it treats an empty one, so nothing downstream needs to distinguish
+    # them.  None of the three is in read_image_conf's required list.
+    if [ -n "$PROVENANCE_REVISION_SUPERPROJECT" ]; then
+        printf "PROVENANCE_REVISION_SUPERPROJECT='%s'\n" "$PROVENANCE_REVISION_SUPERPROJECT"
+    fi
+    if [ -n "$PROVENANCE_REVISION_HDMICEC" ]; then
+        printf "PROVENANCE_REVISION_HDMICEC='%s'\n" "$PROVENANCE_REVISION_HDMICEC"
+    fi
+    if [ -n "$PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK" ]; then
+        printf "PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK='%s'\n" \
+            "$PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK"
+    fi
+    } | confined_write "$target_rel" "the image's $target" \
+            'write the in-guest configuration into the image'
     confined_chmod "$target_rel" 0644 "the image's $target" \
         'set the mode of the in-guest configuration'
 
@@ -10673,6 +10948,21 @@ READINESS_TIMEOUT_SECONDS=''
 EXPECTED_BINDER_PROTOCOL=''
 PROTOCOL_FROM_KERNEL_CONFIG=''
 PROTOCOL_FROM_SDK_CACHE=''
+# The commit revisions of the trees the payload came from, written into the configuration by the
+# image builder because this guest cannot read them for itself: the payload is staged WITHOUT its
+# .git, so `git rev-parse` has nothing to ask and tests/L1Tests/run_coverage.sh would record every
+# repository row as unavailable.  export_build_environment publishes each as
+# CEC_PROVENANCE_REVISION_<LABEL>, which is the variable the runner consults -- and consults ONLY
+# where git could not answer, so an image that somehow did carry a repository is still described
+# by the repository rather than by these.
+#
+# EACH IS OPTIONAL AND AN EMPTY ONE IS NOT AN ERROR.  Empty means the image builder was not given
+# that revision, in which case the row stays as it is today; that is the truth and not a
+# shortfall this init should refuse to boot on.  None of the three appears in the required list
+# below for that reason.
+PROVENANCE_REVISION_SUPERPROJECT=''
+PROVENANCE_REVISION_HDMICEC=''
+PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK=''
 
 read_image_conf() {
     [ -r "$IMAGE_CONF" ] || die "$IMAGE_CONF is missing or unreadable, so this image was not
@@ -10693,7 +10983,9 @@ read_image_conf() {
             GTEST_PREFIX|SINK_CALLER_SOURCE|ARTIFACT_DIR|STATUS_FILE|PROTOCOL_HELPER|READY_PROBE| \
             KERNEL_EXPECTATION|KERNEL_PROVENANCE|SDK_FLAGS_RECORD|BINDER_DEVICE_NODES| \
             READINESS_TIMEOUT_SECONDS|EXPECTED_BINDER_PROTOCOL| \
-            PROTOCOL_FROM_KERNEL_CONFIG|PROTOCOL_FROM_SDK_CACHE)
+            PROTOCOL_FROM_KERNEL_CONFIG|PROTOCOL_FROM_SDK_CACHE| \
+            PROVENANCE_REVISION_SUPERPROJECT|PROVENANCE_REVISION_HDMICEC| \
+            PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK)
                 printf -v "$key" '%s' "$value" ;;
             *)
                 die "unrecognised key '$key' in $IMAGE_CONF.  The image build and this init
@@ -11750,6 +12042,56 @@ export_build_environment() {
        root-image script.  Rebuild the image."
     fi
     export CEC_SINK_CALLER_SOURCE="$SINK_CALLER_SOURCE"
+
+    # THE PAYLOAD'S COMMIT REVISIONS, WHICH THIS GUEST CANNOT DERIVE AND MUST NOT INVENT.
+    #
+    # tests/L1Tests/run_coverage.sh writes provenance.txt from `git rev-parse` over the
+    # superproject and each submodule it finds.  The payload in this image was staged WITHOUT its
+    # .git -- deliberately, because the image is published as an artifact and history has no
+    # business travelling with it -- so every one of those reads fails and every repository row
+    # reads "unavailable (not a repository)".  That is not merely untidy: the artifact's own
+    # verification procedure tells its reader to compare the recorded superproject revision
+    # against `git rev-parse HEAD`, and a row with no sha in it makes that instruction
+    # impossible to carry out.
+    #
+    # THE VARIABLE NAMES ARE THE RUNNER'S CONTRACT, NOT A CONVENTION INVENTED HERE:
+    # CEC_PROVENANCE_REVISION_<LABEL>, where <LABEL> is the runner's own provenance label
+    # upper-cased with '-' mapped to '_'.  So provenance label 'entservices-hdmicecsink' becomes
+    # CEC_PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK.  The runner reads each ONLY when git could
+    # not answer for that path, which is why exporting them cannot override a real repository if
+    # one is ever present, and it refuses a malformed value with its own named diagnostic --
+    # which is why the image builder held each to the same form before writing it here.
+    #
+    # EXPORTED ONLY WHEN NON-EMPTY, and for a stronger reason than tidiness: an EMPTY value is
+    # a malformed value to the runner, so exporting one would turn "the builder was given no
+    # revision for this tree" into a hard refusal inside the guest.  Absent, the row stays
+    # exactly as it is today.  A revision that is absent is logged as such rather than passed
+    # over in silence, because "the provenance artifact will not name this tree" is a fact the
+    # console log should carry.
+    local label conf_name env_name option_name value
+    for label in SUPERPROJECT HDMICEC ENTSERVICES_HDMICECSINK; do
+        conf_name="PROVENANCE_REVISION_$label"
+        env_name="CEC_PROVENANCE_REVISION_$label"
+        # The option's spelling is the label transformed the OTHER way -- lower-cased with '_'
+        # mapped back to '-' -- so the remedy printed below is the flag a reader can copy rather
+        # than one they have to re-derive.  ENTSERVICES_HDMICECSINK is the case that proves the
+        # substitution is needed: without it the message would name a flag that does not exist.
+        option_name="${label,,}"
+        option_name="${option_name//_/-}"
+        value="${!conf_name}"
+        if [ -n "$value" ]; then
+            # Exporting BY NAME, as the SDK loop above does: $env_name holds the variable's
+            # name.  SC2163 exists to catch `export $foo` written where `export foo` was meant,
+            # which is the opposite of what this does.
+            # shellcheck disable=SC2163
+            export "$env_name=$value"
+            log "  $env_name=$value"
+        else
+            log "  $env_name: not supplied by the image builder, so the coverage runner's"
+            log "    provenance artifact will record this repository as unavailable. Pass"
+            log "    --provenance-revision-$option_name to aidl-path-tests-rootfs.sh to fix it."
+        fi
+    done
 
     log "build environment exported:"
     log "  HALIF_PREFIX=$HALIF_PREFIX"
@@ -13428,6 +13770,26 @@ write_manifest() {
         printf 'GUEST_TOOLCHAIN_PIN=%s\n' "${TOOLCHAIN_GCC_MAJOR:-<none requested>}"
         printf 'GUEST_TOOLCHAIN_PIN_STATE=%s\n' "$PINNED_COMPILER_STATE"
         printf 'GUEST_TOOLCHAIN_NOTE=gcc, g++ and gcov are asserted to be the same version, which is what the guest trace depends on; agreement with GUEST_TOOLCHAIN_PIN is RECORDED and not asserted, because the guest package archive is the caller pinned one and this builder does not fail an image build for what that archive does not carry\n'
+        # THE OTHER TOOLCHAIN, AND IT IS A SEPARATE PAIR OF LINES BECAUSE IT IS A SEPARATE
+        # QUESTION.  GUEST_TOOLCHAIN_* above is what will compile INSIDE this image.  These two
+        # are what compiled the staged Binder closure, the AIDL stub libraries and
+        # servicemanager BEFORE this script ran - objects this image only carries.  They are
+        # allowed to differ, and on a bookworm guest with a major-13 acceptance pin they
+        # necessarily do: a staged artefact has to link and load against the GUEST's glibc and
+        # libstdc++, so it must be built by a toolchain no newer than the guest's, while the
+        # coverage instrumentation has to match the branch-arm manifest, so it must be the
+        # pinned family.  Recording both is what stops a reader attributing one to the other.
+        printf 'STAGING_TOOLCHAIN_GCC=%s\n' "${STAGING_GCC_VERSION:-<not stated by the caller>}"
+        printf 'STAGING_TOOLCHAIN_STATE=%s\n' "${STAGING_TOOLCHAIN_STATE:-<not stated by the caller>}"
+        # THE PAYLOAD'S COMMIT REVISIONS, CARRIED OUT AS WELL AS IN.  The in-guest configuration
+        # holds them so the coverage runner can name them in provenance.txt; the manifest holds
+        # them so the workflow that published this image can be tied to the same commits without
+        # opening the image.  An absent one is printed as absent: the payload travels without
+        # .git, so a row nobody supplied a revision for genuinely cannot be answered.
+        printf 'PROVENANCE_REVISION_SUPERPROJECT=%s\n' "${PROVENANCE_REVISION_SUPERPROJECT:-<not supplied>}"
+        printf 'PROVENANCE_REVISION_HDMICEC=%s\n' "${PROVENANCE_REVISION_HDMICEC:-<not supplied>}"
+        printf 'PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK=%s\n' \
+            "${PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK:-<not supplied>}"
         printf 'GUEST_NETWORK_AT_TEST_TIME=none\n'
         printf 'PAYLOAD_TRANSPORT=copied into the image at build time; artifacts are read back out of the image after the guest powers down\n'
     } > "$manifest"

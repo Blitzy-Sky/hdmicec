@@ -2704,7 +2704,42 @@ release_tree_lock() {
 # `timeout` and the test binary, both of which stay in that group because `timeout --foreground`
 # deliberately does not create one of its own.  A bounded grace period follows, then the group is
 # killed outright.
+#
+# ONE GROUP IS NOT THE WHOLE TREE, AND THAT WAS MEASURED RATHER THAN SUSPECTED.  The L2 harness
+# makes the child it forks a process-group LEADER, deliberately and on both sides of the fork
+# (tests/L2Tests/test_main.cpp: the child's own `setpgid(0, 0)`, and the parent's
+# `setpgid(child, child)` immediately after it).  It has to: the fake service host may itself
+# fork, and a teardown that could only signal the one pid it forked left the host's own children
+# running -- while the only group-wide signal available to the harness addressed the RUNNER's
+# group, which would have killed the runner.  The consequence for this script is that the host
+# and everything below it sit in a group of their OWN, and a signal addressed to `-$SUITE_PGID`
+# never reaches them.  Measured at signal time during invocation D, cancelled with SIGTERM:
+#
+#     timeout       3234979  pgid 3234979   <-- = SUITE_PGID, the backgrounded subshell
+#     run_L2Tests   3234980  pgid 3234979       in the suite's group
+#     run_L2Tests   3234996  pgid 3234996   <-- ITS OWN GROUP: escapes -$SUITE_PGID entirely
+#     run_L2Tests   3234997  pgid 3234996       and so does everything below it
+#
+# 3234996 and 3234997 survived the cancellation with PPid 1, were still alive at t=60s, one of
+# them with SIGTERM ignored (SigIgn 0x5006), each holding the cancelled run's coverage temp
+# directory -- while this script logged that the group was "confirmed gone".  On invocation E
+# that survivor is the fake service host, still holding the production "HdmiCec" registration
+# that both harnesses treat as a HARD FAILURE when they find it already taken, so one cancelled
+# run poisoned every later AIDL invocation on that host until somebody killed it by hand.
+#
+# SO THE CUSTODY RECORD IS A SET OF GROUPS, NOT ONE GROUP.  SUITE_PGID is the backgrounded
+# subshell's pid and, under `set -m`, also its group id, which makes it the root of a walk over
+# the process tree; SUITE_EXTRA_PGIDS holds every OTHER process group found below that root.  The
+# walk is taken BEFORE the first signal is sent -- see suite_capture_descendant_groups for why
+# that ordering is the whole of the fix rather than merely tidier.
 SUITE_PGID=''                  # process group of the running suite; empty when none is running
+SUITE_EXTRA_PGIDS=''           # space-separated ids of the DESCENDANT process groups of that
+                               # group, discovered by walking the tree before it is signalled.
+                               # Part of the same custody record as SUITE_PGID: the two are
+                               # cleared together, and only when every id in the set has been
+                               # probed and found extinct, so the EXIT trap's retry inherits
+                               # whatever the first attempt could not establish -- by which
+                               # point these ids may be all that is left of it.
 SUITE_SIGNAL=''                # name of the signal that cancelled this run, if any
 # How long a signalled process group is given to exit before it is killed outright.  Bounded
 # because the point of the exercise is that a cancellation completes.
@@ -2725,69 +2760,373 @@ case "$SUITE_STOP_GRACE_SECONDS" in
 esac
 readonly SUITE_STOP_GRACE_SECONDS
 
-# Wait up to $2 seconds for kill-target $1 (a pid, or -pgid) to disappear.  0 when it is gone.
-await_process_exit() { # $1 = kill target  $2 = seconds
-    local target="$1" seconds="$2" waited=0
-    while kill -0 -- "$target" 2>/dev/null; do
+# Wait up to $1 seconds for EVERY kill target named in $2.. (a pid, or -pgid) to disappear.
+# 0 when all of them are gone, 1 when the period expired with at least one still answering.
+#
+# ONE PERIOD FOR THE WHOLE SET, which is why this takes a list rather than being called in a
+# loop.  Groups signalled together exit concurrently, so a per-target wait would charge
+# SUITE_STOP_GRACE_SECONDS for each of them in turn and multiply the bound by the number of
+# groups -- and the bound exists precisely because a cancellation has to COMPLETE.  Each pass
+# probes the targets in order and stops at the first one still alive, so the ordinary case (one
+# target, already gone) costs the single `kill -0` it always did.
+#
+# A zero-second period is still a coherent instruction and is implemented as one: the first pass
+# probes, and if anything answers, `waited` (0) is not less than 0, so it returns 1 immediately
+# and the caller escalates without waiting.  Nothing is signalled here -- this only observes.
+await_process_exit() { # $1 = seconds  $2.. = kill targets
+    local seconds="$1" waited=0 target alive
+    shift
+    # No targets is not an error: the caller filtered a set that turned out to be empty, and
+    # "everything in the empty set is gone" is the truthful answer rather than a special case.
+    [ "$#" -gt 0 ] || return 0
+    while : ; do
+        alive=''
+        for target in "$@"; do
+            if kill -0 -- "$target" 2>/dev/null; then
+                alive="$target"
+                break
+            fi
+        done
+        [ -n "$alive" ] || return 0
         [ "$waited" -lt "$seconds" ] || return 1
         sleep 1
         waited=$((waited + 1))
     done
+}
+
+# ------------------------------------------------------------------------------------
+# READING THE PROCESS TREE OUT OF /proc, BECAUSE THE ALTERNATIVES ARE WORSE.
+#
+# The rule this script keeps everywhere else applies here too: processes are addressed BY ID and
+# never by a command-line pattern.  `pkill -f run_L1Tests` would match anything that merely
+# mentions the name -- up to and including the harness that started this script, and the CI step
+# that started the harness -- so a pattern is not a narrower tool here, it is an unbounded one.
+# `ps --ppid` would do, but it is one fork per level of the tree and its output format varies
+# between the procps and busybox implementations this script is run under; /proc is already how
+# this script establishes descriptor identity (see open_fd_identity), so it is the idiomatic
+# source here rather than a novel one, and it needs no external binary at all.
+#
+# PROC_STAT_PPID and PROC_STAT_PGID are set by read_proc_ppid_and_pgid rather than printed,
+# which is not a style choice: the walk below reads every entry under /proc, and a command
+# substitution per entry would be one fork per process on the host for every cancellation.
+# ------------------------------------------------------------------------------------
+PROC_STAT_PPID=''
+PROC_STAT_PGID=''
+
+# Read the parent pid and the process group id of $1 into PROC_STAT_PPID / PROC_STAT_PGID.
+# Both are left EMPTY when the pid is gone, when /proc is not readable, or when the line cannot
+# be parsed with certainty -- and every caller treats empty as "no information", never as zero.
+read_proc_ppid_and_pgid() { # $1 = pid
+    local pid="$1" line rest
+    PROC_STAT_PPID=''
+    PROC_STAT_PGID=''
+
+    # A pid that disappears between the directory listing and this read is the ORDINARY case
+    # when walking a tree that is dying, not an error worth a diagnostic: the redirection fails,
+    # `2>/dev/null` (placed FIRST, so it is in force before the failing `<` is attempted)
+    # swallows bash's message, and the empty globals report "gone" to the caller.
+    IFS= read -r line 2>/dev/null < "/proc/$pid/stat" || return 0
+    [ -n "$line" ] || return 0
+
+    # THE COMM FIELD IS PARENTHESISED AND UNESCAPED, WHICH IS WHY THIS DOES NOT SPLIT ON
+    # WHITESPACE.  /proc/<pid>/stat renders field 2 as the executable name in parentheses with
+    # nothing quoted or stripped, so a process named `sh) 1 2 3 (x` -- which a caller may create
+    # deliberately -- shifts every field after it and a whitespace split silently yields another
+    # process's parent and group.  Stripping the LONGEST prefix up to a `)` cannot be fooled by
+    # that: the kernel writes exactly one `)` after the comm, so the last `)` on the line is
+    # always the one that closes it, whatever the comm itself contains.
+    rest="${line##*)}"
+    # Deliberate word splitting on a known-numeric field list, and the positional parameters are
+    # local to this function so nothing outside it is disturbed.  After the comm come: state (1),
+    # ppid (2), pgrp (3).
+    # shellcheck disable=SC2086  # intentional split of /proc stat fields, which are never quoted
+    set -- $rest
+    [ "$#" -ge 3 ] || return 0
+    case "$2" in ''|*[!0-9]*) return 0 ;; esac
+    case "$3" in ''|*[!0-9]*) return 0 ;; esac
+
+    PROC_STAT_PPID="$2"
+    PROC_STAT_PGID="$3"
     return 0
 }
 
-# Forward $1 to the suite's process group, then make sure it is actually gone.  Idempotent, so
-# the signal handler and the EXIT handler can both call it.  The group is addressed by id -- never
-# by a command-line pattern, because `pkill -f run_L1Tests` would also match anything that merely
-# mentions the name, including the harness that started this script.
+# ------------------------------------------------------------------------------------
+# ENUMERATE THE SUITE'S DESCENDANT PROCESS GROUPS, AND DO IT BEFORE ANYTHING IS SIGNALLED.
+#
+# THE ORDERING IS THE FIX, NOT AN OPTIMISATION.  A descendant group is discoverable only while
+# the chain of parents that leads to it is intact.  The measurement in THE CANCELLATION block
+# above shows both halves of that: at signal time 3234996's parent was 3234980, itself a child of
+# the subshell, so a walk from SUITE_PGID reached it; one SIGTERM later 3234980 was gone, 3234996
+# had been reparented to PID 1, and NO walk from this script could ever find it again.  So this
+# runs at the top of stop_suite_group, before the first `kill`, and its result is kept in the
+# custody record for the retry rather than recomputed there.
+#
+# MERGED, NEVER REPLACED.  A second call adds to SUITE_EXTRA_PGIDS and removes nothing: by the
+# time the EXIT trap calls stop_suite_group again, the tree that yielded these ids no longer
+# exists, and dropping an id because this pass could not re-derive it would discard the only
+# handle the script has on a process that is still alive.
+#
+# SEEDED TWO WAYS, WHICH IS WHAT MAKES IT WORK ON BOTH PATHS.  The root pid covers the
+# cancellation path, where the subshell is still running.  Every live process whose group is
+# already in the custody record is also a seed, which covers the close-out path, where `wait` has
+# already collected the subshell and only lower members of its group are left.  A group whose
+# entire ancestor chain has already exited is beyond the reach of any walk -- that case is what
+# the pre-signal ordering exists to prevent, and on the success path it is the harness's own
+# teardown, which signals its host's group by the id it read back after the fork, that covers it.
+#
+# WHAT IT REFUSES TO RETURN, and this guard is load-bearing rather than defensive book-keeping.
+# This script's own process group is EXCLUDED: a descendant may join any group in its session,
+# the runner's group is in that session, and a group-directed signal to it would kill the runner
+# in the middle of its own cleanup -- the exact outcome the L2 harness's comment block cites as
+# the reason it never signals the group a fork inherits.  Groups 0 and 1 are excluded for the
+# same reason at larger scale.  SUITE_PGID itself is not filtered: `set -m` created it for the
+# backgrounded subshell alone, so it is this run's by construction.
+#
+# Always returns 0.  It is called from the signal handler and from the EXIT trap, both of which
+# run under `set -e`, and a non-zero return from an enumeration would abort a cleanup over what
+# is only ever a best-effort reading of a tree that is disappearing as it is read.
+# ------------------------------------------------------------------------------------
+suite_capture_descendant_groups() {
+    local entry pid own_pgid table='' seeds='' frontier='' next='' seen='' groups=''
+    local line p pp pg cursor
+
+    [ -n "$SUITE_PGID" ] || return 0
+
+    # OUR OWN GROUP FIRST, AND NO WALK AT ALL WITHOUT IT.  The exclusion above cannot be applied
+    # to a value that could not be read, and a walk that cannot exclude the runner's group could
+    # hand a caller an id whose signalling ends this script.  A /proc this script cannot read
+    # therefore degrades to exactly the previous behaviour -- SUITE_PGID alone -- which is a
+    # smaller failure than either guessing or refusing to clean up.
+    read_proc_ppid_and_pgid "$$"
+    own_pgid="$PROC_STAT_PGID"
+    if [ -z "$own_pgid" ]; then
+        warn "could not read this script's own process group from /proc, so the suite's"
+        warn "    descendant process groups cannot be enumerated safely; falling back to"
+        warn "    signalling process group $SUITE_PGID alone.  A descendant that made itself a"
+        warn "    group leader -- the L2 fake service host does -- may survive this cleanup."
+        return 0
+    fi
+
+    # ONE SNAPSHOT, THEN THE WALK OVER THAT SNAPSHOT.  Re-reading /proc per level would mix
+    # readings taken at different instants, and a tree that is being torn down changes between
+    # them: a child seen in the second reading but not the first is a child whose parent link was
+    # read after the parent had gone.  A single pass is not atomic either -- nothing over /proc
+    # is -- but it is one instant's worth of inconsistency instead of one per level.
+    for entry in /proc/[0-9]*; do
+        pid="${entry#/proc/}"
+        read_proc_ppid_and_pgid "$pid"
+        [ -n "$PROC_STAT_PGID" ] || continue
+        table="${table}${pid} ${PROC_STAT_PPID} ${PROC_STAT_PGID}
+"
+    done
+    [ -n "$table" ] || return 0
+
+    # SEEDS.  The root pid, plus every live process already in one of the recorded groups.
+    seeds="$SUITE_PGID"
+    while IFS=' ' read -r p pp pg; do
+        [ -n "$p" ] || continue
+        case " $SUITE_PGID $SUITE_EXTRA_PGIDS " in
+            *" $pg "*) case " $seeds " in *" $p "*) : ;; *) seeds="$seeds $p" ;; esac ;;
+        esac
+    done <<< "$table"
+
+    # BREADTH-FIRST, PARENT TO CHILDREN.  Downward only: the relation is followed from a pid to
+    # the processes whose ppid is that pid and never the other way, so the walk cannot climb out
+    # of the suite's tree into the harness that started this script.  `seen` makes it terminate
+    # whatever /proc reports -- a ppid cycle cannot occur, but a snapshot in which a pid was
+    # reused between two reads could present one, and a walk over live kernel data is not the
+    # place to assume it cannot.
+    frontier="$seeds"
+    while [ -n "$frontier" ]; do
+        next=''
+        for cursor in $frontier; do
+            case " $seen " in *" $cursor "*) continue ;; esac
+            seen="$seen $cursor"
+            while IFS=' ' read -r p pp pg; do
+                [ -n "$p" ] || continue
+                if [ "$p" = "$cursor" ]; then
+                    case " $groups " in *" $pg "*) : ;; *) groups="$groups $pg" ;; esac
+                fi
+                if [ "$pp" = "$cursor" ]; then
+                    case " $seen $next " in *" $p "*) : ;; *) next="$next $p" ;; esac
+                fi
+            done <<< "$table"
+        done
+        frontier="$next"
+    done
+
+    for pg in $groups; do
+        # SUITE_PGID is already the head of the custody record; 0 and 1 and this script's own
+        # group are the three ids a group-directed signal must never be pointed at.
+        [ "$pg" != "$SUITE_PGID" ] || continue
+        [ "$pg" != "$own_pgid" ]   || continue
+        [ "$pg" -gt 1 ]            || continue
+        case " $SUITE_EXTRA_PGIDS " in
+            *" $pg "*) : ;;
+            *) SUITE_EXTRA_PGIDS="${SUITE_EXTRA_PGIDS:+$SUITE_EXTRA_PGIDS }$pg" ;;
+        esac
+    done
+    return 0
+}
+
+# The custody record as a flat list, SUITE_PGID first so the ordinary single-group case reads
+# and behaves exactly as it did before this became a set.  Empty when nothing is registered.
+suite_custody_pgids() {
+    local pgid out=''
+    if [ -n "$SUITE_PGID" ]; then
+        out="$SUITE_PGID"
+    fi
+    for pgid in $SUITE_EXTRA_PGIDS; do
+        case " $out " in
+            *" $pgid "*) : ;;
+            *) out="${out:+$out }$pgid" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+# Forward $1 to the suite's process group AND to every descendant process group of it, then make
+# sure each one is actually gone.  Idempotent, so the signal handler and the EXIT handler can both
+# call it.  Every group is addressed by id -- never by a command-line pattern, because
+# `pkill -f run_L1Tests` would also match anything that merely mentions the name, including the
+# harness that started this script.
+#
+# THE ENUMERATION IS THE FIRST THING THIS FUNCTION DOES, AND THAT IS THE FIX.  Signalling
+# `-$SUITE_PGID` and only then looking for what else is out there finds nothing: the intermediate
+# process dies, its child is reparented to PID 1, and the link that made the child reachable is
+# gone.  The measurement in THE CANCELLATION block above is exactly that sequence.  So the walk
+# runs while the tree is still intact, before the first `kill`, and what it finds is added to the
+# custody record rather than used and forgotten.
 #
 # RETURN CONTRACT, AND WHY IT IS NOT ALWAYS 0.
-#   0 -- there was no group, or the group is now provably extinct.  SUITE_PGID is cleared.
-#   1 -- the group STILL EXISTS after SIGTERM and SIGKILL.  Extinction could not be established,
-#        so SUITE_PGID is DELIBERATELY LEFT POPULATED: the EXIT trap calls this function again
-#        and gets another attempt, and the id stays in every diagnostic printed after this point.
-#        Clearing it here would discard the only custody record this script has for the group at
-#        the exact moment that record becomes load-bearing, leaving a live process nothing could
-#        address and nothing could report.
+#   0 -- there was nothing registered, or every group in the custody record has now been PROBED
+#        and found extinct.  SUITE_PGID and SUITE_EXTRA_PGIDS are both cleared.
+#   1 -- at least one group STILL EXISTS after SIGTERM and SIGKILL.  Extinction could not be
+#        established, so the WHOLE custody record -- SUITE_PGID and SUITE_EXTRA_PGIDS alike -- is
+#        DELIBERATELY LEFT POPULATED: the EXIT trap calls this function again and gets another
+#        attempt, and the ids stay in every diagnostic printed after this point.  The descendant
+#        ids matter most here, because they are the ones a later walk can no longer re-derive:
+#        once their parents are gone they are reachable only through this record.  Clearing
+#        either half would discard the only custody record this script has at the exact moment
+#        that record becomes load-bearing, leaving a live process nothing could address and
+#        nothing could report.
 # A caller that cannot act on the status must say so explicitly (`|| warn …`), never by ignoring
 # it: this runs under `set -e`, and a bare call inside the EXIT trap would abort the rest of the
 # trap -- the Makefile restore included -- the first time a group outlived a SIGKILL.
 stop_suite_group() { # $1 = signal name to forward
     local signal="${1:-TERM}"
-    [ -n "$SUITE_PGID" ] || return 0
-    if ! kill -0 -- "-$SUITE_PGID" 2>/dev/null; then
+    local registered live='' survivors='' pgid count=0 live_count=0
+    local -a kill_targets=()
+
+    # Both halves of the record are consulted.  A retry can arrive with SUITE_PGID's own group
+    # already extinct and a descendant group still alive, and returning early on the first half
+    # alone would be the same false "nothing to do" the single-group code gave for a tree it
+    # never looked at.
+    registered="$(suite_custody_pgids)"
+    [ -n "$registered" ] || return 0
+
+    suite_capture_descendant_groups
+    registered="$(suite_custody_pgids)"
+    for pgid in $registered; do
+        count=$((count + 1))
+    done
+
+    # PROBE BEFORE SIGNALLING, AND SIGNAL ONLY WHAT ANSWERS.  A group that is already gone needs
+    # no signal and must not be claimed as one that was stopped; a `kill` to a dead group would
+    # also fail, and a failure that carries no information is worth neither the diagnostic nor
+    # the `|| true` that would hide it.
+    for pgid in $registered; do
+        if kill -0 -- "-$pgid" 2>/dev/null; then
+            live="${live:+$live }$pgid"
+            live_count=$((live_count + 1))
+            kill_targets+=("-$pgid")
+        fi
+    done
+    if [ -z "$live" ]; then
         SUITE_PGID=''
+        SUITE_EXTRA_PGIDS=''
         return 0
     fi
-    warn "forwarding SIG$signal to the suite process group $SUITE_PGID"
-    kill -"$signal" -- "-$SUITE_PGID" 2>/dev/null || true
-    if ! await_process_exit "-$SUITE_PGID" "$SUITE_STOP_GRACE_SECONDS"; then
-        warn "the suite process group $SUITE_PGID ignored SIG$signal for"
-        warn "    ${SUITE_STOP_GRACE_SECONDS}s (SUITE_STOP_GRACE_SECONDS); killing it outright."
-        kill -KILL -- "-$SUITE_PGID" 2>/dev/null || true
-        await_process_exit "-$SUITE_PGID" 5 \
-            || warn "process group $SUITE_PGID survived SIGKILL; report this, it should not happen."
+
+    # THE COUNT IS REPORTED EVEN WHEN IT IS ONE, and the ids are named as soon as it is more,
+    # because "this suite had a process group of its own below the one the runner created" is
+    # itself a fact about the harness that a reader of this log needs.  The single-group wording
+    # is preserved verbatim: on invocations A, B and C there is nothing below the suite's own
+    # group, and that log line should read exactly as it always has.
+    if [ "$count" -eq 1 ]; then
+        warn "forwarding SIG$signal to the suite process group $SUITE_PGID"
+    else
+        warn "forwarding SIG$signal to the suite's $count process groups: $registered"
+        warn "    ($SUITE_PGID is the group this runner created; the rest are descendant groups"
+        warn "     found by walking the tree before signalling it.  The L2 harness makes the fake"
+        warn "     service host a group leader of its own, so a signal to $SUITE_PGID alone would"
+        warn "     leave it and everything below it running.)"
+        if [ "$live_count" -ne "$count" ]; then
+            warn "    $live_count of the $count were still alive at this probe: $live"
+        fi
     fi
-    # EXTINCTION IS VERIFIED, NOT ASSUMED FROM THE KILL.  `kill` returning 0 means the signal
-    # was delivered, not that anything acted on it, so the group is re-probed here after the
-    # grace period and the escalation.  await_process_exit returns 0 only when `kill -0` on the
-    # group has actually started failing, and this last probe is what turns "we sent SIGKILL"
-    # into "there is nothing left in that group" for the log.
-    if kill -0 -- "-$SUITE_PGID" 2>/dev/null; then
-        warn "process group $SUITE_PGID STILL EXISTS after SIG$signal and SIGKILL."
-        warn "  Something in it is unkillable (a task blocked in the kernel, most likely in a"
+    for pgid in $live; do
+        kill -"$signal" -- "-$pgid" 2>/dev/null || true
+    done
+
+    # ONE GRACE PERIOD FOR THE WHOLE SET, not one per group: see await_process_exit.  The groups
+    # were signalled together and exit concurrently, and the bound exists so that a cancellation
+    # completes -- multiplying it by however many groups the harness created would defeat it.
+    if ! await_process_exit "$SUITE_STOP_GRACE_SECONDS" "${kill_targets[@]}"; then
+        if [ "$live_count" -eq 1 ]; then
+            warn "the suite process group $live ignored SIG$signal for"
+        else
+            warn "one or more of the suite process groups $live ignored SIG$signal for"
+        fi
+        warn "    ${SUITE_STOP_GRACE_SECONDS}s (SUITE_STOP_GRACE_SECONDS); killing them outright."
+        for pgid in $live; do
+            kill -KILL -- "-$pgid" 2>/dev/null || true
+        done
+        # PHRASED AS THE SET, NOT AS EACH MEMBER OF IT, because that is all this wait
+        # establishes: await_process_exit stops at the first target still answering, so it knows
+        # that SOMETHING in the set outlived SIGKILL and not which.  Naming them all here would
+        # report groups that had in fact gone.  The per-group re-probe below is what names the
+        # actual survivors, and it runs unconditionally a few lines later.
+        await_process_exit 5 "${kill_targets[@]}" \
+            || warn "at least one of the process group(s) $live is still answering after SIGKILL;
+       report this, it should not happen."
+    fi
+
+    # EXTINCTION IS VERIFIED, NOT ASSUMED FROM THE KILL, AND IT IS VERIFIED PER GROUP.  `kill`
+    # returning 0 means the signal was delivered, not that anything acted on it, so every group
+    # is re-probed here after the grace period and the escalation.  await_process_exit returns 0
+    # only when `kill -0` on all of them has actually started failing, and this last per-group
+    # probe is what turns "we sent SIGKILL" into "there is nothing left in these groups" for the
+    # log -- and what keeps the log from naming a group it did not look at.
+    for pgid in $live; do
+        if kill -0 -- "-$pgid" 2>/dev/null; then
+            survivors="${survivors:+$survivors }$pgid"
+        fi
+    done
+    if [ -n "$survivors" ]; then
+        warn "process group(s) $survivors STILL EXIST after SIG$signal and SIGKILL."
+        warn "  Something in them is unkillable (a task blocked in the kernel, most likely in a"
         warn "  binder ioctl).  On invocation E that process is still holding the \"HdmiCec\""
         warn "  service name, which is fixed in production code and cannot be worked around:"
         warn "  no later AIDL invocation on this host will resolve correctly until it is gone."
         warn "  This run therefore CANNOT report success: it is leaving a process behind that"
         warn "  changes the result of the next run on this host.  Kill it by hand -- the group"
-        warn "  id above is the whole handle you need -- before starting another invocation."
-        # SUITE_PGID is left set on purpose.  See the return contract above: it is the custody
-        # record for a group that is still alive, and the EXIT trap's own call is the retry.
+        warn "  id(s) above are the whole handle you need -- before starting another invocation."
+        # The whole custody record is left set on purpose.  See the return contract above: it is
+        # the record for groups that are still alive, and the EXIT trap's own call is the retry.
         return 1
     fi
-    log "suite process group $SUITE_PGID is confirmed gone"
+    # NAMING ONLY WHAT WAS PROBED.  Every id in $registered was probed by the loop above -- the
+    # live ones after the signal and the escalation, the rest at the pre-signal probe -- so the
+    # claim covers exactly the set this function looked at and nothing wider.  It says how many
+    # there were, because a reader who sees two here has learned something about the harness.
+    if [ "$count" -eq 1 ]; then
+        log "suite process group $SUITE_PGID is confirmed gone"
+    else
+        log "all $count suite process groups are confirmed gone: $registered"
+    fi
     SUITE_PGID=''
+    SUITE_EXTRA_PGIDS=''
     return 0
 }
 
@@ -2797,13 +3136,17 @@ stop_suite_group() { # $1 = signal name to forward
 #
 # WHY THE SUCCESS PATH NEEDS THIS AT ALL.  `wait "$SUITE_PGID"` waits for the subshell LEADER --
 # that is `timeout`, and through it the test binary.  It says nothing about the rest of the
-# group.  The L2 harness forks the fake service host into that same group, and if a teardown
-# path in the harness ever fails to reap it, the runner exits 0 while the host keeps running and
-# keeps the global "HdmiCec" registration.  The next AIDL invocation then resolves against a
-# process from a previous run: not a crash, but a silently wrong selection, which is the worst
-# shape a false green can take here.  So the group is closed out explicitly even when everything
-# passed, and a survivor is REPORTED rather than quietly cleaned up -- a harness that leaks its
-# host is a defect worth someone's attention, and this is the only place it surfaces.
+# group, and nothing whatever about the groups BELOW it.  The L2 harness forks the fake service
+# host from inside that group and makes it a group leader in its own right (see THE CANCELLATION
+# block above for the measured shape and why the harness does it), and if a teardown path in the
+# harness ever fails to reap it, the runner exits 0 while the host keeps running and keeps the
+# global "HdmiCec" registration.  The next AIDL invocation then resolves against a process from a
+# previous run: not a crash, but a silently wrong selection, which is the worst shape a false
+# green can take here.  So EVERY group in the custody record is closed out explicitly even when
+# everything passed -- a check that could only see the runner's own group would report an empty
+# group and a clean invocation while the host it was looking for ran on in a group of its own --
+# and a survivor is REPORTED rather than quietly cleaned up: a harness that leaks its host is a
+# defect worth someone's attention, and this is the only place it surfaces.
 #
 # A DETECTED SURVIVOR FAILS THE INVOCATION, WHICH IS THE POINT OF THE FUNCTION.  Reporting
 # it and returning 0 would let the run continue, later invocations run against a process from
@@ -2814,30 +3157,65 @@ stop_suite_group() { # $1 = signal name to forward
 # produced was gathered with a process alive that the harness believed it had stopped.
 #
 # RETURN CONTRACT:
-#   0 -- the group was empty at close-out (the ordinary case).  SUITE_PGID is cleared.
-#   1 -- a survivor was found and this function extinguished it.  The invocation FAILS; the
-#        host is gone, so the next invocation is not endangered, but the harness leaked it.
+#   0 -- every group in the custody record was empty at close-out (the ordinary case).  Both
+#        SUITE_PGID and SUITE_EXTRA_PGIDS are cleared.
+#   1 -- a survivor was found in one of them and this function extinguished it.  The invocation
+#        FAILS; the host is gone, so the next invocation is not endangered, but the harness
+#        leaked it.
 #   2 -- a survivor was found and could NOT be extinguished.  The invocation fails and the
-#        surviving process still holds whatever it registered; SUITE_PGID stays populated.
+#        surviving process still holds whatever it registered; the whole custody record stays
+#        populated, descendant group ids included, because those ids are the only handle left on
+#        a process whose parents have already exited.
 # The caller distinguishes 1 from 2 in its message, because the two need different actions from
 # whoever reads the log: fix the harness, versus fix the harness AND kill something by hand
 # before the next run on this host means anything.
 #
-# Idempotent and cheap in the ordinary case: the group is already empty, the first `kill -0`
-# fails, and this is one probe and an assignment.
+# Idempotent and cheap in the ordinary case: the groups are already empty, so this is one
+# `kill -0` per registered group -- one, on every invocation where the harness created no group
+# of its own -- plus one walk over /proc, which forks nothing.  The walk is what makes the
+# assertion cover the same set stop_suite_group would signal; without it this function would
+# assert emptiness of the runner's group and call an invocation clean while a leaked host ran on
+# in a group it never looked at.
 # ------------------------------------------------------------------------------------
 finish_suite_group() { # $1 = invocation label, for the message
     local label="${1:-?}"
-    [ -n "$SUITE_PGID" ] || return 0
-    if ! kill -0 -- "-$SUITE_PGID" 2>/dev/null; then
+    local registered live='' pgid count=0 live_count=0
+
+    registered="$(suite_custody_pgids)"
+    [ -n "$registered" ] || return 0
+
+    # ENUMERATED BEFORE IT IS PROBED, for the same reason stop_suite_group does it: whatever is
+    # still reachable from this run's tree has to be found while the links are there.  By this
+    # point `wait` has collected the subshell, so the seeding by group membership -- rather than
+    # from the root pid alone -- is what still finds anything at all; a group whose entire
+    # ancestor chain has already exited is beyond the reach of any walk, and on this path it is
+    # the harness's own teardown, signalling its host's group by the id it read back after the
+    # fork, that is responsible for it.
+    suite_capture_descendant_groups
+    registered="$(suite_custody_pgids)"
+    for pgid in $registered; do
+        count=$((count + 1))
+        if kill -0 -- "-$pgid" 2>/dev/null; then
+            live="${live:+$live }$pgid"
+            live_count=$((live_count + 1))
+        fi
+    done
+    if [ -z "$live" ]; then
         SUITE_PGID=''
+        SUITE_EXTRA_PGIDS=''
         return 0
     fi
-    warn "invocation $label finished, but its process group $SUITE_PGID is NOT EMPTY."
+
+    if [ "$count" -eq 1 ]; then
+        warn "invocation $label finished, but its process group $SUITE_PGID is NOT EMPTY."
+    else
+        warn "invocation $label finished, but $live_count of its $count process groups are NOT"
+        warn "  EMPTY: $live  (of $registered)."
+    fi
     warn "  The runner exited and something it started is still alive -- on an L2 invocation"
     warn "  that is the fake service host, which the harness is supposed to terminate and reap"
-    warn "  in its own teardown.  Terminating the group here so it cannot outlive this run and"
-    warn "  hold the \"HdmiCec\" service name, and FAILING the invocation because the evidence"
+    warn "  in its own teardown.  Terminating the group(s) here so nothing can outlive this run"
+    warn "  and hold the \"HdmiCec\" service name, and FAILING the invocation because the evidence"
     warn "  it just produced was gathered with a process alive that the harness thought it had"
     warn "  stopped -- which is exactly the state the next invocation must not inherit."
     stop_suite_group TERM || return 2
@@ -2956,9 +3334,12 @@ on_signal() { # $1 = signal name  $2 = exit status
     # is reported and the handler still exits with the signal's own status.  The `||` is not
     # optional: under `set -e` a non-zero return from this call would end the shell with THAT
     # status instead of reaching `exit "$2"`, and the run would report 1 for a cancellation.
-    # The EXIT trap calls stop_suite_group again -- SUITE_PGID is deliberately still populated
-    # when extinction failed -- and folds the survivor into the status there, where it cannot
-    # overwrite the 130/143/129 this line is about to set.
+    # The EXIT trap calls stop_suite_group again -- the custody record, SUITE_PGID and the
+    # descendant group ids alike, is deliberately still populated when extinction failed -- and
+    # folds the survivor into the status there, where it cannot overwrite the 130/143/129 this
+    # line is about to set.  The retry matters most for the descendant ids: the walk that found
+    # them cannot re-derive them once this handler's signal has removed their parents, so the
+    # record carried forward from this call is the only thing that still addresses them.
     stop_suite_group "$1" \
         || warn "a process from this run survived the cancellation; it is named above and this" \
                 "run still reports the cancellation as its primary status"
@@ -3722,6 +4103,24 @@ ENVIRONMENT (command-line flags win)
                                invocation on its case count, with both numbers named. That
                                is deliberate: a re-filtered invocation is a different
                                invocation and this script will not report one as the other.
+
+  ARTIFACT PROVENANCE -- optional, and needed only where this script runs somewhere the
+  revision cannot be read from the tree it is measuring.
+  CEC_PROVENANCE_REVISION_<LABEL>
+                               the commit sha to record for one repository, where <LABEL> is
+                               the label provenance.txt prints for it (superproject,
+                               hdmicec, entservices-hdmicecsink, ...) upper-cased with '-'
+                               mapped to '_'.  40 lowercase hex characters, optionally
+                               suffixed -dirty; anything else, an empty value included, is
+                               refused rather than recorded, because a provenance record
+                               nobody can trust is worse than one that says 'unavailable'.
+                               Consulted ONLY where git cannot answer for that path -- no
+                               git, no repository, no HEAD, which is the case inside a
+                               payload assembled with 'git archive'.  Where git CAN answer,
+                               git wins and provenance.txt says the supplied value went
+                               unused, so a measured identity and an asserted one are never
+                               confused.  Unset for every label: exactly the behaviour this
+                               script had before the variable existed.
 
   AIDL/BINDER STAGING PREFIXES -- passed straight through to configure by --build, which
   names no path of its own.  configure.ac declares all four with AC_ARG_VAR and derives the
@@ -5934,8 +6333,8 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # THE WINDOW.  `( … ) &` and `SUITE_PGID=$!` are two commands, and bash runs a pending trap
     # BETWEEN commands.  A SIGINT arriving in that gap therefore reached on_signal with
     # SUITE_PGID still empty, so stop_suite_group returned immediately and the suite -- and, on
-    # invocation E, the fake service host forked into its group -- was left running while this
-    # script exited.  The orphan then held the global "HdmiCec" binder service name, which is
+    # invocation E, the fake service host forked from inside its group and leading a group of its
+    # own -- was left running while this script exited.  The orphan then held the global "HdmiCec" binder service name, which is
     # not a name a second run can work around: it is fixed in production code by
     # IHdmiCec::serviceName(), so one leak makes every later AIDL invocation on the host resolve
     # against a stale process.  Masking INT/TERM/HUP across the launch and the registration
@@ -5993,11 +6392,17 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # deliberately suppressed it.  A trapped signal interrupts the wait either way, which is the
     # whole point of waiting rather than running the suite in the foreground.
     #
-    # THE PROCESS GROUP IS ALSO WHAT REAPS THE FAKE SERVICE HOST, and it needs no machinery of
-    # its own.  The harness forks the host from inside this group, so a cancelled or timed-out
-    # invocation has its host signalled along with the runner by stop_suite_group, which
-    # addresses the group BY ID.  That matters: a pattern-based kill would match anything merely
-    # mentioning the binary's name, up to and including the harness that started this script.
+    # THE PROCESS GROUP IS NOT, BY ITSELF, WHAT REAPS THE FAKE SERVICE HOST -- and this comment
+    # said it was until it was measured.  The harness forks the host from inside this group and
+    # then makes it a group LEADER of its own, on both sides of the fork
+    # (tests/L2Tests/test_main.cpp), so a signal addressed to this group alone reaches `timeout`
+    # and the runner and nothing else: measured during a cancelled invocation D, two run_L2Tests
+    # processes in a group of their own survived with PPid 1 and were still alive at t=60s.  What
+    # reaps the host is stop_suite_group WALKING THE TREE before it signals anything and then
+    # addressing every group it finds BY ID -- see THE CANCELLATION block for the measurement and
+    # the ordering.  Addressing by id is what matters about the mechanism: a pattern-based kill
+    # would match anything merely mentioning the binary's name, up to and including the harness
+    # that started this script.
     #
     # THE REGISTRATION SURVIVES THE WAIT, and that is load-bearing.  Cleared on the line after
     # this one it would go before the exit-status check, before the case-count check and before
@@ -6042,8 +6447,11 @@ run_one_invocation() { # $1=letter $2=tier $3=mode $4=back-end $5=select $6=excl
     # the fake service host, is not signalled and does not stop.  So the 124/137 status below is
     # a report that the runner was cut short, never evidence that everything it started is gone.
     # WHAT ACTUALLY STOPS THE DESCENDANTS is the process-group signal -- stop_suite_group,
-    # reached from on_exit because the `die` here leaves SUITE_PGID registered -- which
-    # addresses the whole group by id and then verifies it is extinct.
+    # reached from on_exit because the `die` here leaves SUITE_PGID registered -- which walks the
+    # tree while it is still intact, addresses every process group it finds by id, and then
+    # re-probes each one rather than inferring extinction from the kill.  The walk is not
+    # optional here: the fake service host leads a group of its own, so a signal to the suite's
+    # group alone would leave exactly the descendant this timeout failed to stop.
     # ------------------------------------------------------------------------------------
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
         printf '%s\n' "--- last 30 lines ---" >&2
@@ -7454,12 +7862,199 @@ git_dirty_paths_of() { # $1 = repository path;  prints one tracked path per line
     return 0
 }
 
-git_sha_of() { # $1 = repository path;  prints "<sha> (<branch>)<dirty detail>" or "unavailable"
-    local repo="$1" sha branch dirty='' paths count digest
-    command -v git >/dev/null 2>&1 || { printf 'unavailable (no git)\n'; return 0; }
-    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'unavailable (not a repository)\n'; return 0; }
+# ------------------------------------------------------------------------------------
+# A REVISION FOR A TREE THAT HAS NO .git, SUPPLIED BY WHOEVER BUILT THE PAYLOAD.
+#
+# THE DEFECT THIS CLOSES, observed in a harvested artifact.  Inside the QEMU guest the payload is
+# a `git archive` -- source bytes and nothing else, no .git anywhere -- so every row of
+# provenance.txt read `unavailable (not a repository)`, while the file's own step 1 told the
+# reader to compare that row with `git rev-parse HEAD`.  An artifact whose prescribed check
+# cannot be performed cannot be tied back to a commit at all, which is the one thing provenance
+# exists to make possible.  The revision IS known at that moment -- the step that assembled the
+# payload read it from a real checkout -- it simply had no way to travel with the payload.
+#
+# THE INTERFACE.  One optional environment variable per repository,
+# CEC_PROVENANCE_REVISION_<LABEL>, where <LABEL> is the label provenance_repositories() emits,
+# upper-cased with `-` mapped to `_`.  The name is DERIVED from the label rather than looked up in
+# a list, so a repository added to that function needs no edit here and cannot be forgotten.
+#
+# WHY GIT ALWAYS WINS WHEN IT CAN ANSWER.  A revision read from the tree that was actually
+# compiled is a measurement; a revision passed in on an environment variable is a claim, and the
+# two can disagree -- a stale export in a CI job, or a value carried over from a previous stage.
+# So the variable is consulted ONLY on git's three "cannot answer" outcomes (no git binary, not a
+# repository, no HEAD), and where it went unused the record SAYS it went unused rather than
+# leaving the reader to wonder which of the two they are looking at.
+#
+# WHY A MALFORMED VALUE IS FATAL RATHER THAN IGNORED.  This is the posture the project already
+# takes on CEC_TEST_AIDL_MODE, where a value the harness does not implement is refused instead of
+# quietly downgrading the run, and the reason is the same one: a provenance record nobody can
+# trust is worse than one that honestly says "unavailable".  Silently dropping a malformed value
+# would produce exactly the artifact this change exists to eliminate, and silently RECORDING one
+# would produce a worse one -- a sha-shaped string that resolves to nothing.  An empty value is
+# malformed too: a producing step that could not determine a revision must not export the
+# variable, because "exported and empty" and "not exported" would otherwise mean the same thing
+# and one of them is a bug in the producer.
+#
+# CHECKED HERE, AT THE DECLARATION, AND NOT WHERE IT IS USED.  Every use of a supplied revision
+# is inside a `$(...)` command substitution, and `die` in a subshell ends the subshell rather
+# than the run: the diagnostic would print, the empty result would be interpolated, and the run
+# would carry on and publish the artifact anyway.  So the values are validated once, at the top
+# level, before main() is reached and before anything is built or measured, and the validated
+# pairs are pre-rendered into PROVENANCE_SUPPLIED_REVISIONS.  The use-time lookup is then a pure
+# read of an already-checked string, with no failure mode of its own.
+# ------------------------------------------------------------------------------------
+PROVENANCE_SUPPLIED_REVISIONS=''   # "<variable name><TAB><value>" per validated supplied revision
+
+# The environment variable name for a provenance label.  Derived, never looked up.
+provenance_revision_variable_name() { # $1 = label -> the variable name
+    # LC_ALL=C so the case conversion is byte-wise: a Turkish locale maps `i` to a dotted capital
+    # I, which would produce a variable name no producing step could ever set.
+    local LC_ALL=C
+    local upper="${1//-/_}"
+    printf 'CEC_PROVENANCE_REVISION_%s' "${upper^^}"
+}
+
+validate_supplied_provenance_revisions() {
+    # LC_ALL=C for the same reason render_untrusted takes it: the `[!0-9a-f]` class below is a
+    # range, and ranges collate by locale.  A commit sha is bytes, so it is matched as bytes.
+    local LC_ALL=C
+    local name value core suffix tab
+    tab="$(printf '\t')"
+
+    # ${!prefix@} lists the NAMES of the shell variables with that prefix -- exported ones
+    # included, since an exported variable is a shell variable.  Measured on this host's bash:
+    # with no match it expands to nothing and does not trip `set -u`, so no guard is needed.
+    for name in ${!CEC_PROVENANCE_REVISION_@}; do
+        value="${!name}"
+        core="$value"
+        suffix=''
+        case "$value" in
+            *-dirty) core="${value%-dirty}"; suffix='-dirty' ;;
+        esac
+        if [ -z "$value" ]; then
+            die "$name is set but empty.
+       It names the revision to record for a tree with no git metadata, and an empty value names
+       nothing.  A step that could not determine a revision must leave the variable UNSET, which
+       records \"unavailable\" honestly; exported-and-empty is indistinguishable from a producer
+       that computed a revision and lost it, so it is refused rather than absorbed."
+        fi
+        if [ "${#core}" -ne 40 ]; then
+            die "$name must be a 40-character lowercase hex commit sha, optionally suffixed
+       -dirty, got $(render_untrusted "$value") (${#core} characters before any -dirty suffix).
+       This value is written into provenance.txt as the identity of a tree that has no git
+       metadata of its own, and a value that is not a commit sha resolves to nothing for whoever
+       later tries to tie these numbers back to a commit.  It is refused rather than recorded,
+       for the same reason CEC_TEST_AIDL_MODE refuses a mode it does not implement."
+        fi
+        case "$core" in
+            *[!0-9a-f]*)
+                die "$name must be a 40-character LOWERCASE hex commit sha, optionally suffixed
+       -dirty, got $(render_untrusted "$value").
+       Upper-case hex, an abbreviated sha, a tag, a branch name and a \`git describe\` string are
+       all refused deliberately: provenance is compared by string equality against
+       \`git rev-parse HEAD\`, and anything that is not that exact form silently fails to match
+       a tree it in fact describes." ;;
+        esac
+        PROVENANCE_SUPPLIED_REVISIONS="${PROVENANCE_SUPPLIED_REVISIONS}${name}${tab}${core}${suffix}
+"
+    done
+    return 0
+}
+validate_supplied_provenance_revisions
+
+# The validated supplied revision for a label, or nothing.  Prints "<variable name><TAB><value>"
+# so a caller can name the source as well as the value -- which is the whole point: a reader has
+# to be able to tell a measured identity from a supplied one without leaving the file.
+provenance_supplied_revision_for() { # $1 = label -> "<variable name><TAB><value>" or nothing
+    local label="$1" want name value tab
+    tab="$(printf '\t')"
+    [ -n "$PROVENANCE_SUPPLIED_REVISIONS" ] || return 0
+    want="$(provenance_revision_variable_name "$label")"
+    while IFS="$tab" read -r name value; do
+        [ -n "$name" ] || continue
+        if [ "$name" = "$want" ]; then
+            printf '%s%s%s' "$name" "$tab" "$value"
+            return 0
+        fi
+    done <<< "$PROVENANCE_SUPPLIED_REVISIONS"
+    return 0
+}
+
+# Whether git can answer for a path at all -- the same three conditions git_sha_of tests, in the
+# same order, so the disposition block in provenance.txt cannot disagree with the rows above it.
+git_can_answer_for() { # $1 = repository path
+    local repo="$1"
+    command -v git >/dev/null 2>&1 || return 1
+    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || return 1
+    [ -n "$(git -C "$repo" rev-parse HEAD 2>/dev/null)" ] || return 1
+    return 0
+}
+
+# What git_sha_of prints when git could not answer: the SUPPLIED revision if one was passed in for
+# this label, and otherwise the exact string this script has always printed.
+#
+# THE NO-VARIABLE PATH IS BYTE-IDENTICAL TO THE PREVIOUS BEHAVIOUR, deliberately.  Those three
+# strings appear in harvested artifacts, in the per-file TSV header and in this script's own log,
+# and a run with nothing supplied must be indistinguishable from a run of the previous version --
+# so nothing is appended to them, not even a hint that the variable exists.
+#
+# WHAT THE SUPPLIED FORM CARRIES, AND WHAT IT CANNOT.  It carries the sha and the name of the
+# variable it came from, so "read from a repository" and "asserted by the payload builder" are
+# distinguishable at a glance.  It cannot carry a branch, nor the content-addressed
+# [DIRTY: N tracked path(s), content sha256 ...] detail that the block above explains is what
+# stops two different dirty trees at one commit recording the same identity: both are derived from
+# a repository, and by construction there is none at this path.  A `-dirty` suffix is therefore
+# recorded as the coarse statement it is, explicitly labelled as coarser than the git-read form,
+# rather than dressed up as the digest it is not.
+# ONE LINE, ALWAYS, AND THAT IS A HARD CONSTRAINT RATHER THAN A PREFERENCE.  This string is
+# stored in PROVENANCE_START_IDENTITIES as "<label><TAB><identity>" with one record per line and
+# looked up from there by an awk program keyed on the label; it is also printed through
+# `%-18s : %s`.  A second line in it would add a junk record to that map and misalign the report.
+# The reasoning that does not fit on the line lives in the block above and in the SUPPLIED
+# REVISIONS section of provenance.txt.
+git_sha_unavailable() { # $1 = provenance label (may be empty)  $2 = why git could not answer
+    local label="${1:-}" reason="$2" supplied name value tab because
+    tab="$(printf '\t')"
+
+    if [ -n "$label" ]; then
+        supplied="$(provenance_supplied_revision_for "$label")"
+        if [ -n "$supplied" ]; then
+            name="${supplied%%"$tab"*}"
+            value="${supplied#*"$tab"}"
+            # The reason is rendered for a human here rather than reused verbatim: the three
+            # tokens above are written to read inside "unavailable (...)", and the same words
+            # inside a sentence do not parse.
+            case "$reason" in
+                'no git')           because='no git binary on PATH' ;;
+                'not a repository') because='no git metadata at this path' ;;
+                'no HEAD')          because='the repository at this path has no HEAD' ;;
+                *)                  because="$reason" ;;
+            esac
+            case "$value" in
+                *-dirty)
+                    printf '%s  [SUPPLIED via %s -- %s; declared DIRTY by its -dirty suffix, which is coarser than a git-read digest]\n' \
+                        "${value%-dirty}" "$name" "$because" ;;
+                *)
+                    printf '%s  [SUPPLIED via %s -- %s; declared clean]\n' \
+                        "$value" "$name" "$because" ;;
+            esac
+            return 0
+        fi
+    fi
+    printf 'unavailable (%s)\n' "$reason"
+    return 0
+}
+
+# $2 is OPTIONAL and additive: with no label there is no variable to consult, so the function
+# behaves exactly as it did before supplied revisions existed.  Every caller in this script
+# passes one, because a row that could have carried an identity and did not is the defect being
+# fixed rather than a caller's private choice.
+git_sha_of() { # $1 = repository path;  $2 = provenance label (optional);  prints the identity
+    local repo="$1" label="${2:-}" sha branch dirty='' paths count digest
+    command -v git >/dev/null 2>&1 || { git_sha_unavailable "$label" 'no git'; return 0; }
+    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { git_sha_unavailable "$label" 'not a repository'; return 0; }
     sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || sha=''
-    [ -n "$sha" ] || { printf 'unavailable (no HEAD)\n'; return 0; }
+    [ -n "$sha" ] || { git_sha_unavailable "$label" 'no HEAD'; return 0; }
     branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch='?'
     # --porcelain over tracked paths only: untracked build residue is not a content difference
     # and must not be reported as one, or every instrumented tree would read as dirty.
@@ -7528,7 +8123,7 @@ capture_start_provenance() {
 
     while IFS="$tab" read -r label path; do
         [ -n "$label" ] || continue
-        identity="$(git_sha_of "$path")"
+        identity="$(git_sha_of "$path" "$label")"
         PROVENANCE_START_IDENTITIES="${PROVENANCE_START_IDENTITIES}${label}${tab}${identity}
 "
         PROVENANCE_START_DETAIL="${PROVENANCE_START_DETAIL}$(printf '  %-18s : %s' "$label" "$identity")
@@ -7566,13 +8161,31 @@ write_provenance() {
     PROVENANCE_TXT="$OUTPUT_DIR/provenance.txt"
     assert_output_dir_still_safe "$PROVENANCE_TXT"
 
-    local super short
+    # THE TITLE CARRIES THE REVISION ONTO EVERY HTML PAGE, which is why the supplied value is
+    # consulted here too.  A guest-produced report titled `revision-unavailable` on all of its
+    # pages is the same defect as the provenance row that could not name a commit -- the title is
+    # in fact the copy most likely to be read, because it cannot be separated from the report.
+    # `(supplied)` is on it so a reader is never left thinking a page was titled from a checkout.
+    local super short supplied title_tab
     super="$WS"
+    title_tab="$(printf '\t')"
     short="$(git -C "$super" rev-parse --short=12 HEAD 2>/dev/null)" || short=''
     if [ -n "$short" ]; then
         GENHTML_TITLE="$GENHTML_TITLE @ $short"
     else
-        GENHTML_TITLE="$GENHTML_TITLE @ revision-unavailable"
+        supplied="$(provenance_supplied_revision_for superproject)"
+        if [ -n "$supplied" ]; then
+            # "<variable name><TAB><value>": the value, abbreviated to the same 12 characters
+            # `git rev-parse --short=12` would have produced, with any -dirty suffix kept because
+            # a dirty tree's report must not be titled as though it came from a clean commit.
+            supplied="${supplied#*"$title_tab"}"
+            case "$supplied" in
+                *-dirty) GENHTML_TITLE="$GENHTML_TITLE @ ${supplied:0:12}-dirty (supplied)" ;;
+                *)       GENHTML_TITLE="$GENHTML_TITLE @ ${supplied:0:12} (supplied)" ;;
+            esac
+        else
+            GENHTML_TITLE="$GENHTML_TITLE @ revision-unavailable"
+        fi
     fi
 
     {
@@ -7615,7 +8228,7 @@ write_provenance() {
         tab="$(printf '\t')"
         while IFS="$tab" read -r label path; do
             [ -n "$label" ] || continue
-            now_identity="$(git_sha_of "$path")"
+            now_identity="$(git_sha_of "$path" "$label")"
             start_identity="$(printf '%s' "$PROVENANCE_START_IDENTITIES" \
                               | "$AWK_BIN" -F"$tab" -v want="$label" \
                                     '$1 == want { sub(/^[^\t]*\t/, ""); print; exit }')"
@@ -7637,6 +8250,62 @@ write_provenance() {
             printf '%s\n' "  means the tree was edited under a measurement, and the numbers in this bundle"
             printf '%s\n' "  belong to the identity recorded ABOVE, not to this one."
         fi
+
+        # ------------------------------------------------------------------------------
+        # THE DISPOSITION OF EVERY SUPPLIED REVISION, INCLUDING THE ONES THAT WENT UNUSED.
+        #
+        # A supplied revision that git overrode leaves no trace on the rows above -- correctly,
+        # since those rows report what was measured -- and a reader who knows a value was passed
+        # in has no way to tell whether it was believed, disagreed with, or never looked at.  This
+        # block answers that, and it is emitted only when something was supplied, so a run with
+        # nothing supplied produces the file it always produced.
+        #
+        # A DISAGREEMENT IS NAMED, NOT SMOOTHED OVER.  Where git answered and the supplied value
+        # names a different commit, that is either a stale export or a payload built from a tree
+        # other than the one measured here, and both are worth a reader's attention: the rows
+        # above are the measurement and remain authoritative, and this block says what else was
+        # claimed.  A supplied label with no repository in this run is reported too, because a
+        # producing step that exports a revision for a tree that is not here has a defect of its
+        # own that nothing else in this bundle would reveal.
+        # ------------------------------------------------------------------------------
+        if [ -n "$PROVENANCE_SUPPLIED_REVISIONS" ]; then
+            printf '\nSUPPLIED REVISIONS -- PASSED IN ON THE ENVIRONMENT, AND WHAT BECAME OF EACH\n'
+            printf '%s\n' "  (CEC_PROVENANCE_REVISION_<LABEL>.  Consulted ONLY where git cannot answer for"
+            printf '%s\n' "   that path -- no git, no repository, no HEAD -- which is the case inside a"
+            printf '%s\n' "   payload assembled with 'git archive'.  A supplied value names a commit and"
+            printf '%s\n' "   nothing more: no branch, and none of the content-addressed [DIRTY: ...] detail,"
+            printf '%s\n' "   both of which can only be derived from a repository.)"
+            local sup_name sup_value sup_repo_label sup_repo_path sup_git_head sup_matched
+            while IFS="$tab" read -r sup_name sup_value; do
+                [ -n "$sup_name" ] || continue
+                sup_matched=''
+                while IFS="$tab" read -r sup_repo_label sup_repo_path; do
+                    [ -n "$sup_repo_label" ] || continue
+                    [ "$(provenance_revision_variable_name "$sup_repo_label")" = "$sup_name" ] || continue
+                    sup_matched="$sup_repo_label"
+                    if git_can_answer_for "$sup_repo_path"; then
+                        sup_git_head="$(git -C "$sup_repo_path" rev-parse HEAD 2>/dev/null)" || sup_git_head=''
+                        if [ "$sup_git_head" = "${sup_value%-dirty}" ]; then
+                            printf '  %-40s NOT USED: git answered for %s, and agrees\n' \
+                                "$sup_name" "$sup_repo_label"
+                        else
+                            printf '  %-40s NOT USED: git answered for %s and DISAGREES\n' \
+                                "$sup_name" "$sup_repo_label"
+                            printf '      supplied : %s\n' "$sup_value"
+                            printf '      git HEAD : %s\n' "${sup_git_head:-unreadable}"
+                        fi
+                    else
+                        printf '  %-40s USED as the identity of %s: %s\n' \
+                            "$sup_name" "$sup_repo_label" "$sup_value"
+                    fi
+                    break
+                done <<< "$(provenance_repositories)"
+                if [ -z "$sup_matched" ]; then
+                    printf '  %-40s SET, but no repository with that label is part of this run\n' "$sup_name"
+                    printf '      value    : %s\n' "$sup_value"
+                fi
+            done <<< "$PROVENANCE_SUPPLIED_REVISIONS"
+        fi
         printf '\nRUNNER AND CONFIGURATION\n'
         printf '  runner path        : %s\n' "$SCRIPT_PATH"
         printf '  runner sha256      : %s\n' "$(sha256_of "$SCRIPT_PATH")"
@@ -7650,10 +8319,27 @@ write_provenance() {
         printf '  lcov               : %s\n' "$(lcov_run --version 2>/dev/null | head -n1 || printf 'unavailable')"
         printf '  gcov               : %s\n' "$(gcov --version 2>/dev/null | head -n1 || printf 'unavailable')"
         printf '  compiler           : %s\n' "$("${CXX:-g++}" --version 2>/dev/null | head -n1 || printf 'unavailable')"
+        # ------------------------------------------------------------------------------
+        # THE INSTRUCTION HAS TO BE PERFORMABLE IN THE PLACE THE FILE IS READ, which is what it
+        # was not.  It said "compare the revision above with `git rev-parse HEAD`" -- and where
+        # this bundle is harvested from, a payload assembled with `git archive`, there is no .git
+        # for that command to read, so the one check the artifact prescribed for tying itself back
+        # to a commit could not be carried out at all.  Both cases are now spelled out, and which
+        # one applies is written on the row itself: a row marked SUPPLIED came from the payload
+        # builder, any other row was read from a repository.
+        # ------------------------------------------------------------------------------
         printf '\nHOW TO CHECK THIS ARTIFACT STILL APPLIES\n'
-        # shellcheck disable=SC2016  # literal backticks: this line QUOTES a command to type
-        printf '  1. Compare the superproject revision above with `git rev-parse HEAD`.\n'
+        # shellcheck disable=SC2016  # literal backticks: these lines QUOTE commands to type
+        printf '  1. Compare the superproject revision above with the tree you mean to trust.\n'
         # shellcheck disable=SC2016  # literal backticks, same reason as the line above
+        printf '     In a checkout: `git rev-parse HEAD`, run at the workspace root.\n'
+        printf '     Where the row is marked SUPPLIED there is no repository to ask, by\n'
+        printf '     construction -- compare it instead with the revision the step that assembled\n'
+        printf '     this payload recorded, which is the value it passed in\n'
+        printf '     CEC_PROVENANCE_REVISION_SUPERPROJECT and the same string printed above.\n'
+        printf '     A row reading "unavailable" carries no revision at all: neither git nor the\n'
+        printf '     builder supplied one, and these numbers cannot be tied to a commit.\n'
+        # shellcheck disable=SC2016  # literal backticks, same reason as the lines above
         printf '  2. Compare the runner sha256 above with `sha256sum %s`.\n' "$SCRIPT_PATH"
         printf '  If either differs, these numbers were produced from a different tree or a\n'
         printf '  different script, and the acceptance decision they carry does not transfer.\n'
@@ -7661,7 +8347,7 @@ write_provenance() {
 
     chmod 600 -- "$PROVENANCE_TXT" 2>/dev/null || true
     log "provenance: $PROVENANCE_TXT"
-    log "  superproject : $(git_sha_of "$WS")"
+    log "  superproject : $(git_sha_of "$WS" superproject)"
     log "  runner sha256: $(sha256_of "$SCRIPT_PATH")"
 }
 
@@ -7680,8 +8366,8 @@ write_per_file_tsv() {
     {
         printf '# Per-file coverage for the HDMI-CEC middleware L1 suite, derived from\n'
         printf '# %s\n' "$LINE_GATE_TRACE"
-        printf '# PROVENANCE  superproject %s\n' "$(git_sha_of "$WS")"
-        printf '# PROVENANCE  hdmicec      %s\n' "$(git_sha_of "$HDMICEC_ROOT")"
+        printf '# PROVENANCE  superproject %s\n' "$(git_sha_of "$WS" superproject)"
+        printf '# PROVENANCE  hdmicec      %s\n' "$(git_sha_of "$HDMICEC_ROOT" hdmicec)"
         printf '# PROVENANCE  runner       %s  sha256 %s\n' "$SCRIPT_PATH" "$(sha256_of "$SCRIPT_PATH")"
         printf '# PROVENANCE  generated    %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unavailable)"
         printf '# Full manifest: %s\n' "${PROVENANCE_TXT:-provenance.txt}"
@@ -7790,7 +8476,7 @@ write_uncovered_lines() {
         printf '# Paths are relative to %s. A line is listed when its DA: record shows a hit\n' "$HDMICEC_ROOT"
         printf '# count of zero. Files with full line coverage are omitted.\n'
         printf '# Line coverage bar in force for this run: %s%%\n' "$COVERAGE_MIN"
-        printf '# PROVENANCE  superproject %s\n' "$(git_sha_of "$WS")"
+        printf '# PROVENANCE  superproject %s\n' "$(git_sha_of "$WS" superproject)"
         printf '# PROVENANCE  runner       %s  sha256 %s\n' "$SCRIPT_PATH" "$(sha256_of "$SCRIPT_PATH")"
         printf '# Full manifest: %s\n' "${PROVENANCE_TXT:-provenance.txt}"
         printf '#\n'

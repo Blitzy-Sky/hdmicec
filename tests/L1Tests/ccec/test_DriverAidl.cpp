@@ -357,13 +357,13 @@ namespace halcompat = ::com::rdk::hal::halcompat;
  *   DriverAidlSelectionTest           4  A           absent              no
  *   DriverAidlLocalInstanceTest      25  A, B, C     any                 no
  *   DriverAidlLegacyArmTest           5  A           absent              no
- *   DriverAidlSessionTest            26  B           compatible          yes
+ *   DriverAidlSessionTest            27  B           compatible          yes
  *   DriverAidlTransmitTest           12  B           compatible          yes
  *   ---------------------------------------------------------------------------------
- *                                   123  of which 85 run under invocation A
+ *                                   124  of which 85 run under invocation A
  *
  * The 85 are the first five fixtures, 23 + 28 + 4 + 25 + 5. The two that invocation A
- * excludes are DriverAidlSessionTest, 26 cases, and DriverAidlTransmitTest, 12 - the 38 in
+ * excludes are DriverAidlSessionTest, 27 cases, and DriverAidlTransmitTest, 12 - the 39 in
  * the excluded column below - because both require the AIDL back-end to be the resolved one.
  *
  * The counts the runner will see. Its per-invocation gate reconciles selected plus excluded
@@ -371,11 +371,11 @@ namespace halcompat = ::com::rdk::hal::halcompat;
  *
  *   invocation   registered   selected   excluded
  *   ------------------------------------------------
- *   A                   606        568         38
- *   B                   606        422        184
- *   C                   606        384        222
+ *   A                   607        568         39
+ *   B                   607        423        184
+ *   C                   607        384        223
  *
- * Registered is 606 = 483 pre-existing + the 123 above. Every figure in that table is measured
+ * Registered is 607 = 483 pre-existing + the 124 above. Every figure in that table is measured
  * on this host, with the runner's own filters, by
  *
  *   ./run_L1Tests --gtest_list_tests --gtest_filter=<filter> | grep -cE '^  [A-Za-z]'
@@ -12737,6 +12737,197 @@ TEST_F(DriverAidlSessionTest, AZeroByteMessageFromTheHalIsDiscardedBeforeAllocat
     EXPECT_EQ(applicationListener.frameAt(0), wellFormed)
         << "the frame that did arrive is not the well-formed one, so the empty payload disturbed "
            "the marshalling of the frame after it";
+}
+
+// THE OTHER ARM OF THE SAME LENGTH GUARD - AN OVER-LENGTH MESSAGE - AND IT IS THE ARM WHERE THE
+// TWO BACK-ENDS DIFFER IN CONSEQUENCE AND NOT MERELY IN DEGREE.
+//
+// A message longer than a CECFrame can hold cannot be copied into one at all: CECFrame::append()
+// takes the bytes one at a time and raises std::out_of_range("Frame grows beyond maximum") on the
+// byte past the capacity (CECFrame.cpp:54-64). Where that append sits decides what happens next,
+// and the two back-ends put it in different places. On the legacy back-end it is OUTSIDE
+// DriverImpl::DriverReceiveCallback's try block (DriverImpl.cpp:60), so the exception escapes the
+// HAL's callback and takes the process down - measured, and measured identically on the
+// pre-migration base, so it is a pre-existing condition of that back-end and out of scope to fix
+// here. This back-end is written so that it cannot happen: the allocation and the append are both
+// inside the try, and the general catch arm deletes the frame and returns binder::Status::ok().
+// Containment is therefore a deliberate property of the new code rather than a byproduct of it,
+// and a deliberate property nothing exercises is a property nobody knows still holds.
+//
+// Why it could not have been covered before. The same reason as the under-length arm: nothing in
+// the middleware can produce a message this long - a CECFrame cannot hold one, and the outbound
+// guard refuses anything past the AIDL contract's length before a transmit is attempted - so only
+// a HAL can deliver one, and only a fake can stand in for a HAL. On a host with no binder driver
+// this back-end is never selected and this callback never runs at all.
+//
+// ONE CASE OVER TWO SIZES rather than two cases, and not a parameterized fixture. 129 and 4096 are
+// two points on ONE arm, not two arms, so the reasoning above is stated once and SCOPED_TRACE
+// names whichever size failed; the transmit half of this same guard already has exactly this shape
+// (FramesOverTheAidlLimitAreRefusedWithoutBeingSentOrTruncated loops over its two over-limit sizes
+// in a single case); and nothing in this file is value-parameterized, so a TEST_P would introduce
+// machinery for two rows. The one thing a loop risks that two cases would not - a fatal assertion
+// returning early and leaving the second size unmeasured - is removed by making every per-size
+// precondition non-fatal, so each size reports its own outcome whatever the other one did.
+//
+// THE SIZES ARE DERIVED FROM CECFrame::MAX_LENGTH AND NOT RESTATED. One byte past the capacity is
+// the boundary whatever the capacity becomes, and a multiple of it stays comfortably past the
+// boundary for the same reason; a case that restated 129 would silently stop testing the boundary
+// the day the capacity moved. The static_assert on MAX_LENGTH near the top of this file would fire
+// on such a change, but it guards a different question - the 16/17/20 authority conflict on the
+// transmit side, and its text sends the reader to those three sizes - so leaning on it here would
+// tie this case to an assertion that is not about it, for no saving.
+//
+// Four things are asserted per size, and the first is the one that separates this back-end from
+// the legacy one:
+//
+//   1. nothing escapes the callback. The fake invokes the listener directly and catches nothing
+//      (fake_hdmi_cec_aidl_service.cpp:1063-1085), and under this invocation the fake is
+//      in-process, so the dispatch is local and anything escaping onMessageReceived arrives in
+//      this case body. EXPECT_NO_THROW is a real observation here rather than a formality: it is
+//      the property the legacy back-end does not have on this input, and losing it would not be a
+//      dropped frame but a dead process.
+//
+//   2. no frame is delivered, waited for over a window rather than checked at one instant. The
+//      append copies MAX_LENGTH bytes before it raises, so what is being ruled out is not an
+//      empty frame but a silently TRUNCATED one - and a truncated frame is a perfectly ordinary
+//      frame to every consumer above the queue, which would hand it to the application as though
+//      the HAL had sent it. A peer can read a truncated CEC frame as a different message entirely.
+//
+//   3. the listener holds nothing afterwards, which is what catches a frame that surfaced after
+//      the window closed rather than not at all.
+//
+//   4. the delivery chain is alive, established by a positive control after each over-length
+//      payload. The control carries the same header byte as the payload, and this connection
+//      filters nothing whatever - DefaultFilter::isFiltered returns false outright for an
+//      UNREGISTERED source (Connection.cpp:304-306) - so the two deliveries differ in exactly one
+//      property, which is length. Without the control, a receive path that was dead for the whole
+//      case would read as correct containment.
+//
+// The middleware's own log line is deliberately NOT asserted, unlike the queue-refusal case below
+// where the log is the only trace the arm leaves. Here the arm emits the general catch arm's line,
+// which an allocation failure emits too, so it does not discriminate this arm; and a future change
+// that moved the rejection ahead of the allocation would change that text while every property
+// asserted above stayed true. The containment is what this case is about.
+/**
+ * @brief An over-length message from the HAL is contained: nothing escapes the callback, no frame
+ *        reaches an application listener, and the receive path keeps working afterwards.
+ * @pre Invocation B, with the AIDL back-end resolved and a session open.
+ * @note Two sizes in one case - one byte past CECFrame::MAX_LENGTH and a multiple of it, both
+ *       derived rather than restated so that neither stops exercising the arm if the capacity
+ *       changes. SCOPED_TRACE names whichever size failed, and every per-size precondition is
+ *       non-fatal so one size cannot leave the other unmeasured.
+ * @note CECFrame::append() copies MAX_LENGTH bytes before it raises, so what the non-delivery
+ *       assertions rule out is a silently TRUNCATED frame reaching the application, not an empty
+ *       one. On the legacy back-end the same input is fatal, because there the append sits outside
+ *       the try (DriverImpl.cpp:60) and the exception escapes the HAL's callback.
+ * @note The positive control after each payload is load-bearing: a dead receive chain would
+ *       otherwise be indistinguishable from correct containment.
+ * @see DriverAidlImpl::EventListener::onMessageReceived()
+ * @see CECFrame::append()
+ */
+TEST_F(DriverAidlSessionTest, AnOverLengthMessageFromTheHalIsDiscardedWithoutEscaping) {
+    ASSERT_NE(fake->getListener(), nullptr)
+        << "the fake holds no listener although open() completed, so no callback can arrive and "
+           "this case would prove nothing";
+
+    // Derived, never restated. One byte past the capacity is the boundary itself, which is the
+    // only size an off-by-one in the copy would be visible at; thirty-two times the capacity is
+    // the arbitrarily large delivery an out-of-process HAL is free to make, and is the size class
+    // an ad-hoc guest harness demonstrated containment at once without leaving a guard behind.
+    constexpr size_t frameCapacity = static_cast<size_t>(CECFrame::MAX_LENGTH);
+    const size_t overLength[] = { frameCapacity + 1, frameCapacity * 32 };
+
+    // A well-formed broadcast Report Physical Address. It serves twice: as the positive control,
+    // and as the first bytes of each over-length payload, so that the payload and the control
+    // differ in length and in nothing else.
+    const std::vector<uint8_t> wellFormed{ 0x4F, REPORT_PHYSICAL_ADDRESS, 0x21, 0x00, 0x04 };
+
+    for (size_t index = 0; index < sizeof(overLength) / sizeof(overLength[0]); index++) {
+        const size_t size = overLength[index];
+
+        SCOPED_TRACE("inbound message of " + std::to_string(size) + " bytes, against a CECFrame "
+                     "capacity of " + std::to_string(frameCapacity) + " bytes");
+
+        // A fresh listener and connection per size, so each size's counts start from zero and a
+        // frame delivered under one size can never be read as a frame delivered under the other.
+        RecordingFrameListener applicationListener;
+        ListeningConnection listeningConnection(
+            LogicalAddress(LogicalAddress::UNREGISTERED),
+            "DriverAidlSessionTest-receive-too-long-" + std::to_string(size),
+            applicationListener);
+
+        // The payload: the control's bytes, then padding out to the target size. The first
+        // frameCapacity bytes are therefore a frame the whole chain above the queue would accept,
+        // which is what makes a truncated delivery detectable rather than plausible.
+        std::vector<uint8_t> oversized(wellFormed);
+        oversized.resize(size, 0x00);
+
+        bool triggered = false;
+        EXPECT_NO_THROW({ triggered = fake->fireOnMessageReceived(oversized); })
+            << "an exception escaped the middleware's oneway callback and reached the HAL's "
+               "delivery. The fake invokes the listener directly and catches nothing, and this "
+               "invocation's fake is in-process, so what surfaced here is what would escape into "
+               "onTransact on a real transport - and it is exactly how the legacy back-end loses "
+               "the process on this same input. The allocation and the append must both stay "
+               "inside the try, and every catch arm must release the frame and return ok";
+
+        if (!triggered) {
+            ADD_FAILURE()
+                << "the over-length delivery never reached the middleware's callback: either no "
+                   "listener was captured, or the callback threw and the assertion above has "
+                   "already said so. Either way nothing below would be attributable to the length "
+                   "guard, so this size is unmeasured rather than passing";
+            continue;
+        }
+
+        EXPECT_FALSE(applicationListener.waitForFrames(1, kNonDeliveryWindowMs))
+            << "a message too long for a CECFrame reached an application listener. append() copies "
+               "the first "
+            << frameCapacity
+            << " bytes before it raises, so what arrived is the TRUNCATED remains of the message - "
+               "indistinguishable, to every consumer above the queue, from a frame the HAL really "
+               "sent, and readable by a peer as a different message entirely. The frame must be "
+               "released on the catch arm and never offered onto the queue";
+
+        EXPECT_EQ(applicationListener.frameCount(), 0u)
+            << "the listener holds " << applicationListener.frameCount()
+            << " frame(s) after an over-length delivery, where none was expected - so a frame "
+               "surfaced once the non-delivery window had closed rather than not at all";
+
+        // The positive control: the same chain, a length it can hold, must deliver.
+        bool controlTriggered = false;
+        EXPECT_NO_THROW({ controlTriggered = fake->fireOnMessageReceived(wellFormed); })
+            << "the positive control itself raised, so the over-length payload left the callback "
+               "or the captured listener in a state the next delivery could not survive";
+
+        if (!controlTriggered) {
+            ADD_FAILURE()
+                << "the positive control could not be triggered, so the non-delivery above is "
+                   "unattributable: a receive path that was dead for this whole size reads exactly "
+                   "like correct containment";
+            continue;
+        }
+
+        EXPECT_TRUE(applicationListener.waitForFrames(1, kFrameDeliveryTimeoutMs))
+            << "a well-formed frame delivered immediately after the over-length one never arrived "
+               "within "
+            << kFrameDeliveryTimeoutMs
+            << " ms, so the receive path was dead for this size and the non-delivery above says "
+               "nothing about the length guard. The chain has to survive a std::out_of_range "
+               "caught mid-append: a frame released on the catch arm must leave the owner lock, "
+               "the incoming queue and the Bus reader exactly as they were";
+
+        EXPECT_EQ(applicationListener.frameAt(0), wellFormed)
+            << "the frame that did arrive is not the well-formed one, so the over-length payload "
+               "was not discarded whole - its truncated remains were delivered ahead of the "
+               "control, or they disturbed the marshalling of the frame after it";
+
+        EXPECT_EQ(applicationListener.frameCount(), 1u)
+            << "the listener holds " << applicationListener.frameCount()
+            << " frames after one over-length delivery and one well-formed one, so the over-length "
+               "payload was delivered too - late rather than never, which is the same defect with "
+               "a delay in front of it";
+    }
 }
 
 // THE QUEUE'S REFUSAL ARM, WHICH IS WHAT STOPS A STALLED READER TURNING EVERY FURTHER EVENT INTO

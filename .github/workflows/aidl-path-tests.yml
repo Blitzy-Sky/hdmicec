@@ -1144,10 +1144,19 @@ jobs:
       # Binder SDK with -DBUILD_HOST_AIDL=ON, which builds the host AIDL compiler, and that
       # target calls FLEX_TARGET/BISON_TARGET. Without them CMake fails outright.
       #
-      # gcc-multilib and g++-multilib are what make the i386 staging possible at all: the
-      # Binder SDK, the AIDL stub snapshots and GoogleTest are compiled here with -m32 for the
-      # guest. They need no glib - the guest's glib comes from its own Debian i386 archive -
-      # so the restricted i386 subset of Ubuntu's archive is not involved.
+      # gcc-multilib and g++-multilib USED TO BE what made the i386 staging possible at all, when
+      # the Binder SDK, the AIDL stub snapshots and GoogleTest were compiled here with -m32. They
+      # are not any more: those three now build inside the guest-matched i386 build chroot, whose
+      # compiler is natively 32-bit and whose libraries come from the guest's own pinned Debian
+      # archive. They are RETAINED because the toolchain gate's -m32 probe still uses them, and
+      # that probe is retained in turn because it is what proves the pinned family is installed
+      # COMPLETE on this runner rather than half-installed - see "Select and prove the acceptance
+      # toolchain", which says so at the point of the check. Dropping them would silently remove
+      # a completeness assertion in exchange for nothing measurable.
+      #
+      # debootstrap IS NOW A DOUBLE PREREQUISITE, and its second use is easy to miss: it builds
+      # the guest's base root filesystem, and it also builds the i386 build chroot that compiles
+      # everything the guest loads. Both come from the one resolved snapshot.
       #
       # gcc-13, g++-13 AND THEIR MULTILIB VARIANTS ARE NAMED EXPLICITLY, AND THE BARE `g++` IS
       # GONE. The list used to carry `build-essential g++`, which installs whichever family the
@@ -1196,7 +1205,10 @@ jobs:
       # installed cannot drift from what the gate below demands. The unversioned gcc-multilib
       # and g++-multilib stay beside them: they track the archive default and carry the 32-bit
       # libc pieces, which is a different thing from the versioned compiler's own 32-bit
-      # runtime, and the -m32 probe in the gate is what proves the pair actually works.
+      # runtime, and the -m32 probe in the gate is what proves the pair actually works. That
+      # probe no longer guards the guest's libraries - the i386 build chroot does - so what it
+      # now establishes is completeness of the installed family, which is why it is described
+      # that way at the gate rather than as a staging prerequisite.
       - name: Install packages
         run: >
           sudo apt-get update
@@ -1512,9 +1524,13 @@ jobs:
       #      satisfy the pin separately can still be three installations that cannot read each
       #      other's counters. All three come from one package pair, so equality is achievable.
       #   4. -m32 ACTUALLY WORKS with the selected compiler - compiled and linked, not inferred
-      #      from a package name. This job stages an all-32-bit guest userspace, and a missing
-      #      g++-<major>-multilib presents as a link failure deep inside the i386 GoogleTest
-      #      build forty minutes later otherwise.
+      #      from a package name. This assertion is RETAINED although the three i386 staging
+      #      builds no longer use this compiler: they moved into the guest-matched i386 build
+      #      chroot, whose gcc is natively 32-bit, so the host's multilib is no longer on the
+      #      path that produces the guest's libraries. What it still establishes is that the
+      #      pinned family is installed COMPLETE on this runner rather than half-installed, and
+      #      it is what would catch a future edit that moved a 32-bit build back onto the host
+      #      without noticing. It is cheap and it is not weakened.
       #   5. gcov GOES FIRST ON PATH UNDER THE NAME `gcov`, through a one-entry shim directory.
       #      Not decoration: tests/L1Tests/run_coverage.sh resolves `gcov` from PATH and has no
       #      override knob. The guest runs its own copy of that script against its own toolchain,
@@ -1523,11 +1539,33 @@ jobs:
       #   6. THE EXACT PATCH LEVELS ARE RECORDED, in this step's log and in the job summary, so
       #      the figures this job publishes carry the toolchain that produced them.
       #
+      # WHICH BUILD THIS PIN GOVERNS, because this job now has three compiler pins and they are
+      # easy to conflate:
+      #
+      #   CEC_TOOLCHAIN_GCC_MAJOR - proved here - governs THE HOST BUILD: the shipping libRCEC,
+      #     the L1 and L2 binaries, and the coverage instrumentation. It is the one pin that
+      #     cannot be relaxed, because the .gcno notes, the accumulated trace, the line gate and
+      #     the (file,line,block,branch) manifest the branch gate compares against are all
+      #     properties of the compiler that produced them.
+      #   The i386 build chroot's own gcc governs ONLY the three i386 staging builds, whose
+      #     output is copied into the guest image and loaded there. It is a gcc-12 family because
+      #     the guest's suite cannot serve 13, and that deviation is measured, printed and
+      #     recorded into the image's provenance by "Create the guest-matched i386 build chroot".
+      #     Nothing about it touches CC, CXX or the gcov shim this step establishes.
+      #   THE SAME value, handed to the image builder as --toolchain-gcc-major, governs the
+      #     compiler installed INSIDE the guest, which is what the guest's own copy of
+      #     run_coverage.sh uses. The builder gates-and-records it against the guest's own
+      #     archive rather than failing, because that archive is not this runner's.
+      #
       # CC and CXX GO INTO GITHUB_ENV, which is what makes them reach the CMake steps (CMake
       # honours both), ./configure, the three makes and the hand build - rather than only this
       # step. GITHUB_ENV and GITHUB_PATH take effect from the NEXT step onwards, which is why the
       # assertions here use absolute paths and why the step after this one re-checks the
       # resolution later steps will actually see.
+      #
+      # THE CHROOT DELIBERATELY DOES NOT INHERIT THEM. Its runner script enters with env -i, so
+      # a CC pointing at the host's gcc-13 cannot leak into a staging build and reintroduce the
+      # symbol-version mismatch the chroot exists to remove.
       - name: Select and prove the acceptance toolchain
         run: |
           set -euo pipefail
@@ -1543,7 +1581,7 @@ jobs:
 
           for tool in "$cc" "$cxx" "$gcov"; do
             if [ ! -x "$tool" ]; then
-              echo "::error::$tool is not present on this runner, so the pinned GCC $major acceptance toolchain cannot be selected and this job would silently build - and measure - with the image default instead. gcc-$major provides gcc-$major and gcov-$major, g++-$major provides g++-$major, and the -m32 staging additionally needs gcc-$major-multilib and g++-$major-multilib; all are in ubuntu-24.04's archive. If this runner label was changed, check that the new image's archive carries the gcc-$major family at all - jammy does not."
+              echo "::error::$tool is not present on this runner, so the pinned GCC $major acceptance toolchain cannot be selected and this job would silently build - and measure - with the image default instead. gcc-$major provides gcc-$major and gcov-$major, g++-$major provides g++-$major, and the -m32 completeness probe below additionally needs gcc-$major-multilib and g++-$major-multilib; all are in ubuntu-24.04's archive. If this runner label was changed, check that the new image's archive carries the gcc-$major family at all - jammy does not."
               exit 1
             fi
           done
@@ -1578,16 +1616,25 @@ jobs:
           fi
           [ "$rc" -eq 0 ] || exit "$rc"
 
-          # -m32, COMPILED AND LINKED RATHER THAN ASSUMED FROM A PACKAGE NAME. The guest
-          # userspace is all-32-bit and every staged artefact is refused by the image builder if
-          # its ELF class disagrees, so this is the cheapest place to learn that the selected
-          # family has no 32-bit runtime. <string> is included deliberately: a C++ link is what
-          # needs the 32-bit libstdc++, which is the half a bare C probe would pass without.
+          # -m32, COMPILED AND LINKED RATHER THAN ASSUMED FROM A PACKAGE NAME.
+          #
+          # WHAT THIS NOW ESTABLISHES, stated precisely because the reason changed. The three
+          # i386 staging builds no longer use this compiler at all: they run inside the
+          # guest-matched i386 build chroot, because artefacts built by THIS family against the
+          # RUNNER's glibc require symbol versions the guest cannot resolve. So this probe is no
+          # longer the thing that stands between the job and a broken guest library. It is
+          # retained as a COMPLETENESS assertion on the pinned family - a half-installed gcc-13
+          # that compiles 64-bit and cannot link 32-bit is a runner defect worth naming, and it
+          # is what would catch a future edit that moved a 32-bit build back onto the host
+          # without noticing the consequence. It costs one compile and it is not weakened.
+          #
+          # <string> is included deliberately: a C++ link is what needs the 32-bit libstdc++,
+          # which is the half a bare C probe would pass without.
           probe_dir="$(mktemp -d)"
           printf '%s\n' '#include <string>' 'int main() { return std::string("m32").size() == 3 ? 0 : 1; }' \
             > "$probe_dir/m32-probe.cpp"
           if ! "$cxx" -m32 -o "$probe_dir/m32-probe" "$probe_dir/m32-probe.cpp" 2> "$probe_dir/m32-probe.log"; then
-            echo "::error::$cxx cannot compile and link a -m32 C++ translation unit, so the i386 staging this job depends on cannot be built with the pinned family. Install gcc-$major-multilib and g++-$major-multilib: the unversioned gcc-multilib/g++-multilib metapackages track the archive default and do not necessarily carry the 32-bit runtime for THIS family. Compiler output follows."
+            echo "::error::$cxx cannot compile and link a -m32 C++ translation unit, so the pinned GCC $major family is installed incompletely on this runner. Install gcc-$major-multilib and g++-$major-multilib: the unversioned gcc-multilib/g++-multilib metapackages track the archive default and do not necessarily carry the 32-bit runtime for THIS family. The guest's own libraries are built in the i386 build chroot rather than by this compiler, so this is a runner-completeness fault and not a staging fault. Compiler output follows."
             cat "$probe_dir/m32-probe.log"
             rm -rf -- "$probe_dir"
             exit 1
@@ -1597,7 +1644,7 @@ jobs:
           case "$m32_class" in
             *ELF\ 32-bit*) : ;;
             *)
-              echo "::error::the -m32 probe linked but produced '$m32_class' rather than an ELF 32-bit object, so -m32 is being ignored. Every staged artefact would then be refused by the image builder for the right reason and the wrong cause."
+              echo "::error::the -m32 probe linked but produced '$m32_class' rather than an ELF 32-bit object, so -m32 is being ignored by this compiler. The guest's own libraries are unaffected - they are built in the i386 build chroot - but a compiler that silently discards -m32 is a runner defect that would mislead every later reading of this step, so it is named here."
               rm -rf -- "$probe_dir"
               exit 1
               ;;
@@ -2039,6 +2086,15 @@ jobs:
       # it to the suite; and any host-side use of the L1 runner takes CEC_SINK_CALLER_SOURCE
       # directly. Both are set from the one resolution below, so they cannot disagree.
       #
+      # WHICH NAME GOES WHERE, and it is one each. SINK_CALLER_SOURCE is the BUILDER-FACING name
+      # and is what the --sink-caller-source argument is spelled from; CEC_SINK_CALLER_SOURCE is
+      # the SUITE-FACING name, read by the L1 drift guard on a host-side run and by the digest
+      # cross-check after the image build. Both are set from the single resolution below, so the
+      # split is about which consumer a reader should follow rather than about two values. The
+      # builder invocation used to pass --sink-caller-source twice, once from each name; the
+      # duplicate was harmless last-wins redundancy and is gone. Do not reintroduce it - if a
+      # second consumer needs the path, read the variable rather than adding an argument.
+      #
       # THE READABILITY CHECK IS NOT REDUNDANT WITH THE CHECKOUT. The drift guard distinguishes
       # "the variable is set and the file is not there" -- which it reports as a WIRING FAULT --
       # from "nothing pointed at the source at all". Exporting a path this job has not opened
@@ -2289,6 +2345,524 @@ jobs:
           cmake --build build/googletest -j8
           cmake --install build/googletest
 
+      # THE PINNED PACKAGE SOURCE IS RESOLVED ONCE, HERE, BECAUSE TWO STEPS NOW CONSUME IT.
+      #
+      # It used to be resolved inside "Build the base root filesystem", which was then its only
+      # consumer. It no longer is: the guest-matched i386 build chroot created immediately below
+      # is debootstrapped from the SAME archive state, and it runs long before any base root
+      # filesystem exists. Two independent resolutions could disagree - a dispatch input
+      # honoured by one and not the other, a snapshot pruned between them, or simply an edit
+      # that changed one copy of the validation - and a build chroot whose glibc came from a
+      # different archive state than the guest's is precisely the defect the chroot exists to
+      # prevent. So the timestamp is validated and proved ONCE and both consumers read the
+      # exported result; there is no second place that can form an opinion about it.
+      #
+      # NOTHING ABOUT THE VALIDATION IS RELAXED BY THE MOVE. The YYYYMMDDTHHMMSSZ form is still
+      # refused rather than passed through, and the archive is still proved to serve this suite
+      # by fetching its Release file with --fail before an hour of work is committed to it. Only
+      # two things changed: the Release file lands under tools/ rather than under $WORK_DIR/host,
+      # because $WORK_DIR is created by a later step and this one now runs before it, and the
+      # metadata banner is printed here instead of there.
+      #
+      # This is host-side acquisition at IMAGE-BUILD time and is legitimate. What must not
+      # happen - and does not - is the GUEST reaching the network at test time; it is booted
+      # with -nic none and its init refuses to run if it finds an interface, a route or a
+      # resolver.
+      - name: Resolve and prove the pinned Debian snapshot
+        # The dispatch input reaches the script through the ENVIRONMENT, never through ${{ }}
+        # interpolation into the script body, which is the same pattern the lcov and kernel
+        # digest steps use. An interpolated expression is substituted before bash parses the
+        # line, so a value carrying shell metacharacters would be executed rather than
+        # compared; as an environment variable it is data.
+        env:
+          DEBIAN_SNAPSHOT_INPUT: ${{ github.event.inputs.debian_snapshot }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/tools"
+
+          # The dispatch input wins over the env default; an empty input means "use the pin".
+          snapshot="${DEBIAN_SNAPSHOT_INPUT:-}"
+          [ -n "$snapshot" ] || snapshot="$GUEST_DEBIAN_SNAPSHOT"
+          case "$snapshot" in
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) : ;;
+            *) echo "::error::the Debian snapshot timestamp '$snapshot' is not in snapshot.debian.org's YYYYMMDDTHHMMSSZ form. It is refused rather than passed through, because a malformed timestamp yields a URL that 404s deep inside debootstrap's output."; exit 1 ;;
+          esac
+          mirror="$GUEST_DEBIAN_SNAPSHOT_ARCHIVE/$snapshot"
+
+          # Does the pin exist, and does it serve this suite? Asked before an hour of work is
+          # committed to it. --fail makes an HTTP error an exit status; the Release file is the
+          # cheapest object that proves both the snapshot and the suite are there.
+          release_file="$GITHUB_WORKSPACE/tools/snapshot-Release"
+          release_url="$mirror/dists/$GUEST_DEBIAN_SUITE/Release"
+          if ! curl --fail --silent --show-error --location --max-time 120 \
+                    --output "$release_file" -- "$release_url"; then
+            echo "::error::the pinned Debian snapshot does not serve $GUEST_DEBIAN_SUITE: $release_url could not be fetched. Either the timestamp names no snapshot, or snapshot.debian.org is unavailable. Pick a timestamp that exists (the archive lists them) and pass it as the debian_snapshot input, or fix GUEST_DEBIAN_SNAPSHOT."
+            exit 1
+          fi
+          echo "================ PINNED PACKAGE SOURCE ================"
+          echo "snapshot timestamp   : $snapshot"
+          echo "archive              : $mirror"
+          echo "suite                : $GUEST_DEBIAN_SUITE"
+          echo "architecture         : $GUEST_ARCH"
+          # Evidence that the archive state is the one the pin names, read from the archive's
+          # own signed metadata rather than asserted here.
+          grep -E '^(Origin|Suite|Codename|Version|Date|Valid-Until|Architectures):' \
+            -- "$release_file" | sed 's/^/  /' || true
+          echo "================ END PINNED PACKAGE SOURCE ================"
+
+          # Exported so every later consumer - the i386 build chroot below, the base root
+          # filesystem, and the image build's --apt-mirror - uses the same composed URL, and so
+          # the timestamp exists in exactly one place for the whole job.
+          {
+            echo "GUEST_DEBIAN_SNAPSHOT_RESOLVED=$snapshot"
+            echo "GUEST_DEBIAN_MIRROR=$mirror"
+          } >> "$GITHUB_ENV"
+          # The Release file itself is kept rather than discarded: it is uploaded with the
+          # provisioning records, so the archive state this run built against is inspectable
+          # after the fact instead of only quoted in a log line.
+          echo "archive metadata kept at $release_file for the provisioning artefact"
+
+      # THE GUEST-MATCHED i386 BUILD CHROOT, AND WHY THE THREE STAGING BUILDS BELOW MOVED INTO IT.
+      #
+      # THE DEFECT THIS REPLACES, MEASURED RATHER THAN REASONED. The three i386 staging builds
+      # used to run on the runner itself with this job's pinned gcc/g++-13 and the RUNNER's
+      # glibc. The artefacts they produced are copied into the guest root image and linked
+      # against INSIDE the guest, by aidl-path-tests-rootfs.sh's servicemanager readiness probe.
+      # The runner is ubuntu-24.04 (glibc 2.39, libstdc++ with GLIBCXX_3.4.32) and the guest is
+      # Debian bookworm i386 (glibc 2.36, libstdc++.so.6.0.30 topping out at GLIBCXX_3.4.30), so
+      # the staged libraries required symbol versions the guest does not define and the in-guest
+      # link died with exactly:
+      #
+      #   /usr/bin/ld: libbinder.so: undefined reference to `std::ios_base_library_init()@GLIBCXX_3.4.32'
+      #   /usr/bin/ld: libcutils.so: undefined reference to `__isoc23_sscanf@GLIBC_2.38'
+      #   /usr/bin/ld: libcutils.so: undefined reference to `__isoc23_strtol@GLIBC_2.38'
+      #
+      # Two independent causes, and both are properties of the COMPILER'S OWN RUNTIME rather
+      # than of anything this workflow passes:
+      #
+      #   * g++ 13 emits a reference to std::ios_base_library_init()@GLIBCXX_3.4.32 for any C++
+      #     translation unit that includes <iostream>. The guest's libstdc++ predates that
+      #     version node, so the reference can never resolve there.
+      #   * glibc from 2.38 onwards redirects strtol, sscanf and their family to __isoc23_*
+      #     aliases whenever __GLIBC_USE(ISOC23) is on, which _GNU_SOURCE turns on and which
+      #     g++ always defines. The guest's glibc 2.36 carries no __isoc23_* symbol at all.
+      #
+      # THREE THINGS THAT LOOK LIKE REMEDIES AND ARE NOT. Each was measured on this host/guest
+      # pair before the chroot was written, and each is recorded so a future edit does not spend
+      # the day rediscovering it:
+      #
+      #   * -D__GLIBC_USE_C2X_STRTOL=0 / -D__GLIBC_USE_C23_STRTOL=0 CANNOT WORK. glibc's own
+      #     /usr/include/features.h #undefs that macro and re-derives it from __GLIBC_USE(ISOC23),
+      #     so the -D is discarded before any header can read it.
+      #   * -static-libstdc++ -static-libgcc IS INSUFFICIENT. It does remove the GLIBCXX_3.4.32
+      #     requirement, but the host's PREBUILT 32-bit libstdc++.a itself carries undefined
+      #     references to __isoc23_strtoul (in eh_alloc.o and debug.o), so the artefact still
+      #     requires GLIBC_2.38. Measured, not assumed.
+      #   * --sysroot=<guest rootfs> plus -static-libstdc++ fails for the same reason: the
+      #     archive is prebuilt against the host's glibc, not recompiled against the sysroot's.
+      #
+      # THE REMEDY THAT DOES WORK is to build the staged artefacts with a toolchain whose glibc
+      # and libstdc++ are NO NEWER than the guest's - which means building them in the guest's
+      # own userspace. This step creates exactly that: a bookworm i386 chroot from the SAME
+      # pinned snapshot the guest image is debootstrapped from, so its ceiling IS the guest's
+      # ceiling by construction rather than by a constant transcribed into this file. Rebuilding
+      # the same sources there produces libraries whose highest requirements are GLIBCXX_3.4.21,
+      # GLIBC_2.1 and __isoc99_sscanf@GLIBC_2.7, all of which the guest defines.
+      #
+      # THE TOOLCHAIN DEVIATION IS RECORDED, NOT HIDDEN. bookworm cannot serve gcc-13, so the
+      # staged i386 artefacts are compiled by the chroot's gcc/g++ 12 family rather than by this
+      # job's pinned major 13. That is the same trade the image builder already makes for the
+      # guest's own compiler - install_image_pinned_compiler gates and RECORDS rather than
+      # failing, for this identical reason - so the deviation is measured here, printed here, and
+      # carried into the image's SDK build-flags record so the guest's provenance says which
+      # compiler family built what it is running. It is also a deviation from THIS JOB's pin and
+      # not from the SDK's own requirement: linux_binder_idl's BUILD.md documents "GCC 11.2.0 or
+      # later (GCC 9.4.0 minimum)", which 12.2.0 clears.
+      #
+      #   WHICH PIN GOVERNS WHICH BUILD, because there are now three and conflating them is the
+      #   easy mistake:
+      #     CEC_TOOLCHAIN_GCC_MAJOR (13), proved by "Select and prove the acceptance toolchain",
+      #       governs THE HOST BUILD - the shipping libRCEC, the L1/L2 binaries and the coverage
+      #       instrumentation whose .gcno notes only a matching gcov can read. It is unchanged
+      #       and unweakened by this step, and nothing here touches CC, CXX or the gcov shim.
+      #     The chroot's gcc-12 family governs ONLY the three i386 staging builds below, whose
+      #       output is never instrumented, never measured and never linked into a host binary -
+      #       it is copied into the guest image and loaded there.
+      #     THE SAME CEC_TOOLCHAIN_GCC_MAJOR, handed to the image builder as
+      #       --toolchain-gcc-major, governs the compiler installed INSIDE the guest, which is
+      #       what the guest's own run_coverage.sh uses. The builder gates-and-records that one
+      #       against the guest's archive, and this step does not affect it: the staging
+      #       toolchain measured here is passed separately, as --staging-gcc-version and
+      #       --staging-toolchain-state, precisely so the two cannot be confused in the image's
+      #       provenance.
+      #
+      # WHY THE AMD64 RUNTIME IS INSTALLED INTO A 32-BIT CHROOT, which looks wrong and is not.
+      # linux_binder_idl's CMakeLists.txt UNCONDITIONALLY overrides FLEX_EXECUTABLE and
+      # BISON_EXECUTABLE (:859, :867) to the AOSP prebuilts at android/build-tools/linux-x86/bin,
+      # and those two are ELF 64-bit x86-64 dynamic executables needing
+      # /lib64/ld-linux-x86-64.so.2 plus libc, libm, libdl, libpthread, librt and libgcc_s. A
+      # pure i386 root has no /lib64 at all, so code generation for the host AIDL compiler would
+      # fail to exec them. libc6-amd64, lib64gcc-s1 and lib64stdc++6 supply exactly that loader
+      # and those libraries, they come from the SAME pinned snapshot (so their ceiling is the
+      # guest's 2.36 and they cannot reintroduce GLIBC_2.38), and they live under /lib64 and
+      # /usr/lib/x86_64-linux-gnu, which an i386 gcc and ld never search. Measured inside the
+      # chroot: flex 2.6.4, bison 3.8.2 and m4 1.4.19 all run.
+      #
+      # NO 32-BIT PERSONALITY IS SET, DELIBERATELY. uname -m inside this chroot reports x86_64,
+      # so CMAKE_HOST_SYSTEM_PROCESSOR does too, and linux_binder_idl's CMakeLists.txt:82-87
+      # therefore stages the AOSP kernel-UAPI headers from build-tools/sysroots/x86_64-linux-musl
+      # - byte for byte the set the previously-proven host build used. Wrapping the chroot in
+      # linux32 would silently switch that to i686-linux-musl and change an input nobody asked to
+      # change.
+      #
+      # THE CHROOT LIVES UNDER $RUNNER_TEMP, NOT UNDER $GITHUB_WORKSPACE, so it is outside the
+      # tree "Verify no Actions credential is persisted in any checkout" walks, outside the
+      # payload tar, and outside anything git reports.
+      - name: Create the guest-matched i386 build chroot
+        run: |
+          set -euo pipefail
+          chroot_root="$RUNNER_TEMP/cec-i386-build-chroot"
+          helper="$GITHUB_WORKSPACE/tools/i386-build-chroot-run.sh"
+          collector="$GITHUB_WORKSPACE/tools/collect-guest-symbol-versions.sh"
+          symbol_map="$GITHUB_WORKSPACE/tools/guest-defined-symbol-versions.txt"
+          mkdir -p "$GITHUB_WORKSPACE/tools"
+
+          # The two paths are written into the generated helper as single-quoted literals, so a
+          # quote in either would end the literal and change what the script does. Runner paths
+          # never contain one; this refuses rather than relies on that.
+          case "$chroot_root$GITHUB_WORKSPACE" in
+            *\'*) echo "::error::the chroot root or the workspace path contains a single quote, which cannot be embedded safely in the generated helper script. Neither RUNNER_TEMP nor GITHUB_WORKSPACE should ever contain one."; exit 1 ;;
+          esac
+
+          # A SURVIVING ROOT IS REFUSED RATHER THAN REMOVED, and the reason is not tidiness. The
+          # helper below bind-mounts /dev into the chroot; if a previous run died between the
+          # mount and its trap, an `rm -rf` of this directory would delete the HOST's device
+          # nodes. Refusing costs a re-run on a self-hosted runner and never costs that.
+          if [ -e "$chroot_root" ]; then
+            echo "::error::$chroot_root already exists. This job builds the i386 build chroot from the pinned snapshot on every run and never reuses one, because a surviving root is an unknown archive state wearing the expected name. It is NOT removed automatically: /dev is bind-mounted into it while builds run, so an rm -rf of a root with a live /dev mount would delete the host's device nodes. Check with 'mount | grep $chroot_root', unmount anything listed, then remove it."
+            exit 1
+          fi
+
+          # ---------------------------------------------------------------------------------
+          # The chroot itself, from the resolved snapshot rather than from a second opinion
+          # about which snapshot that is. GUEST_ARCH and GUEST_DEBIAN_SUITE are the same
+          # variables the base root filesystem uses, so the build environment tracks the guest
+          # by construction: a suite or architecture bump moves both together or neither.
+          # ---------------------------------------------------------------------------------
+          # Asserted rather than assumed, and for the same reason the base root filesystem
+          # asserts it: an empty mirror would make debootstrap fail on something that looks like
+          # a network fault, when the real fault is that the resolution step did not run first.
+          if [ -z "${GUEST_DEBIAN_MIRROR:-}" ] || [ -z "${GUEST_DEBIAN_SNAPSHOT_RESOLVED:-}" ]; then
+            echo "::error::GUEST_DEBIAN_MIRROR and GUEST_DEBIAN_SNAPSHOT_RESOLVED are not both set, so this chroot cannot be built from the same archive state as the guest - which is the ONLY property that makes it a guest-matched chroot. They are exported by 'Resolve and prove the pinned Debian snapshot', which must run before this step."
+            exit 1
+          fi
+          echo "debootstrapping $GUEST_DEBIAN_SUITE/$GUEST_ARCH from $GUEST_DEBIAN_MIRROR"
+          echo "  (snapshot $GUEST_DEBIAN_SNAPSHOT_RESOLVED - the same one the guest image is built from)"
+          sudo debootstrap --arch="$GUEST_ARCH" --variant=minbase --components=main \
+            "$GUEST_DEBIAN_SUITE" "$chroot_root" "$GUEST_DEBIAN_MIRROR"
+
+          # apt inside the chroot must reach the same archive, and the AOSP clone the SDK build
+          # performs needs a resolver. Both are host-side acquisition at image-build time, which
+          # is legitimate here and is what the guest is forbidden from doing at test time.
+          printf 'deb %s %s main\n' "$GUEST_DEBIAN_MIRROR" "$GUEST_DEBIAN_SUITE" \
+            | sudo tee "$chroot_root/etc/apt/sources.list" > /dev/null
+          sudo cp -- /etc/resolv.conf "$chroot_root/etc/resolv.conf"
+
+          # git refuses to operate on a repository owned by another user, and every checkout the
+          # chroot builds from is owned by the runner account while the chroot runs as root. The
+          # authoritative HEAD assertions still run OUTSIDE the chroot as the runner, so this
+          # relaxes nothing that guards which commit is built - it only lets build_binder.sh's
+          # own rev-parse and the AOSP clone work.
+          printf '%s\n' '[safe]' '  directory = *' \
+            | sudo tee "$chroot_root/etc/gitconfig" > /dev/null
+
+          # ---------------------------------------------------------------------------------
+          # The helper every later step uses to enter the chroot. It is generated rather than
+          # committed because the two absolute paths it needs are runner-scoped, and it is a
+          # script rather than an inline `sudo chroot` because the mounts need a teardown trap
+          # that an inline command cannot carry across a failing build.
+          # ---------------------------------------------------------------------------------
+          {
+            printf '%s\n' '#!/usr/bin/env bash'
+            printf '%s\n' '# Generated by .github/workflows/aidl-path-tests.yml. Do not edit in place.'
+            printf '%s\n' '#'
+            printf '%s\n' '# Runs ONE command inside the guest-matched i386 build chroot, with the runner workspace'
+            printf '%s\n' '# bind-mounted at the SAME absolute path it has outside. That is what lets the three'
+            printf '%s\n' '# staging builds keep using the paths they already know - the checkouts, GTEST_PREFIX_I386,'
+            printf '%s\n' '# HALIF_PREFIX_I386, the generated CMake toolchain file - with no path rewriting and no'
+            printf '%s\n' '# copying, and it is why the artefacts land directly in the directories the later'
+            printf '%s\n' '# verification and image-build steps read.'
+            printf '%s\n' '#'
+            printf '%s\n' '#   usage: sudo <this script> [--chdir DIR] [--env NAME=VALUE]... -- command [args...]'
+            printf '%s\n' '#'
+            printf '%s\n' '# The two paths below are baked in at generation time rather than read from the'
+            printf '%s\n' '# environment: this script is invoked through sudo, and sudo env_reset would drop them.'
+            printf '%s\n' '#'
+            printf '%s\n' '# The mounts are made here and torn down by an EXIT/INT/TERM trap. That matters more than'
+            printf '%s\n' '# tidiness: /dev is bind-mounted, so a root left mounted after a failed build would turn'
+            printf '%s\n' "# a later 'rm -rf' of the chroot into a deletion of the host's device nodes."
+            printf '%s\n' 'set -euo pipefail'
+            printf '%s\n' ''
+            printf 'CHROOT_ROOT=%s\n' "'$chroot_root'"
+            printf 'WORKSPACE=%s\n' "'$GITHUB_WORKSPACE'"
+            cat <<'CHROOT_HELPER_EOF'
+          SELF_NAME='i386-build-chroot-run'
+
+          die() { printf '::error::%s: %s\n' "$SELF_NAME" "$*" >&2; exit 1; }
+
+          [ "$(id -u)" = '0' ] || die "must run as root; it mounts the workspace and the pseudo-filesystems into the chroot. Invoke it through sudo."
+
+          chdir=''
+          declare -a passthrough=()
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --chdir)
+                [ $# -ge 2 ] || die "--chdir needs a directory."
+                chdir="$2"; shift 2 ;;
+              --env)
+                [ $# -ge 2 ] || die "--env needs a NAME=VALUE pair."
+                case "$2" in
+                  [A-Za-z_]*=*) : ;;
+                  *) die "--env expects NAME=VALUE, got '$2'." ;;
+                esac
+                passthrough+=("$2"); shift 2 ;;
+              --) shift; break ;;
+              *)  die "unknown argument '$1'; the form is [--chdir DIR] [--env NAME=VALUE]... -- command [args...]" ;;
+            esac
+          done
+          [ $# -ge 1 ] || die "no command was given after --."
+
+          [ -d "$CHROOT_ROOT" ] || die "the build chroot is not present at $CHROOT_ROOT."
+          [ -x "$CHROOT_ROOT/usr/bin/env" ] || die "$CHROOT_ROOT does not look like a populated root filesystem: no executable /usr/bin/env."
+          [ -d "$WORKSPACE" ] || die "the workspace is not present at $WORKSPACE."
+
+          declare -a MOUNTED=()
+
+          unmount_all() {
+            local i target attempt
+            for (( i = ${#MOUNTED[@]} - 1; i >= 0; i-- )); do
+              target="${MOUNTED[i]}"
+              for attempt in 1 2 3 4 5; do
+                mountpoint -q -- "$target" || break
+                umount -- "$target" 2>/dev/null && break
+                # A lazy unmount is the fallback rather than the first move: it detaches the
+                # mount from the namespace immediately even if a descendant is still busy,
+                # which is what keeps a failed build from leaving /dev bound under the chroot.
+                umount -l -- "$target" 2>/dev/null && break
+                sleep 1
+              done
+              if mountpoint -q -- "$target"; then
+                printf '::error::%s: %s is still mounted after five attempts. Do NOT remove %s until it is unmounted.\n' \
+                  "$SELF_NAME" "$target" "$CHROOT_ROOT" >&2
+              fi
+            done
+            MOUNTED=()
+          }
+          trap unmount_all EXIT INT TERM
+
+          # $1 = filesystem type, or the literal 'bind'
+          # $2 = source
+          # $3 = target
+          # $4 = optional comma-separated mount options
+          mount_one() {
+            mkdir -p -- "$3"
+            if [ "$1" = 'bind' ]; then
+              mount --bind ${4:+-o "$4"} -- "$2" "$3"
+            else
+              mount -t "$1" ${4:+-o "$4"} "$2" "$3"
+            fi
+            MOUNTED+=("$3")
+          }
+
+          # /proc so nproc, the compilers and cmake can read the machine; /sys read-only because
+          # nothing in these builds writes it; /dev for the loader, /dev/null and /dev/urandom;
+          # /dev/pts because git and apt want a terminal device when they have one.
+          mount_one proc  proc     "$CHROOT_ROOT/proc"
+          mount_one sysfs sysfs    "$CHROOT_ROOT/sys" ro
+          mount_one bind  /dev     "$CHROOT_ROOT/dev"
+          mount_one bind  /dev/pts "$CHROOT_ROOT/dev/pts"
+          mount_one bind  "$WORKSPACE" "$CHROOT_ROOT$WORKSPACE"
+
+          # env -i, so nothing of the runner's environment leaks in and changes a build: no
+          # CC/CXX pointing at the host's gcc-13, no CPPFLAGS naming host include roots, no
+          # PATH that could reach a host binary. What the builds need is passed explicitly with
+          # --env by the caller. --chdir must precede the NAME=VALUE assignments: env treats the
+          # first non-option argument as the command name, so an option after an assignment
+          # would be passed to the command instead of acted on.
+          status=0
+          chroot -- "$CHROOT_ROOT" /usr/bin/env -i \
+            ${chdir:+"--chdir=$chdir"} \
+            PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+            HOME='/root' \
+            LC_ALL='C' \
+            TMPDIR='/tmp' \
+            CC='/usr/bin/gcc' \
+            CXX='/usr/bin/g++' \
+            "${passthrough[@]}" \
+            "$@" || status=$?
+          exit "$status"
+          CHROOT_HELPER_EOF
+          } > "$helper"
+          chmod 0755 "$helper"
+
+          # ---------------------------------------------------------------------------------
+          # The build dependencies, resolved by apt inside the chroot rather than by
+          # debootstrap's --include, so real dependency resolution applies. Every one is
+          # required by something in the three staging builds; none is speculative:
+          #
+          #   build-essential   gcc, g++, make, libc6-dev and dpkg-dev
+          #   cmake             build_binder.sh and build_modules.sh both invoke bare `cmake`
+          #   ninja-build       the generator the googletest staging asks for with -G Ninja
+          #   flex, bison       find_package(FLEX)/(BISON) in linux_binder_idl (:856-857)
+          #   pkg-config        find_package(PkgConfig) in linux_binder_idl (:103)
+          #   git               build_binder.sh's rev-parse, and the AOSP clone plus git apply
+          #   python3           build_modules.sh's manifest pass
+          #   ca-certificates   the AOSP clone is https
+          #   libc6-amd64,      the loader and 64-bit runtime the AOSP prebuilt flex and bison
+          #   lib64gcc-s1,        need in order to exec at all - see the comment block above
+          #   lib64stdc++6
+          # ---------------------------------------------------------------------------------
+          chroot_packages='build-essential cmake ninja-build flex bison pkg-config git python3 ca-certificates libc6-amd64 lib64gcc-s1 lib64stdc++6'
+          sudo "$helper" --env DEBIAN_FRONTEND=noninteractive --env CHROOT_PACKAGES="$chroot_packages" -- \
+            /bin/sh -c 'apt-get -qq update && apt-get -qq -y --no-install-recommends install $CHROOT_PACKAGES'
+
+          # ---------------------------------------------------------------------------------
+          # The measurements. Every value below is read out of the chroot rather than
+          # transcribed into this file, so a suite bump changes them instead of invalidating
+          # them silently.
+          # ---------------------------------------------------------------------------------
+          echo "================ i386 BUILD CHROOT ================"
+          echo "root                 : $chroot_root"
+          sudo "$helper" -- /bin/sh -c 'gcc --version | head -n 1; g++ --version | head -n 1; ldd --version | head -n 1; cmake --version | head -n 1; ninja --version; git --version; python3 --version'
+          echo "================ END i386 BUILD CHROOT ================"
+
+          staging_gcc="$(sudo "$helper" -- /bin/sh -c 'gcc -dumpfullversion 2>/dev/null || gcc -dumpversion' | tr -d '[:space:]')"
+          staging_gxx="$(sudo "$helper" -- /bin/sh -c 'g++ -dumpfullversion 2>/dev/null || g++ -dumpversion' | tr -d '[:space:]')"
+          case "$staging_gcc" in
+            [0-9]*.[0-9]*) : ;;
+            *) echo "::error::could not read a dotted version out of the build chroot's gcc ('$staging_gcc'). The staging toolchain must be measurable, because its identity is recorded into the guest image's provenance."; exit 1 ;;
+          esac
+          if [ "$staging_gcc" != "$staging_gxx" ]; then
+            echo "::error::the build chroot's gcc ($staging_gcc) and g++ ($staging_gxx) are different versions. The C and C++ halves of the staged libraries would then carry two different runtimes, which is the class of defect this chroot exists to remove."
+            exit 1
+          fi
+          staging_major="${staging_gcc%%.*}"
+
+          # GATE-AND-RECORD, in the same shape and for the same reason as the image builder's
+          # install_image_pinned_compiler: bookworm cannot serve gcc-13, so a mismatch against
+          # this job's host pin is EXPECTED and is recorded as a deviation rather than failing
+          # the build. What would be a real failure is a compiler older than the SDK's own
+          # documented floor, and that is checked.
+          if [ "$staging_major" = "$CEC_TOOLCHAIN_GCC_MAJOR" ]; then
+            staging_state='matches-pin'
+          else
+            staging_state='deviates-from-pin'
+          fi
+          if [ "$staging_major" -lt 11 ]; then
+            echo "::error::the build chroot's gcc is $staging_gcc, older than the GCC 11.2.0 linux_binder_idl's BUILD.md documents as its requirement (9.4.0 absolute minimum). A deviation from this job's pinned major $CEC_TOOLCHAIN_GCC_MAJOR is accepted and recorded; a compiler below the SDK's own floor is not."
+            exit 1
+          fi
+          echo "staging toolchain    : gcc/g++ $staging_gcc  (host pin: major $CEC_TOOLCHAIN_GCC_MAJOR, state: $staging_state)"
+          if [ "$staging_state" = 'deviates-from-pin' ]; then
+            echo "  RECORDED DEVIATION. The three i386 staging builds below are compiled by this gcc-$staging_major"
+            echo "  family, not by the pinned major $CEC_TOOLCHAIN_GCC_MAJOR, because $GUEST_DEBIAN_SUITE cannot serve the pin and"
+            echo "  because a newer compiler's runtime is exactly what made the staged libraries unloadable"
+            echo "  in the guest. It is passed to the image builder as --staging-gcc-version and"
+            echo "  --staging-toolchain-state, so the guest's own SDK build-flags record says which"
+            echo "  compiler family built what it is running. The host build and the coverage"
+            echo "  instrumentation remain on the pinned major $CEC_TOOLCHAIN_GCC_MAJOR, unchanged."
+          fi
+
+          # The CMake floor is the SDK's own, asserted against the chroot's cmake rather than
+          # against the runner's: the runner's cmake never runs these builds now. googletest's
+          # own floor is lower than the SDK's, so clearing this clears both.
+          chroot_cmake="$(sudo "$helper" -- /bin/sh -c 'cmake --version | head -n 1' | awk '{ print $3 }')"
+          lowest="$(printf '%s\n%s\n' "$chroot_cmake" "$CMAKE_SDK_FLOOR" | sort -V | head -n 1)"
+          if [ "$lowest" != "$CMAKE_SDK_FLOOR" ] && [ "$chroot_cmake" != "$CMAKE_SDK_FLOOR" ]; then
+            echo "::error::the build chroot's cmake is $chroot_cmake, below the $CMAKE_SDK_FLOOR floor the Binder SDK requires (its BUILD.md states 3.22.1 or later). $GUEST_DEBIAN_SUITE was expected to ship a cmake at or above it; check what the pinned snapshot actually serves."
+            exit 1
+          fi
+          echo "chroot cmake         : $chroot_cmake (SDK floor $CMAKE_SDK_FLOOR)"
+
+          # ---------------------------------------------------------------------------------
+          # The guest's symbol-version ceiling, MEASURED. This map is what the fail-fast check
+          # after the staging builds compares every staged artefact against, and it is read out
+          # of the chroot for one reason: the chroot and the guest are debootstrapped from the
+          # same suite and the same snapshot, so the chroot's defined versions ARE the guest's.
+          # A hardcoded pair of ceilings would go stale the moment GUEST_DEBIAN_SUITE moved.
+          # ---------------------------------------------------------------------------------
+          {
+            printf '%s\n' '#!/bin/sh'
+            printf '%s\n' '# Generated by .github/workflows/aidl-path-tests.yml. Do not edit in place.'
+            printf '%s\n' '#'
+            printf '%s\n' '# Prints "<soname><TAB><version>" for every symbol version DEFINED by every shared'
+            printf '%s\n' "# library in this root's own multiarch library directories. readelf's section names are"
+            printf '%s\n' '# used verbatim: "Version definition section" (.gnu.version_d) is what a library'
+            printf '%s\n' '# DEFINES, and "Version needs section" (.gnu.version_r) is what it REQUIRES. The awk'
+            printf '%s\n' '# stops at the next .gnu. section header so the two can never be mixed.'
+            printf '%s\n' '#'
+            printf '%s\n' '# The multiarch directory is asked of dpkg rather than assumed, so this is correct for'
+            printf '%s\n' '# i386 and for armhf without an edit.'
+            cat <<'SYMBOL_COLLECTOR_EOF'
+          set -eu
+          multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+          for so in "/lib/$multiarch"/*.so* "/usr/lib/$multiarch"/*.so*; do
+            [ -f "$so" ] || continue
+            soname="$(readelf -d -- "$so" 2>/dev/null | sed -n 's/.*Library soname: \[\(.*\)\].*/\1/p' | head -n 1)"
+            [ -n "$soname" ] || soname="${so##*/}"
+            readelf -V -- "$so" 2>/dev/null | awk -v soname="$soname" '
+              /Version definition section/ { inside = 1; next }
+              /section .\.gnu\./           { inside = 0 }
+              inside && /Name: /           { sub(/.*Name: /, ""); sub(/[ \t].*/, ""); print soname "\t" $0 }
+            '
+          done
+          SYMBOL_COLLECTOR_EOF
+          } > "$collector"
+          chmod 0755 "$collector"
+
+          sudo "$helper" -- /bin/sh "$collector" | sort -u > "$symbol_map"
+
+          # AN EMPTY OR TRUNCATED MAP WOULD MAKE THE LATER CHECK VACUOUSLY GREEN, which is worse
+          # than not having the check: it would pass the exact artefacts that broke the guest.
+          # So the map is proved to carry both of the ceilings that matter and a plausible
+          # number of rows before anything is allowed to consult it.
+          map_rows="$(wc -l < "$symbol_map" | tr -d '[:space:]')"
+          glibcxx_ceiling="$(awk -F'\t' '$2 ~ /^GLIBCXX_/ { print $2 }' "$symbol_map" | sort -V | tail -n 1)"
+          glibc_ceiling="$(awk -F'\t' '$2 ~ /^GLIBC_2\./ { print $2 }' "$symbol_map" | sort -V | tail -n 1)"
+          if [ "$map_rows" -lt 50 ] || [ -z "$glibcxx_ceiling" ] || [ -z "$glibc_ceiling" ]; then
+            echo "::error::the guest symbol-version map at $symbol_map is not usable: $map_rows row(s), highest GLIBCXX '${glibcxx_ceiling:-<none>}', highest GLIBC '${glibc_ceiling:-<none>}'. It must carry both ceilings, because the staged-artefact check consults it and an empty map would pass every artefact. Check that libstdc++6 and libc6 are installed in the chroot and that readelf is present."
+            exit 1
+          fi
+          echo "guest symbol ceiling : $glibcxx_ceiling / $glibc_ceiling  ($map_rows soname/version pairs measured)"
+
+          {
+            echo "CEC_I386_CHROOT=$chroot_root"
+            echo "CEC_I386_CHROOT_RUN=$helper"
+            echo "CEC_GUEST_SYMBOL_VERSIONS=$symbol_map"
+            echo "CEC_GUEST_GLIBCXX_CEILING=$glibcxx_ceiling"
+            echo "CEC_GUEST_GLIBC_CEILING=$glibc_ceiling"
+            echo "CEC_STAGING_GCC_VERSION=$staging_gcc"
+            echo "CEC_STAGING_TOOLCHAIN_STATE=$staging_state"
+          } >> "$GITHUB_ENV"
+
+          # THE DEVIATION IS PUT WHERE A READER LOOKS FIRST, in the same shape as the runner
+          # toolchain's own section: a pin, a measured value and a state. A deviation recorded
+          # only in a step log is a deviation most readers will not find, and the whole point of
+          # gate-and-record rather than gate-and-fail is that the record has to be as visible as
+          # the failure would have been.
+          {
+            echo "### Guest-matched i386 staging toolchain (deviation from the runner pin: $staging_state)"
+            echo
+            echo "| What | Pin | Measured | State |"
+            echo "| --- | --- | --- | --- |"
+            echo "| staging gcc/g++ (i386 build chroot) | major $CEC_TOOLCHAIN_GCC_MAJOR | $staging_gcc | $staging_state |"
+            echo "| chroot cmake | >= $CMAKE_SDK_FLOOR (Binder SDK floor) | $chroot_cmake | gated |"
+            echo "| guest symbol-version ceiling | measured, not pinned | $glibcxx_ceiling / $glibc_ceiling | recorded |"
+            echo
+            echo "The three i386 staging builds - GoogleTest, the Binder SDK and the AIDL client stub snapshots - are compiled inside a \`$GUEST_DEBIAN_SUITE\`/\`$GUEST_ARCH\` chroot debootstrapped from the same pinned snapshot as the guest image, because artefacts built by the runner's newer compiler require symbol versions (\`GLIBCXX_3.4.32\`, \`__isoc23_*@GLIBC_2.38\`) that the guest's runtime does not define. \`$GUEST_DEBIAN_SUITE\` cannot serve the pinned GCC $CEC_TOOLCHAIN_GCC_MAJOR family, so this deviation is unavoidable and is recorded rather than gated - the same trade the image builder makes for the guest's own compiler. **The host build and the coverage instrumentation remain on the pinned major $CEC_TOOLCHAIN_GCC_MAJOR and are unaffected.** These two values are passed to the image builder as \`--staging-gcc-version\` and \`--staging-toolchain-state\`, so the guest's own SDK build-flags record names the compiler family that built what it is running."
+          } >> "$GITHUB_STEP_SUMMARY"
+          df -h "$GITHUB_WORKSPACE" | tail -n 1
+
       # THE GUEST'S GoogleTest, AND WHY --gtest-prefix IS NOT OPTIONAL.
       #
       # The image builder requires it twice over. Its input validation requires the LITERAL
@@ -2301,18 +2875,50 @@ jobs:
       # -DCMAKE_INSTALL_LIBDIR=lib is load-bearing rather than tidy: on a Debian-family host
       # GNUInstallDirs can multiarch the library directory, which would put gtest.pc under
       # lib/<triple>/pkgconfig and fail the literal-path check above.
+      #
+      # THIS BUILD RUNS INSIDE THE GUEST-MATCHED i386 CHROOT, for the reason the chroot step
+      # sets out at length: these archives are copied into the guest image and linked there, and
+      # a libgtest.a compiled by the runner's g++-13 carries references to GLIBCXX_3.4.32 that
+      # the guest's libstdc++ cannot resolve. The cmake that runs is the chroot's 3.25.1, whose
+      # floor clears both this project's and the SDK's; the runner's AIDL_CMAKE_BIN_DIR is
+      # deliberately NOT on the path, because that is an x86_64 binary and could not run against
+      # an i386 userspace anyway.
+      #
+      # --chdir keeps the working directory at the workspace so `-B build/googletest-i386` still
+      # resolves to the same relative path it did before, and the workspace is bind-mounted at
+      # its own absolute path so -S and -DCMAKE_INSTALL_PREFIX need no rewriting.
+      #
+      # -m32 IS KEPT, and it is now a no-op rather than a lever. Measured in the chroot: the
+      # compiler's own target is i686-linux-gnu, and a translation unit compiled with and
+      # without -m32 both produce Class ELF32 / Machine Intel 80386. It stays for three reasons:
+      # it states what the artefact must be instead of leaving that to an inherited default; it
+      # keeps this step's flags identical in intent to the CMake toolchain file the SDK build
+      # needs, where the flag is not optional; and it means the ELF32 assertions below are
+      # checking a stated requirement rather than an accident. Removing it would change nothing
+      # measurable and would make the two staging paths disagree on their own terms.
       - name: Build googletest for the guest (i386)
         run: |
           set -euo pipefail
-          cmake -G Ninja -S "$GITHUB_WORKSPACE/googletest" -B build/googletest-i386 \
+          in_chroot() {
+            sudo "$CEC_I386_CHROOT_RUN" --chdir "$GITHUB_WORKSPACE" "$@"
+          }
+
+          in_chroot -- cmake -G Ninja -S "$GITHUB_WORKSPACE/googletest" -B build/googletest-i386 \
             -DCMAKE_INSTALL_PREFIX="$GTEST_PREFIX_I386" \
             -DCMAKE_INSTALL_LIBDIR=lib \
             -DBUILD_TYPE=Debug -DBUILD_GMOCK=ON -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 \
             -DCMAKE_EXE_LINKER_FLAGS=-m32 -DCMAKE_SHARED_LINKER_FLAGS=-m32
-          cmake --build build/googletest-i386 -j8
-          cmake --install build/googletest-i386
+          in_chroot -- cmake --build build/googletest-i386 -j8
+          in_chroot -- cmake --install build/googletest-i386
+
+          # THE ARTEFACTS ARE HANDED BACK TO THE RUNNER ACCOUNT. The chroot builds as root, so
+          # everything it wrote into the workspace is root-owned; later steps read, tar and
+          # `rm -rf` these trees as the unprivileged runner and would fail on a root-owned
+          # subtree. This is ownership only - no content is touched.
+          sudo chown -R "$(id -u):$(id -g)" -- \
+            "$GITHUB_WORKSPACE/install-i386" "$GITHUB_WORKSPACE/build/googletest-i386"
 
           for required in \
             "$GTEST_PREFIX_I386/lib/pkgconfig/gtest.pc" \
@@ -2334,7 +2940,7 @@ jobs:
           elf_machine="$(readelf -h "$GTEST_PREFIX_I386/lib/libgtest.a" 2>/dev/null | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p' | head -n 1)"
           echo "libgtest.a: class=$elf_class machine=$elf_machine"
           if [ "$elf_class" != "ELF32" ]; then
-            echo "::error::the guest's GoogleTest was built as $elf_class (machine '$elf_machine'), not ELF32. The guest userspace is all-32-bit; check that gcc-multilib/g++-multilib are installed and that the -m32 flags above reached the compile."
+            echo "::error::the guest's GoogleTest was built as $elf_class (machine '$elf_machine'), not ELF32. The guest userspace is all-32-bit, and this build runs inside the i386 build chroot whose compiler is natively 32-bit, so an ELF64 result means the compile did not happen in the chroot at all - check that the cmake invocations above still go through \$CEC_I386_CHROOT_RUN rather than reaching the runner's compiler directly."
             exit 1
           fi
 
@@ -2443,8 +3049,13 @@ jobs:
       # build_binder.sh configures with a fixed argument list and offers no way to pass -D, and
       # it removes a stale CMakeCache.txt before configuring, so pre-seeding the cache does not
       # survive either. CMake reads CMAKE_TOOLCHAIN_FILE FROM THE ENVIRONMENT from 3.21
-      # onwards, and the CMake these steps use through the step-scoped PATH prepend is at or
-      # above the 3.22.1 SDK floor, so a toolchain file is reachable where a -D is not.
+      # onwards, and the CMake that now runs these two staging builds is the i386 build chroot's
+      # own - asserted against the same CMAKE_SDK_FLOOR by "Create the guest-matched i386 build
+      # chroot" and well past 3.21 - so a toolchain file is reachable where a -D is not. It used
+      # to be the runner's AIDL_CMAKE_BIN_DIR, prepended per step; that binary is x86_64 and
+      # cannot execute against an i386 userspace, so the prepend was dropped when the staging
+      # moved into the chroot. The file itself is unaffected: it is read by whichever cmake
+      # configures the build.
       #
       # It sets exactly two things and nothing more:
       #
@@ -2480,11 +3091,19 @@ jobs:
       #   passes, and BUILD.md:432-435 describes exactly it: the toolchain "currently produces
       #   the all-32-bit (protocol 7) build".
       #
-      # CMAKE_SYSTEM_NAME is deliberately NOT set. Setting it would put CMake into
-      # cross-compiling mode and break the host AIDL compiler that -DBUILD_HOST_AIDL=ON builds;
-      # this is a native build that happens to emit 32-bit objects, and the resulting i386 host
-      # tools still run on this x86_64 runner through the i386 loader that gcc-multilib brings
-      # in.
+      # CMAKE_SYSTEM_NAME is deliberately NOT set, and that is even more clearly right now than
+      # it was. Setting it would put CMake into cross-compiling mode and break the host AIDL
+      # compiler that -DBUILD_HOST_AIDL=ON builds. This build runs inside the guest-matched i386
+      # chroot, so it is not a cross-compilation in any sense: the compiler is natively i386, the
+      # i386 host tools it produces run natively there, and the loader they need is the chroot's
+      # own rather than a multilib one borrowed from the runner. It used to be a native x86_64
+      # build emitting 32-bit objects, which reached the same place by a longer route.
+      #
+      # NO 32-BIT PERSONALITY IS SET EITHER, and that is load-bearing here specifically:
+      # linux_binder_idl's CMakeLists.txt branches on CMAKE_HOST_SYSTEM_PROCESSOR to choose which
+      # staged AOSP kernel-UAPI sysroot to put ahead of /usr/include. uname -m inside the chroot
+      # reports x86_64, as it does outside, so that choice is byte for byte the one the
+      # previously-proven build made. Wrapping the chroot in linux32 would silently switch it.
       - name: Write the i386 CMake toolchain file
         run: |
           set -euo pipefail
@@ -2541,9 +3160,37 @@ jobs:
 
           assert_source_head "before the build"
 
-          cd "$HALIF_PREFIX_I386"
-          BINDER_SOURCE_DIR="$src" BINDER_VERSION="$BINDER_SDK_COMMIT" \
-            CMAKE_TOOLCHAIN_FILE="$AIDL_I386_TOOLCHAIN" PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_binder.sh
+          # THE BUILD ITSELF RUNS INSIDE THE GUEST-MATCHED i386 CHROOT. This is the staging
+          # whose output the guest actually loads - libbinder, libutils, libcutils and the
+          # servicemanager the in-guest readiness probe links against - so it is the staging the
+          # symbol-version mismatch broke, and it is compiled by the chroot's gcc-12 family
+          # against the chroot's glibc 2.36, both of which are the guest's own.
+          #
+          # env -i inside the helper means nothing of the runner's environment reaches
+          # build_binder.sh by accident, so every variable it needs is named explicitly below -
+          # the five this step's `env:` block overrides, plus the three the script's own hooks
+          # read. The HEAD assertions stay OUTSIDE the chroot and run as the runner account, so
+          # what governs which commit is built has not moved.
+          #
+          # AIDL_CMAKE_BIN_DIR IS DELIBERATELY NOT PREPENDED ANY MORE. It holds an x86_64 cmake,
+          # which cannot execute against an i386 userspace; the chroot's own cmake is used and
+          # "Create the guest-matched i386 build chroot" asserts it against CMAKE_SDK_FLOOR
+          # before this step runs. CMAKE_TOOLCHAIN_FILE still reaches cmake from the
+          # environment, which is supported from 3.21 and the chroot's cmake is well past it.
+          sudo "$CEC_I386_CHROOT_RUN" --chdir "$HALIF_PREFIX_I386" \
+            --env HALIF_PREFIX="$HALIF_PREFIX" \
+            --env HALIF_LIB_DIR="$HALIF_LIB_DIR" \
+            --env BINDER_SDK_DIR="$BINDER_SDK_DIR" \
+            --env BINDER_SDK_INCLUDE_DIR="$BINDER_SDK_INCLUDE_DIR" \
+            --env BINDER_BUILD_DIR="$BINDER_BUILD_DIR" \
+            --env BINDER_SOURCE_DIR="$src" \
+            --env BINDER_VERSION="$BINDER_SDK_COMMIT" \
+            --env CMAKE_TOOLCHAIN_FILE="$AIDL_I386_TOOLCHAIN" \
+            -- ./build_binder.sh
+
+          # Ownership only, no content: the chroot builds as root and later steps read, copy,
+          # tar and `rm -rf` this tree as the unprivileged runner account.
+          sudo chown -R "$(id -u):$(id -g)" -- "$HALIF_PREFIX_I386"
 
           assert_source_head "after build_binder.sh returned"
 
@@ -2583,6 +3230,12 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/tools"
           cp -- "$cache" "$GITHUB_WORKSPACE/tools/i386-binder-CMakeCache.txt"
 
+      # Built inside the guest-matched i386 chroot for the same reason as the SDK above: these
+      # two stub libraries are staged into the guest image and loaded there, and the common pin
+      # stays at 0.2.0.0 because that is the ABI the released hdmicec snapshot was generated
+      # against. common goes first because build_modules.sh pre-checks each dependency's shared
+      # object. The chroot's cmake is used rather than AIDL_CMAKE_BIN_DIR, which is an x86_64
+      # binary; the toolchain file still reaches cmake through the environment.
       - name: Build the AIDL client stub snapshots for the guest (i386)
         env:
           HALIF_PREFIX: ${{ github.workspace }}/rdk-halif-aidl-i386
@@ -2591,11 +3244,23 @@ jobs:
           BINDER_SDK_INCLUDE_DIR: ${{ github.workspace }}/rdk-halif-aidl-i386/out/build
         run: |
           set -euo pipefail
-          cd "$HALIF_PREFIX_I386"
-          CMAKE_TOOLCHAIN_FILE="$AIDL_I386_TOOLCHAIN" PATH="$AIDL_CMAKE_BIN_DIR:$PATH" \
-            ./build_modules.sh common --version 0.2.0.0
-          CMAKE_TOOLCHAIN_FILE="$AIDL_I386_TOOLCHAIN" PATH="$AIDL_CMAKE_BIN_DIR:$PATH" \
-            ./build_modules.sh hdmicec --version 0.1.0.0
+          in_chroot() {
+            sudo "$CEC_I386_CHROOT_RUN" --chdir "$HALIF_PREFIX_I386" \
+              --env HALIF_PREFIX="$HALIF_PREFIX" \
+              --env HALIF_LIB_DIR="$HALIF_LIB_DIR" \
+              --env BINDER_SDK_DIR="$BINDER_SDK_DIR" \
+              --env BINDER_SDK_INCLUDE_DIR="$BINDER_SDK_INCLUDE_DIR" \
+              --env CMAKE_TOOLCHAIN_FILE="$AIDL_I386_TOOLCHAIN" \
+              "$@"
+          }
+
+          in_chroot -- ./build_modules.sh common --version 0.2.0.0
+          in_chroot -- ./build_modules.sh hdmicec --version 0.1.0.0
+
+          # Ownership only, no content: the chroot builds as root and later steps read, copy,
+          # tar and `rm -rf` this tree as the unprivileged runner account.
+          sudo chown -R "$(id -u):$(id -g)" -- "$HALIF_PREFIX_I386"
+
           ls -l "$HALIF_PREFIX_I386/out/target/lib/halif"
 
       # The same gate the image builder applies, run here where the remedy is at hand rather
@@ -2649,6 +3314,115 @@ jobs:
           fi
           [ "$rc" -eq 0 ] || exit 1
 
+      # THE FAIL-FAST GATE FOR THE DEFECT THE BUILD CHROOT EXISTS TO PREVENT.
+      #
+      # The 32-bit check above answers "is this artefact the right machine". This one answers
+      # the question that actually broke the job: "can the guest's runtime satisfy what this
+      # artefact requires". They are independent - an i386 library built against a newer glibc
+      # is perfectly 32-bit and perfectly unloadable - and only the second one catches a staging
+      # step that somehow compiled outside the chroot.
+      #
+      # WHY IT IS HERE AND NOT LEFT TO THE IMAGE BUILDER. aidl-path-tests-rootfs.sh does check
+      # loadability, but it checks it INSIDE the guest, which is roughly forty minutes of kernel
+      # build, debootstrap and image assembly later, and the diagnostic there arrives as an ld
+      # error against a library nobody has looked at since. Here the remedy is at hand and the
+      # artefact is named. The builder's check is not weakened or removed - --sdk-dir is
+      # caller-controlled and it must still defend itself against a staging it did not produce -
+      # it should simply no longer be reachable by this route.
+      #
+      # WHAT IS COMPARED, AND WHERE THE CEILING COMES FROM. Every artefact the image stages is
+      # scanned: the six-library binder closure, the two HALIF stub libraries and
+      # servicemanager. readelf -V reports, per artefact, the symbol versions it NEEDS and the
+      # soname it needs each from; the guest's DEFINED set was measured out of the build chroot,
+      # which is debootstrapped from the same suite and the same snapshot as the guest, so it is
+      # the guest's own ceiling rather than a pair of constants that would go stale on a suite
+      # bump. A needed (soname, version) pair absent from that set is refused.
+      #
+      # THE SECOND ARM IS A SYMBOL SCAN, NOT A VERSION COMPARISON, and it is separate on
+      # purpose. glibc from 2.38 redirects strtol, sscanf and their family to __isoc23_* aliases
+      # whenever __GLIBC_USE(ISOC23) is on, which _GNU_SOURCE forces on and which g++ always
+      # defines; the guest's glibc carries no such symbol at ANY version. Any reference to one
+      # is therefore fatal on its own terms, regardless of which version node it was tagged
+      # with, so it is looked for by name.
+      - name: Verify the guest's staged artefacts need no symbol version the guest lacks
+        run: |
+          set -euo pipefail
+          defined="$CEC_GUEST_SYMBOL_VERSIONS"
+          if [ ! -s "$defined" ]; then
+            echo "::error::the measured guest symbol-version map is missing or empty at '$defined'. It is written by 'Create the guest-matched i386 build chroot'; without it this check would pass every artefact, which is worse than not running it."
+            exit 1
+          fi
+          glibcxx_ceiling="$CEC_GUEST_GLIBCXX_CEILING"
+          glibc_ceiling="$CEC_GUEST_GLIBC_CEILING"
+          tab="$(printf '\t')"
+          rc=0
+
+          # $1 = absolute path to a staged shared library or executable
+          check_artefact() {
+            local artefact="$1" needs='' isoc23='' soname='' version='' name=''
+            name="$(basename -- "$artefact")"
+            if [ ! -f "$artefact" ]; then
+              echo "::error::the staged artefact $artefact is missing, so the symbol versions it needs cannot be read. Every library the guest loads must exist here before the image is assembled."
+              rc=1
+              return
+            fi
+
+            # readelf's own section names, verbatim: "Version needs section" (.gnu.version_r) is
+            # what the artefact REQUIRES. The awk stops at the next .gnu. section header so the
+            # needs section can never bleed into the definitions section that follows it, and it
+            # carries the File: line forward because the version names beneath it belong to that
+            # soname.
+            needs="$(readelf -V -- "$artefact" 2>/dev/null | awk '
+              /Version needs section/ { inside = 1; next }
+              /section .\.gnu\./      { inside = 0 }
+              inside && /File: /      { file = $0; sub(/.*File: /, "", file); sub(/[ \t].*/, "", file) }
+              inside && /Name: /      { name = $0; sub(/.*Name: /, "", name); sub(/[ \t].*/, "", name); print file "\t" name }
+            ' | sort -u)"
+
+            while IFS="$tab" read -r soname version; do
+              [ -n "${version:-}" ] || continue
+              if grep -Fqx "$soname$tab$version" -- "$defined"; then
+                continue
+              fi
+              if ! grep -Fq "$soname$tab" -- "$defined"; then
+                # The chroot has no version definitions for that soname at all - the dynamic
+                # loader itself is the usual case. Nothing can be concluded either way, so it
+                # is reported and left to the in-image loader check rather than guessed at.
+                printf '  note  %-34s needs %s from %s, a soname the build chroot defines no versions for; the in-image loader check covers that one.\n' \
+                  "$name" "$version" "$soname"
+                continue
+              fi
+              echo "::error::$artefact requires the symbol version $version from $soname, which the guest userspace does not define. The guest's measured ceilings are $glibcxx_ceiling and $glibc_ceiling. This is the defect that used to kill the image build forty minutes later, at the in-guest link of the servicemanager readiness probe. REMEDY: build this artefact inside the guest-matched i386 build chroot, which is what the three i386 staging steps do - check that the step producing it still routes its compiler through \$CEC_I386_CHROOT_RUN. Linking it with -static-libstdc++ -static-libgcc does NOT close this: measured on this host/guest pair, the prebuilt 32-bit libstdc++.a itself references __isoc23_strtoul@GLIBC_2.38 from eh_alloc.o and debug.o, so the artefact still requires a glibc the guest does not have."
+              rc=1
+            done <<< "$needs"
+
+            isoc23="$(readelf --dyn-syms -W -- "$artefact" 2>/dev/null | grep -oE '__isoc23_[A-Za-z0-9_]+' | sort -u || true)"
+            if [ -n "$isoc23" ]; then
+              echo "::error::$artefact references the glibc C23 aliases below, which glibc introduced at 2.38 and which the guest's glibc ($glibc_ceiling) does not carry at any version:"
+              printf '%s\n' "$isoc23" | sed 's/^/    /'
+              echo "  No -D can suppress them: glibc's own /usr/include/features.h #undefs __GLIBC_USE_C23_STRTOL and re-derives it from __GLIBC_USE(ISOC23), which _GNU_SOURCE - always defined by g++, and set explicitly by libcutils - forces on. REMEDY: build this artefact inside the guest-matched i386 build chroot, whose glibc IS the guest's."
+              rc=1
+            fi
+
+            if [ "$rc" -eq 0 ]; then
+              printf '  ok    %-34s within the guest ceiling\n' "$name"
+            fi
+          }
+
+          binder_lib="$HALIF_PREFIX_I386/out/target/lib/binder"
+          halif_lib="$HALIF_PREFIX_I386/out/target/lib/halif"
+          echo "guest ceiling measured from the build chroot: $glibcxx_ceiling / $glibc_ceiling"
+          for soname in libbinder.so libutils.so liblog.so libbase.so libcutils.so libcutils_sockets.so; do
+            check_artefact "$binder_lib/$soname"
+          done
+          for soname in libhdmicec-v0.1.0.0-cpp.so libcommon-v0.2.0.0-cpp.so; do
+            check_artefact "$halif_lib/$soname"
+          done
+          check_artefact "$HALIF_PREFIX_I386/out/target/bin/servicemanager"
+
+          [ "$rc" -eq 0 ] || exit 1
+          echo "every staged artefact stays within the guest's defined symbol versions and references no __isoc23_* alias"
+
       # The cloned upstream Binder sources and the CMake object trees are build scratch, not
       # part of a staged SDK: nothing at runtime reads them, the readiness markers stop
       # build_binder.sh from wanting them again, and the i386 tree is copied wholesale into the
@@ -2671,6 +3445,31 @@ jobs:
                     "$HALIF_PREFIX_I386/build-tools" "$HALIF_PREFIX_I386/build" \
                     "$HALIF_PREFIX_I386/.git" \
                     "$GITHUB_WORKSPACE/build/googletest" "$GITHUB_WORKSPACE/build/googletest-i386"
+
+          # THE i386 BUILD CHROOT IS RELEASED HERE, AND ONLY AFTER PROVING IT IS UNMOUNTED. It
+          # lives under $RUNNER_TEMP rather than the workspace, but on a hosted runner that is
+          # the same filesystem, and a bookworm i386 root with a toolchain in it is over a
+          # gigabyte. Everything that needed it has run: the three staging builds, the 32-bit
+          # check and the symbol-version gate, all of which are above.
+          #
+          # THE MOUNT CHECK IS NOT DEFENSIVE PADDING. The chroot-run helper bind-mounts /dev
+          # into the root and unmounts it from an EXIT/INT/TERM trap; if that trap were ever
+          # defeated - a SIGKILL, a cancelled job resumed, a lazy unmount still settling - then
+          # `rm -rf` here would recurse through the bind and delete the HOST's device nodes. So
+          # the mount table is read and a surviving mount is a named failure that leaves the
+          # directory alone, which costs a gigabyte of scratch and never costs /dev.
+          if [ -n "${CEC_I386_CHROOT:-}" ] && [ -d "$CEC_I386_CHROOT" ]; then
+            still_mounted="$(awk -v root="$CEC_I386_CHROOT" \
+              '$2 == root || index($2, root "/") == 1 { print $2 }' /proc/self/mounts || true)"
+            if [ -n "$still_mounted" ]; then
+              echo "::error::the i386 build chroot at $CEC_I386_CHROOT still has mounted filesystems, so it is NOT being removed - an rm -rf through a live /dev bind mount would delete the host's device nodes. Still mounted:"
+              printf '%s\n' "$still_mounted" | sed 's/^/    /'
+              exit 1
+            fi
+            sudo rm -rf -- "$CEC_I386_CHROOT"
+            echo "released the i386 build chroot at $CEC_I386_CHROOT"
+          fi
+
           df -h "$GITHUB_WORKSPACE" | tail -n 1
 
       # A BUILD PREREQUISITE, not a committed artefact: the suite compiles against the mock HAL
@@ -3686,62 +4485,50 @@ jobs:
       # one: give it the digest a previous run measured and a changed base becomes a named
       # failure here instead of a quietly different image.
       #
-      # THE SNAPSHOT IS VERIFIED TO EXIST BEFORE IT IS USED. A mistyped or pruned timestamp
-      # would otherwise surface as a debootstrap failure hundreds of lines into its output.
+      # THE SNAPSHOT IS VERIFIED TO EXIST BEFORE IT IS USED, and that verification no longer
+      # happens here: "Resolve and prove the pinned Debian snapshot" does it once, near the top
+      # of the job, and exports GUEST_DEBIAN_SNAPSHOT_RESOLVED and GUEST_DEBIAN_MIRROR. It moved
+      # because there is now a second consumer of the same archive state - the guest-matched
+      # i386 build chroot, which runs long before this step - and two independent resolutions
+      # could disagree about which snapshot they used. A mistyped or pruned timestamp is still
+      # refused before an hour of work is committed to it; it is refused earlier.
       #
       # This is host-side acquisition at IMAGE-BUILD time and is legitimate. What must not
       # happen - and does not - is the GUEST reaching the network at test time; it is booted
       # with -nic none and its init refuses to run if it finds an interface, a route or a
       # resolver.
       - name: Build the base root filesystem
-        # The two dispatch inputs reach the script through the ENVIRONMENT, never through
+        # The dispatch input reaches the script through the ENVIRONMENT, never through
         # ${{ }} interpolation into the script body, and that is the same pattern the lcov and
         # kernel digest steps already use. An interpolated expression is substituted before
         # bash parses the line, so a value containing shell metacharacters would be executed
-        # rather than compared; as an environment variable it is data.
+        # rather than compared; as an environment variable it is data. The debian_snapshot input
+        # is consumed by the resolution step above rather than here, so only the digest
+        # cross-check input remains.
         env:
-          DEBIAN_SNAPSHOT_INPUT: ${{ github.event.inputs.debian_snapshot }}
           BASE_EXPECTED_SHA256: ${{ github.event.inputs.base_expected_sha256 }}
         run: |
           set -euo pipefail
-          # The runner-owned subtree, not qemu-work itself: this step writes the snapshot
-          # Release file, the base tarball and its digest as the unprivileged account.
+          # The runner-owned subtree, not qemu-work itself: this step writes the base tarball
+          # and its digest as the unprivileged account.
           mkdir -p "$WORK_DIR/host"
           cd "$WORK_DIR/host"
 
-          # The dispatch input wins over the env default; an empty input means "use the pin".
-          snapshot="${DEBIAN_SNAPSHOT_INPUT:-}"
-          [ -n "$snapshot" ] || snapshot="$GUEST_DEBIAN_SNAPSHOT"
-          case "$snapshot" in
-            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) : ;;
-            *) echo "::error::the Debian snapshot timestamp '$snapshot' is not in snapshot.debian.org's YYYYMMDDTHHMMSSZ form. It is refused rather than passed through, because a malformed timestamp yields a URL that 404s deep inside debootstrap's output."; exit 1 ;;
-          esac
-          mirror="$GUEST_DEBIAN_SNAPSHOT_ARCHIVE/$snapshot"
-
-          # Does the pin exist, and does it serve this suite? Asked before an hour of work is
-          # committed to it. --fail makes an HTTP error an exit status; the Release file is the
-          # cheapest object that proves both the snapshot and the suite are there.
-          release_url="$mirror/dists/$GUEST_DEBIAN_SUITE/Release"
-          if ! curl --fail --silent --show-error --location --max-time 120 \
-                    --output "$WORK_DIR/host/snapshot-Release" -- "$release_url"; then
-            echo "::error::the pinned Debian snapshot does not serve $GUEST_DEBIAN_SUITE: $release_url could not be fetched. Either the timestamp names no snapshot, or snapshot.debian.org is unavailable. Pick a timestamp that exists (the archive lists them) and pass it as the debian_snapshot input, or fix GUEST_DEBIAN_SNAPSHOT."
+          # THE RESOLVED VALUES ARE CONSUMED, NOT RE-DERIVED. Both are exported by "Resolve and
+          # prove the pinned Debian snapshot", which validated the timestamp's form and proved
+          # the archive serves this suite. Re-validating here would create a second opinion that
+          # could drift from the one the build chroot was created from, which is the specific
+          # failure mode that made a guest-mismatched staging possible in the first place. They
+          # are asserted non-empty so a reordering that put this step first is a named failure
+          # rather than a debootstrap invocation with an empty mirror.
+          snapshot="${GUEST_DEBIAN_SNAPSHOT_RESOLVED:-}"
+          mirror="${GUEST_DEBIAN_MIRROR:-}"
+          if [ -z "$snapshot" ] || [ -z "$mirror" ]; then
+            echo "::error::GUEST_DEBIAN_SNAPSHOT_RESOLVED and GUEST_DEBIAN_MIRROR are not both set, so the snapshot this step must debootstrap from is unknown. They are exported by 'Resolve and prove the pinned Debian snapshot', which must run before this step and before 'Create the guest-matched i386 build chroot'."
             exit 1
           fi
-          echo "================ PINNED PACKAGE SOURCE ================"
-          echo "snapshot timestamp   : $snapshot"
-          echo "archive              : $mirror"
-          # Evidence that the archive state is the one the pin names, read from the archive's
-          # own signed metadata rather than asserted here.
-          grep -E '^(Origin|Suite|Codename|Version|Date|Valid-Until|Architectures):' \
-            -- "$WORK_DIR/host/snapshot-Release" | sed 's/^/  /' || true
-          echo "================ END PINNED PACKAGE SOURCE ================"
-
-          # Exported so every later step - the image build's --apt-mirror above all - uses the
-          # same composed URL, and so the timestamp exists in exactly one place.
-          {
-            echo "GUEST_DEBIAN_SNAPSHOT_RESOLVED=$snapshot"
-            echo "GUEST_DEBIAN_MIRROR=$mirror"
-          } >> "$GITHUB_ENV"
+          echo "pinned package source: $mirror  (snapshot $snapshot, suite $GUEST_DEBIAN_SUITE)"
+          echo "  proved to serve this suite by the resolution step; its Release metadata is in that step's log."
 
           sudo debootstrap --arch="$GUEST_ARCH" --variant=minbase \
             "$GUEST_DEBIAN_SUITE" "$WORK_DIR/host/base-rootfs" "$mirror"
@@ -3886,6 +4673,97 @@ jobs:
           echo "  .git present       : $([ -e "$staged/.git" ] && echo yes || echo 'no (stripped)')"
           echo "  size               : $(du -sh -- "$staged" | awk '{ print $1 }')"
 
+      # THE COMMIT IDENTITIES THE GUEST CANNOT DISCOVER FOR ITSELF.
+      #
+      # Stripping .git out of the payload is the right call and is not being reconsidered - the
+      # image is uploaded as an artifact and repository metadata has no business in it. But it
+      # has a consequence that made the harvested evidence weaker than it reads: the guest's
+      # run_coverage.sh writes a provenance.txt whose repository rows are produced by asking git,
+      # and inside the guest git cannot answer for a tree that has no .git. Every row therefore
+      # read "unavailable (not a repository)", and the file's own instruction to compare the
+      # superproject revision against `git rev-parse HEAD` could not be carried out by anyone
+      # holding the artefact. A coverage figure that cannot be tied to a commit is a figure, not
+      # evidence.
+      #
+      # THE FIX IS TO CARRY THE ANSWER IN, not to put .git back. The revisions are read HERE,
+      # on the runner, from the checkouts that actually produced what the guest contains, passed
+      # to the image builder as --provenance-revision-<label>, written into the in-guest
+      # configuration file, and exported by the init as CEC_PROVENANCE_REVISION_<LABEL> - the
+      # variable run_coverage.sh consults for a path git cannot answer for. The runner is the
+      # only participant that can know these values, so this is the only place they can come
+      # from.
+      #
+      # WHICH TREE ANSWERS FOR WHICH LABEL, and the choices are not interchangeable:
+      #
+      #   hdmicec                  hdmicec-payload, NOT the hdmicec checkout this job builds in.
+      #                            The payload tree is what was copied into the image; the build
+      #                            tree has stubs, object files and a configured Makefile in it
+      #                            and would report itself dirty for reasons the guest never saw.
+      #   entservices-hdmicecsink  the Sink checkout, which is where the one staged file -
+      #                            plugin/HdmiCecSinkImplementation.cpp, the L1 drift guard's
+      #                            subject - came from. The builder creates that directory inside
+      #                            the guest, which is why run_coverage.sh emits a row for it.
+      #   superproject             the workspace root, IF it is a repository. On this job it is
+      #                            not: every tree arrives through actions/checkout with a `path:`
+      #                            and the guest's own workspace is an assembled layout rather
+      #                            than a checkout of anything. So this label is normally left
+      #                            unset, which leaves the row reading exactly what it reads
+      #                            today. github.sha is deliberately NOT substituted for it: that
+      #                            is hdmicec's commit, and labelling it "superproject" would be
+      #                            a false statement in the one file a reader trusts for
+      #                            identity. A caller that does have a superproject checkout is
+      #                            served, because the option exists and is resolved from the
+      #                            tree rather than from a constant.
+      #
+      # A MALFORMED VALUE IS NOT PASSED THROUGH. The builder validates the form again and refuses
+      # anything that is not a 40-character lower-case sha with an optional -dirty suffix, and
+      # the guest's runner refuses it a third time; passing a bad value would therefore turn a
+      # provenance gap into a failed build. So it is validated here, and a value that cannot be
+      # read or does not validate is reported and OMITTED - which degrades to exactly today's
+      # behaviour for that row rather than failing anything.
+      - name: Resolve the provenance revisions carried into the guest
+        run: |
+          set -euo pipefail
+
+          # $1 = the provenance label as tests/L1Tests/run_coverage.sh spells it
+          # $2 = absolute path of the checkout that answers for that label
+          # $3 = the GITHUB_ENV variable this job carries the resolved value in
+          resolve_revision() {
+            local label="$1" tree="$2" var="$3" head='' porcelain='' value=''
+
+            if [ ! -d "$tree/.git" ]; then
+              printf '  %-24s %s\n' "$label" "no repository at $tree - omitted, so the guest row reads as it does today"
+              return 0
+            fi
+
+            head="$(git -C "$tree" rev-parse HEAD 2>/dev/null || true)"
+            # 40 lower-case hex, checked by length and by residue rather than by a forty-element
+            # character class: tr deletes every permitted character, so anything left over is a
+            # character that is not permitted.
+            if [ "${#head}" -ne 40 ] || [ -n "$(printf '%s' "$head" | tr -d '0-9a-f')" ]; then
+              echo "::warning::could not read a 40-character lower-case commit sha for '$label' out of $tree (got '${head:-<nothing>}'). It is OMITTED rather than passed on, because the image builder and the in-guest runner both refuse a malformed value; the guest's provenance row for $label will read as it does without this feature."
+              return 0
+            fi
+
+            # UNTRACKED COUNTS AS DIRTY, deliberately. What travels into the image is a CONTENT
+            # copy of the tree, so an untracked file is in the guest just as surely as a modified
+            # one, and a bare sha would then describe something the guest does not contain.
+            porcelain="$(git -C "$tree" status --porcelain 2>/dev/null || true)"
+            if [ -n "$porcelain" ]; then
+              value="$head-dirty"
+              printf '  %-24s %s\n' "$label" "$value  (working tree not clean: $(printf '%s\n' "$porcelain" | wc -l | tr -d '[:space:]') entr(y/ies))"
+            else
+              value="$head"
+              printf '  %-24s %s\n' "$label" "$value"
+            fi
+            echo "$var=$value" >> "$GITHUB_ENV"
+          }
+
+          echo "provenance revisions carried into the guest:"
+          resolve_revision 'superproject'            "$GITHUB_WORKSPACE"                          PROVENANCE_REVISION_SUPERPROJECT
+          resolve_revision 'hdmicec'                 "$GITHUB_WORKSPACE/hdmicec-payload"          PROVENANCE_REVISION_HDMICEC
+          resolve_revision 'entservices-hdmicecsink' "$GITHUB_WORKSPACE/entservices-hdmicecsink"  PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK
+
       # THE ROOT IMAGE IS BUILT BY THE CHECKED-IN SCRIPT BESIDE THIS FILE. It is not fetched
       # and it is not generated inline. The script also installs the in-guest init, which is the
       # guest's PID 1 and the only thing that invokes run_coverage.sh.
@@ -3961,6 +4839,37 @@ jobs:
           # is the property the guest's own trace depends on - that the guest's gcov and its
           # compiler are the same family. Spelling a version here instead of passing this
           # variable is what would let the two drift.
+          # THE THREE PROVENANCE REVISIONS ARE OPTIONAL PER REPOSITORY, so they are assembled
+          # into an array rather than spelled into the fixed argument list: a label the runner
+          # could not resolve must be ABSENT from the command line, because the builder refuses
+          # an empty value and because absence is what degrades to today's behaviour for that
+          # row. `if` blocks rather than `[ -n ... ] && arr+=(...)`, because under `set -e` a
+          # false test at the head of an && list is the step's exit status.
+          declare -a provenance_args=()
+          if [ -n "${PROVENANCE_REVISION_SUPERPROJECT:-}" ]; then
+            provenance_args+=( --provenance-revision-superproject "$PROVENANCE_REVISION_SUPERPROJECT" )
+          fi
+          if [ -n "${PROVENANCE_REVISION_HDMICEC:-}" ]; then
+            provenance_args+=( --provenance-revision-hdmicec "$PROVENANCE_REVISION_HDMICEC" )
+          fi
+          if [ -n "${PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK:-}" ]; then
+            provenance_args+=( --provenance-revision-entservices-hdmicecsink "$PROVENANCE_REVISION_ENTSERVICES_HDMICECSINK" )
+          fi
+          echo "provenance arguments : ${#provenance_args[@]} value(s) passed to the builder"
+
+          # --staging-gcc-version AND --staging-toolchain-state CARRY THE ONE TOOLCHAIN THE IMAGE
+          # ITSELF CANNOT MEASURE. The libraries the guest loads were compiled in the i386 build
+          # chroot, whose gcc family is not this job's pinned major and is not the guest's own
+          # installed compiler either; the builder records both values in the SDK build-flags
+          # record it writes into the image, so the guest's provenance answers "which compiler
+          # family built what I am running" rather than leaving a reader to assume it was the
+          # pinned one. They are asserted set, because a silently empty pair would publish an
+          # image whose provenance says "unknown" about a fact this job measured.
+          if [ -z "${CEC_STAGING_GCC_VERSION:-}" ] || [ -z "${CEC_STAGING_TOOLCHAIN_STATE:-}" ]; then
+            echo "::error::CEC_STAGING_GCC_VERSION and CEC_STAGING_TOOLCHAIN_STATE are not both set, so the compiler family that built the staged i386 libraries cannot be recorded in the image. They are exported by 'Create the guest-matched i386 build chroot', which must run before this step."
+            exit 1
+          fi
+
           sudo env "TMPDIR=$builder_tmp" bash "$script" \
             --output "$GUEST_IMAGE" \
             --payload "$GITHUB_WORKSPACE/guest-payload" \
@@ -3970,12 +4879,14 @@ jobs:
             --gtest-prefix "$GTEST_PREFIX_I386" \
             --sink-caller-source "$SINK_CALLER_SOURCE" \
             --kernel-config "$GUEST_KERNEL_CONFIG" \
-            --sink-caller-source "$CEC_SINK_CALLER_SOURCE" \
             --arch "$GUEST_ARCH" \
             --size "$GUEST_IMAGE_SIZE_MIB" \
             --apt-mirror "deb $GUEST_DEBIAN_MIRROR $GUEST_DEBIAN_SUITE main" \
             --readiness-timeout "$GUEST_READINESS_TIMEOUT_SECONDS" \
-            --toolchain-gcc-major "$CEC_TOOLCHAIN_GCC_MAJOR"
+            --toolchain-gcc-major "$CEC_TOOLCHAIN_GCC_MAJOR" \
+            --staging-gcc-version "$CEC_STAGING_GCC_VERSION" \
+            --staging-toolchain-state "$CEC_STAGING_TOOLCHAIN_STATE" \
+            "${provenance_args[@]}"
 
           # POST-BUILDER CUSTODY, AND IT IS A DESCRIPTOR RATHER THAN A PATHNAME FROM HERE ON.
           #
@@ -4719,6 +5630,17 @@ jobs:
       # the userspace side, and the kernel patch that makes protocol 7 reachable at all. The patch is uploaded because it is the least conventional thing this
       # job does and the first thing a reader will want to inspect: it is generated from a
       # heredoc in this workflow, so the uploaded copy is exactly what was applied.
+      #
+      # FOUR OF THESE RECORD THE GUEST-MATCHED i386 BUILD CHROOT, which is the second least
+      # conventional thing this job does and is where the staged libraries the guest loads are
+      # now compiled. snapshot-Release fixes the archive state both the chroot and the guest
+      # were debootstrapped from - one resolution, so one file answers for both.
+      # guest-defined-symbol-versions.txt is the measured ceiling the staged-artefact gate
+      # compares against, so a reader can see WHAT was enforced rather than only that something
+      # was. The two generated scripts are uploaded for the same reason as the kernel patch: they
+      # are written from heredocs in this workflow, so the uploaded copies are exactly what ran.
+      # The compiler family that built the staged artefacts is recorded separately, in the image
+      # manifest and in the guest's own SDK build-flags record.
       - name: Upload the provisioning records
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 (v7.0.1)
@@ -4732,6 +5654,10 @@ jobs:
             tools/qemu-boundary.txt
             tools/i386-protocol7-toolchain.cmake
             tools/i386-binder-CMakeCache.txt
+            tools/snapshot-Release
+            tools/guest-defined-symbol-versions.txt
+            tools/i386-build-chroot-run.sh
+            tools/collect-guest-symbol-versions.sh
             kernel-src/binder-ipc32-restore.patch
           if-no-files-found: error
 

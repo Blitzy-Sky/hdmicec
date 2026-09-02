@@ -107,12 +107,21 @@ OBJS:= CECFrame.o \
 #                            that subpath rather than named as it stands
 #   LEGACY_HAL_INCLUDE_DIR   optional override, likewise
 #
-# A deployment that does not export them fails at compile time on a missing
-# generated header, or - for the Binder headers and the two production header
-# roots, all of which are probed below - with the named error this file raises,
-# which is the intended outcome: the alternative is silently shipping a library
-# that carries only one back-end, or one certified against test-scope headers.
-HALIF_LIB_DIR ?= $(HALIF_PREFIX)/lib/halif
+# A deployment that does not export them fails with the named error this file
+# raises: every root it needs from outside this source tree is probed below - the
+# Binder header and library roots, the two production header roots, and the three
+# AIDL stub include roots with their stub library directory - which is the
+# intended outcome, because the alternative is silently shipping a library that
+# carries only one back-end, or one certified against test-scope headers.
+#
+# HALIF_LIB_DIR is deliberately NOT defaulted here with a `?=` any more.  It is
+# resolved beside the three AIDL include roots it belongs with, further down, by
+# the same probe they use and under the same $(origin) test the Binder library
+# directory below uses, so that an unset HALIF_PREFIX cannot expand to the host's
+# own /lib/halif.  That expansion is QA finding N6: with the prefix unset - and
+# every other root correctly staged - this file emitted three absolute include
+# roots belonging to the host and a -L/lib/halif beside them, and named none of
+# them.
 
 # THE BINDER LIBRARY DIRECTORY IS PROBED, FOR THE SAME REASON THE HEADER ROOT
 # BELOW IS.  configure.ac accepts two layouts for it - lib/binder, as the SDK's
@@ -447,10 +456,198 @@ endif
 endif
 # ---------------------------------------------------------------------------
 
-AIDL_INCLUDE = -I$(HALIF_PREFIX)/hdmicec/0.1.0.0/include	\
-	-I$(HALIF_PREFIX)/common/0.2.0.0/include	\
-	-I$(HALIF_PREFIX)/common/current	\
-	-I$(BINDER_INCLUDE_DIR)	\
+# ---------------------------------------------------------------------------
+# THE THREE AIDL STUB INCLUDE ROOTS AND THE STUB LIBRARY DIRECTORY, PROBED THE
+# SAME WAY THE BINDER AND THE TWO PRODUCTION ROOTS ABOVE ARE.
+#
+# THE MEASURED CONSEQUENCE OF NOT PROBING THEM IS QA FINDING N6.  AIDL_INCLUDE
+# below expanded $(HALIF_PREFIX) with no probe and no guard, so with that prefix
+# unset - every other root correctly staged - it emitted
+# -I/hdmicec/0.1.0.0/include, -I/common/0.2.0.0/include and -I/common/current:
+# three absolute roots belonging to the host rather than to any staging tree, one
+# of which a host could plausibly own.  The build then stopped several files in,
+# with a bare "com/rdk/hal/hdmicec/BnHdmiCecEventListener.h: No such file or
+# directory" that named neither the prefix nor the root, while configure.ac -
+# given the same tree - names the exact missing root and states that the
+# dependency cannot be disabled.  The two builds now say the same thing.
+#
+# THE SUBPATHS ARE FIXED AND THERE IS NO CANDIDATE LIST, which is the one
+# deliberate difference from the Binder and production probes above.  configure.ac
+# accepts exactly these three subpaths beneath HALIF_PREFIX and no alternative
+# layout - hdmicec/0.1.0.0/include, common/0.2.0.0/include and common/current,
+# each behind a plain `test -d` on that one path - so inventing extra candidates
+# here would make the hand build accept a staging tree the Autotools build
+# rejects, which is precisely the asymmetry the Binder probe's shared candidate
+# ORDER exists to remove.  The same inputs must name the same accepted trees
+# whichever of the two build systems is driven.
+#
+# EACH ROOT IS PROBED BY THE HEADER IT MUST ACTUALLY SUPPLY, not by the bare
+# directory, for the reason stated above BINDER_INCLUDE_CANDIDATES: $(wildcard)
+# is an existence test that does not distinguish a directory from a file, and a
+# root that does not carry its header cannot satisfy the #include anyway.  The
+# witness for each is the header the code reaches THROUGH that root:
+#
+#   hdmicec/0.1.0.0/include   com/rdk/hal/hdmicec/IHdmiCec.h
+#                             the generated client stubs and server bases
+#                             DriverAidlImpl.cpp is compiled against
+#   common/0.2.0.0/include    com/rdk/hal/PropertyValue.h
+#                             the frozen common import the hdmicec 0.1.0.0
+#                             snapshot was generated and pinned against -
+#                             0.2.0.0, deliberately not the newer common release
+#   common/current            halcompat.h
+#                             getService and isCompatible, which do NOT live
+#                             under the 0.2.0.0 root, so the two snapshot roots
+#                             alone never reach them
+#
+# AND EACH CANDIDATE IS SKIPPED WHEN HALIF_PREFIX IS UNSET, with the same
+# $(if $(strip ...)) every probe in this file uses: an unset prefix must
+# contribute no candidate at all rather than an absolute /hdmicec/... path that a
+# host directory of that name would satisfy, which is the failure mode that makes
+# N6 more than a cosmetic diagnostic.  configure.ac guards its three the same
+# way, with `test -n`.
+#
+# WHY PRODUCTION_HEADER_ROOT_IS_TEST_TREE IS NOT EXTENDED TO THESE FOUR ROOTS.
+# That refusal exists because this repository really does carry test-scope
+# substitutes for the other two roots' headers - mocks/telemetry_busmessage_sender.h
+# and stubs/ccec/drivers/hdmi_cec_driver.h - and the legacy HAL root keeps
+# ../drivers/include as a candidate, which can reach the second through a
+# symlink.  Neither mocks/ nor stubs/ carries com/rdk/hal/hdmicec/IHdmiCec.h,
+# com/rdk/hal/PropertyValue.h or halcompat.h, and neither can:
+# mocks/hdmicec/fake_hdmi_cec_aidl_service.h is a CONSUMER of the generated
+# stubs, reaching <com/rdk/hal/hdmicec/BnHdmiCec.h> through these very roots
+# rather than standing in for them.  The roots here are also fixed subpaths with
+# no in-tree candidate and no override variable, so a HALIF_PREFIX aimed at
+# either tree simply fails the witness probes and lands in the named error below.
+# A refusal on these roots could therefore never fire, and a check that cannot
+# fire is worse than no check: it reads as a guarantee.
+#
+# $(1) the candidate root, empty when its prefix was unset, and $(2) the header
+# beneath it that proves it.  Expands to the root when the header is there and to
+# nothing otherwise - the same $(wildcard)/$(patsubst)/$(firstword) reduction the
+# Binder probes above spell out inline.  It is a function here only because four
+# roots share it and a copy per root would be four places to change.
+ccec_halif_root = $(firstword $(patsubst %/$(2),%,$(wildcard $(addsuffix /$(2),$(1)))))
+
+HALIF_HDMICEC_INCLUDE_CANDIDATE := $(if $(strip $(HALIF_PREFIX)),$(HALIF_PREFIX)/hdmicec/0.1.0.0/include)
+HALIF_COMMON_INCLUDE_CANDIDATE := $(if $(strip $(HALIF_PREFIX)),$(HALIF_PREFIX)/common/0.2.0.0/include)
+HALCOMPAT_INCLUDE_CANDIDATE := $(if $(strip $(HALIF_PREFIX)),$(HALIF_PREFIX)/common/current)
+
+HALIF_HDMICEC_INCLUDE_DIR := $(call ccec_halif_root,$(HALIF_HDMICEC_INCLUDE_CANDIDATE),com/rdk/hal/hdmicec/IHdmiCec.h)
+HALIF_COMMON_INCLUDE_DIR := $(call ccec_halif_root,$(HALIF_COMMON_INCLUDE_CANDIDATE),com/rdk/hal/PropertyValue.h)
+HALCOMPAT_INCLUDE_DIR := $(call ccec_halif_root,$(HALCOMPAT_INCLUDE_CANDIDATE),halcompat.h)
+
+# THE STUB LIBRARY DIRECTORY, under the SAME $(origin) test the Binder library
+# directory above uses and for the same reason: `?=` assigns only when nothing
+# has set the variable, so skipping the probe unless $(origin) is `undefined`
+# preserves exactly what the `?=` this replaces guaranteed.  A deployment that
+# stages the stub libraries away from the headers and names HALIF_LIB_DIR itself
+# - the split staging layout the orchestrator contract at the top of this file
+# documents - keeps working untouched and unprobed, which is also how
+# configure.ac treats it, with `test -z "$HALIF_LIB_DIR"` before its own
+# default.
+#
+# The single candidate is HALIF_PREFIX/lib/halif, the one layout configure.ac
+# derives, and it is probed for libhdmicec-v0.1.0.0-cpp.so beneath it rather than
+# for the directory, because that file is what -lhdmicec-v0.1.0.0-cpp resolves
+# against and a lib/halif without it cannot satisfy the edge.  This is the
+# stricter of the two builds here, deliberately and in line with the Binder
+# library directory a few lines up, which errors rather than falling back to the
+# ambient LDFLAGS as configure does: a library directory this file cannot name is
+# one the build log cannot record.  A sysroot that stages the stub libraries on
+# the loader's default search path is served by naming HALIF_LIB_DIR at whatever
+# directory holds them, which the override path above accepts without probing.
+#
+# Whether it was supplied is recorded BEFORE the assignment below, because after
+# it $(origin) reads `file` either way and the message would then claim to have
+# probed a value it was handed.  This file's other messages report what they
+# actually looked at, and this is what keeps this one doing the same.
+HALIF_LIB_DIR_SUPPLIED := $(if $(filter undefined,$(origin HALIF_LIB_DIR)),,yes)
+
+ifeq ($(origin HALIF_LIB_DIR),undefined)
+HALIF_LIB_CANDIDATES := \
+	$(if $(strip $(HALIF_PREFIX)),$(HALIF_PREFIX)/lib/halif)
+
+HALIF_LIB_DIR := $(call ccec_halif_root,$(HALIF_LIB_CANDIDATES),libhdmicec-v0.1.0.0-cpp.so)
+endif
+
+# The per-root state the message below reads.  $(1) is a resolved root: expands to
+# the value in brackets when it resolved and to the word MISSING when it did not,
+# so one error marks each root individually instead of only reporting that
+# something was wrong.
+ccec_halif_state = $(if $(strip $(1)),resolved [$(strip $(1))],MISSING)
+
+# The unresolved roots on their own, as one summary line, so the message answers
+# "which one" without the reader diffing four.  $(1) is the resolved root, $(2)
+# the candidate probed for it, and $(3) the subpath to name when HALIF_PREFIX was
+# unset and there was therefore no candidate to name at all.
+ccec_halif_unresolved = $(if $(strip $(1)),,$(if $(strip $(2)),$(2),$(3)))
+
+HALIF_AIDL_UNRESOLVED := \
+	$(call ccec_halif_unresolved,$(HALIF_HDMICEC_INCLUDE_DIR),$(HALIF_HDMICEC_INCLUDE_CANDIDATE),HALIF_PREFIX/hdmicec/0.1.0.0/include) \
+	$(call ccec_halif_unresolved,$(HALIF_COMMON_INCLUDE_DIR),$(HALIF_COMMON_INCLUDE_CANDIDATE),HALIF_PREFIX/common/0.2.0.0/include) \
+	$(call ccec_halif_unresolved,$(HALCOMPAT_INCLUDE_DIR),$(HALCOMPAT_INCLUDE_CANDIDATE),HALIF_PREFIX/common/current) \
+	$(call ccec_halif_unresolved,$(HALIF_LIB_DIR),$(HALIF_LIB_CANDIDATES),HALIF_PREFIX/lib/halif)
+
+define HALIF_AIDL_ROOTS_NOT_FOUND
+the staged rdk-halif-aidl tree did not supply every root libRCEC is built
+against, so libRCEC cannot be built with the AIDL HDMI CEC back-end, and the
+back-end is not optional: this library always contains both HAL back-ends and
+chooses between them at run time, so this dependency cannot be disabled.
+  roots that did not resolve: [$(strip $(HALIF_AIDL_UNRESOLVED))]
+Export HALIF_PREFIX to the staged rdk-halif-aidl tree - and HALIF_LIB_DIR as
+well, but only when the stub libraries are staged apart from its headers -
+exactly as the RDK build orchestrator already exports OPENSOURCE_BASE and
+GLIB_LIBRARY_PATH.  Each root is a FIXED subpath beneath HALIF_PREFIX, the same
+three configure.ac accepts and no others, and each was probed for the header or
+library it has to supply rather than for the bare directory:
+  1  $$(HALIF_PREFIX)/hdmicec/0.1.0.0/include  probed for com/rdk/hal/hdmicec/IHdmiCec.h
+     $(call ccec_halif_state,$(HALIF_HDMICEC_INCLUDE_DIR))
+  2  $$(HALIF_PREFIX)/common/0.2.0.0/include   probed for com/rdk/hal/PropertyValue.h
+     $(call ccec_halif_state,$(HALIF_COMMON_INCLUDE_DIR))
+  3  $$(HALIF_PREFIX)/common/current           probed for halcompat.h
+     $(call ccec_halif_state,$(HALCOMPAT_INCLUDE_DIR))
+  4  $$(HALIF_PREFIX)/lib/halif                probed for libhdmicec-v0.1.0.0-cpp.so
+     $(if $(HALIF_LIB_DIR_SUPPLIED),supplied as [$(strip $(HALIF_LIB_DIR))] and taken as given rather than probed,$(call ccec_halif_state,$(HALIF_LIB_DIR)))
+with HALIF_PREFIX=[$(HALIF_PREFIX)] and HALIF_LIB_DIR=[$(HALIF_LIB_DIR)],
+which left these candidates to probe: [$(strip $(HALIF_HDMICEC_INCLUDE_CANDIDATE)
+$(HALIF_COMMON_INCLUDE_CANDIDATE) $(HALCOMPAT_INCLUDE_CANDIDATE)
+$(HALIF_LIB_CANDIDATES))]
+Roots 2 and 3 live under common/, OUTSIDE the hdmicec/-only sparse checkout
+rdk-halif-aidl is documented with, so a sparse clone resolves root 1 and fails
+those two until common/ is materialised; configure.ac carries the same note for
+the same reason.  A HALIF_LIB_DIR supplied from the environment or the command
+line is taken as given rather than probed, and line 4 above says which of the two
+happened to the value reported there.
+endef
+
+# Guarded by BINDER_HEADER_GOALS - the same variable the Binder and production
+# header checks above use, and the same condition rather than a similar one: it
+# is empty exactly when the only goal is `clean`.  Removing objects has to stay
+# possible on a host that staged nothing, and every other goal compiles or links
+# and cannot honestly be attempted without these four roots.  One error is
+# raised for all four, so a tree missing three of them is diagnosed in one pass
+# rather than one make invocation at a time.
+ifneq ($(strip $(BINDER_HEADER_GOALS)),)
+ifneq ($(strip $(HALIF_AIDL_UNRESOLVED)),)
+$(error $(HALIF_AIDL_ROOTS_NOT_FOUND))
+endif
+endif
+# ---------------------------------------------------------------------------
+
+# The four include roots the AIDL back-end is compiled against: the three probed
+# HALIF roots above, in the order configure.ac assembles them, then the probed
+# Binder header root.
+#
+# $(addprefix -I,$(strip ...)) rather than a bare -I on each, for the same reason
+# the INCLUDE list below states it: an empty value emits a lone -I, which the
+# compiler driver reads as taking the NEXT token as its directory, so a missing
+# root would fail naming the wrong thing.  On any goal that compiles, the named
+# errors above have already fired for an empty value; this keeps the flags
+# well-formed on `clean`, which is the goal those errors deliberately skip.
+AIDL_INCLUDE = $(addprefix -I,$(strip $(HALIF_HDMICEC_INCLUDE_DIR)))	\
+	$(addprefix -I,$(strip $(HALIF_COMMON_INCLUDE_DIR)))	\
+	$(addprefix -I,$(strip $(HALCOMPAT_INCLUDE_DIR)))	\
+	$(addprefix -I,$(strip $(BINDER_INCLUDE_DIR)))	\
 
 # The four direct link edges, in dependency order, and the reason they are wrapped.
 #
@@ -476,13 +673,20 @@ AIDL_INCLUDE = -I$(HALIF_PREFIX)/hdmicec/0.1.0.0/include	\
 # libcutils_sockets - is staged and made loadable rather than named here, because
 # nothing in the middleware references it.
 AIDL_LIBS = -Wl,--no-as-needed -lhdmicec-v0.1.0.0-cpp -lcommon-v0.2.0.0-cpp -lbinder -lutils -Wl,--as-needed
-# $(addprefix) rather than a bare -L on the probed directory: an empty value
+# $(addprefix) rather than a bare -L on either probed directory: an empty value
 # would otherwise emit a lone -L, which the driver reads as taking the NEXT
 # token - the first entry of AIDL_LIBS - as its directory, turning a missing
 # prefix into a link failure that names the wrong thing.  The goal-guarded
-# error above is what an empty value normally reaches first; this keeps the
-# flag well-formed on any path that does not.
-AIDL_LDFLAGS = -L$(HALIF_LIB_DIR) $(addprefix -L,$(strip $(BINDER_LIB_DIR)))
+# errors above are what an empty value normally reaches first; this keeps the
+# flags well-formed on any path that does not.
+#
+# The HALIF half is wrapped for the first time here because HALIF_LIB_DIR is now
+# probed rather than defaulted to HALIF_PREFIX/lib/halif.  The old default was
+# never empty - it was merely wrong when the prefix was unset, naming the host's
+# own /lib/halif, which is the link half of QA finding N6 - so the bare -L was
+# safe by accident.  A probed value can legitimately be empty on `clean`, and the
+# wrapper is what keeps that invocation's flags well-formed.
+AIDL_LDFLAGS = $(addprefix -L,$(strip $(HALIF_LIB_DIR))) $(addprefix -L,$(strip $(BINDER_LIB_DIR)))
 
 # -I../drivers/include is deliberately absent from this list now: it is the last
 # candidate of LEGACY_HAL_INCLUDE_CANDIDATES above instead, so the in-tree layout
@@ -667,6 +871,22 @@ $(info libRCEC Binder wire ABI: BINDER_IPC_32BIT=$(strip $(BINDER_IPC_32BIT)), p
 # they can legitimately be empty, because the resolution errors are skipped there.
 $(info libRCEC telemetry header root: [$(strip $(TELEMETRY_INCLUDE_DIR))])
 $(info libRCEC legacy HDMI CEC HAL header root: [$(strip $(LEGACY_HAL_INCLUDE_DIR))])
+
+# The AIDL back-end's own four roots are announced in the same form and for the
+# same reason, and QA finding N6 is the case of this banner not doing it: it
+# named the telemetry root, the legacy HAL root and the derived wire ABI, so a
+# mis-staged HALIF_PREFIX was invisible in the log and the first mention of it
+# was a header-not-found from the compiler.  These lines are what makes the AIDL
+# half of "which headers was this artefact certified against" answerable from the
+# log alone, without re-deriving the include path; the fourth records which
+# staged libhdmicec-v0.1.0.0-cpp.so the unconditional link edges resolved
+# against.  The labels are configure.ac's own, so the two builds' logs read
+# alike.  Values are printed even on a bare `clean`, where they can legitimately
+# be empty, because the resolution error is skipped there.
+$(info libRCEC generated AIDL stub include root: [$(strip $(HALIF_HDMICEC_INCLUDE_DIR))])
+$(info libRCEC frozen common 0.2.0.0 include root: [$(strip $(HALIF_COMMON_INCLUDE_DIR))])
+$(info libRCEC halcompat.h include root: [$(strip $(HALCOMPAT_INCLUDE_DIR))])
+$(info libRCEC AIDL stub library directory: [$(strip $(HALIF_LIB_DIR))])
 
 # The Binder kernel UAPI is a HARD PREREQUISITE of libRCEC, not an optional
 # extra.  DriverAidlImpl's transport preflight marshals struct binder_write_read
