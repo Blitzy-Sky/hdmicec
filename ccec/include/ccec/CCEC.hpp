@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -30,8 +30,53 @@
 #ifndef HDMI_CCEC_HPP_
 #define HDMI_CCEC_HPP_
 
+/**
+ * @file CCEC.hpp
+ * @brief Namespace-macro anchor for the CCEC (Consumer CEC) subsystem.
+ *
+ * This header establishes the optional @c CCEC C++ namespace scaffolding that
+ * is shared across the CCEC middleware. It is included first by the other CCEC
+ * public headers so that the namespace wrapper macros are defined before any
+ * CCEC type or function is declared. The header contains preprocessor
+ * definitions only; it declares no classes or functions.
+ *
+ * @see CCEC_BEGIN_NAMESPACE
+ * @see CCEC_END_NAMESPACE
+ */
+
+/**
+ * @def CEC_NAMESPACE
+ * @brief Object-like marker macro defined unconditionally by this header.
+ *
+ * This header defines @c CEC_NAMESPACE (single-C spelling) as an empty
+ * object-like macro. Document-as-is: defining @c CEC_NAMESPACE does @b not
+ * activate the namespace wrapper macros. CCEC_BEGIN_NAMESPACE / CCEC_END_NAMESPACE
+ * are gated below on the differently spelled @c CCEC_NAMESPACE (double-C) macro,
+ * so whether the @c CCEC namespace is opened depends solely on whether
+ * @c CCEC_NAMESPACE is separately defined (for example, by the build), and not
+ * on @c CEC_NAMESPACE defined here.
+ */
 #define CEC_NAMESPACE
 
+/**
+ * @def CCEC_BEGIN_NAMESPACE
+ * @brief Opens the @c CCEC namespace scope for CCEC declarations.
+ *
+ * When @c CCEC_NAMESPACE is defined, this macro expands to
+ * <tt>namespace CCEC {</tt>, wrapping all subsequent CCEC declarations in the
+ * @c CCEC namespace; otherwise it expands to nothing and the declarations are
+ * emitted in the global namespace.
+ * @note The gating macro is @c CCEC_NAMESPACE (double-C), which is distinct from
+ * the @c CEC_NAMESPACE marker defined above; the two are not interchangeable.
+ *
+ * @def CCEC_END_NAMESPACE
+ * @brief Closes the namespace scope opened by @c CCEC_BEGIN_NAMESPACE.
+ *
+ * When @c CCEC_NAMESPACE is defined, this macro expands to the closing
+ * <tt>}</tt> of the @c CCEC namespace; otherwise it expands to nothing. Every
+ * CCEC header pairs @c CCEC_BEGIN_NAMESPACE with @c CCEC_END_NAMESPACE to
+ * bracket its declarations.
+ */
 #ifdef CCEC_NAMESPACE
 #define CCEC_BEGIN_NAMESPACE namespace CCEC {
 #define CCEC_END_NAMESPACE }

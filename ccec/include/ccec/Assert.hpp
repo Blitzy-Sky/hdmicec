@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -35,6 +35,30 @@
 #include <cstdio>
 #include <stdexcept>
 
+/**
+ * @def Assert
+ * @brief Project assertion macro that logs the failing expression's source location, then calls the standard C @c assert().
+ *
+ * This is the active assertion facility for the CCEC middleware. When @p expr
+ * evaluates to @c false the macro prints a diagnostic of the form
+ * <tt>[Assert ] failed at [file][line]</tt>, embedding the source file
+ * (@c __FILE__) and line number (@c __LINE__), and then invokes the standard C
+ * library @c assert(expr). The macro expands to a <tt>do { ... } while (0)</tt>
+ * block, so it behaves as a single statement and yields no value.
+ *
+ * @param[in] expr Boolean expression expected to be @c true; when it evaluates to
+ *             @c false the diagnostic is printed and @c assert(expr) is invoked.
+ *
+ * @warning @p expr must be side-effect free. It is evaluated by the internal
+ *          <tt>if (!(expr))</tt> guard and again by @c assert(expr), so it can be
+ *          evaluated more than once; in particular, when the first evaluation is
+ *          @c false it is re-evaluated by @c assert(). Supplying an expression
+ *          with side effects can therefore change program behavior.
+ *
+ * @note An alternative class-based @c Assert implementation is retained under the
+ *       disabled <tt>\#if 0</tt> block below and is intentionally compiled out; the
+ *       macro form below is the one in effect.
+ */
 CCEC_BEGIN_NAMESPACE
 
 #if 0

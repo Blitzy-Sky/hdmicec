@@ -26,9 +26,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup osal
+* @defgroup osal OS Abstraction Layer (OSAL)
 * @{
 **/
 
@@ -56,6 +56,11 @@ public:
 \brief Constructor.
 Creates an Condition object with state set to false.
 
+\note Supplemental (documented as-is; production code is not modified): this
+      default constructor initializes only the @c cond state (to false); it does
+      not initialize the @c initial member. @c initial is therefore
+      indeterminate after default construction, so a subsequent reset() restores
+      an indeterminate value (see reset()).
 */
 /**************************************************************************/
 
@@ -65,7 +70,7 @@ Creates an Condition object with state set to false.
 \brief Constructor.
 Creates an Condition object with state set to given parameter.
 
-\param initial - initial state to be set. This will be set as default state 
+\param[in] initial - initial state to be set. This will be set as default state 
 of the object as well.
 */
 /**************************************************************************/
@@ -85,8 +90,10 @@ Destroys the Condition object.
 \brief Set the state of the object.
 Sets the state of the object, which will be either true/false.
 
-\param cond - state to be set.This will default to true is method called with
- no parameters.
+\note The state is set to true. Documented as-is: the original text described a
+ "cond" parameter ("state to be set. This will default to true is method
+ called with no parameters"), but this overload takes no parameters and always
+ sets the state to true.
 */
 /**************************************************************************/
 
@@ -107,6 +114,11 @@ Returns the state of the object, which will be either true/false.
 \brief Resets the state of the object.
 Reset the state of object to default, which is set while creating the object.
 
+\note Supplemental (documented as-is; production code is not modified): the
+      restored value is @c initial. @c initial is only assigned by the
+      Condition(bool) constructor; Condition(void) does not initialize it, so
+      after default construction reset() assigns an indeterminate (uninitialized)
+      value to @c cond (undefined behavior).
 */
 /**************************************************************************/
 	

@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup osal
+* @defgroup osal OS Abstraction Layer (OSAL)
 * @{
 **/
 
@@ -33,9 +33,18 @@
 
 CCEC_OSAL_BEGIN_NAMESPACE
 
+/**
+ * @brief Base exception type for the OSAL layer.
+ *
+ * Derives from std::exception and serves as the root of the OSAL exception hierarchy.
+ */
 class OSException : public std::exception
 {
 public:
+	/**
+	 * @brief Returns a human-readable description of the exception.
+	 * @return The fixed C-string literal "Base Exception..".
+	 */
 	virtual const char* what() const noexcept
 	{
 		return "Base Exception..";
@@ -44,9 +53,16 @@ private:
 };
 
 
+/**
+ * @brief Exception indicating that a requested OSAL operation is not supported.
+ */
 class OperationNotSupportedException : public OSException
 {
 public:
+	/**
+	 * @brief Returns a human-readable description of the exception.
+	 * @return The fixed C-string literal "Operation Not Supported..".
+	 */
 	virtual const char* what() const noexcept
 	{
 		return "Operation Not Supported..";
@@ -54,9 +70,16 @@ public:
 };
 
 
+/**
+ * @brief Exception indicating that an OSAL object is in an invalid state for the requested operation.
+ */
 class InvalidStateException : public OSException
 {
 public:
+	/**
+	 * @brief Returns a human-readable description of the exception.
+	 * @return The fixed C-string literal "Invalid State Exception..".
+	 */
 	virtual const char* what() const noexcept
 	{
 		return "Invalid State Exception..";

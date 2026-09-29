@@ -20,9 +20,9 @@
 
 
 /**
-* @defgroup hdmicec
+* @defgroup hdmicec HDMI-CEC Middleware
 * @{
-* @defgroup ccec
+* @defgroup ccec CCEC Library
 * @{
 **/
 
@@ -38,22 +38,61 @@
 
 CCEC_BEGIN_NAMESPACE
 
+/**
+ * @brief Header block of a CEC message.
+ *
+ * The first byte of every HDMI-CEC frame is a header that carries the two
+ * logical addresses of the exchange: the initiator (source) is packed into
+ * the upper nibble (bits 7..4) and the follower (destination) into the lower
+ * nibble (bits 3..0). This class models that single-byte header, supporting
+ * construction from explicit logical addresses, decoding from a received
+ * @c CECFrame, and serialization back into a frame.
+ */
 class Header 
 {
 public:
 	enum {
-		MAX_LEN = 1,
+		MAX_LEN = 1,  ///< Encoded length of a CEC header in a frame: 1 byte (source nibble + destination nibble).
 	};
 
+	/**
+	 * @brief Constructs a header from explicit source and destination logical addresses.
+	 *
+	 * @param[in] from The initiator (source) logical address of the CEC message.
+	 * @param[in] to   The follower (destination) logical address of the CEC message.
+	 *
+	 * @note This constructor logs the constructed header by calling print().
+	 */
 	Header(const LogicalAddress &from, const LogicalAddress &to) : from(from), to(to) {
         print();
     };
 
+	/**
+	 * @brief Decodes a header from a byte within a CEC frame.
+	 *
+	 * Reads the header byte at @p startPos in @p frame and splits it into its two
+	 * logical addresses: the source is taken from the upper nibble (bits 7..4)
+	 * and the destination from the lower nibble (bits 3..0).
+	 *
+	 * @param[in] frame    The CEC frame containing the encoded header byte.
+	 * @param[in] startPos Byte offset of the header within @p frame (defaults to 0).
+	 */
 	Header(const CECFrame &frame, size_t startPos = 0) {
         from = LogicalAddress((frame.at(startPos) & 0xF0) >> 4);
         to   = LogicalAddress((frame.at(startPos) & 0x0F) >> 0);
 	}
 
+	/**
+	 * @brief Serializes the header into a CEC frame.
+	 *
+	 * Appends the single header byte to @p frame, packing the source logical
+	 * address into the upper nibble (bits 7..4) and the destination logical
+	 * address into the lower nibble (bits 3..0).
+	 *
+	 * @param[in,out] frame The frame to which the encoded header byte is appended.
+	 *
+	 * @return Reference to the same @c CECFrame passed in @p frame, to support call chaining.
+	 */
 	CECFrame &serialize(CECFrame &frame) const {
 		CCEC_LOG( LOG_DEBUG, "Serialing header  %s   %s \n",from.toString().c_str(),to.toString().c_str());
         /* serialize to same byte */
@@ -64,8 +103,14 @@ public:
         return frame;
 	}
 
+	/**
+	 * @brief Destroys the header.
+	 */
 	virtual ~Header(void) {};
 
+    /**
+     * @brief Logs the header's source and destination logical addresses.
+     */
     void print(void) const {
         CCEC_LOG( LOG_DEBUG, "Header : From : %s \n", from.toString().c_str());
         CCEC_LOG( LOG_DEBUG, "Header : to   : %s \n", to.toString().c_str());
@@ -73,8 +118,8 @@ public:
 
 
 public:
-	LogicalAddress from;
-	LogicalAddress to;
+	LogicalAddress from;  ///< Source (initiator) logical address carried in the header.
+	LogicalAddress to;  ///< Destination (follower) logical address carried in the header.
 };
 
 
