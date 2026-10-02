@@ -39,7 +39,7 @@ name: aidl-path-tests
 #
 #   D IS UNSCHEDULED THERE, NOT INCAPABLE. D is the LEGACY L2 invocation: CEC_TEST_AIDL_MODE
 #   =absent, no fake host launched, no binder anything. It runs on a driverless host perfectly
-#   well - measured on such a host as 14 cases from 3 suites, 10 passed and 4 permitted
+#   well - measured on such a host as 17 cases from 4 suites, 11 passed and 6 permitted
 #   DualPathAidlFlowTest skips, exit 0. The hosted job simply does not schedule it, which is a
 #   scope decision rather than a capability one: that job is specified to run invocation A only,
 #   so adding D would change what its green tick means. D is therefore run HERE, in the matrix,
@@ -85,13 +85,14 @@ name: aidl-path-tests
 # ----------------------------------------------------------------------------------------
 # THIS FOLDER'S THREE PATHS, AND WHERE THEY SIT IN THE FINAL SCOPE.
 #
-# The diff gate for this migration is "exactly the TWENTY-FIVE in-submodule paths" - 13
-# modified and 12 added, measured with `git diff --name-status` inside hdmicec - plus
-# blitzy/documentation/Project Guide.md in the superproject, which makes TWENTY-SIX logical
-# files (14 UPDATE counting the guide, 12 CREATE, 0 DELETE).
+# The diff gate for this migration is "exactly the TWENTY-SIX in-submodule paths" - 13
+# modified and 13 added, measured with `git diff --name-status` inside hdmicec, the 26th being
+# AIDL_HAL_MIGRATION_NOTES.md, which holds the design detail review moved out of the code
+# comments - plus blitzy/documentation/Project Guide.md in the superproject, which makes
+# TWENTY-SEVEN logical files (14 UPDATE counting the guide, 13 CREATE, 0 DELETE).
 #
-# Three of the twenty-five are here: L1-tests.yml, this file, and
-# .github/workflows/aidl-path-tests-rootfs.sh. The rootfs builder is ONE OF THE TWENTY-FIVE
+# Three of the twenty-six are here: L1-tests.yml, this file, and
+# .github/workflows/aidl-path-tests-rootfs.sh. The rootfs builder is ONE OF THE TWENTY-SIX
 # rather than an extra beyond them, and it is worth saying why it is in the set at all: it is
 # authorised by the provisioning requirement - the guest root image must be built by a
 # CHECKED-IN SCRIPT - which the file-by-file table never enumerated. It is not out of scope
@@ -173,7 +174,7 @@ name: aidl-path-tests
 # coverage met the bar. Exit 1 is a failure. EXIT 3 IS ADVISORY AND IS NOT A PASS - the script
 # says so in terms, and the image manifest's STATUS_FILE_FORMAT repeats it.
 #
-# ITS BRANCH_MANIFEST IS POPULATED, AND AN EMPTY ENTRY IS A REGRESSION. All 92 records - 89
+# ITS BRANCH_MANIFEST IS POPULATED, AND AN EMPTY ENTRY IS A REGRESSION. All 119 records - 116
 # required arms plus 3 recorded unreachable by construction, selection.reason-unrecorded,
 # compat.client-era-frozen and halcall.clock-unreadable - carry measured line, block and branch
 # coordinates, read out of a real unfiltered trace and cross-checked against `gcov -b -c -t`.
@@ -189,11 +190,11 @@ name: aidl-path-tests
 #
 #   * EXIT 1, THE PER-FILE LINE GATE, on any host where the binder transport turns out not to
 #     be usable. run_coverage.sh defers invocations B, C and E in that case, and
-#     ccec/src/DriverAidlImpl.cpp - most of whose body only those invocations reach - falls
-#     below the 80% bar, measured at 58.6% (379/647) on a driverless host. Its sibling
+#     ccec/src/DriverAidlImpl.cpp - over a third of whose body only those invocations reach - falls
+#     below the 80% bar, measured at 64.7% (462/714) on a driverless host. Its sibling
 #     ccec/src/Driver.cpp clears the bar there at 80.0% (12/15), because the legacy-selection
 #     arm of the factory is reached by invocations A and D; the aggregate clears it too, at
-#     86.0% (2405/2795) over 32 source files. So the per-file half is the one that fails, and
+#     86.9% (2488/2862) over 32 source files. So the per-file half is the one that fails, and
 #     it fails on one file. Per-file gating is on for an acceptance run, so that is a `die` and a
 #     1, not an advisory. It is the outcome a driverless host measures today, and it is exactly
 #     what this job's guest provisioning exists to change: binderfs, the device nodes and
@@ -201,10 +202,10 @@ name: aidl-path-tests
 #     one of those did not come up and the console log's BINDER PLATFORM RECORD says which.
 #
 #   * EXIT 3, THE DEFERRED ARMS, when those same deferrals happen while the line figures still
-#     clear the bar. 30 of the 89 required arms carry a prerequisite - 28 need invocation B, one
+#     clear the bar. 31 of the 116 required arms carry a prerequisite - 29 need invocation B, one
 #     needs invocation C, and one needs a usable binder driver with no service registered on it,
 #     which is a condition rather than an invocation letter - so a matrix that did not run them
-#     leaves those 30 unmeasured. The remaining 59 required arms carry no prerequisite at all:
+#     leaves those 31 unmeasured. The remaining 85 required arms carry no prerequisite at all:
 #     they are enforced and measured on every run, including one on a host with no binder driver,
 #     so a zero on one of those is a failure here and now rather than a deferral. The gate
 #     reports each deferred arm by name with the prerequisite it needed, never as a pass and
@@ -5417,7 +5418,7 @@ jobs:
               echo "branch-arm gate's own output are in the uploaded artifacts and in the console log."
               ;;
             3)
-              echo "::error::run_coverage.sh exited 3, which is ADVISORY AND IS NOT A PASS. The figures met the bar but something reduced this run to measuring what it did not establish, and the COVERAGE ADVISORY block in the console log names every reason it recorded - read that first, because it is the diagnosis rather than a hint. The likely one for this job is a DEFERRED INVOCATION: if the guest's binder transport did not come up, invocations B, C and E do not run, which also leaves 30 of the 89 required branch arms unmeasured (28 need invocation B, one needs invocation C, and one needs a usable binder driver with no service registered on it) - the branch-arm gate lists each by name with the prerequisite it needed and prints its own census, and the other 59 required arms are enforced on this run whatever the transport did. Cross-read the BINDER PLATFORM RECORD in the console log for binderfs, the device nodes, the protocol agreement and servicemanager. The other advisory sources are a weakened gate (COVERAGE_MIN other than 80, --no-per-file-gate, COVERAGE_GATE_EXEMPT_FILES, GTEST_EXTRA_ARGS, or a capture without --run - this job sets none of them), an unclassified dependency-header record in the line gate's trace, and a BRANCH_MANIFEST entry added without its measured line, block and branch coordinates. None of them is fixed by treating this status as a pass."
+              echo "::error::run_coverage.sh exited 3, which is ADVISORY AND IS NOT A PASS. The figures met the bar but something reduced this run to measuring what it did not establish, and the COVERAGE ADVISORY block in the console log names every reason it recorded - read that first, because it is the diagnosis rather than a hint. The likely one for this job is a DEFERRED INVOCATION: if the guest's binder transport did not come up, invocations B, C and E do not run, which also leaves 31 of the 116 required branch arms unmeasured (29 need invocation B, one needs invocation C, and one needs a usable binder driver with no service registered on it) - the branch-arm gate lists each by name with the prerequisite it needed and prints its own census, and the other 85 required arms are enforced on this run whatever the transport did. Cross-read the BINDER PLATFORM RECORD in the console log for binderfs, the device nodes, the protocol agreement and servicemanager. The other advisory sources are a weakened gate (COVERAGE_MIN other than 80, --no-per-file-gate, COVERAGE_GATE_EXEMPT_FILES, GTEST_EXTRA_ARGS, or a capture without --run - this job sets none of them), an unclassified dependency-header record in the line gate's trace, and a BRANCH_MANIFEST entry added without its measured line, block and branch coordinates. None of them is fixed by treating this status as a pass."
               exit 1
               ;;
             1)

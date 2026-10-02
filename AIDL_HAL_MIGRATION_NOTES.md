@@ -1,259 +1,114 @@
 # HdmiCec AIDL HAL Migration — Design Notes
 
-## Logical-address allocation and registration (AIDL back-end)
+This file holds the design detail, rationale and history that the Doxygen comments in the
+AIDL HAL back-end's net-new code, its test doubles and its tests no longer carry; those code
+comments are deliberately brief. Each per-file section below (one per source file, or per part
+of a large file) expands that file's comments with one `###` entry per symbol, and two further
+sections describe the DeviceType-derived logical-address registration and the fixed physical
+address 1.0.0.0 on the AIDL back-end, with any earlier statement those changes made untrue
+kept only where it is marked as superseded.
 
-On the AIDL back-end (`ccec/src/DriverAidlImpl.{hpp,cpp}`), the middleware owns logical-address
-allocation. The AIDL HAL leaves it to the client: `IHdmiCec.open()` says every address must be
-added by the client, and `hdmi_cec.md` HAL.CEC.9 requires the controller client to allocate as
-HDMI 1.4b §10.2 defines and to call `addLogicalAddresses()` only after a successful poll-based
-allocation. The legacy back-end is unchanged. Its HAL allocates source addresses inside
-`HdmiCecOpen()`.
+**Contents**
 
-### `DriverAidlImpl::LOCAL_DEVICE_TYPE`
+- [ccec/src/Driver.cpp](#ccecsrcdrivercpp)
+- ccec/src/DriverAidlImpl.hpp
+  - [part 1 of 2](#ccecsrcdriveraidlimplhpp-part-1-of-2)
+  - [part 2 of 2](#ccecsrcdriveraidlimplhpp-part-2-of-2)
+- ccec/src/DriverAidlImpl.cpp
+  - [part 1 of 2](#ccecsrcdriveraidlimplcpp-part-1-of-2)
+  - [part 2 of 2](#ccecsrcdriveraidlimplcpp-part-2-of-2)
+- [Logical-address allocation and registration (AIDL back-end)](#logical-address-allocation-and-registration-aidl-back-end)
+- [Physical address (AIDL back-end)](#physical-address-aidl-back-end)
+- [mocks/hdmicec/fake_hdmi_cec_aidl_service.h](#mockshdmicecfake_hdmi_cec_aidl_serviceh)
+- [mocks/hdmicec/fake_hdmi_cec_aidl_service.cpp](#mockshdmicecfake_hdmi_cec_aidl_servicecpp)
+- [mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp](#mockshdmicecfake_hdmi_cec_aidl_service_hostcpp)
+- [tests/L1Tests/test_main.cpp](#testsl1teststest_maincpp)
+- tests/L1Tests/ccec/test_DriverAidl.cpp
+  - [part 1 of 6](#testsl1testsccectest_driveraidlcpp-part-1-of-6)
+  - [part 2 of 6](#testsl1testsccectest_driveraidlcpp-part-2-of-6)
+  - [part 3 of 6](#testsl1testsccectest_driveraidlcpp-part-3-of-6)
+  - [part 4 of 6](#testsl1testsccectest_driveraidlcpp-part-4-of-6)
+  - [part 5 of 6](#testsl1testsccectest_driveraidlcpp-part-5-of-6)
+  - [part 6 of 6](#testsl1testsccectest_driveraidlcpp-part-6-of-6)
+- tests/L2Tests/test_main.cpp
+  - [part 1 of 2](#testsl2teststest_maincpp-part-1-of-2)
+  - [part 2 of 2](#testsl2teststest_maincpp-part-2-of-2)
+- tests/L2Tests/ccec/test_DualPathIntegration.cpp
+  - [part 1 of 2](#testsl2testsccectest_dualpathintegrationcpp-part-1-of-2)
+  - [part 2 of 2](#testsl2testsccectest_dualpathintegrationcpp-part-2-of-2)
 
-- A private `static constexpr int` holding `DeviceType::PLAYBACK_DEVICE`. To change the device
-  role on the AIDL back-end for a product, change this constant and nothing else.
-- The middleware has no device-type configuration, and the Driver interface passes none to
-  `open()`. PLAYBACK_DEVICE is the HDMI-source role, and it is the role that the AIDL HAL leaves
-  for the client to allocate.
-- `getLogicalAddress(int devType)` does not use `devType` to choose an address. It only writes
-  the value to the log. The Source plugin calls `LibCCEC::getLogicalAddress(DEV_TYPE_TUNER)`
-  with the value 1, which `CCEC::DeviceType` reads as RECORDING_DEVICE. Choosing an address
-  from that argument would therefore pick the wrong role.
+## ccec/src/Driver.cpp
 
-### `DriverAidlImpl::logicalAddressCandidates(int deviceType)`
+### SELECTED_BACK_END_LOG_FORMAT
 
-A protected static helper. It returns the candidate addresses for a device type in priority
-order. The table is the inverse of `LogicalAddress::getType()`
-(`ccec/include/ccec/Operands.hpp`):
+- One format string with one substitution, the back-end name, so the emitted line is identical
+  across every selection arm apart from that name.
+- It is a test and tooling contract rather than a diagnostic convenience, so it is defined once,
+  in `Driver.cpp`, and referenced nowhere else.
+- Consumers: the functional suites match it to establish which back-end resolved; the coverage
+  runner greps it once per invocation and treats its absence as a failed invocation; device-level
+  validation relies on it wherever the concrete back-end headers are out of scope.
+- It is the only way the selection is observable. No introspection API is added to the `Driver`
+  interface, deliberately, because that would grow the middleware public surface.
 
-| `DeviceType`                                           | Candidates      |
-|--------------------------------------------------------|-----------------|
-| TV                                                     | 0               |
-| RECORDING_DEVICE                                       | 1, 2, 9         |
-| TUNER                                                  | 3, 6, 7, 10     |
-| PLAYBACK_DEVICE                                        | 4, 8, 11        |
-| AUDIO_SYSTEM                                           | 5               |
-| RESERVED, PURE_CEC_SWITCH, VIDEO_PROCESSOR, any other  | none            |
+### resolveBackEnd
 
-It is protected rather than private so that a test subclass can exercise it directly. It is
-not part of the installed API, because `DriverAidlImpl.hpp` is not installed.
+- It is the single selection point of the middleware. `DriverImpl` (legacy in-process C ABI) and
+  `DriverAidlImpl` (out-of-process `com.rdk.hal.hdmicec` AIDL HAL) implement the same `Driver`
+  interface and are both compiled into the library in every build, for every SOC vendor.
+- Selection is decided at run time on the AIDL service's availability **and** compatibility. A
+  service that is present but whose metadata halcompat rejects selects the legacy back-end exactly
+  as an absent one does, which is why the question asked is `isServiceAvailable()`, not a bare
+  presence test.
+- Construct-then-query order is load bearing. Gating construction on availability would be unsafe:
+  the availability query is the first thing in the process that may touch libbinder, and on the
+  pinned binder stack an unguarded lookup on a platform with no binder driver aborts rather than
+  returning an error. `DriverAidlImpl`'s constructor touches no binder, so constructing it is safe
+  on a legacy-only SOC; `isServiceAvailable()` never aborts, never blocks indefinitely and never
+  propagates an exception.
+- Three arms exist, each logged, because "absent" and "present but not usable" are different
+  platform conditions that validation gates separately:
+  1. the service is present and compatible, so the AIDL back-end is selected;
+  2. the binder transport is reachable but no compatible service resolved (none registered, or the
+     registered one cannot be spoken to compatibly), so the legacy back-end is selected;
+  3. the binder transport itself is unavailable, so the legacy back-end is selected.
+- Arms 2 and 3 are told apart through `DriverAidlImpl::unavailabilityReason()`. The query runs the
+  bounded preflight as its own first stage and records which stage declined, so the record is
+  reported rather than re-derived. Re-deriving it would pay the preflight's context-manager timeout
+  a second time, and a servicemanager appearing or dying between the two calls could make the
+  reported reason name a condition that did not cause the fallback.
+- Which compatibility rule rejected a service (an empty or `"-1"` interface hash, an unfrozen
+  development server, or an interface version outside the compiled-against era and major), with
+  the server's reported version and hash, is logged by `DriverAidlImpl::isServiceAvailable()`
+  itself; `resolveBackEnd` cannot observe it and must not invent it.
+- Both candidates have static storage duration, so the returned reference stays valid for the
+  lifetime of the process.
+- It is called only from the one-time initializer of `Driver::getInstance()`, which the language
+  serializes, so no lock is taken. `Driver::instanceMutex` in particular is not used: it is
+  declared but never defined anywhere in the tree, and referencing it would leave the library with
+  an undefined symbol.
+- Neither construction nor the query throws, so the enclosing static cannot be left uninitialized
+  and re-entered on a later call.
+- Re-entering `Driver::getInstance()` from either back-end's constructor or availability query
+  would re-enter the initializer that is still running, which is undefined behaviour rather than a
+  recoverable error. Both back-ends reach the incoming frame queue through their own accessor
+  precisely so this cannot happen.
 
-### `DriverAidlImpl::registerDeviceLogicalAddress()`
+### resolveBackEnd — fallback reason (function body)
 
-`open()` calls this helper after the state becomes OPENED, while it still holds the recursive
-instance lock. A call to `open()` while the driver is already OPENED returns silently before
-reaching this step, so `Bus::start()`'s second `open()` does not allocate again.
-
-The helper first clears the local list; the previous session's address was released by that
-session's close. It then takes each candidate `c` of `LOCAL_DEVICE_TYPE` in order and polls it
-with this back-end's own `poll(c, c)`. That call sends a one-byte frame whose initiator equals
-its destination, which is the HDMI 1.4b §10.2.1 allocation poll.
-
-| Poll or add outcome                                              | Meaning   | Action                                                    |
-|------------------------------------------------------------------|-----------|-----------------------------------------------------------|
-| `poll` returns normally (directed `ACK_STATE_0`)                 | taken     | `LOG_INFO`, next candidate                                |
-| `poll` raises `CECNoAckException` (directed `ACK_STATE_1`)       | free      | `addLogicalAddresses({c})`                                |
-| `poll` raises `IOException` (`BUSY`, non-ok status) or another `Exception` | not free | `LOG_EXP`, next candidate                      |
-| `addLogicalAddresses` ok status, `true`                          | registered| local list becomes `{c}`, `LOG_INFO` address and type, stop |
-| `addLogicalAddresses` ok status, `false`                         | declined  | `LOG_EXP`, next candidate                                 |
-| `addLogicalAddresses` non-ok binder status                       | transport | `LOG_EXP`, stop with nothing registered                   |
-| no controller held, or no candidate left                         | none      | `LOG_EXP`, nothing registered                             |
-
-This step never throws out of `open()`. The pre-OPENED failure arms of `open()` are unchanged:
-no proxy, a failed `IHdmiCec::open()`, and a null controller. When allocation fails,
-`getLogicalAddress()` reports 0, and `LibCCEC::getLogicalAddress()` then raises its existing
-`InvalidStateException`.
-
-The add call is timed with the same slow-call diagnostic as every other synchronous AIDL call.
-The pinned libbinder offers no client-side deadline.
-
-### `DriverAidlImpl::open()`
-
-The steps up to OPENED keep the legacy order under one lock: state test, proxy test, threadpool
-start, listener construction, `IHdmiCec::open()`, the status and controller tests, then the state
-change. The `#if 0` throw is kept verbatim. Address registration runs last. Detail moved out of
-the condensed comment:
-
-- **Null controller.** `IHdmiCec.open()` is declared `@nullable` and returns null on error. An ok
-  status with no controller is therefore an IOException, not a success.
-- **Per-session listener.** A fresh listener is built for each session. Every path that ends a
-  session detaches and releases it: both arms of `close()`, both failure arms of `open()`, and
-  the destructor. The `eventListener == 0` guard relies on this. A listener reused across
-  sessions could still be referenced by the previous session's HAL.
-- **Failed-open detach.** A failed open has already handed the listener to the HAL, and nothing
-  obliges the HAL to drop it. The listener is detached before the exception leaves.
-- **Threadpool.** `IHdmiCecEventListener` is `oneway`, so its callbacks need a binder thread in
-  this process. `startThreadPool()` is idempotent. The maximum thread count is left alone, because
-  lowering a maximum that is already established can abort the process. `joinThreadPool()` is
-  never called, because it would not return.
-- **Single client.** `IHdmiCec.open()` fails with `EX_ILLEGAL_STATE` while a session is open. That
-  is why the CLOSED/CLOSING/OPENED state machine is kept.
-
-### `DriverAidlImpl::addLogicalAddress()` — exactly one address
-
-The Polaris (AIDL) calls take `int[]`, but the back-end never holds more than one registered
-address. Each array is a one-element temporary.
-
-- The state guard and the controller check are unchanged.
-- The same address as the one held returns `true` with no HAL call.
-- A different address first releases the held one with `removeLogicalAddresses({old})`. A failed
-  release is logged and ignored, as `removeLogicalAddress()` does. The local list is cleared, and
-  then `addLogicalAddresses({source})` is called.
-- Success leaves the local list exactly `{source}`. A non-ok status raises `IOException`. A `false`
-  result raises `AddressNotAvailableException`. A failed add leaves the list empty.
-- **Coarser failure category.** The legacy HAL status separates "address unavailable",
-  "general error" and success. `addLogicalAddresses()` returns a single boolean, which is false
-  both when the address is out of range and when it is already added. `false` therefore maps to
-  the nearer legacy category, `AddressNotAvailableException`.
-- `removeLogicalAddress()` and `close()` are unchanged. `close()` does not clear the local list,
-  and the next `open()` registration replaces it.
-
-The Sink plugin allocates its own address and calls `LibCCEC::addLogicalAddress()`
-(`HdmiCecSinkImplementation.cpp` :2767 inside a try, :3065 outside any try). The
-replace-on-add rule means that this replaces the enable-time address rather than adding a second
-one.
-
-### `DriverAidlImpl::getLogicalAddress()` — read through the HAL
-
-- Every call goes to `IHdmiCec::getLogicalAddresses()`. The back-end never answers from the local
-  list. It returns entry 0, and a result with more than one entry is logged at `LOG_INFO`.
-- **Zero is the only "no address" value.** Five cases return 0, and each writes its own log
-  line: no proxy, a non-ok status, an empty result, an entry outside 0x0..0xE, and a genuine
-  address 0. The legacy back-end also returns 0 when its HAL writes nothing, and
-  `LibCCEC::getLogicalAddress()` turns 0 into `InvalidStateException`. Any other sentinel would
-  suppress that signal.
-- **Raw-value check.** The range check runs on the raw `int32_t` before any conversion. Passing
-  the value to `LogicalAddress`'s narrowing constructor would turn 256 into 0x0 and 271 into 0xF,
-  which are plausible but wrong addresses. Only a HAL that breaks its contract can reach this
-  arm. The legacy back-end has no counterpart: it would hand such a value through unchanged.
-- **Logging.** The rejected value is controlled by the HAL. It is logged only through `%d`, and
-  never as text or as a format string.
-
-### `DriverAidlImpl::logicalAddresses`
-
-The member is a `std::list`, exactly as in `DriverImpl`, so the two back-ends read alike. On the
-AIDL back-end it never holds more than one entry. `isValidLogicalAddress()` reads it, and
-`Connection::matchSource()` reads it through that method.
-
-### Test double (`mocks/hdmicec/fake_hdmi_cec_aidl_service.{h,cpp}`)
-
-- `FakeHdmiCecController::sendMessage()` recognises an allocation poll: a one-byte frame whose
-  initiator nibble equals its destination nibble.
-  - The poll is answered `ACK_STATE_1` (free) unless `setLogicalAddressOccupied(address, true)`
-    marks the address taken (`ACK_STATE_0`). `setAllocationPollResult()` can install any other
-    status.
-  - Polls are recorded only in `getAllocationPolls()`, so the send counter and the
-    last-sent capture still describe application frames only.
-- A successful `addLogicalAddresses` / `removeLogicalAddresses` (ok status, `true`) updates
-  `getRegisteredLogicalAddresses()`. A successful `IHdmiCec::close()` and
-  `FakeHdmiCecController::reset()` both clear it.
-- `FakeHdmiCecService::getLogicalAddresses()` by default reports the controller's registered
-  addresses. A vector installed with `setLogicalAddressesResult()` still overrides that default.
-- The out-of-process host (`fake_hdmi_cec_aidl_service_host.cpp`) uses the same fake. Its control
-  verb `registered` replies `OK registered <decimal,...>`; the field is empty when nothing is
-  registered.
-
-### Tests
-
-- **`DriverAidlLocalInstanceTest`** (any invocation; uses locally injected fakes). Covers:
-  - the candidate table;
-  - enable registering `{4}` and reading it back through the HAL;
-  - occupied candidates (4 taken gives 8; 4 and 8 taken gives 11; all taken gives none);
-  - a busy poll, a declined add, a transport failure on add, and a null controller;
-  - replace-on-add, and the same-address no-op;
-  - close followed by re-registration.
-- **`DriverAidlSessionTest`** (invocation B). Covers:
-  - enable registering exactly `{4}`;
-  - `LibCCEC::getLogicalAddress(1)` returning 4 through the HAL;
-  - re-open with 4 occupied registering `{8}`;
-  - no free candidate leading to `InvalidStateException`.
-
-  The fixture's TearDown runs close and then open after resetting the fake. This re-registers
-  the enable-time address, so the driver and the fake agree before the next case.
-- **`DualPathAidlFlowTest.EnablingTheDriverRegistersOneAddressThatLibCcecReadsBackThroughTheHal`**
-  (invocation E, real binder IPC). The host reports `registered` = `4`, and
-  `LibCCEC::getLogicalAddress(1)` returns 4.
-
-### Superseded pre-refine design
-
-Before this change, `open()` registered no address, `getLogicalAddress()` ignored `devType` and
-returned whatever the HAL held unprompted, and the fake answered a canned single entry 4.
-
-## Physical address (AIDL back-end)
-
-### Value and encoding
-
-`DriverAidlImpl::getPhysicalAddress()` writes `DriverAidlImpl::FIXED_PHYSICAL_ADDRESS`, which is
-`0x01000000`: the physical address 1.0.0.0, one nibble per byte, most significant first. The value
-is fixed because the `com.rdk.hal.hdmicec` AIDL HAL exposes no physical-address query.
-
-The encoding is the one the production callers of `LibCCEC::getPhysicalAddress()` decode. Both
-plugins seed `0x0F0F0F0F` (F.F.F.F), call the method, and split the result into four bytes that
-they pass to `PhysicalAddress(b0, b1, b2, b3)`:
-
-| Caller | Lines | Decode |
-|---|---|---|
-| `entservices-hdmicecsource/plugin/HdmiCecSourceImplementation.cpp` | 1176-1177 | `{(v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF}` |
-| `entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp` | 3201-3202 | identical |
-
-`PhysicalAddress::toString()` then renders `0x01000000` as `"1.0.0.0"`. The packed 16-bit form
-`0x1000` would decode there as 0.0.0.0, which is why it is not used.
-
-### No HAL call
-
-- The method calls nothing on `IHdmiCec` or `IHdmiCecController` and no legacy `HdmiCec*`
-  function, and it reads neither the service proxy nor the controller reference.
-- It has no state guard, matching `DriverImpl::getPhysicalAddress()`, so a driver that was never
-  opened, an OPENED driver and a CLOSED driver all answer 1.0.0.0.
-- It takes no lock. `write()` holds the instance lock across the synchronous
-  `IHdmiCecController::sendMessage()`, so a locked query would wait on that AIDL call; this one
-  answers while a transmit is stalled in the HAL.
-- `LibCCEC::getPhysicalAddress()` is unchanged and still raises `InvalidStateException` before
-  the library is initialized; once initialized with the AIDL back-end selected, it returns
-  `0x01000000`.
-- The legacy back-end is unchanged: `DriverImpl::getPhysicalAddress()` still reads the address
-  with `HdmiCecGetPhysicalAddress()`.
-
-### Null out-parameter
-
-A null `physicalAddress` is logged at `LOG_EXP` and not written; the method returns without
-raising. A non-null one is written and the value is logged at `LOG_DEBUG`.
-
-### Tests
-
-| Case | Invocation | Asserts |
-|---|---|---|
-| `DriverAidlLocalInstanceTest.GetPhysicalAddressReportsTheFixedAddressOnANeverOpenedDriver` | A, B, C | `0x0F0F0F0F` becomes `0x01000000` and decodes to `"1.0.0.0"` on three calls; no legacy HAL call |
-| `DriverAidlLocalInstanceTest.GetPhysicalAddressToleratesANullOutParameter` | A, B, C | a null pointer neither crashes nor raises, and the next query still answers |
-| `DriverAidlLocalInstanceTest.GetPhysicalAddressIsFixedInEveryStateAndCallsNoAidlMethod` | A, B, C | same value while OPENED and after `close()`; zero calls on call-counting service and controller doubles |
-| `DriverAidlLocalInstanceTest.GetPhysicalAddressAnswersWhileATransmitIsStalledInTheHal` | A, B, C | the query completes while another thread's `sendMessage()` holds the instance lock |
-| `DriverAidlSessionTest.LibCCECReportsTheFixedPhysicalAddressWithoutAnyAidlCall` | B | `LibCCEC::getPhysicalAddress()` yields `0x01000000`; every fake service and controller counter unchanged |
-| `DualPathAidlFlowTest.LibCCECReportsTheFixedPhysicalAddressWithoutCrossingBinder` | E (skips on D) | same over real binder IPC; the remote fake's send, open and close counts unchanged |
-
-`DriverAidlLegacyArmTest.PhysicalAddressIsReadThroughTheLegacyHalApi` still covers the legacy
-back-end reading the address through the legacy HAL.
-
-### Limitation
-
-The value is correct only where the device's real position in the HDMI topology is 1.0.0.0, such
-as a source connected directly to the first input of the root display. A device behind a switch
-or an AV receiver, or on another input, reports 1.0.0.0 anyway, and every CEC message that
-carries the physical address (`<Report Physical Address>`, `<Active Source>`) carries that value.
-Reporting the real topology position needs a source the AIDL HAL does not provide; the
-device-settings EDID read is the candidate.
-
-### Superseded interim design (B1)
-
-Before the address was fixed, the AIDL back-end treated physical-address retrieval as blocked
-item B1: the method logged `BLOCKED ITEM B1` at `LOG_EXP` and left the caller's out-parameter
-untouched, pending the device-settings HAL header declaring the EDID-byte read, which was to be
-supplied as a separate input and was not. That design rejected a lazily opened legacy CEC handle
-(a CEC HAL substitution that would also run source logical-address discovery on the wire beside
-the active AIDL controller), the AIDL HDMI-output EDID event, and reconstructing the declaration
-from test mocks. The fixed 1.0.0.0 replaces it, B1 no longer blocks the AIDL path, and the case
-`DriverAidlLocalInstanceTest.GetPhysicalAddressIsBlockedOnB1AndLeavesTheOutParameterUntouched`
-was replaced by the cases above.
+- Calling `DriverAidlImpl::isBinderPreflightOk()` in the body to work out which arm declined would
+  pay the context-manager timeout a second time, doubling the worst case added to `LibCCEC::init()`
+  on the platform least able to absorb it, and the second answer could differ from the first.
+- The reason phrases live beside their producer in `DriverAidlImpl.cpp`; two of the three are a
+  contract, because the coverage runner and the L2 tier both transcribe the emitted line, so
+  rewording either breaks them.
+- The "not usable" line is worded deliberately unlike the selected-path line, so grepping for the
+  selected-path literal yields exactly one hit per process.
+- A `NULL` reason is not expected (`isServiceAvailable()` records a reason on every false exit) but
+  is handled rather than assumed, logged as a warning, because a silent fallback with no reason
+  would be undiagnosable.
+- Declaring the legacy back-end first makes it the last destroyed, matching its role as the
+  fallback; nothing gates whether the AIDL back-end exists.
 
 ## ccec/src/DriverAidlImpl.hpp (part 1 of 2)
 
@@ -1816,616 +1671,260 @@ holds what the source comment no longer carries; the source keeps the contract i
   function-level catch, which would record `REASON_QUERY_FAILED` and relabel an established
   rejection, is unreachable from it.
 
-## ccec/src/Driver.cpp
-
-### SELECTED_BACK_END_LOG_FORMAT
-
-- One format string with one substitution, the back-end name, so the emitted line is identical
-  across every selection arm apart from that name.
-- It is a test and tooling contract rather than a diagnostic convenience, so it is defined once,
-  in `Driver.cpp`, and referenced nowhere else.
-- Consumers: the functional suites match it to establish which back-end resolved; the coverage
-  runner greps it once per invocation and treats its absence as a failed invocation; device-level
-  validation relies on it wherever the concrete back-end headers are out of scope.
-- It is the only way the selection is observable. No introspection API is added to the `Driver`
-  interface, deliberately, because that would grow the middleware public surface.
-
-### resolveBackEnd
-
-- It is the single selection point of the middleware. `DriverImpl` (legacy in-process C ABI) and
-  `DriverAidlImpl` (out-of-process `com.rdk.hal.hdmicec` AIDL HAL) implement the same `Driver`
-  interface and are both compiled into the library in every build, for every SOC vendor.
-- Selection is decided at run time on the AIDL service's availability **and** compatibility. A
-  service that is present but whose metadata halcompat rejects selects the legacy back-end exactly
-  as an absent one does, which is why the question asked is `isServiceAvailable()`, not a bare
-  presence test.
-- Construct-then-query order is load bearing. Gating construction on availability would be unsafe:
-  the availability query is the first thing in the process that may touch libbinder, and on the
-  pinned binder stack an unguarded lookup on a platform with no binder driver aborts rather than
-  returning an error. `DriverAidlImpl`'s constructor touches no binder, so constructing it is safe
-  on a legacy-only SOC; `isServiceAvailable()` never aborts, never blocks indefinitely and never
-  propagates an exception.
-- Three arms exist, each logged, because "absent" and "present but not usable" are different
-  platform conditions that validation gates separately:
-  1. the service is present and compatible, so the AIDL back-end is selected;
-  2. the binder transport is reachable but no compatible service resolved (none registered, or the
-     registered one cannot be spoken to compatibly), so the legacy back-end is selected;
-  3. the binder transport itself is unavailable, so the legacy back-end is selected.
-- Arms 2 and 3 are told apart through `DriverAidlImpl::unavailabilityReason()`. The query runs the
-  bounded preflight as its own first stage and records which stage declined, so the record is
-  reported rather than re-derived. Re-deriving it would pay the preflight's context-manager timeout
-  a second time, and a servicemanager appearing or dying between the two calls could make the
-  reported reason name a condition that did not cause the fallback.
-- Which compatibility rule rejected a service (an empty or `"-1"` interface hash, an unfrozen
-  development server, or an interface version outside the compiled-against era and major), with
-  the server's reported version and hash, is logged by `DriverAidlImpl::isServiceAvailable()`
-  itself; `resolveBackEnd` cannot observe it and must not invent it.
-- Both candidates have static storage duration, so the returned reference stays valid for the
-  lifetime of the process.
-- It is called only from the one-time initializer of `Driver::getInstance()`, which the language
-  serializes, so no lock is taken. `Driver::instanceMutex` in particular is not used: it is
-  declared but never defined anywhere in the tree, and referencing it would leave the library with
-  an undefined symbol.
-- Neither construction nor the query throws, so the enclosing static cannot be left uninitialized
-  and re-entered on a later call.
-- Re-entering `Driver::getInstance()` from either back-end's constructor or availability query
-  would re-enter the initializer that is still running, which is undefined behaviour rather than a
-  recoverable error. Both back-ends reach the incoming frame queue through their own accessor
-  precisely so this cannot happen.
-
-### resolveBackEnd — fallback reason (function body)
-
-- Calling `DriverAidlImpl::isBinderPreflightOk()` in the body to work out which arm declined would
-  pay the context-manager timeout a second time, doubling the worst case added to `LibCCEC::init()`
-  on the platform least able to absorb it, and the second answer could differ from the first.
-- The reason phrases live beside their producer in `DriverAidlImpl.cpp`; two of the three are a
-  contract, because the coverage runner and the L2 tier both transcribe the emitted line, so
-  rewording either breaks them.
-- The "not usable" line is worded deliberately unlike the selected-path line, so grepping for the
-  selected-path literal yields exactly one hit per process.
-- A `NULL` reason is not expected (`isServiceAvailable()` records a reason on every false exit) but
-  is handled rather than assumed, logged as a warning, because a silent fallback with no reason
-  would be undiagnosable.
-- Declaring the legacy back-end first makes it the last destroyed, matching its role as the
-  fallback; nothing gates whether the AIDL back-end exists.
-
-## mocks/hdmicec/fake_hdmi_cec_aidl_service.cpp
-
-### HDMI_CEC_FAKE_AIDL_SERVICE_IMPL (`@defgroup`, Fake Service Implementation Specification)
-
-- Every interface method follows one shape: take the lock, count the call, capture what a test
-  needs to read back, trace the call, then answer. The pre-refine wording said the answer is the
-  canned response the test installed where one exists, and a fixed value where the declaration
-  records that there is deliberately no control.
-- Every setter takes the same lock for one assignment, and every observation accessor takes it to
-  return a copy rather than a reference, so a test may install a canned response or read a capture
-  while a binder thread is answering and still read a stable snapshot.
-- The two static instance functions sit outside that shape and take no lock, for the reason
-  recorded on `FakeHdmiCecService::getInstance()`.
-- Each member's contract (parameters, return value, pre- and postconditions, and why the member
-  exists) is stated once, on its declaration in `fake_hdmi_cec_aidl_service.h`, and copied with
-  `@copydoc` rather than restated.
-- No CEC reasoning, as the pre-refine fake was written: it did not read a frame's destination
-  nibble, classify a message as directed or broadcast, inspect an opcode, police a frame length or
-  derive a send status from message content. That belongs to the adapter under test; a second copy
-  in the fake would make the suite assert the fake's opinion instead of the adapter's behaviour.
-  The fake's purpose is to make each adapter branch reachable.
-- Superseded: the "no CEC reasoning / never reads the destination nibble" statement no longer holds
-  once the fake answers the adapter's logical-address allocation polls. A self-addressed one-byte
-  poll is answered as not acknowledged unless a test marks that address occupied, and
-  `getLogicalAddresses` by default reflects the addresses registered through the fake's controller.
-- No GoogleMock and no GoogleTest, although the legacy driver double in the same directory uses
-  both: this translation unit is also compiled into the separate fake-service host binary, which
-  links only the AIDL stub and binder libraries, so a single reference to either framework would
-  break that link.
-- No binder threadpool: the service-side threadpool belongs to the host binary and the client-side
-  one to the middleware adapter. Starting one here would blur the in-process and out-of-process
-  cases, and telling those two apart is the reason both exist.
-
-### `@file`
-
-- No `.aidl` is authored here, no interface is added and no method is added to an interface.
-- Test scope: the file is built only for test targets (the fake-service host binary and the test
-  runners), so no symbol defined here can reach the shipped middleware library.
-
-### FAKE_HDMI_CEC_BINDER_DRIVER
-
-- The linked libbinder aborts the whole process when it cannot open its driver. On a host without
-  kernel binder support, checking the node first turns "the process died during test set-up" into
-  "registration reported false", which is the behaviour `registerFakeHdmiCecService()` documents.
-- `/dev/binder` is the default node name the SDK's own process state uses, and the node a test
-  runner and its service manager share.
-
-### FAKE_HDMI_CEC_TRACE_ABSENT
-
-- Spelled once so no trace site drifts into printing an empty field, where a reader could not tell
-  a missing object from a missing value.
-
-### fakeHdmiCecTraceLabel
-
-- The registry and its sequence are function-local rather than file-scope so construction is
-  ordered by first use, not link order: the translation unit is compiled into two binaries (the L1
-  test runner and the fake-service host) and the first caller differs in each.
-- The lock is the registry's own and is taken nowhere else, so a call from inside one of the fake's
-  critical sections (where most trace sites sit) cannot deadlock against it, and a call on a binder
-  thread cannot race one from a test thread.
-- Nothing is pruned: reusing an ordinal would let two different objects appear under one label in a
-  single capture, the confusion the ordinal exists to remove. The registry is bounded by the
-  handful of objects one run traces.
-
-### FakeHdmiCecController::addLogicalAddresses
-
-- The vector is captured as it arrived, neither normalised, sorted, deduplicated nor trimmed,
-  because its width is what the single-element assertions read.
-- The optional delay is read under the instance mutex, and the mutex is dropped before the sleep,
-  so a concurrent capture read on a remote fake answering on binder threads is never blocked behind
-  it. Zero is the default and costs one lock acquisition and a comparison, which is why the delay is
-  unconditional rather than compiled out. `setAddLogicalAddressesDelayMs()` records why a real
-  sleep is the only way to reach the middleware's slow-call threshold.
-
-### FakeHdmiCecController::removeLogicalAddresses
-
-- A false result and a non-ok status are ordinary outcomes on the removal path rather than errors,
-  so neither is treated differently in the body from the successful case.
-- Superseded: "treated no differently from the successful case" no longer holds once the controller
-  keeps a registration record. Only an ok status with a `true` result removes the addresses from
-  `getRegisteredLogicalAddresses()`; a false result or a non-ok status leaves the registrations as
-  they were. Unlike `addLogicalAddresses()`, the body takes no configurable delay.
-
-### FakeHdmiCecController::sendMessage
-
-- Pre-refine: the frame was captured whole and never examined. Nothing read a destination nibble,
-  inspected an opcode or applied a length limit, so the fake could not classify a frame as directed
-  or broadcast, and the meaning of `ACK_STATE_0` and `ACK_STATE_1` (inverted between those two
-  cases) stayed a property of the adapter under test.
-- Superseded: the fake now answers the adapter's self-addressed allocation polls (not acknowledged
-  unless a test marks the address occupied), so "never examined" no longer describes the body.
-
-### FakeHdmiCecController::getInterfaceVersion and getInterfaceHash
-
-- The divergence trace fires only when the reported value differs from the compiled-in one, so the
-  line that does appear names the moment the controller was made to report something the snapshot
-  would not, rather than leaving a silent metadata change to be inferred from a later failure.
-- `setInterfaceVersion()` / `setInterfaceHash()` install such values, and the
-  `DriverAidlCompatibilityTest` cases that drive them are what make these branches reached.
-
-### FakeHdmiCecController::setAddLogicalAddressesDelayMs
-
-- A negative value is stored as given and treated as "no delay" by the comparison at the point of
-  use, which keeps the setter free of a clamp a caller would have to reason about.
-
-### FakeHdmiCecController::setInterfaceHash and setInterfaceVersion
-
-- The hash setter traces in the same shape as the service's setter, so one line records where in a
-  run the controller was made to report a divergent hash.
-- No validation: the caller owns which hash is reported, and any `int32_t` is a version the caller
-  may want reported.
-
-### FakeHdmiCecController::reset
-
-- At the pre-refine member set, one critical section restores all three canned results, all three
-  canned statuses and both metadata values, and clears all three captures and all three counters.
-- Spelling each default beside the line that restores it keeps a documented default and the code
-  that reinstates it together. Restoring the metadata pair stops a case that installed a divergent
-  hash or version from deciding the outcome of the next one.
-
-### FakeHdmiCecService::getState and getProperty
-
-- `getState`: there is no member behind `DEFAULT_STATE`, so nothing can make the method report
-  anything else, and no canned status exists to make it fail.
-- `getProperty`: no `PropertyValue` is constructed anywhere in the body, so there is no fabricated
-  metric for a test to assert against itself.
-
-### FakeHdmiCecService::getLogicalAddresses
-
-- Each width of the answer (empty, one entry, more than one) reaches a different arm of the adapter
-  under test, which is why the vector is never normalised, sorted, deduplicated or truncated.
-- Superseded: the pre-refine comment said the canned vector is copied out. By default the fake now
-  reflects the addresses registered through its controller; canned overrides remain possible.
-
-### FakeHdmiCecService::open
-
-- An ok status carrying nothing usable (a null controller) is the one combination a test has to
-  ask for explicitly, because the null-controller flag is read only on the ok arm.
-
-### FakeHdmiCecService::close
-
-- "A callback arriving during or after a close is rejected by the adapter's own state guard" is a
-  required behaviour; clearing the captured listener in `close` would make it untestable.
-
-### FakeHdmiCecService::getInterfaceVersion and getInterfaceHash
-
-- The trace fires only on divergence, so an ordinary compatible run prints nothing here and the
-  line that does appear names the change at the moment it would matter.
-
-### FakeHdmiCecService::setLogicalAddressesResult
-
-- Nothing rejects an empty vector, caps its width or validates an entry, because every one of
-  those shapes is a case a test needs to be able to install.
-
-### FakeHdmiCecService::setOpenBinderStatus
-
-- `EX_ILLEGAL_STATE` is the exception the interface documents for an already-open service.
-
-### FakeHdmiCecService::setGetLogicalAddressesBinderStatus
-
-- The failed query and the successful but empty query can be installed separately even though the
-  adapter reports the same outcome for both.
-
-### FakeHdmiCecService::setInterfaceHash and setInterfaceVersion
-
-- The one line a run prints from the hash setter is the record of where the fake was made
-  deliberately incompatible; the harness owns which value produces the refusal.
-- The version is held in a member of its own, so installing it disturbs neither the hash nor any
-  canned response.
-
-### FakeHdmiCecService::getController
-
-- The strong pointer is copied out so the controller outlives the call whatever the service does
-  next. No statement in the class reassigns the member, which is what makes the never-null
-  guarantee hold for the life of the service.
-
-### FakeHdmiCecService::reset
-
-- At the pre-refine member set, one critical section restores every canned response and both
-  metadata values, clears both captures and zeroes all seven counters.
-- Each default is spelled beside the line that restores it, keeping the restored value and the
-  documented default from drifting apart.
-- Three statuses, not seven: `getState()`, `getProperty()`, `registerEventListener()` and
-  `unregisterEventListener()` answer a fixed ok because the middleware never calls them, and a
-  settable failure arm on a method nothing under test reaches would imply coverage that does not
-  exist. Their counters are still cleared, because "the adapter never called this" is asserted
-  against them.
-
-### FakeHdmiCecService::fireOnMessageReceived, fireOnStateChanged and fireOnMessageSent
-
-- Copying the listener out inside the critical section and invoking it outside is what makes the
-  re-entrancy the declaration describes safe.
-- The traced status follows the declaration's local-versus-remote distinction: from a local
-  listener it is the callback's own return value; from a remote proxy the interface is oneway and
-  the value reports only that the driver accepted the transaction. Nothing waits for, or can
-  observe, a remote callback's own outcome.
-- `fireOnStateChanged` matches `fireOnMessageReceived` in where the lock is released and in what
-  the traced status does and does not establish.
-
-### FakeHdmiCecService::getInstance and setInstance
-
-- `getInstance` needs no lock because no test thread and no binder thread can be running while the
-  value changes.
-- `setInstance` traces the label of the object it replaces and then the label now in place, so a
-  log carries one record of every change to the pointer.
-
-### registerFakeHdmiCecService
-
-- Four checks, in order, and the order bounds the damage: the null service and the binder driver
-  node are tested before libbinder is touched, because the linked libbinder treats a driver it
-  cannot open as fatal; a host with no kernel binder support therefore gets a false return instead
-  of losing its whole run, every legacy case included. Only then is a service manager obtained and
-  tested, and only then is the name offered and the resulting status tested.
-- A driver present but speaking a protocol version the linked libbinder was not built for stays
-  fatal inside libbinder and is deliberately not screened here: policing that is the middleware's
-  own preflight, and a second copy of a production decision inside a test fake would be one more
-  thing to keep in step.
-- Nothing in the body time-limits the service manager request, which is why the declaration hands
-  that bound to the parent harness.
-- A false return is always accompanied by a trace giving its reason.
-
-## tests/L1Tests/test_main.cpp
-
-### File overview (`@file`)
-
-- The back-end selection resolves once per process, and it resolves in this harness: the
-  `LibCCEC::init()` call in `CecTestEnvironment::SetUp()` is the first thing in the binary that
-  forces `Driver::getInstance()`. Its helper `resolveBackEnd` (in `ccec/src/Driver.cpp`) constructs
-  both back-ends, asks the AIDL one whether its service came up, and emits exactly one
-  selected-path line, which every functional suite, the coverage runner and device-level
-  validation match on because the `Driver` interface has no introspection API.
-- Consequences: anything that is to influence the selection must happen before that init call,
-  and nothing after it can change the outcome. Registering a fake service after init leaves the
-  legacy back-end selected and produces a green run that proves nothing about the AIDL path, so the
-  mode handling sits ahead of init by construction, not merely "early in SetUp".
-- `CEC_TEST_AIDL_MODE` is read only in this file and in `tests/L2Tests/test_main.cpp`; no
-  production source reads it, and none may.
-- Modes and the coverage-runner invocations they serve:
-  - `absent` (invocation A): register nothing. An unset or empty variable means exactly this, so a
-    plain `./run_L1Tests` behaves as it did before the AIDL back-end existed, and this mode does not
-    touch libbinder at all.
-  - `compatible` (invocation B): register an in-process fake reporting its real, frozen metadata;
-    the AIDL back-end is selected.
-  - `incompatible` (invocation C): register an in-process fake whose interface hash is `"-1"`. The
-    service is present but rejected as incompatible, the rejection is logged and the legacy
-    back-end is selected. Presence alone is not sufficient, and this mode proves it.
-  - `remote`: not implemented here. It means "launch the out-of-process fake host", which is
-    `run_L2Tests`' job; here it is a hard failure naming that runner.
-- An unrecognised value is a hard failure, never a quiet fall back to `absent`: a typo that
-  silently downgraded the run to the legacy path would report a green result for an AIDL
-  invocation that never happened.
-- Why an in-process fake, and its limits: libbinder resolves a name registered in the calling
-  process to the local `BBinder`, so `interface_cast` returns that very object. No `Bp*` proxy is
-  created, no transaction crosses the binder driver and the client threadpool is not involved,
-  which is why a separate L2 tier hosts the fake in its own process.
-- The in-process fake is also the only way to reach the compatibility-rejection branches:
-  `halcompat::isCompatible` (`rdk-halif-aidl/common/current/halcompat.h`) rejects an empty or
-  `"-1"` interface hash, and only an object whose `getInterfaceHash()` dispatches virtually can
-  report such a value. A remote fake cannot, because its generated `onTransact` answers the
-  metadata transactions from compiled-in constants; mode `incompatible` therefore has no L2
-  counterpart.
-- This file does not start the binder client threadpool. `DriverAidlImpl::open()` owns that and
-  runs inside the init call; starting one here would duplicate an ownership the production
-  back-end already holds.
-
-### `#include "fake_hdmi_cec_aidl_service.h"`
-
-- Included unqualified because `AM_CPPFLAGS` already carries `-I$(top_srcdir)/mocks/hdmicec`, the
-  same route `hdmi_cec_driver_mock.h` travels. It supplies the fake, its metadata overrides and the
-  registration entry point that publishes it under the production service name.
-
-### `#include "../../ccec/src/DriverAidlImpl.hpp"`
-
-- Reached by relative path rather than an added `-I`, the same arrangement the `ccec/` suites use
-  for `DriverImpl.hpp`, one directory level shallower.
-- Needed for exactly one symbol, `DriverAidlImpl::isBinderPreflightOk()`. Reaching the service
-  manager unguarded is unsafe in two independent ways on the pinned binder stack: with no driver
-  node libbinder aborts the process rather than returning an error, and with a driver node but no
-  running servicemanager it blocks indefinitely waiting for binder handle 0. A plain existence
-  check on the driver node would cover only the first.
-- `isBinderPreflightOk()` covers both (node openable, protocol version equal, handle 0 resolved
-  within a bounded timeout) and is public precisely so a test translation unit may call it. Using
-  it also keeps the driver-node path out of this file, so there is no second spelling to drift.
-
-### `#include "../../ccec/src/DriverImpl.hpp"`
-
-- Included for the class only, so the per-test registry restoration can establish by
-  `dynamic_cast` which back-end the process resolved to. Restoring the registry calls
-  `Driver::removeLogicalAddress()`, which on the AIDL back-end issues a binder transaction this
-  harness must not perform. Nothing else in the file needs the type, and no case is served by it.
-
-### g_fakeAidlService
-
-- Follows the same single-pointer idiom as `g_driverMock`.
-- Deliberately never released in `TearDown`. The pinned C++ `IServiceManager` exposes no
-  service-removal API; the service manager keeps a reference to the published binder and the
-  middleware may hold one too. Dropping this reference would not unpublish anything; at best it
-  would destroy an object the service manager still advertises. Nothing deregisters it.
-
-### Log-injection rendering contract (RENDER_LIMIT, renderUntrustedValue)
-
-- Defect removed (CWE-117): diagnostics used to stream caller-supplied text verbatim. A value
-  carrying a newline ended the message and began a line of its own, and a line beginning
-  `::error::` is a GitHub Actions workflow command. Measured before the fix:
-  `CEC_TEST_AIDL_MODE=$'bogus\n::error::FORGED_L1_ANNOTATION'` produced a standalone forged
-  `::error::` annotation in the run log, and a five-thousand-character value produced more than ten
-  kilobytes of diagnostics, burying the real failure.
-- The contract, in application order (the order makes the escaping unambiguous and reversible):
-  - (a) a literal backslash becomes `\\` first, so every escape introduced afterwards is
-    distinguishable from the same characters occurring literally in the value;
-  - (b) `0x0A` becomes `\n`, `0x0D` becomes `\r`, `0x09` becomes `\t`, and every other byte outside
-    printable ASCII `0x20..0x7E` becomes `\xNN` in lower-case hex. Classification is by byte value
-    on `unsigned char` with no locale-sensitive function (no `isprint`, `iswprint` or ctype table),
-    so it behaves as under `LC_ALL=C` in any locale and no multi-byte sequence can hide a control
-    character;
-  - (c) the rendering is truncated at `RENDER_LIMIT` characters and
-    `...[truncated, N bytes total]` is appended, N being the value's own length in bytes, so a
-    caller cannot drown a log and the message still says how much was withheld;
-  - (d) it is applied to the value, never to the surrounding message, and the result is always
-    delimited with double quotes, so an empty value is visible as `""` rather than as a gap;
-  - (e) it never begins a diagnostic line: every message keeps its own prefix in front of it and the
-    rendering begins with `"`. With (b) leaving no raw newline, a forged standalone `::error::`,
-    `::warning::` or `::notice::` line is unreachable by construction rather than unlikely.
-- This is one of five copies of one contract; they must not diverge, and a change to any is a
-  change to all five:
-  - `hdmicec/tests/L1Tests/run_coverage.sh` — `render_untrusted()`
-  - `hdmicec/.github/workflows/aidl-path-tests-rootfs.sh` — `render_untrusted()`
-  - `hdmicec/tests/L1Tests/test_main.cpp` — `renderUntrustedValue()`
-  - `hdmicec/tests/L2Tests/test_main.cpp` — `renderUntrustedValue()`
-  - `hdmicec/mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp` — `renderUntrustedValue()`
-- The two convenience overloads are `inline` so a copy whose file does not call one of them raises
-  no `-Wunused-function` warning; the copies are identical by construction, and which overloads a
-  file calls is a property of its callers.
-- Five file-local copies rather than one shared helper, deliberately: two are shell and three are
-  C++, spread over three build targets and one non-built script, and a shared header would add a
-  build-system edge for a twenty-line function. The cost is the cross-reference every copy carries.
-- `renderUntrustedValue(const char *, std::size_t)`: every diagnostic in the file naming a value
-  supplied by the environment, the command line or another process goes through it. Any input is
-  acceptable, including embedded newlines, carriage returns, ANSI escape sequences, invalid UTF-8
-  and multi-kilobyte payloads. The result is never longer than `RENDER_LIMIT` characters plus the
-  truncation note and the two quotes. Rendering a whole message would escape the message's own
-  punctuation and destroy the prefix clause (e) depends on.
-- Backslash arm first (function body): this ordering is clause (a); it makes a rendered `\n`
-  unambiguously either the two characters the value contained or a newline it contained.
-- `renderUntrustedValue(const char *)`: a null pointer renders as the four characters `<unset>`,
-  undelimited, because "unset" and "set to the empty string" are different facts.
-
-### AIDL_MODE_VARIABLE and the four mode spellings
-
-- Spelled exactly once each; the spellings are a fixed contract shared with
-  `tests/L2Tests/test_main.cpp`, `run_coverage.sh`, both CI workflows and the test documentation.
-
-### BROKEN_INTERFACE_HASH
-
-- `halcompat::isCompatible` rejects `"-1"`; the accompanying comment in `halcompat.h` reads "hash
-  RPC failed - not a dev build, a broken link". Reporting it is the only way to drive a present
-  service down the incompatible arm of the selection.
-
-### failIfServiceAlreadyPublished
-
-- A stale registration left by another process makes the run's selection resolve against that
-  service instead of the harness's fake, so the outcome would depend on what happened to be running
-  on the machine. Overwriting the entry hides the collision; tolerating it makes a green result
-  meaningless.
-- The service name is supplied from the generated interface rather than a literal, so the harness
-  cannot drift from the name the middleware looks up.
-- A collision, or a service manager that cannot be reached, is raised as a fatal gtest failure.
-- Called before `isBinderPreflightOk()` has passed, it would abort or block the process instead of
-  failing the test.
-- The pinned C++ `IServiceManager` offers no way to clear a collision.
-
-### publishFakeForMode
-
-- Mode `incompatible` differs from `compatible` by exactly one call, the interface-hash override,
-  which keeps the two modes' divergence auditable at a glance.
-- Without a usable binder transport the run fails rather than publishing nothing: publishing
-  nothing would select the legacy back-end and report a green result for an AIDL invocation that
-  never ran.
-- Fatal failures: no usable binder transport, the name already published, a fake that cannot be
-  constructed, a fake that cannot be published.
-- Preconditions: it runs ahead of `LibCCEC::init()` in `CecTestEnvironment::SetUp()`, because a fake
-  published after init leaves the already-resolved selection on the legacy back-end; and nothing
-  may already be published under the production name, which `failIfServiceAlreadyPublished()`
-  establishes.
-- Nothing withdraws the registration, because the pinned C++ `IServiceManager` has no
-  service-removal API.
-- `setInstance` ordering (function body): `SetUp` runs before any `TEST_F` body, which lets a case
-  configure or observe a fake registered long before it ran.
-
-### applyAidlModeBeforeInit
-
-- The one place in `run_L1Tests` that acts on the four modes.
-- Every path that does not need libbinder avoids it: `absent` returns without touching it, and both
-  rejection paths (`remote`, unrecognised) fail before reaching it.
-- An unrecognised value, mode `remote` and any failure to publish the fake are each fatal gtest
-  failures; for `compatible` and `incompatible` the process holds a reference to the fake.
-- `LibCCEC::init()` is the first thing in the binary that forces `Driver::getInstance()`; the
-  selection is then fixed, so a service reached after init leaves it on the legacy back-end and
-  produces a green run that proves nothing about the AIDL path.
-- A fatal assertion returns from this function without unwinding its caller, so
-  `CecTestEnvironment::SetUp()` invokes it through `ASSERT_NO_FATAL_FAILURE`.
-- Rendered unrecognised value (function body): it is the one diagnostic in the binary naming a
-  value nothing has validated (every earlier arm matched a known spelling). Streamed raw,
-  `$'bogus\n::error::FORGED'` ended the message and began a standalone GitHub workflow command;
-  `renderUntrustedValue()` leaves no newline, bounds the length and keeps the sentence's own words
-  in front of the value.
-
-### LogicalAddressRegistryGuard
-
-- The driver's list of acquired logical addresses is the only piece of its state a test can add to
-  that nothing takes away again. `DriverImpl::close()` deliberately does not clear it, the AIDL
-  back-end matches that, and clearing would be an unauthorized change to legacy behaviour.
-- Two groups of cases sit on opposite sides of this: some register an address and do not remove it
-  in teardown; others assert that an address is not registered, because
-  `Connection::matchSource()` only rewrites a frame's source nibble when
-  `Driver::isValidLogicalAddress()` reports the address as acquired.
-- In declaration order the negative-precondition cases run first and everything passes. Under
-  `--gtest_shuffle` (a valid order CI may use) the registering cases can run first and the others
-  then fail on a rewritten source nibble. Measured: seeds 12345 and 99999 each failed exactly two
-  cases; seed 54321 passed. A suite whose verdict depends on its order cannot certify anything.
-- Why a listener rather than a fixture teardown: the twelve pre-existing L1 units are outside the
-  migration's diff by design (an acceptance check enforces that), and a teardown in the two
-  registering fixtures would fix only those two and leave every other and every future fixture
-  free to reintroduce the leak. A process-global listener makes the property hold for all: the next
-  case starts from the registry the first case started from.
-- It does not touch production close/term semantics: the registry is restored from outside the
-  driver through its public interface, and no production file changes.
-- It does nothing when nothing leaked, the case after all but a handful of tests. Detection is a
-  pure list walk under the driver's lock (`Driver::isValidLogicalAddress()` reaches no HAL and no
-  service on either back-end), so the common path costs fifteen list walks and no HAL call.
-- It issues no binder call, ever: `Driver::removeLogicalAddress()` on the AIDL back-end is a
-  transaction, so restoration runs only on the legacy back-end, and under an AIDL selection a
-  residual registration is reported and left. The order dependence is a legacy-invocation problem
-  anyway: the leaking cases are the `LibCCEC` ones, which the AIDL invocations' filters exclude,
-  and the AIDL session fixture re-registers the device's address around every case.
-- Superseded: the pre-refine comment said the AIDL session fixture's cases add and remove their
-  addresses within a single case. The AIDL back-end now registers the device's address when the
-  driver is enabled, and the fixture's close-open cycle in `SetUp` and `TearDown` re-registers it.
-- It never fails a test: everything it calls is wrapped, because a restoration problem must not be
-  attributed to a case that already produced its own result. It reports on stdout instead.
-- The gmock warning: restoring on the legacy back-end reaches `HdmiCecRemoveLogicalAddress()` on
-  the process-global mock with no expectation, so gmock prints "Uninteresting mock function call"
-  and takes the mock's `ON_CALL` default (`HDMI_CEC_IO_SUCCESS`, installed in
-  `hdmi_cec_driver_mock.cpp`). This is accepted rather than silenced. Installing a permissive
-  `EXPECT_CALL` and then calling `::testing::Mock::VerifyAndClearExpectations()` was measured and
-  rejected: it clears every expectation live on the mock, including one a case legitimately left
-  unmet, and could hide a real failure. `::testing::Mock::AllowUninterestingCalls()` would express
-  this exactly but is private in GoogleTest 1.15. An explanatory line is logged immediately before
-  the removals.
-
-### LogicalAddressRegistryGuard::LogicalAddressRegistryGuard
-
-- The baseline is taken lazily at the first test, deliberately: a run whose environment `SetUp`
-  failed fatally never starts a test, and the guard must not be what forces the back-end selection
-  on such a run.
-
-### LogicalAddressRegistryGuard::OnTestStart
-
-- `testInfo` is unused; the first call is what matters, not which case it belongs to.
-- The baseline is captured rather than assumed empty, so an address `init()` itself acquired is
-  treated as part of the starting state instead of being torn out from under every case.
-- Superseded: the pre-refine comment said no address is acquired by `init()` ("none does today").
-  That no longer holds on the AIDL back-end, which registers the device's DeviceType-derived
-  logical address when the driver is enabled inside `init()`; the capture-not-assume design covers
-  it unchanged.
-
-### LogicalAddressRegistryGuard::OnTestEnd
-
-- `testInfo` is named in the report so a leak is attributed to the case that made it rather than
-  the case that would have tripped over it.
-- GoogleTest sequences listener `OnTestEnd` after the case's own `TearDown`, so a fixture that
-  cleans up after itself has already done so.
-- Addresses that were part of the baseline are left exactly as they are; every other address is
-  removed or the reason it could not be is reported.
-- Each legacy removal produces one gmock warning; the class notes record why that is accepted.
-
-### LogicalAddressRegistryGuard assignable-address enum
-
-- `0x0` to `0xE` inclusive. `0xF` is UNREGISTERED/BROADCAST, a destination and never an address a
-  device acquires; the AIDL controller documents the same range for `addLogicalAddresses()`, so
-  probing it would ask about a value neither back-end can hold.
-
-### LogicalAddressRegistryGuard::isRegistered
-
-- Returning false when the query itself failed is the safe direction: it leads to no removal.
-- `Driver::isValidLogicalAddress()` is a list walk under the driver's own lock on both back-ends,
-  reaching no HAL, service or binder transaction, which makes probing every address after every test
-  free. It does not check lifecycle state, so it answers on a closed driver as on an open one, which
-  matters because the registry survives a close.
-
-### LogicalAddressRegistryGuard::restore
-
-- When it returns false nothing was called, and the caller must not report a residual registration
-  as the failure of a removal that never ran.
-- `InvalidStateException` is expected rather than exceptional: the driver must be OPENED for a
-  removal, and a case that terminated the library leaves it CLOSED. It is reported and the loop
-  continues, because the remaining addresses are worth attempting and nothing the guard does may
-  fail a test.
-
-### LogicalAddressRegistryGuard::baselineRegistered
-
-- Asserting that the baseline is empty would be asserting a property of `LibCCEC::init()` from the
-  wrong place.
-- Superseded: the pre-refine comment called the baseline "empty in practice on this binary". Under
-  an AIDL selection it can now hold the address `init()` registers from the device's DeviceType; on
-  the legacy back-end it remains empty.
-
-### CecTestEnvironment::SetUp
-
-- The mode is applied before `init()` because `init()` is the one-way door that fixes the
-  selection; a failure stops the run rather than letting `init()` resolve a selection the requested
-  mode did not ask for.
-- Init failure is fatal to the whole run: `SetUp` runs once for the binary and every
-  driver-dependent case takes an initialized CEC stack as its precondition, so carrying on would
-  assert against an unopened stack and report green for a process that never came up.
-- Nothing can legitimately be ignored: `init()` raises `InvalidStateException` on a second call,
-  which a once-per-process `SetUp` never reaches, and the exceptions it can raise
-  (`Driver::getInstance().open()` refused by the HAL, `Bus::getInstance().start()` failing) are
-  real failures.
-
-### CecTestEnvironment::TearDown
-
-- `TearDown` runs after the suite, so every result has been recorded; aborting would obscure
-  legitimately earned results, and a fatal assertion would cut the three cleanup statements short.
-  A non-fatal expectation makes a failing `term()` visible while the cleanup completes.
-- One failure is expected and honest: when `init()` failed in `SetUp`, `term()` raises
-  `InvalidStateException` and is reported as a second failure, which correctly says the process
-  never came up.
-- Nothing unpublishes the fake AIDL service; see `g_fakeAidlService`.
-
-### main
-
-- `LogicalAddressRegistryGuard` makes the binary's result independent of case order, including
-  under `--gtest_shuffle`, which used to fail two cases on two of three sampled seeds.
-- It is appended so it runs after the default result printer's `OnTestEnd`: the case's `[ OK ]` or
-  `[ FAILED ]` line is printed first and any guard report appears beneath it. GoogleTest takes
-  ownership of the listener, so nothing deletes it.
+## Logical-address allocation and registration (AIDL back-end)
+
+On the AIDL back-end (`ccec/src/DriverAidlImpl.{hpp,cpp}`), the middleware owns logical-address
+allocation. The AIDL HAL leaves it to the client: `IHdmiCec.open()` says every address must be
+added by the client, and `hdmi_cec.md` HAL.CEC.9 requires the controller client to allocate as
+HDMI 1.4b §10.2 defines and to call `addLogicalAddresses()` only after a successful poll-based
+allocation. The legacy back-end is unchanged. Its HAL allocates source addresses inside
+`HdmiCecOpen()`.
+
+### `DriverAidlImpl::LOCAL_DEVICE_TYPE`
+
+- A private `static constexpr int` holding `DeviceType::PLAYBACK_DEVICE`. To change the device
+  role on the AIDL back-end for a product, change this constant and nothing else.
+- The middleware has no device-type configuration, and the Driver interface passes none to
+  `open()`. PLAYBACK_DEVICE is the HDMI-source role, and it is the role that the AIDL HAL leaves
+  for the client to allocate.
+- `getLogicalAddress(int devType)` does not use `devType` to choose an address. It only writes
+  the value to the log. The Source plugin calls `LibCCEC::getLogicalAddress(DEV_TYPE_TUNER)`
+  with the value 1, which `CCEC::DeviceType` reads as RECORDING_DEVICE. Choosing an address
+  from that argument would therefore pick the wrong role.
+
+### `DriverAidlImpl::logicalAddressCandidates(int deviceType)`
+
+A protected static helper. It returns the candidate addresses for a device type in priority
+order. The table is the inverse of `LogicalAddress::getType()`
+(`ccec/include/ccec/Operands.hpp`):
+
+| `DeviceType`                                           | Candidates      |
+|--------------------------------------------------------|-----------------|
+| TV                                                     | 0               |
+| RECORDING_DEVICE                                       | 1, 2, 9         |
+| TUNER                                                  | 3, 6, 7, 10     |
+| PLAYBACK_DEVICE                                        | 4, 8, 11        |
+| AUDIO_SYSTEM                                           | 5               |
+| RESERVED, PURE_CEC_SWITCH, VIDEO_PROCESSOR, any other  | none            |
+
+It is protected rather than private so that a test subclass can exercise it directly. It is
+not part of the installed API, because `DriverAidlImpl.hpp` is not installed.
+
+### `DriverAidlImpl::registerDeviceLogicalAddress()`
+
+`open()` calls this helper after the state becomes OPENED, while it still holds the recursive
+instance lock. A call to `open()` while the driver is already OPENED returns silently before
+reaching this step, so `Bus::start()`'s second `open()` does not allocate again.
+
+The helper first clears the local list; the previous session's address was released by that
+session's close. It then takes each candidate `c` of `LOCAL_DEVICE_TYPE` in order and polls it
+with this back-end's own `poll(c, c)`. That call sends a one-byte frame whose initiator equals
+its destination, which is the HDMI 1.4b §10.2.1 allocation poll.
+
+| Poll or add outcome                                              | Meaning   | Action                                                    |
+|------------------------------------------------------------------|-----------|-----------------------------------------------------------|
+| `poll` returns normally (directed `ACK_STATE_0`)                 | taken     | `LOG_INFO`, next candidate                                |
+| `poll` raises `CECNoAckException` (directed `ACK_STATE_1`)       | free      | `addLogicalAddresses({c})`                                |
+| `poll` raises `IOException` (`BUSY`, non-ok status) or another `Exception` | not free | `LOG_EXP`, next candidate                      |
+| `addLogicalAddresses` ok status, `true`                          | registered| local list becomes `{c}`, `LOG_INFO` address and type, stop |
+| `addLogicalAddresses` ok status, `false`                         | declined  | `LOG_EXP`, next candidate                                 |
+| `addLogicalAddresses` non-ok binder status                       | transport | `LOG_EXP`, stop with nothing registered                   |
+| no controller held, or no candidate left                         | none      | `LOG_EXP`, nothing registered                             |
+
+This step never throws out of `open()`. The pre-OPENED failure arms of `open()` are unchanged:
+no proxy, a failed `IHdmiCec::open()`, and a null controller. When allocation fails,
+`getLogicalAddress()` reports 0, and `LibCCEC::getLogicalAddress()` then raises its existing
+`InvalidStateException`.
+
+The add call is timed with the same slow-call diagnostic as every other synchronous AIDL call.
+The pinned libbinder offers no client-side deadline.
+
+### `DriverAidlImpl::open()`
+
+The steps up to OPENED keep the legacy order under one lock: state test, proxy test, threadpool
+start, listener construction, `IHdmiCec::open()`, the status and controller tests, then the state
+change. The `#if 0` throw is kept verbatim. Address registration runs last. Detail moved out of
+the condensed comment:
+
+- **Null controller.** `IHdmiCec.open()` is declared `@nullable` and returns null on error. An ok
+  status with no controller is therefore an IOException, not a success.
+- **Per-session listener.** A fresh listener is built for each session. Every path that ends a
+  session detaches and releases it: both arms of `close()`, both failure arms of `open()`, and
+  the destructor. The `eventListener == 0` guard relies on this. A listener reused across
+  sessions could still be referenced by the previous session's HAL.
+- **Failed-open detach.** A failed open has already handed the listener to the HAL, and nothing
+  obliges the HAL to drop it. The listener is detached before the exception leaves.
+- **Threadpool.** `IHdmiCecEventListener` is `oneway`, so its callbacks need a binder thread in
+  this process. `startThreadPool()` is idempotent. The maximum thread count is left alone, because
+  lowering a maximum that is already established can abort the process. `joinThreadPool()` is
+  never called, because it would not return.
+- **Single client.** `IHdmiCec.open()` fails with `EX_ILLEGAL_STATE` while a session is open. That
+  is why the CLOSED/CLOSING/OPENED state machine is kept.
+
+### `DriverAidlImpl::addLogicalAddress()` — exactly one address
+
+The Polaris (AIDL) calls take `int[]`, but the back-end never holds more than one registered
+address. Each array is a one-element temporary.
+
+- The state guard and the controller check are unchanged.
+- The same address as the one held returns `true` with no HAL call.
+- A different address first releases the held one with `removeLogicalAddresses({old})`. A failed
+  release is logged and ignored, as `removeLogicalAddress()` does. The local list is cleared, and
+  then `addLogicalAddresses({source})` is called.
+- Success leaves the local list exactly `{source}`. A non-ok status raises `IOException`. A `false`
+  result raises `AddressNotAvailableException`. A failed add leaves the list empty.
+- **Coarser failure category.** The legacy HAL status separates "address unavailable",
+  "general error" and success. `addLogicalAddresses()` returns a single boolean, which is false
+  both when the address is out of range and when it is already added. `false` therefore maps to
+  the nearer legacy category, `AddressNotAvailableException`.
+- `removeLogicalAddress()` and `close()` are unchanged. `close()` does not clear the local list,
+  and the next `open()` registration replaces it.
+
+The Sink plugin allocates its own address and calls `LibCCEC::addLogicalAddress()`
+(`HdmiCecSinkImplementation.cpp` :2767 inside a try, :3065 outside any try). The
+replace-on-add rule means that this replaces the enable-time address rather than adding a second
+one.
+
+### `DriverAidlImpl::getLogicalAddress()` — read through the HAL
+
+- Every call goes to `IHdmiCec::getLogicalAddresses()`. The back-end never answers from the local
+  list. It returns entry 0, and a result with more than one entry is logged at `LOG_INFO`.
+- **Zero is the only "no address" value.** Five cases return 0, and each writes its own log
+  line: no proxy, a non-ok status, an empty result, an entry outside 0x0..0xE, and a genuine
+  address 0. The legacy back-end also returns 0 when its HAL writes nothing, and
+  `LibCCEC::getLogicalAddress()` turns 0 into `InvalidStateException`. Any other sentinel would
+  suppress that signal.
+- **Raw-value check.** The range check runs on the raw `int32_t` before any conversion. Passing
+  the value to `LogicalAddress`'s narrowing constructor would turn 256 into 0x0 and 271 into 0xF,
+  which are plausible but wrong addresses. Only a HAL that breaks its contract can reach this
+  arm. The legacy back-end has no counterpart: it would hand such a value through unchanged.
+- **Logging.** The rejected value is controlled by the HAL. It is logged only through `%d`, and
+  never as text or as a format string.
+
+### `DriverAidlImpl::logicalAddresses`
+
+The member is a `std::list`, exactly as in `DriverImpl`, so the two back-ends read alike. On the
+AIDL back-end it never holds more than one entry. `isValidLogicalAddress()` reads it, and
+`Connection::matchSource()` reads it through that method.
+
+### Test double (`mocks/hdmicec/fake_hdmi_cec_aidl_service.{h,cpp}`)
+
+- `FakeHdmiCecController::sendMessage()` recognises an allocation poll: a one-byte frame whose
+  initiator nibble equals its destination nibble.
+  - The poll is answered `ACK_STATE_1` (free) unless `setLogicalAddressOccupied(address, true)`
+    marks the address taken (`ACK_STATE_0`). `setAllocationPollResult()` can install any other
+    status.
+  - Polls are recorded only in `getAllocationPolls()`, so the send counter and the
+    last-sent capture still describe application frames only.
+- A successful `addLogicalAddresses` / `removeLogicalAddresses` (ok status, `true`) updates
+  `getRegisteredLogicalAddresses()`. A successful `IHdmiCec::close()` and
+  `FakeHdmiCecController::reset()` both clear it.
+- `FakeHdmiCecService::getLogicalAddresses()` by default reports the controller's registered
+  addresses. A vector installed with `setLogicalAddressesResult()` still overrides that default.
+- The out-of-process host (`fake_hdmi_cec_aidl_service_host.cpp`) uses the same fake. Its control
+  verb `registered` replies `OK registered <decimal,...>`; the field is empty when nothing is
+  registered.
+
+### Tests
+
+- **`DriverAidlLocalInstanceTest`** (any invocation; uses locally injected fakes). Covers:
+  - the candidate table;
+  - enable registering `{4}` and reading it back through the HAL;
+  - occupied candidates (4 taken gives 8; 4 and 8 taken gives 11; all taken gives none);
+  - a busy poll, a declined add, a transport failure on add, and a null controller;
+  - replace-on-add, and the same-address no-op;
+  - close followed by re-registration.
+- **`DriverAidlSessionTest`** (invocation B). Covers:
+  - enable registering exactly `{4}`;
+  - `LibCCEC::getLogicalAddress(1)` returning 4 through the HAL;
+  - re-open with 4 occupied registering `{8}`;
+  - no free candidate leading to `InvalidStateException`.
+
+  The fixture's TearDown runs close and then open after resetting the fake. This re-registers
+  the enable-time address, so the driver and the fake agree before the next case.
+- **`DualPathAidlFlowTest.EnablingTheDriverRegistersOneAddressThatLibCcecReadsBackThroughTheHal`**
+  (invocation E, real binder IPC). The host reports `registered` = `4`, and
+  `LibCCEC::getLogicalAddress(1)` returns 4.
+
+### Superseded pre-refine design
+
+Before this change, `open()` registered no address, `getLogicalAddress()` ignored `devType` and
+returned whatever the HAL held unprompted, and the fake answered a canned single entry 4.
+
+## Physical address (AIDL back-end)
+
+### Value and encoding
+
+`DriverAidlImpl::getPhysicalAddress()` writes `DriverAidlImpl::FIXED_PHYSICAL_ADDRESS`, which is
+`0x01000000`: the physical address 1.0.0.0, one nibble per byte, most significant first. The value
+is fixed because the `com.rdk.hal.hdmicec` AIDL HAL exposes no physical-address query.
+
+The encoding is the one the production callers of `LibCCEC::getPhysicalAddress()` decode. Both
+plugins seed `0x0F0F0F0F` (F.F.F.F), call the method, and split the result into four bytes that
+they pass to `PhysicalAddress(b0, b1, b2, b3)`:
+
+| Caller | Lines | Decode |
+|---|---|---|
+| `entservices-hdmicecsource/plugin/HdmiCecSourceImplementation.cpp` | 1176-1177 | `{(v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF}` |
+| `entservices-hdmicecsink/plugin/HdmiCecSinkImplementation.cpp` | 3201-3202 | identical |
+
+`PhysicalAddress::toString()` then renders `0x01000000` as `"1.0.0.0"`. The packed 16-bit form
+`0x1000` would decode there as 0.0.0.0, which is why it is not used.
+
+### No HAL call
+
+- The method calls nothing on `IHdmiCec` or `IHdmiCecController` and no legacy `HdmiCec*`
+  function, and it reads neither the service proxy nor the controller reference.
+- It has no state guard, matching `DriverImpl::getPhysicalAddress()`, so a driver that was never
+  opened, an OPENED driver and a CLOSED driver all answer 1.0.0.0.
+- It takes no lock. `write()` holds the instance lock across the synchronous
+  `IHdmiCecController::sendMessage()`, so a locked query would wait on that AIDL call; this one
+  answers while a transmit is stalled in the HAL.
+- `LibCCEC::getPhysicalAddress()` is unchanged and still raises `InvalidStateException` before
+  the library is initialized; once initialized with the AIDL back-end selected, it returns
+  `0x01000000`.
+- The legacy back-end is unchanged: `DriverImpl::getPhysicalAddress()` still reads the address
+  with `HdmiCecGetPhysicalAddress()`.
+
+### Null out-parameter
+
+A null `physicalAddress` is logged at `LOG_EXP` and not written; the method returns without
+raising. A non-null one is written and the value is logged at `LOG_DEBUG`.
+
+### Tests
+
+| Case | Invocation | Asserts |
+|---|---|---|
+| `DriverAidlLocalInstanceTest.GetPhysicalAddressReportsTheFixedAddressOnANeverOpenedDriver` | A, B, C | `0x0F0F0F0F` becomes `0x01000000` and decodes to `"1.0.0.0"` on three calls; no legacy HAL call |
+| `DriverAidlLocalInstanceTest.GetPhysicalAddressToleratesANullOutParameter` | A, B, C | a null pointer neither crashes nor raises, and the next query still answers |
+| `DriverAidlLocalInstanceTest.GetPhysicalAddressIsFixedInEveryStateAndCallsNoAidlMethod` | A, B, C | same value while OPENED and after `close()`; zero calls on call-counting service and controller doubles |
+| `DriverAidlLocalInstanceTest.GetPhysicalAddressAnswersWhileATransmitIsStalledInTheHal` | A, B, C | the query completes while another thread's `sendMessage()` holds the instance lock |
+| `DriverAidlSessionTest.LibCCECReportsTheFixedPhysicalAddressWithoutAnyAidlCall` | B | `LibCCEC::getPhysicalAddress()` yields `0x01000000`; every fake service and controller counter unchanged |
+| `DualPathAidlFlowTest.LibCCECReportsTheFixedPhysicalAddressWithoutCrossingBinder` | E (skips on D) | same over real binder IPC; the remote fake's send, open and close counts unchanged |
+
+`DriverAidlLegacyArmTest.PhysicalAddressIsReadThroughTheLegacyHalApi` still covers the legacy
+back-end reading the address through the legacy HAL.
+
+### Limitation
+
+The value is correct only where the device's real position in the HDMI topology is 1.0.0.0, such
+as a source connected directly to the first input of the root display. A device behind a switch
+or an AV receiver, or on another input, reports 1.0.0.0 anyway, and every CEC message that
+carries the physical address (`<Report Physical Address>`, `<Active Source>`) carries that value.
+Reporting the real topology position needs a source the AIDL HAL does not provide; the
+device-settings EDID read is the candidate.
+
+### Superseded interim design (B1)
+
+Before the address was fixed, the AIDL back-end treated physical-address retrieval as blocked
+item B1: the method logged `BLOCKED ITEM B1` at `LOG_EXP` and left the caller's out-parameter
+untouched, pending the device-settings HAL header declaring the EDID-byte read, which was to be
+supplied as a separate input and was not. That design rejected a lazily opened legacy CEC handle
+(a CEC HAL substitution that would also run source logical-address discovery on the wire beside
+the active AIDL controller), the AIDL HDMI-output EDID event, and reconstructing the declaration
+from test mocks. The fixed 1.0.0.0 replaces it, B1 no longer blocks the AIDL path, and the case
+`DriverAidlLocalInstanceTest.GetPhysicalAddressIsBlockedOnB1AndLeavesTheOutParameterUntouched`
+was replaced by the cases above.
 
 ## mocks/hdmicec/fake_hdmi_cec_aidl_service.h
 
@@ -2982,6 +2481,227 @@ symbol whose comment it came from.
   cases is the parent harness's readiness timeout, which fails the run when a host does not report
   itself ready in time.
 
+## mocks/hdmicec/fake_hdmi_cec_aidl_service.cpp
+
+### HDMI_CEC_FAKE_AIDL_SERVICE_IMPL (`@defgroup`, Fake Service Implementation Specification)
+
+- Every interface method follows one shape: take the lock, count the call, capture what a test
+  needs to read back, trace the call, then answer. The pre-refine wording said the answer is the
+  canned response the test installed where one exists, and a fixed value where the declaration
+  records that there is deliberately no control.
+- Every setter takes the same lock for one assignment, and every observation accessor takes it to
+  return a copy rather than a reference, so a test may install a canned response or read a capture
+  while a binder thread is answering and still read a stable snapshot.
+- The two static instance functions sit outside that shape and take no lock, for the reason
+  recorded on `FakeHdmiCecService::getInstance()`.
+- Each member's contract (parameters, return value, pre- and postconditions, and why the member
+  exists) is stated once, on its declaration in `fake_hdmi_cec_aidl_service.h`, and copied with
+  `@copydoc` rather than restated.
+- No CEC reasoning, as the pre-refine fake was written: it did not read a frame's destination
+  nibble, classify a message as directed or broadcast, inspect an opcode, police a frame length or
+  derive a send status from message content. That belongs to the adapter under test; a second copy
+  in the fake would make the suite assert the fake's opinion instead of the adapter's behaviour.
+  The fake's purpose is to make each adapter branch reachable.
+- Superseded: the "no CEC reasoning / never reads the destination nibble" statement no longer holds
+  once the fake answers the adapter's logical-address allocation polls. A self-addressed one-byte
+  poll is answered as not acknowledged unless a test marks that address occupied, and
+  `getLogicalAddresses` by default reflects the addresses registered through the fake's controller.
+- No GoogleMock and no GoogleTest, although the legacy driver double in the same directory uses
+  both: this translation unit is also compiled into the separate fake-service host binary, which
+  links only the AIDL stub and binder libraries, so a single reference to either framework would
+  break that link.
+- No binder threadpool: the service-side threadpool belongs to the host binary and the client-side
+  one to the middleware adapter. Starting one here would blur the in-process and out-of-process
+  cases, and telling those two apart is the reason both exist.
+
+### `@file`
+
+- No `.aidl` is authored here, no interface is added and no method is added to an interface.
+- Test scope: the file is built only for test targets (the fake-service host binary and the test
+  runners), so no symbol defined here can reach the shipped middleware library.
+
+### FAKE_HDMI_CEC_BINDER_DRIVER
+
+- The linked libbinder aborts the whole process when it cannot open its driver. On a host without
+  kernel binder support, checking the node first turns "the process died during test set-up" into
+  "registration reported false", which is the behaviour `registerFakeHdmiCecService()` documents.
+- `/dev/binder` is the default node name the SDK's own process state uses, and the node a test
+  runner and its service manager share.
+
+### FAKE_HDMI_CEC_TRACE_ABSENT
+
+- Spelled once so no trace site drifts into printing an empty field, where a reader could not tell
+  a missing object from a missing value.
+
+### fakeHdmiCecTraceLabel
+
+- The registry and its sequence are function-local rather than file-scope so construction is
+  ordered by first use, not link order: the translation unit is compiled into two binaries (the L1
+  test runner and the fake-service host) and the first caller differs in each.
+- The lock is the registry's own and is taken nowhere else, so a call from inside one of the fake's
+  critical sections (where most trace sites sit) cannot deadlock against it, and a call on a binder
+  thread cannot race one from a test thread.
+- Nothing is pruned: reusing an ordinal would let two different objects appear under one label in a
+  single capture, the confusion the ordinal exists to remove. The registry is bounded by the
+  handful of objects one run traces.
+
+### FakeHdmiCecController::addLogicalAddresses
+
+- The vector is captured as it arrived, neither normalised, sorted, deduplicated nor trimmed,
+  because its width is what the single-element assertions read.
+- The optional delay is read under the instance mutex, and the mutex is dropped before the sleep,
+  so a concurrent capture read on a remote fake answering on binder threads is never blocked behind
+  it. Zero is the default and costs one lock acquisition and a comparison, which is why the delay is
+  unconditional rather than compiled out. `setAddLogicalAddressesDelayMs()` records why a real
+  sleep is the only way to reach the middleware's slow-call threshold.
+
+### FakeHdmiCecController::removeLogicalAddresses
+
+- A false result and a non-ok status are ordinary outcomes on the removal path rather than errors,
+  so neither is treated differently in the body from the successful case.
+- Superseded: "treated no differently from the successful case" no longer holds once the controller
+  keeps a registration record. Only an ok status with a `true` result removes the addresses from
+  `getRegisteredLogicalAddresses()`; a false result or a non-ok status leaves the registrations as
+  they were. Unlike `addLogicalAddresses()`, the body takes no configurable delay.
+
+### FakeHdmiCecController::sendMessage
+
+- Pre-refine: the frame was captured whole and never examined. Nothing read a destination nibble,
+  inspected an opcode or applied a length limit, so the fake could not classify a frame as directed
+  or broadcast, and the meaning of `ACK_STATE_0` and `ACK_STATE_1` (inverted between those two
+  cases) stayed a property of the adapter under test.
+- Superseded: the fake now answers the adapter's self-addressed allocation polls (not acknowledged
+  unless a test marks the address occupied), so "never examined" no longer describes the body.
+
+### FakeHdmiCecController::getInterfaceVersion and getInterfaceHash
+
+- The divergence trace fires only when the reported value differs from the compiled-in one, so the
+  line that does appear names the moment the controller was made to report something the snapshot
+  would not, rather than leaving a silent metadata change to be inferred from a later failure.
+- `setInterfaceVersion()` / `setInterfaceHash()` install such values, and the
+  `DriverAidlCompatibilityTest` cases that drive them are what make these branches reached.
+
+### FakeHdmiCecController::setAddLogicalAddressesDelayMs
+
+- A negative value is stored as given and treated as "no delay" by the comparison at the point of
+  use, which keeps the setter free of a clamp a caller would have to reason about.
+
+### FakeHdmiCecController::setInterfaceHash and setInterfaceVersion
+
+- The hash setter traces in the same shape as the service's setter, so one line records where in a
+  run the controller was made to report a divergent hash.
+- No validation: the caller owns which hash is reported, and any `int32_t` is a version the caller
+  may want reported.
+
+### FakeHdmiCecController::reset
+
+- At the pre-refine member set, one critical section restores all three canned results, all three
+  canned statuses and both metadata values, and clears all three captures and all three counters.
+- Spelling each default beside the line that restores it keeps a documented default and the code
+  that reinstates it together. Restoring the metadata pair stops a case that installed a divergent
+  hash or version from deciding the outcome of the next one.
+
+### FakeHdmiCecService::getState and getProperty
+
+- `getState`: there is no member behind `DEFAULT_STATE`, so nothing can make the method report
+  anything else, and no canned status exists to make it fail.
+- `getProperty`: no `PropertyValue` is constructed anywhere in the body, so there is no fabricated
+  metric for a test to assert against itself.
+
+### FakeHdmiCecService::getLogicalAddresses
+
+- Each width of the answer (empty, one entry, more than one) reaches a different arm of the adapter
+  under test, which is why the vector is never normalised, sorted, deduplicated or truncated.
+- Superseded: the pre-refine comment said the canned vector is copied out. By default the fake now
+  reflects the addresses registered through its controller; canned overrides remain possible.
+
+### FakeHdmiCecService::open
+
+- An ok status carrying nothing usable (a null controller) is the one combination a test has to
+  ask for explicitly, because the null-controller flag is read only on the ok arm.
+
+### FakeHdmiCecService::close
+
+- "A callback arriving during or after a close is rejected by the adapter's own state guard" is a
+  required behaviour; clearing the captured listener in `close` would make it untestable.
+
+### FakeHdmiCecService::getInterfaceVersion and getInterfaceHash
+
+- The trace fires only on divergence, so an ordinary compatible run prints nothing here and the
+  line that does appear names the change at the moment it would matter.
+
+### FakeHdmiCecService::setLogicalAddressesResult
+
+- Nothing rejects an empty vector, caps its width or validates an entry, because every one of
+  those shapes is a case a test needs to be able to install.
+
+### FakeHdmiCecService::setOpenBinderStatus
+
+- `EX_ILLEGAL_STATE` is the exception the interface documents for an already-open service.
+
+### FakeHdmiCecService::setGetLogicalAddressesBinderStatus
+
+- The failed query and the successful but empty query can be installed separately even though the
+  adapter reports the same outcome for both.
+
+### FakeHdmiCecService::setInterfaceHash and setInterfaceVersion
+
+- The one line a run prints from the hash setter is the record of where the fake was made
+  deliberately incompatible; the harness owns which value produces the refusal.
+- The version is held in a member of its own, so installing it disturbs neither the hash nor any
+  canned response.
+
+### FakeHdmiCecService::getController
+
+- The strong pointer is copied out so the controller outlives the call whatever the service does
+  next. No statement in the class reassigns the member, which is what makes the never-null
+  guarantee hold for the life of the service.
+
+### FakeHdmiCecService::reset
+
+- At the pre-refine member set, one critical section restores every canned response and both
+  metadata values, clears both captures and zeroes all seven counters.
+- Each default is spelled beside the line that restores it, keeping the restored value and the
+  documented default from drifting apart.
+- Three statuses, not seven: `getState()`, `getProperty()`, `registerEventListener()` and
+  `unregisterEventListener()` answer a fixed ok because the middleware never calls them, and a
+  settable failure arm on a method nothing under test reaches would imply coverage that does not
+  exist. Their counters are still cleared, because "the adapter never called this" is asserted
+  against them.
+
+### FakeHdmiCecService::fireOnMessageReceived, fireOnStateChanged and fireOnMessageSent
+
+- Copying the listener out inside the critical section and invoking it outside is what makes the
+  re-entrancy the declaration describes safe.
+- The traced status follows the declaration's local-versus-remote distinction: from a local
+  listener it is the callback's own return value; from a remote proxy the interface is oneway and
+  the value reports only that the driver accepted the transaction. Nothing waits for, or can
+  observe, a remote callback's own outcome.
+- `fireOnStateChanged` matches `fireOnMessageReceived` in where the lock is released and in what
+  the traced status does and does not establish.
+
+### FakeHdmiCecService::getInstance and setInstance
+
+- `getInstance` needs no lock because no test thread and no binder thread can be running while the
+  value changes.
+- `setInstance` traces the label of the object it replaces and then the label now in place, so a
+  log carries one record of every change to the pointer.
+
+### registerFakeHdmiCecService
+
+- Four checks, in order, and the order bounds the damage: the null service and the binder driver
+  node are tested before libbinder is touched, because the linked libbinder treats a driver it
+  cannot open as fatal; a host with no kernel binder support therefore gets a false return instead
+  of losing its whole run, every legacy case included. Only then is a service manager obtained and
+  tested, and only then is the name offered and the resulting status tested.
+- A driver present but speaking a protocol version the linked libbinder was not built for stays
+  fatal inside libbinder and is deliberately not screened here: policing that is the middleware's
+  own preflight, and a second copy of a production decision inside a test fake would be one more
+  thing to keep in step.
+- Nothing in the body time-limits the service manager request, which is why the declaration hands
+  that bound to the parent harness.
+- A false return is always accompanied by a trace giving its reason.
+
 ## mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp
 
 Detail moved out of the source comments of the separate-process fake-service host. The source comments say what each symbol does; this section keeps the full contracts and the reasoning behind them.
@@ -3255,6 +2975,323 @@ Detail moved out of the source comments of the separate-process fake-service hos
 - Which wait applies depends on whether the parent supplied a channel. With one, the channel and the shutdown path are watched together so neither starves the other. Without one, it is the same blocking self-pipe wait the program has always performed, unchanged, which keeps an invocation that supplies neither variable exactly as it was.
 - Teardown releases what the program took, on every path including a failed one: the published pointer is cleared so nothing can reach a fake that is going away, the self-pipe descriptors are closed, and the inherited channel descriptors are closed so the parent sees end of file promptly rather than at exit. The binder registration needs no withdrawal: the pinned service manager exposes no removal API and process exit releases it.
 
+## tests/L1Tests/test_main.cpp
+
+### File overview (`@file`)
+
+- The back-end selection resolves once per process, and it resolves in this harness: the
+  `LibCCEC::init()` call in `CecTestEnvironment::SetUp()` is the first thing in the binary that
+  forces `Driver::getInstance()`. Its helper `resolveBackEnd` (in `ccec/src/Driver.cpp`) constructs
+  both back-ends, asks the AIDL one whether its service came up, and emits exactly one
+  selected-path line, which every functional suite, the coverage runner and device-level
+  validation match on because the `Driver` interface has no introspection API.
+- Consequences: anything that is to influence the selection must happen before that init call,
+  and nothing after it can change the outcome. Registering a fake service after init leaves the
+  legacy back-end selected and produces a green run that proves nothing about the AIDL path, so the
+  mode handling sits ahead of init by construction, not merely "early in SetUp".
+- `CEC_TEST_AIDL_MODE` is read only in this file and in `tests/L2Tests/test_main.cpp`; no
+  production source reads it, and none may.
+- Modes and the coverage-runner invocations they serve:
+  - `absent` (invocation A): register nothing. An unset or empty variable means exactly this, so a
+    plain `./run_L1Tests` behaves as it did before the AIDL back-end existed, and this mode does not
+    touch libbinder at all.
+  - `compatible` (invocation B): register an in-process fake reporting its real, frozen metadata;
+    the AIDL back-end is selected.
+  - `incompatible` (invocation C): register an in-process fake whose interface hash is `"-1"`. The
+    service is present but rejected as incompatible, the rejection is logged and the legacy
+    back-end is selected. Presence alone is not sufficient, and this mode proves it.
+  - `remote`: not implemented here. It means "launch the out-of-process fake host", which is
+    `run_L2Tests`' job; here it is a hard failure naming that runner.
+- An unrecognised value is a hard failure, never a quiet fall back to `absent`: a typo that
+  silently downgraded the run to the legacy path would report a green result for an AIDL
+  invocation that never happened.
+- Why an in-process fake, and its limits: libbinder resolves a name registered in the calling
+  process to the local `BBinder`, so `interface_cast` returns that very object. No `Bp*` proxy is
+  created, no transaction crosses the binder driver and the client threadpool is not involved,
+  which is why a separate L2 tier hosts the fake in its own process.
+- The in-process fake is also the only way to reach the compatibility-rejection branches:
+  `halcompat::isCompatible` (`rdk-halif-aidl/common/current/halcompat.h`) rejects an empty or
+  `"-1"` interface hash, and only an object whose `getInterfaceHash()` dispatches virtually can
+  report such a value. A remote fake cannot, because its generated `onTransact` answers the
+  metadata transactions from compiled-in constants; mode `incompatible` therefore has no L2
+  counterpart.
+- This file does not start the binder client threadpool. `DriverAidlImpl::open()` owns that and
+  runs inside the init call; starting one here would duplicate an ownership the production
+  back-end already holds.
+
+### `#include "fake_hdmi_cec_aidl_service.h"`
+
+- Included unqualified because `AM_CPPFLAGS` already carries `-I$(top_srcdir)/mocks/hdmicec`, the
+  same route `hdmi_cec_driver_mock.h` travels. It supplies the fake, its metadata overrides and the
+  registration entry point that publishes it under the production service name.
+
+### `#include "../../ccec/src/DriverAidlImpl.hpp"`
+
+- Reached by relative path rather than an added `-I`, the same arrangement the `ccec/` suites use
+  for `DriverImpl.hpp`, one directory level shallower.
+- Needed for exactly one symbol, `DriverAidlImpl::isBinderPreflightOk()`. Reaching the service
+  manager unguarded is unsafe in two independent ways on the pinned binder stack: with no driver
+  node libbinder aborts the process rather than returning an error, and with a driver node but no
+  running servicemanager it blocks indefinitely waiting for binder handle 0. A plain existence
+  check on the driver node would cover only the first.
+- `isBinderPreflightOk()` covers both (node openable, protocol version equal, handle 0 resolved
+  within a bounded timeout) and is public precisely so a test translation unit may call it. Using
+  it also keeps the driver-node path out of this file, so there is no second spelling to drift.
+
+### `#include "../../ccec/src/DriverImpl.hpp"`
+
+- Included for the class only, so the per-test registry restoration can establish by
+  `dynamic_cast` which back-end the process resolved to. Restoring the registry calls
+  `Driver::removeLogicalAddress()`, which on the AIDL back-end issues a binder transaction this
+  harness must not perform. Nothing else in the file needs the type, and no case is served by it.
+
+### g_fakeAidlService
+
+- Follows the same single-pointer idiom as `g_driverMock`.
+- Deliberately never released in `TearDown`. The pinned C++ `IServiceManager` exposes no
+  service-removal API; the service manager keeps a reference to the published binder and the
+  middleware may hold one too. Dropping this reference would not unpublish anything; at best it
+  would destroy an object the service manager still advertises. Nothing deregisters it.
+
+### Log-injection rendering contract (RENDER_LIMIT, renderUntrustedValue)
+
+- Defect removed (CWE-117): diagnostics used to stream caller-supplied text verbatim. A value
+  carrying a newline ended the message and began a line of its own, and a line beginning
+  `::error::` is a GitHub Actions workflow command. Measured before the fix:
+  `CEC_TEST_AIDL_MODE=$'bogus\n::error::FORGED_L1_ANNOTATION'` produced a standalone forged
+  `::error::` annotation in the run log, and a five-thousand-character value produced more than ten
+  kilobytes of diagnostics, burying the real failure.
+- The contract, in application order (the order makes the escaping unambiguous and reversible):
+  - (a) a literal backslash becomes `\\` first, so every escape introduced afterwards is
+    distinguishable from the same characters occurring literally in the value;
+  - (b) `0x0A` becomes `\n`, `0x0D` becomes `\r`, `0x09` becomes `\t`, and every other byte outside
+    printable ASCII `0x20..0x7E` becomes `\xNN` in lower-case hex. Classification is by byte value
+    on `unsigned char` with no locale-sensitive function (no `isprint`, `iswprint` or ctype table),
+    so it behaves as under `LC_ALL=C` in any locale and no multi-byte sequence can hide a control
+    character;
+  - (c) the rendering is truncated at `RENDER_LIMIT` characters and
+    `...[truncated, N bytes total]` is appended, N being the value's own length in bytes, so a
+    caller cannot drown a log and the message still says how much was withheld;
+  - (d) it is applied to the value, never to the surrounding message, and the result is always
+    delimited with double quotes, so an empty value is visible as `""` rather than as a gap;
+  - (e) it never begins a diagnostic line: every message keeps its own prefix in front of it and the
+    rendering begins with `"`. With (b) leaving no raw newline, a forged standalone `::error::`,
+    `::warning::` or `::notice::` line is unreachable by construction rather than unlikely.
+- This is one of five copies of one contract; they must not diverge, and a change to any is a
+  change to all five:
+  - `hdmicec/tests/L1Tests/run_coverage.sh` — `render_untrusted()`
+  - `hdmicec/.github/workflows/aidl-path-tests-rootfs.sh` — `render_untrusted()`
+  - `hdmicec/tests/L1Tests/test_main.cpp` — `renderUntrustedValue()`
+  - `hdmicec/tests/L2Tests/test_main.cpp` — `renderUntrustedValue()`
+  - `hdmicec/mocks/hdmicec/fake_hdmi_cec_aidl_service_host.cpp` — `renderUntrustedValue()`
+- The two convenience overloads are `inline` so a copy whose file does not call one of them raises
+  no `-Wunused-function` warning; the copies are identical by construction, and which overloads a
+  file calls is a property of its callers.
+- Five file-local copies rather than one shared helper, deliberately: two are shell and three are
+  C++, spread over three build targets and one non-built script, and a shared header would add a
+  build-system edge for a twenty-line function. The cost is the cross-reference every copy carries.
+- `renderUntrustedValue(const char *, std::size_t)`: every diagnostic in the file naming a value
+  supplied by the environment, the command line or another process goes through it. Any input is
+  acceptable, including embedded newlines, carriage returns, ANSI escape sequences, invalid UTF-8
+  and multi-kilobyte payloads. The result is never longer than `RENDER_LIMIT` characters plus the
+  truncation note and the two quotes. Rendering a whole message would escape the message's own
+  punctuation and destroy the prefix clause (e) depends on.
+- Backslash arm first (function body): this ordering is clause (a); it makes a rendered `\n`
+  unambiguously either the two characters the value contained or a newline it contained.
+- `renderUntrustedValue(const char *)`: a null pointer renders as the four characters `<unset>`,
+  undelimited, because "unset" and "set to the empty string" are different facts.
+
+### AIDL_MODE_VARIABLE and the four mode spellings
+
+- Spelled exactly once each; the spellings are a fixed contract shared with
+  `tests/L2Tests/test_main.cpp`, `run_coverage.sh`, both CI workflows and the test documentation.
+
+### BROKEN_INTERFACE_HASH
+
+- `halcompat::isCompatible` rejects `"-1"`; the accompanying comment in `halcompat.h` reads "hash
+  RPC failed - not a dev build, a broken link". Reporting it is the only way to drive a present
+  service down the incompatible arm of the selection.
+
+### failIfServiceAlreadyPublished
+
+- A stale registration left by another process makes the run's selection resolve against that
+  service instead of the harness's fake, so the outcome would depend on what happened to be running
+  on the machine. Overwriting the entry hides the collision; tolerating it makes a green result
+  meaningless.
+- The service name is supplied from the generated interface rather than a literal, so the harness
+  cannot drift from the name the middleware looks up.
+- A collision, or a service manager that cannot be reached, is raised as a fatal gtest failure.
+- Called before `isBinderPreflightOk()` has passed, it would abort or block the process instead of
+  failing the test.
+- The pinned C++ `IServiceManager` offers no way to clear a collision.
+
+### publishFakeForMode
+
+- Mode `incompatible` differs from `compatible` by exactly one call, the interface-hash override,
+  which keeps the two modes' divergence auditable at a glance.
+- Without a usable binder transport the run fails rather than publishing nothing: publishing
+  nothing would select the legacy back-end and report a green result for an AIDL invocation that
+  never ran.
+- Fatal failures: no usable binder transport, the name already published, a fake that cannot be
+  constructed, a fake that cannot be published.
+- Preconditions: it runs ahead of `LibCCEC::init()` in `CecTestEnvironment::SetUp()`, because a fake
+  published after init leaves the already-resolved selection on the legacy back-end; and nothing
+  may already be published under the production name, which `failIfServiceAlreadyPublished()`
+  establishes.
+- Nothing withdraws the registration, because the pinned C++ `IServiceManager` has no
+  service-removal API.
+- `setInstance` ordering (function body): `SetUp` runs before any `TEST_F` body, which lets a case
+  configure or observe a fake registered long before it ran.
+
+### applyAidlModeBeforeInit
+
+- The one place in `run_L1Tests` that acts on the four modes.
+- Every path that does not need libbinder avoids it: `absent` returns without touching it, and both
+  rejection paths (`remote`, unrecognised) fail before reaching it.
+- An unrecognised value, mode `remote` and any failure to publish the fake are each fatal gtest
+  failures; for `compatible` and `incompatible` the process holds a reference to the fake.
+- `LibCCEC::init()` is the first thing in the binary that forces `Driver::getInstance()`; the
+  selection is then fixed, so a service reached after init leaves it on the legacy back-end and
+  produces a green run that proves nothing about the AIDL path.
+- A fatal assertion returns from this function without unwinding its caller, so
+  `CecTestEnvironment::SetUp()` invokes it through `ASSERT_NO_FATAL_FAILURE`.
+- Rendered unrecognised value (function body): it is the one diagnostic in the binary naming a
+  value nothing has validated (every earlier arm matched a known spelling). Streamed raw,
+  `$'bogus\n::error::FORGED'` ended the message and began a standalone GitHub workflow command;
+  `renderUntrustedValue()` leaves no newline, bounds the length and keeps the sentence's own words
+  in front of the value.
+
+### LogicalAddressRegistryGuard
+
+- The driver's list of acquired logical addresses is the only piece of its state a test can add to
+  that nothing takes away again. `DriverImpl::close()` deliberately does not clear it, the AIDL
+  back-end matches that, and clearing would be an unauthorized change to legacy behaviour.
+- Two groups of cases sit on opposite sides of this: some register an address and do not remove it
+  in teardown; others assert that an address is not registered, because
+  `Connection::matchSource()` only rewrites a frame's source nibble when
+  `Driver::isValidLogicalAddress()` reports the address as acquired.
+- In declaration order the negative-precondition cases run first and everything passes. Under
+  `--gtest_shuffle` (a valid order CI may use) the registering cases can run first and the others
+  then fail on a rewritten source nibble. Measured: seeds 12345 and 99999 each failed exactly two
+  cases; seed 54321 passed. A suite whose verdict depends on its order cannot certify anything.
+- Why a listener rather than a fixture teardown: the twelve pre-existing L1 units are outside the
+  migration's diff by design (an acceptance check enforces that), and a teardown in the two
+  registering fixtures would fix only those two and leave every other and every future fixture
+  free to reintroduce the leak. A process-global listener makes the property hold for all: the next
+  case starts from the registry the first case started from.
+- It does not touch production close/term semantics: the registry is restored from outside the
+  driver through its public interface, and no production file changes.
+- It does nothing when nothing leaked, the case after all but a handful of tests. Detection is a
+  pure list walk under the driver's lock (`Driver::isValidLogicalAddress()` reaches no HAL and no
+  service on either back-end), so the common path costs fifteen list walks and no HAL call.
+- It issues no binder call, ever: `Driver::removeLogicalAddress()` on the AIDL back-end is a
+  transaction, so restoration runs only on the legacy back-end, and under an AIDL selection a
+  residual registration is reported and left. The order dependence is a legacy-invocation problem
+  anyway: the leaking cases are the `LibCCEC` ones, which the AIDL invocations' filters exclude,
+  and the AIDL session fixture re-registers the device's address around every case.
+- Superseded: the pre-refine comment said the AIDL session fixture's cases add and remove their
+  addresses within a single case. The AIDL back-end now registers the device's address when the
+  driver is enabled, and the fixture's close-open cycle in `SetUp` and `TearDown` re-registers it.
+- It never fails a test: everything it calls is wrapped, because a restoration problem must not be
+  attributed to a case that already produced its own result. It reports on stdout instead.
+- The gmock warning: restoring on the legacy back-end reaches `HdmiCecRemoveLogicalAddress()` on
+  the process-global mock with no expectation, so gmock prints "Uninteresting mock function call"
+  and takes the mock's `ON_CALL` default (`HDMI_CEC_IO_SUCCESS`, installed in
+  `hdmi_cec_driver_mock.cpp`). This is accepted rather than silenced. Installing a permissive
+  `EXPECT_CALL` and then calling `::testing::Mock::VerifyAndClearExpectations()` was measured and
+  rejected: it clears every expectation live on the mock, including one a case legitimately left
+  unmet, and could hide a real failure. `::testing::Mock::AllowUninterestingCalls()` would express
+  this exactly but is private in GoogleTest 1.15. An explanatory line is logged immediately before
+  the removals.
+
+### LogicalAddressRegistryGuard::LogicalAddressRegistryGuard
+
+- The baseline is taken lazily at the first test, deliberately: a run whose environment `SetUp`
+  failed fatally never starts a test, and the guard must not be what forces the back-end selection
+  on such a run.
+
+### LogicalAddressRegistryGuard::OnTestStart
+
+- `testInfo` is unused; the first call is what matters, not which case it belongs to.
+- The baseline is captured rather than assumed empty, so an address `init()` itself acquired is
+  treated as part of the starting state instead of being torn out from under every case.
+- Superseded: the pre-refine comment said no address is acquired by `init()` ("none does today").
+  That no longer holds on the AIDL back-end, which registers the device's DeviceType-derived
+  logical address when the driver is enabled inside `init()`; the capture-not-assume design covers
+  it unchanged.
+
+### LogicalAddressRegistryGuard::OnTestEnd
+
+- `testInfo` is named in the report so a leak is attributed to the case that made it rather than
+  the case that would have tripped over it.
+- GoogleTest sequences listener `OnTestEnd` after the case's own `TearDown`, so a fixture that
+  cleans up after itself has already done so.
+- Addresses that were part of the baseline are left exactly as they are; every other address is
+  removed or the reason it could not be is reported.
+- Each legacy removal produces one gmock warning; the class notes record why that is accepted.
+
+### LogicalAddressRegistryGuard assignable-address enum
+
+- `0x0` to `0xE` inclusive. `0xF` is UNREGISTERED/BROADCAST, a destination and never an address a
+  device acquires; the AIDL controller documents the same range for `addLogicalAddresses()`, so
+  probing it would ask about a value neither back-end can hold.
+
+### LogicalAddressRegistryGuard::isRegistered
+
+- Returning false when the query itself failed is the safe direction: it leads to no removal.
+- `Driver::isValidLogicalAddress()` is a list walk under the driver's own lock on both back-ends,
+  reaching no HAL, service or binder transaction, which makes probing every address after every test
+  free. It does not check lifecycle state, so it answers on a closed driver as on an open one, which
+  matters because the registry survives a close.
+
+### LogicalAddressRegistryGuard::restore
+
+- When it returns false nothing was called, and the caller must not report a residual registration
+  as the failure of a removal that never ran.
+- `InvalidStateException` is expected rather than exceptional: the driver must be OPENED for a
+  removal, and a case that terminated the library leaves it CLOSED. It is reported and the loop
+  continues, because the remaining addresses are worth attempting and nothing the guard does may
+  fail a test.
+
+### LogicalAddressRegistryGuard::baselineRegistered
+
+- Asserting that the baseline is empty would be asserting a property of `LibCCEC::init()` from the
+  wrong place.
+- Superseded: the pre-refine comment called the baseline "empty in practice on this binary". Under
+  an AIDL selection it can now hold the address `init()` registers from the device's DeviceType; on
+  the legacy back-end it remains empty.
+
+### CecTestEnvironment::SetUp
+
+- The mode is applied before `init()` because `init()` is the one-way door that fixes the
+  selection; a failure stops the run rather than letting `init()` resolve a selection the requested
+  mode did not ask for.
+- Init failure is fatal to the whole run: `SetUp` runs once for the binary and every
+  driver-dependent case takes an initialized CEC stack as its precondition, so carrying on would
+  assert against an unopened stack and report green for a process that never came up.
+- Nothing can legitimately be ignored: `init()` raises `InvalidStateException` on a second call,
+  which a once-per-process `SetUp` never reaches, and the exceptions it can raise
+  (`Driver::getInstance().open()` refused by the HAL, `Bus::getInstance().start()` failing) are
+  real failures.
+
+### CecTestEnvironment::TearDown
+
+- `TearDown` runs after the suite, so every result has been recorded; aborting would obscure
+  legitimately earned results, and a fatal assertion would cut the three cleanup statements short.
+  A non-fatal expectation makes a failing `term()` visible while the cleanup completes.
+- One failure is expected and honest: when `init()` failed in `SetUp`, `term()` raises
+  `InvalidStateException` and is reported as a second failure, which correctly says the process
+  never came up.
+- Nothing unpublishes the fake AIDL service; see `g_fakeAidlService`.
+
+### main
+
+- `LogicalAddressRegistryGuard` makes the binary's result independent of case order, including
+  under `--gtest_shuffle`, which used to fail two cases on two of three sampled seeds.
+- It is appended so it runs after the default result printer's `OnTestEnd`: the case's `[ OK ]` or
+  `[ FAILED ]` line is printed first and any guard report appears beneath it. GoogleTest takes
+  ownership of the listener, so nothing deletes it.
+
 ## tests/L1Tests/ccec/test_DriverAidl.cpp (part 1 of 6)
 
 Detail moved out of the comments in the file header, the contract and manifest blocks, the
@@ -3428,20 +3465,21 @@ file-scope constants and the helpers through `ScopedCecLogLevel`.
   yields one selection outcome and every outcome needs its own process; hence fixtures are
   partitioned by invocation and each invocation-specific one asserts its precondition in `SetUp`
   rather than adapting.
-- The 85 run under invocation A are the first five fixtures, 23 + 28 + 4 + 25 + 5. Invocation A
-  excludes `DriverAidlSessionTest` (27) and `DriverAidlTransmitTest` (12), the 39 excluded,
+- The 94 run under invocation A are the first five fixtures, 23 + 28 + 4 + 34 + 5. Invocation A
+  excludes `DriverAidlSessionTest` (32) and `DriverAidlTransmitTest` (12), the 44 excluded,
   because both require the AIDL back-end to be the resolved one.
 - The runner's per-invocation gate reconciles selected plus excluded against registered, so all
-  three numbers matter and a stale one fails the invocation. Registered is 607 = 483 pre-existing
-  + 124. Every figure was measured on the host with the runner's own filters, by
+  three numbers matter and a stale one fails the invocation. Registered is 621 = 483 pre-existing
+  + 138, in 25 suites; selected and excluded are 577 and 44 under A, 437 and 184 under B, and
+  393 and 228 under C. Every figure was measured on the host with the runner's own filters, by
   `./run_L1Tests --gtest_list_tests --gtest_filter=<filter> | grep -cE '^  [A-Za-z]'`, with the
   filters taken verbatim from `run_coverage.sh`'s `INVOCATION_MATRIX`. Listing is a registration
   query needing no binder driver, so B's and C's counts are measurable on a driverless host; they
   are measured rather than derived because arithmetic over the table misses a renamed or
   unclassified suite.
-- Only invocation A was executed on the host (568 selected, 568 passed, exit 0). A binder-capable
-  runner produces B's and C's outcomes; a count mismatch there means a filter or classification
-  drifted, not that a test failed.
+- Invocation A was executed on the host (577 selected from 23 suites, 577 passed, exit 0).
+  B (437 of 437 passed) and C (393 of 393 passed) were executed in a binder-capable guest; a
+  count mismatch there means a filter or classification drifted, not that a test failed.
 - The filters are not written out in the file: `run_coverage.sh` derives them from five
   classification constants (`NEUTRAL_SUITES`, `LEGACY_BOUND_SUITES`,
   `CONTRACT_ANY_BACKEND_SUITES`, `CONTRACT_LEGACY_ONLY_SUITES`, `CONTRACT_AIDL_ONLY_SUITES`) and
@@ -3462,11 +3500,16 @@ file-scope constants and the helpers through `ScopedCecLogLevel`.
   reason (a present, rejected service) and the mid-process registration case would register a
   second service under a taken name, which the harness's collision check
   (`failIfServiceAlreadyPublished()` in `tests/L1Tests/test_main.cpp`) forbids.
-- `EXPECTED_SUITE_PATTERN` needs no edit for this file: it is a stable subset of the nine oldest,
-  largest fixtures, so adding a test file never touches it, and none of these fixtures belongs in
-  it because a run exercising only this file is the partial run it exists to catch. The count
-  gate in `verify_results` reconciles the executed count against `--gtest_list_tests` rather than
-  a hardcoded number, so added cases need no expected-count edit.
+- `EXPECTED_SUITE_PATTERN` names twelve fixtures: the nine oldest, largest pre-existing ones and
+  this file's three back-end-independent fixtures, `DriverAidlCompatibilityTest`,
+  `DriverAidlPreflightTest` and `DriverAidlLocalInstanceTest`. The pattern only proves the
+  results file came from this suite; a partial run is caught by the per-invocation count
+  reconciliation, which is why widening it is safe. The count gate in `verify_results` reconciles
+  the executed count against `--gtest_list_tests` rather than a hardcoded number, so added cases
+  need no expected-count edit.
+- Superseded: an earlier comment held that `EXPECTED_SUITE_PATTERN` needed no edit for this file
+  and that none of its fixtures belonged in it, because a run exercising only this file is the
+  partial run the pattern exists to catch; `run_coverage.sh` names the three fixtures above.
 - References into `run_coverage.sh` are by name rather than line, because that file grows and a
   line citation into it stops identifying its subject; shell function and constant names are
   greppable and survive edits.
@@ -7782,7 +7825,8 @@ the global environment and `main()`.
 
 ### HDMI_CEC_L2_DUALPATH
 
-- The group's `@brief` named "the 14 cases" of this file: `DualPathSelectionTest` 4, `DualPathLegacyFlowTest` 6, `DualPathAidlFlowTest` 4.
+- The file registers 16 cases: `DualPathSelectionTest` 4, `DualPathLegacyFlowTest` 6, `DualPathAidlFlowTest` 6. The group's `@brief` carries no count.
+- Superseded: the pre-refine group `@brief` named "the 14 cases" of this file, when `DualPathAidlFlowTest` held 4. `EnablingTheDriverRegistersOneAddressThatLibCcecReadsBackThroughTheHal` and `LibCCECReportsTheFixedPhysicalAddressWithoutCrossingBinder` brought it to 6.
 
 ### File overview (`@file`)
 
@@ -7860,16 +7904,17 @@ the global environment and `main()`.
 |---|---|---|---|
 | `DualPathSelectionTest` | 4 | D and E | nothing |
 | `DualPathLegacyFlowTest` | 6 | D | E (fixture `SetUp`, back-end check) |
-| `DualPathAidlFlowTest` | 4 | E, all four | D (fixture `SetUp`, back-end check) |
-| Registered in this file | 14 | | |
+| `DualPathAidlFlowTest` | 6 | E, all six | D (fixture `SetUp`, back-end check) |
+| Registered in this file | 16 | | |
 
 - The fourth selection case, `WriteControlCommandReportsEpipeAndTheChildIsStillReapedInsteadOfKillingTheRunner`, is about the harness: it drives the harness's own `writeControlCommand()` against a descriptor whose reader has gone, requires the command-specific `EPIPE` diagnostic, and requires the child that made the descriptor reader-less to be reaped through the same terminate-and-reap a teardown performs. It builds its own pipes and child, needs no host, driver or service manager, and executes under both invocations.
 - `--gtest_filter=DualPath*` selects the suite; the three fixtures share the prefix to match the sibling convention in `tests/L1Tests/ccec/test_DriverAidl.cpp`.
-- The registered total is identical for D and E because the arm-specific fixtures skip rather than fail: D = 4 selection pass + 6 legacy pass + 4 AIDL skip; E = 4 selection pass + 6 legacy skip + 4 AIDL pass. Skip identities follow from the fixture guards: under D only the four `DualPathAidlFlowTest` cases, under E only the six `DualPathLegacyFlowTest` cases. Adding an unconditional case moves the passing count and no skip identity.
-- Measured invocation D (file's own cases): 14 tests from 3 suites ran, 10 passed, 4 skipped, exit status zero, with "back-end selected : legacy" preceded by "the binder transport is unavailable on this platform" — the fallback-not-abort requirement visible in the run's own output. The invocation E split was derived from the fixture guards, not measured in the repository; re-measure it on the binder-capable runner.
-- There are exactly three `GTEST_SKIP` sites. Two are opposite-arm fixture skips: `DualPathLegacyFlowTest::SetUp` skips when the resolved back-end is not legacy (fires under E, takes all six cases), and `DualPathAidlFlowTest::SetUp` skips when it is not AIDL (fires under D, takes all four). The third is inside `DualPathSelectionTest.TheResolvedBackEndMatchesTheModeTheHarnessWasGiven` and is not an arm skip: it fires only when `CEC_TEST_AIDL_MODE` is unset or empty; the matrix sets the variable for D and E, so it fires under neither, and its appearance means the runner did not export the variable — a harness fault to treat as a failure, not to allowlist.
+- The registered total is identical for D and E because the arm-specific fixtures skip rather than fail: D = 4 selection pass + 6 legacy pass + 6 AIDL skip; E = 4 selection pass + 6 legacy skip + 6 AIDL pass. Skip identities follow from the fixture guards: under D only the six `DualPathAidlFlowTest` cases, under E only the six `DualPathLegacyFlowTest` cases. Adding an unconditional case moves the passing count and no skip identity.
+- Measured invocation D (file's own cases): 16 tests from 3 suites ran, 10 passed, the 6 `DualPathAidlFlowTest` cases skipped, exit status zero, with "back-end selected : legacy" preceded by "the binder transport is unavailable on this platform" — the fallback-not-abort requirement visible in the run's own output. With `DualPathHostLifecycleTest` the tier registers 17 cases in 4 suites: invocation D ran 17, 11 passed and the 6 `DualPathAidlFlowTest` cases skipped, exit status zero; invocation E, measured in a binder-capable guest, ran 17, 11 passed and the 6 `DualPathLegacyFlowTest` cases skipped.
+- Superseded: an earlier measurement of 14 tests from 3 suites (10 passed, 4 skipped) under D predates the two added `DualPathAidlFlowTest` cases, and the invocation E split it gave was derived from the fixture guards rather than measured.
+- There are exactly three `GTEST_SKIP` sites. Two are opposite-arm fixture skips: `DualPathLegacyFlowTest::SetUp` skips when the resolved back-end is not legacy (fires under E, takes all six cases), and `DualPathAidlFlowTest::SetUp` skips when it is not AIDL (fires under D, takes all six). The third is inside `DualPathSelectionTest.TheResolvedBackEndMatchesTheModeTheHarnessWasGiven` and is not an arm skip: it fires only when `CEC_TEST_AIDL_MODE` is unset or empty; the matrix sets the variable for D and E, so it fires under neither, and its appearance means the runner did not export the variable — a harness fault to treat as a failure, not to allowlist.
 - The two inbound AIDL cases, `InboundFrameFromTheFakeServiceArrivesOnABinderThreadAndReachesTheTypedProcessor` and `AFrameDeliveredWhileTheDriverIsNotOpenedIsRejectedByTheStateGuard`, execute under E through the host's control channel; an E run reporting any AIDL case skipped is a defect.
-- The whole skip allowlist: under D the four `DualPathAidlFlowTest` cases, under E the six `DualPathLegacyFlowTest` cases; the third site belongs in none.
+- The whole skip allowlist: under D the six `DualPathAidlFlowTest` cases, under E the six `DualPathLegacyFlowTest` cases; the third site belongs in none.
 - `DualPathAidlFlowTest::SetUp` asserts, rather than skips on, the host's channel being open: under E the AIDL back-end resolved, so a host was published and ready and the harness proved its channel with a ping. A closed channel is a harness or host defect; skipping would let E report green with every observation it exists to make not made.
 - Selected-path log literals, transcribed from `ccec/src/Driver.cpp` (whose constants live in an anonymous namespace and cannot be imported) so that the runner's grep and a human reader agree on one string; exactly one appears per process:
   - invocation E (AIDL selected): `Driver::getInstance : HDMI CEC HAL back-end selected : AIDL`

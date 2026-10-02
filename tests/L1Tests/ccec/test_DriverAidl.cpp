@@ -144,17 +144,17 @@ namespace halcompat = ::com::rdk::hal::halcompat;
  *   DriverAidlCompatibilityTest     23  any       A, B, C     any                 no
  *   DriverAidlPreflightTest         28  any       A, B, C     any                 no
  *   DriverAidlSelectionTest          4  legacy    A           absent              no
- *   DriverAidlLocalInstanceTest     25  any       A, B, C     any                 no
+ *   DriverAidlLocalInstanceTest     34  any       A, B, C     any                 no
  *   DriverAidlLegacyArmTest          5  legacy    A           absent              no
- *   DriverAidlSessionTest           27  AIDL      B           compatible          yes
+ *   DriverAidlSessionTest           32  AIDL      B           compatible          yes
  *   DriverAidlTransmitTest          12  AIDL      B           compatible          yes
  *   ------------------------------------------------------------------------------------------
- *                                  124  of which 85 run under invocation A
+ *                                  138  of which 94 run under invocation A
  *
  *   Invocation  Registered  Selected  Excluded
- *   A                  607       568        39
- *   B                  607       423       184
- *   C                  607       384       223
+ *   A                  621       577        44
+ *   B                  621       437       184
+ *   C                  621       393       228
  *
  * A fixture run under the wrong invocation fails in SetUp rather than skipping. Back-ends any,
  * legacy and AIDL are run_coverage.sh's CONTRACT_ANY_BACKEND_SUITES, CONTRACT_LEGACY_ONLY_SUITES

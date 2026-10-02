@@ -193,16 +193,16 @@
 #      was omitted" comes to stand beside triggers it does not describe.
 #   2. FUNCTION FIGURES COME FROM THE ALIAS RECORDS, NOT THE LEADER RECORDS.  lcov 2.x
 #      writes per-function data as FNL:<index>,<start>,<end> and
-#      FNA:<index>,<count>,<name> (this trace carries 440 FNA and 431 FNL records and
+#      FNA:<index>,<count>,<name> (this trace carries 513 FNA and 503 FNL records and
 #      zero of the older FN:/FNDA: records).  Counting the FNA aliases reproduces
-#      `lcov --summary` EXACTLY -- both report 377/440 -- whereas the per-file FNF:/FNH:
-#      leader totals give 375/431, because several aliases can share one leader.  The
+#      `lcov --summary` EXACTLY -- both report 481/513 -- whereas the per-file FNF:/FNH:
+#      leader totals give 479/503, because several aliases can share one leader.  The
 #      FUNCTIONS column below is therefore alias-derived so that the TOTAL row reconciles
 #      with the summary block, and the leader figures are printed alongside it rather than
 #      dropped.  Only FNA's numeric SECOND field is read, so a demangled name containing
 #      commas (templates, operator overloads) cannot corrupt the count; the name is
 #      always the LAST field.
-#   3. NOT EVERY FILE HAS BRANCH DATA, AND THAT IS CORRECT.  22 of the 30 files in the
+#   3. NOT EVERY FILE HAS BRANCH DATA, AND THAT IS CORRECT.  24 of the 32 files in the
 #      filtered trace carry BRF:/BRH: records; the other 8 contain no branch arcs at all,
 #      so lcov emits no branch record for them.  Those cells render "n/a  no data"
 #      instead of a misleading 0.0%.
@@ -1024,7 +1024,7 @@ readonly DEPENDENCY_EXCLUDES=(
 # WHY halcompat.h IS ON THIS LIST AND NOT MERELY MENTIONED IN A COMMENT.  AAP 0.6.5 requires it
 # retained in the filtered copy: it is CONSUMED HALIF SOURCE, not third-party toolchain code.
 # getService<I>() and isCompatible<I>() are called from the selection path, and SEVENTEEN of the
-# 89 required branch arms in BRANCH_MANIFEST below live inside isCompatible<>() -- both arms of
+# 116 required branch arms in BRANCH_MANIFEST below live inside isCompatible<>() -- both arms of
 # the null gate, of the empty-hash and "-1" gates, of the "notfrozen" gate, and of each of the
 # era, major and ordering comparisons.  The branch gate reads the UNFILTERED capture, so those
 # seventeen are not what a
@@ -3556,10 +3556,12 @@ genhtml_run() {
 #   br_cell            awk-local in the per-file table program (write_per_file_tsv / per_file_report)
 #   func_cell          awk-local in the per-file table program
 #   line_cell          awk-local in the per-file table program
+#   size_t             C++ type inside the quoted source of BRANCH_MANIFEST's allocate.* loop records
 # ------------------------------------------------------------------------------------
 SELFTEST_NOT_A_COMMAND='br_cell
 func_cell
-line_cell'
+line_cell
+size_t'
 readonly SELFTEST_NOT_A_COMMAND
 
 # ------------------------------------------------------------------------------------
@@ -5094,12 +5096,12 @@ readonly LEGACY_BOUND_SUITES='BusTest.*:ConnectionTest.*:IntegrationFlowTest.*:D
 # The contract suite's own fixtures, partitioned by which back-end each one requires.  Read
 # from the FIXTURE MANIFEST in tests/L1Tests/ccec/test_DriverAidl.cpp, which is the authority
 # for its own case set, and cross-checked against the built binary.
-#   back-end independent  Compatibility 23, Preflight 28, LocalInstance 25  = 76, under A, B and C
+#   back-end independent  Compatibility 23, Preflight 28, LocalInstance 34  = 85, under A, B and C
 #   legacy back-end only  Selection 4, LegacyArm 5                          =  9, under A only
-#   AIDL back-end only    Session 26, Transmit 12                           = 38, under B only
-# That is 123 contract cases, so run_L1Tests registers 606 in total: the 483 pre-existing cases
-# plus these 123.  Under the filters below that comes out as 568 selected and 38 excluded on
-# invocation A, 422 and 184 on B, and 384 and 222 on C -- figures the reconciliation in
+#   AIDL back-end only    Session 32, Transmit 12                           = 44, under B only
+# That is 138 contract cases, so run_L1Tests registers 621 in total: the 483 pre-existing cases
+# plus these 138.  Under the filters below that comes out as 577 selected and 44 excluded on
+# invocation A, 437 and 184 on B, and 393 and 228 on C -- figures the reconciliation in
 # run_one_invocation measures from the binary rather than reading from here.
 readonly CONTRACT_ANY_BACKEND_SUITES='DriverAidlCompatibilityTest.*:DriverAidlPreflightTest.*:DriverAidlLocalInstanceTest.*'
 readonly CONTRACT_LEGACY_ONLY_SUITES='DriverAidlSelectionTest.*:DriverAidlLegacyArmTest.*'
@@ -5130,23 +5132,23 @@ readonly L2_SUITES='DualPath*'
 # filter's selection, and GoogleTest counts a case it SKIPPED among "tests" -- so without this
 # field an invocation whose cases all skipped in SetUp reconciles perfectly, exits 0, and
 # reports a full complement of evidence it did not produce.
-# On invocation E that is not a hypothetical: its four AIDL-flow cases are the
+# On invocation E that is not a hypothetical: its six AIDL-flow cases are the
 # only proof this suite ever has that a frame crosses real binder IPC and arrives on a binder
 # thread, and they skip rather than fail when the resolved back-end is not theirs.  A green E
-# with those four skipped is the exact false green this whole matrix exists to prevent.
+# with those six skipped is the exact false green this whole matrix exists to prevent.
 #
-# WHAT IT IS NOT: a count.  A tolerance of "up to four skips" would accept four skipped
-# MANDATORY cases while four permitted ones ran, which is the same false green wearing a
+# WHAT IT IS NOT: a count.  A tolerance of "up to six skips" would accept six skipped
+# MANDATORY cases while six permitted ones ran, which is the same false green wearing a
 # different number.  So the permitted set is named, every skip is matched against it, and a skip
 # that does not match is fatal WITH ITS NAME.  The mandatory count is then MEASURED from the
 # binary as "the selection minus the permitted set", never written down, so adding a case to a
 # fixture needs no edit here -- and the numbers it derives on this host are the settled contract:
-# D has 11 mandatory (15 selected less the 4 permitted DualPathAidlFlowTest cases) and E has 9
-# (15 less the 6 permitted DualPathLegacyFlowTest cases).  Read off the built binary with
-# --gtest_list_tests, the tier registers 15: DualPathSelectionTest 4, DualPathLegacyFlowTest 6,
-# DualPathAidlFlowTest 4 and DualPathHostLifecycleTest 1.  So D's eleven are the four selection
-# cases, the six legacy-flow cases and the one lifecycle case, and E's nine are the four
-# selection cases, the four AIDL-flow cases and the same one lifecycle case -- which is the
+# D has 11 mandatory (17 selected less the 6 permitted DualPathAidlFlowTest cases) and E has 11
+# (17 less the 6 permitted DualPathLegacyFlowTest cases).  Read off the built binary with
+# --gtest_list_tests, the tier registers 17: DualPathSelectionTest 4, DualPathLegacyFlowTest 6,
+# DualPathAidlFlowTest 6 and DualPathHostLifecycleTest 1.  So D's eleven are the four selection
+# cases, the six legacy-flow cases and the one lifecycle case, and E's eleven are the four
+# selection cases, the six AIDL-flow cases and the same one lifecycle case -- which is the
 # fixture that regression-pins the group-wide bounded teardown and is back-end independent, so
 # it is mandatory under BOTH.
 #
@@ -8625,13 +8627,13 @@ per_file_report() {
 # beside each entry so that a later reader can re-derive it rather than take it on trust.
 #
 # WHY IT LIVES IN THIS SCRIPT RATHER THAN IN A FILE OF ITS OWN.  A sibling manifest file would
-# be a TWENTY-SIXTH in-submodule path in a change whose diff check requires exactly TWENTY-FIVE
+# be a TWENTY-SEVENTH in-submodule path in a change whose diff check requires exactly TWENTY-SIX
 # and nothing more, so it would fail that check.  The scope identity, measured rather than
-# recalled -- `git diff --name-status` against the change's baseline reports 25 paths inside
-# this submodule, 13 modified and 12 added, and the superproject diff reports the `hdmicec`
-# gitlink advancing plus `blitzy/documentation/Project Guide.md`, giving 26 LOGICAL FILES:
-# 14 UPDATE, of which the Guide is one, and 12 CREATE.  An extra file here would therefore be
-# both a twenty-sixth submodule path and a twenty-seventh logical file, and the check names its
+# recalled -- `git diff --name-status` against the change's baseline reports 26 paths inside
+# this submodule, 13 modified and 13 added, and the superproject diff reports the `hdmicec`
+# gitlink advancing plus `blitzy/documentation/Project Guide.md`, giving 27 LOGICAL FILES:
+# 14 UPDATE, of which the Guide is one, and 13 CREATE.  An extra file here would therefore be
+# both a twenty-seventh submodule path and a twenty-eighth logical file, and the check names its
 # allowlist exactly, so neither number has any slack to absorb it.  The manifest is data plus
 # gate logic, both of which a shell script can hold perfectly well, so it holds them.
 #
@@ -8683,8 +8685,8 @@ per_file_report() {
 # principle; the principle -- never write a number that was not measured -- is what the `needs`
 # fields carry instead.
 #
-# WHAT IS PROVEN, AND WHERE.  Every one of the 89 required arms below has been observed non-zero,
-# and the 30 that carry a prerequisite were observed on a binder-capable guest rather than assumed.
+# WHAT IS PROVEN, AND WHERE.  Every one of the 116 required arms below has been observed non-zero,
+# and the 31 that carry a prerequisite were observed on a binder-capable guest rather than assumed.
 # On 2026-09-01 the full A-E matrix ran in one instrumented i386 guest under the QEMU provisioning
 # that .github/workflows/aidl-path-tests.yml owns -- kernel 5.15.148 with
 # CONFIG_ANDROID_BINDER_IPC_32BIT=y, binder protocol 7 agreeing between kernel, SDK build and the
@@ -8692,20 +8694,24 @@ per_file_report() {
 # accumulated capture: `89 taken, 0 never taken, 0 absent, 0 deferred, 0 unchecked`.  All five
 # invocations passed all four of their own checks, and the line gate passed both halves
 # (aggregate and per file) for the first time, with ccec/src/DriverAidlImpl.cpp at 88.4% line.
-# So the 28 arms needing invocation B, the 1 needing invocation C and the 1 needing a driver with
+# On 2026-10-02 the manifest grew to 116 required arms with the enable-time logical-address
+# allocation, the exactly-one add and the fixed physical address, and the same matrix in an x86-64
+# binder-vm guest at binder protocol 8 reported `116 taken, 0 never taken, 0 absent, 0 deferred,
+# 0 unchecked` with both line-gate halves passing.
+# So the 29 arms needing invocation B, the 1 needing invocation C and the 1 needing a driver with
 # no service on it are measured facts, not projections.
 #
-# WHAT A DRIVERLESS HOST STILL CANNOT SHOW, STATED PRECISELY.  Those same 30 arms are reported
+# WHAT A DRIVERLESS HOST STILL CANNOT SHOW, STATED PRECISELY.  Those same 31 arms are reported
 # DEFERRED, not passed, on any host without a binder driver -- which is the ordinary development
-# case and the hosted-CI case both.  A driverless run therefore enforces 59 of the 89 and names
+# case and the hosted-CI case both.  A driverless run therefore enforces 85 of the 116 and names
 # the rest with the invocation or resource they are missing; it is not an acceptance run and this
-# script does not let it read as one.  The other 59 required arms are observed non-zero by a
+# script does not let it read as one.  The other 85 required arms are observed non-zero by a
 # driverless run: every arm of the bounded preflight, including the two
 # beyond the BINDER_VERSION gate, is reached under invocation A through the BinderPreflightProbe
 # seam that ccec/src/DriverAidlImpl.hpp declares and isBinderPreflightOk() takes as a defaulted
 # third parameter, so their `needs` fields are empty and their counts are real.  A seam rather
 # than syscall interposition is what makes that true without a driver and without redefining
-# ioctl() or mmap() for a 568-case process.  The receive path's own two guards and the
+# ioctl() or mmap() for a 577-case process.  The receive path's own two guards and the
 # slow-call diagnostic are in the deferred set, because a
 # listener callback and a synchronous AIDL call both need a live session; the queue handoff's
 # reserved-slot arithmetic and the context-manager timeout ceiling are NOT, because a
@@ -9057,8 +9063,8 @@ readonly BRANCH_MANIFEST=(
     #   kept in the manifest, not deleted, so the gate still fails if the arm is REMOVED from the
     #   source -- the same disposition as compat.client-era-frozen and selection.reason-unrecorded.
     #   Driving it would take a clock_gettime interposer, which would test the interposer.
-    "halcall.clock-unreadable|ccec/src/DriverAidlImpl.cpp|314|0|1|UNREACHABLE: halCallStarted() only yields HAL_CALL_CLOCK_UNREADABLE when clock_gettime(CLOCK_MONOTONIC) fails on a stack timespec, which Linux does not do, and the helper has internal linkage so no test can substitute for it; measured taken 0 with DA:491 also 0 on the full matrix|unreachable|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
-    "halcall.clock-readable|ccec/src/DriverAidlImpl.cpp|314|0|0|invocation B: the ordinary case, where startedMs was readable so the second read is evaluated and the elapsed time can be compared (measured taken 288, matching DA:494 on the same run)|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
+    "halcall.clock-unreadable|ccec/src/DriverAidlImpl.cpp|314|0|1|UNREACHABLE: halCallStarted() only yields HAL_CALL_CLOCK_UNREADABLE when clock_gettime(CLOCK_MONOTONIC) fails on a stack timespec, which Linux does not do, and the helper has internal linkage so no test can substitute for it; measured taken 0 with DA:315 also 0 on the full matrix|unreachable|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
+    "halcall.clock-readable|ccec/src/DriverAidlImpl.cpp|314|0|0|invocation B: the ordinary case, where startedMs was readable so the second read is evaluated and the elapsed time can be compared (measured taken 288, matching DA:318 on the same run)|required|B|if ((HAL_CALL_CLOCK_UNREADABLE == startedMs) || !monotonicNowMs(nowMs)) {"
     "halcall.slow|ccec/src/DriverAidlImpl.cpp|320|0|0|invocation B against a deliberately delayed fake: one LOG_WARN line naming the operation and the elapsed time|required|B|if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {"
     "halcall.within-threshold|ccec/src/DriverAidlImpl.cpp|320|0|1|invocation B: every healthy synchronous call, which must stay silent|required|B|if (elapsedMs > SLOW_HAL_CALL_WARN_MS) {"
 
@@ -9180,6 +9186,66 @@ readonly BRANCH_MANIFEST=(
     # assumes the shape rather than repeating that measurement will map these two backwards.
     "read.flush-sentinel-skipped|ccec/src/DriverAidlImpl.cpp|1249|0|0|invocation A, DriverAidlLocalInstanceTest.TheReceiveFlushSurvivesASecondCloseSentinel: the second sentinel is skipped rather than dereferenced (measured taken 1)|required||if (inFrame != 0) {"
     "read.flush-frame-drained|ccec/src/DriverAidlImpl.cpp|1249|0|1|invocation A, DriverAidlLocalInstanceTest.TheReceiveFlushReleasesARealFrameQueuedBehindTheCloseSentinel: the parity arm, where the flush meets a real frame and copies and releases it exactly as it did before the null check existed|required||if (inFrame != 0) {"
+
+    # ---- GROUP 11: ENABLE-TIME LOGICAL-ADDRESS ALLOCATION.  open() reaches OPENED and then calls
+    # registerDeviceLogicalAddress(), which polls each candidate of LOCAL_DEVICE_TYPE with poll(c, c)
+    # and registers the first free one with a single one-element addLogicalAddresses() call.  Every
+    # arm below is reached by invocation A through DriverAidlLocalInstanceTest's AllocationProbe on an
+    # injected session, so each `needs` field is empty and the arms are enforced on any host.
+    #
+    # THE CANDIDATE SWITCH'S ARC ORDER IS MEASURED, NOT ASSUMED.  The TV and AUDIO_SYSTEM arms carry
+    # equal counts under every case that reaches them, so the trace alone cannot tell them apart.
+    # A replica of the switch built with this project's compiler and -fprofile-arcs -ftest-coverage,
+    # called with distinct per-type counts, puts the arcs in case-label order with default last:
+    # 0 TV, 1 RECORDING_DEVICE, 2 TUNER, 3 PLAYBACK_DEVICE, 4 AUDIO_SYSTEM, 5 default.
+    #
+    # THE POLL OUTCOMES SIT ON TWO LINES.  The acknowledged poll is the CALL's normal-return arc on
+    # the poll line, block 0 arc 0; its throw arc is block e0 and is not mapped.  The two caught
+    # outcomes are the handler-dispatch arcs on the first catch line: arc 1 enters the
+    # CECNoAckException handler and arc 2 the Exception handler; arc 0 propagates and is never taken.
+    "candidates.tv|ccec/src/DriverAidlImpl.cpp|1064|0|0|invocation A, DriverAidlLocalInstanceTest.TheCandidateTableIsTheInverseOfTheLogicalAddressTypeTable: TV yields {0} (measured taken 2 alone)|required||switch (deviceType) {"
+    "candidates.recording-device|ccec/src/DriverAidlImpl.cpp|1064|0|1|invocation A, the same case: RECORDING_DEVICE yields {1, 2, 9} (measured taken 4 alone)|required||switch (deviceType) {"
+    "candidates.tuner|ccec/src/DriverAidlImpl.cpp|1064|0|2|invocation A, the same case: TUNER yields {3, 6, 7, 10} (measured taken 5 alone)|required||switch (deviceType) {"
+    "candidates.playback-device|ccec/src/DriverAidlImpl.cpp|1064|0|3|invocation A, the same case: PLAYBACK_DEVICE yields {4, 8, 11}; also every enable-time registration, because LOCAL_DEVICE_TYPE is PLAYBACK_DEVICE (measured taken 4 alone)|required||switch (deviceType) {"
+    "candidates.audio-system|ccec/src/DriverAidlImpl.cpp|1064|0|4|invocation A, the same case: AUDIO_SYSTEM yields {5} (measured taken 2 alone)|required||switch (deviceType) {"
+    "candidates.none|ccec/src/DriverAidlImpl.cpp|1064|0|5|invocation A, the same case: RESERVED, PURE_CEC_SWITCH, VIDEO_PROCESSOR and the out-of-range values yield an empty list (measured taken 8 alone)|required||switch (deviceType) {"
+    "allocate.no-controller|ccec/src/DriverAidlImpl.cpp|1093|0|2|invocation A, DriverAidlLocalInstanceTest.AllocationTriesTheNextCandidateOnRefusalAndStopsOnTransportFailure: the null-controller row logs and registers nothing (measured taken 1 alone)|required||if (hdmiCecController == 0) {"
+    "allocate.controller-held|ccec/src/DriverAidlImpl.cpp|1093|0|3|invocation A, DriverAidlLocalInstanceTest.EnablingRegistersExactlyOneAddressAndReadsItBackThroughTheHal and every registration that reaches the candidates|required||if (hdmiCecController == 0) {"
+    "allocate.candidate-polled|ccec/src/DriverAidlImpl.cpp|1100|0|0|invocation A, every registration with a controller: the loop body polls the next candidate|required||for (size_t index = 0; index < candidates.size(); index++) {"
+    "allocate.no-free-candidate|ccec/src/DriverAidlImpl.cpp|1100|0|1|invocation A, DriverAidlLocalInstanceTest.OccupiedCandidatesAreSkippedAndAFullSetRegistersNothing: with 4, 8 and 11 occupied the loop is exhausted, nothing is registered and one LOG_EXP line names the device type (measured taken 1 alone)|required||for (size_t index = 0; index < candidates.size(); index++) {"
+    "allocate.poll-acknowledged|ccec/src/DriverAidlImpl.cpp|1105|0|0|invocation A, DriverAidlLocalInstanceTest.OccupiedCandidatesAreSkippedAndAFullSetRegistersNothing: an acknowledged poll means the address is taken and the next candidate is tried (measured taken 6 alone)|required||poll(candidate, candidate);"
+    "allocate.poll-not-acknowledged|ccec/src/DriverAidlImpl.cpp|1108|0|1|invocation A, DriverAidlLocalInstanceTest.EnablingRegistersExactlyOneAddressAndReadsItBackThroughTheHal: CECNoAckException means the address is free (measured taken 1 alone)|required||catch (CECNoAckException &) {"
+    "allocate.poll-failed|ccec/src/DriverAidlImpl.cpp|1108|0|2|invocation A, DriverAidlLocalInstanceTest.AllocationTriesTheNextCandidateOnRefusalAndStopsOnTransportFailure: a BUSY poll raises IOException, which counts as not free (measured taken 1 alone)|required||catch (CECNoAckException &) {"
+    "allocate.register-status-not-ok|ccec/src/DriverAidlImpl.cpp|1126|0|0|invocation A, DriverAidlLocalInstanceTest.AllocationTriesTheNextCandidateOnRefusalAndStopsOnTransportFailure: a DEAD_OBJECT addLogicalAddresses stops allocation with nothing registered (measured taken 1 alone)|required||if (!txn.isOk()) {"
+    "allocate.register-status-ok|ccec/src/DriverAidlImpl.cpp|1126|0|1|invocation A, DriverAidlLocalInstanceTest.EnablingRegistersExactlyOneAddressAndReadsItBackThroughTheHal (measured taken 1 alone)|required||if (!txn.isOk()) {"
+    "allocate.register-declined|ccec/src/DriverAidlImpl.cpp|1131|0|0|invocation A, DriverAidlLocalInstanceTest.AllocationTriesTheNextCandidateOnRefusalAndStopsOnTransportFailure: an ok status carrying false moves on to the next candidate (measured taken 1 alone)|required||if (!added) {"
+    "allocate.register-accepted|ccec/src/DriverAidlImpl.cpp|1131|0|1|invocation A, DriverAidlLocalInstanceTest.EnablingRegistersExactlyOneAddressAndReadsItBackThroughTheHal: the local list becomes exactly {4} (measured taken 1 alone)|required||if (!added) {"
+
+    # ---- GROUP 12: EXACTLY ONE REGISTERED ADDRESS ON AN EXPLICIT ADD.  addLogicalAddress() treats
+    # the held address as a no-op, and a different one replaces it: the held address is released
+    # with removeLogicalAddresses(), whose failure is logged and ignored, before the new one is added.
+    # The add's own status and result arms stay in GROUP 4.
+    #
+    # The same-address test is a short-circuited `&&` with a call between its operands, so its line
+    # carries eight arcs; arcs 6 and 7 are the whole condition's TRUE and FALSE, fixed by the count
+    # (the FALSE arc equals the number of adds that reach the replace test on the next line).  The
+    # nothing-held arm is the one arc in this group invocation A does not reach: every A case that
+    # adds holds the enable-time address first, so it is measured under invocation B.
+    "addlogical.already-registered|ccec/src/DriverAidlImpl.cpp|1517|0|6|invocation A, DriverAidlLocalInstanceTest.AddingADifferentAddressReplacesTheRegisteredOne: re-adding the held address returns true with no HAL call (measured taken 1 alone)|required||if (!logicalAddresses.empty() && (logicalAddresses.front() == source)) {"
+    "addlogical.not-already-registered|ccec/src/DriverAidlImpl.cpp|1517|0|7|invocation A, the same case: every add of an address other than the held one (measured taken 4 alone)|required||if (!logicalAddresses.empty() && (logicalAddresses.front() == source)) {"
+    "addlogical.replaces-held|ccec/src/DriverAidlImpl.cpp|1522|0|0|invocation A, DriverAidlLocalInstanceTest.AddingADifferentAddressReplacesTheRegisteredOne: a different address releases the held one first (measured taken 4 alone)|required||if (!logicalAddresses.empty()) {"
+    "addlogical.nothing-held|ccec/src/DriverAidlImpl.cpp|1522|0|1|invocation B, DriverAidlSessionTest.AddLogicalAddressMapsRefusalAndTransportFailureToDistinctExceptions and .AddLogicalAddressFailuresReachBothRealSinkCallPathsAsExpected: a refused add leaves nothing held, so the next add goes straight to the HAL (measured taken 1 and 2 alone)|required|B|if (!logicalAddresses.empty()) {"
+    "addlogical.release-status-not-ok|ccec/src/DriverAidlImpl.cpp|1534|0|0|invocation A, DriverAidlLocalInstanceTest.AddingADifferentAddressReplacesTheRegisteredOne: a DEAD_OBJECT release is logged and the add still proceeds (measured taken 1 alone)|required||if (!removeTxn.isOk()) {"
+    "addlogical.release-status-ok|ccec/src/DriverAidlImpl.cpp|1534|0|1|invocation A, the same case: every release whose transport succeeds (measured taken 3 alone)|required||if (!removeTxn.isOk()) {"
+    "addlogical.release-declined|ccec/src/DriverAidlImpl.cpp|1537|0|0|invocation A, the same case: a release the HAL declines is logged and ignored (measured taken 2 alone)|required||else if (!removed) {"
+    "addlogical.released|ccec/src/DriverAidlImpl.cpp|1537|0|1|invocation A, the same case: the HAL releases the held address (measured taken 1 alone)|required||else if (!removed) {"
+
+    # ---- GROUP 13: THE FIXED PHYSICAL ADDRESS.  getPhysicalAddress() writes FIXED_PHYSICAL_ADDRESS,
+    # 0x01000000 (1.0.0.0), in every driver state and makes no AIDL call; its one branch is the
+    # null out-parameter guard.  Both arms are reached by invocation A.
+    "physical.null-out-parameter|ccec/src/DriverAidlImpl.cpp|1446|0|0|invocation A, DriverAidlLocalInstanceTest.GetPhysicalAddressToleratesANullOutParameter: logged, nothing written, no exception (measured taken 1 alone)|required||if (physicalAddress == NULL) {"
+    "physical.fixed-address-written|ccec/src/DriverAidlImpl.cpp|1446|0|1|invocation A, DriverAidlLocalInstanceTest.GetPhysicalAddressReportsTheFixedAddressOnANeverOpenedDriver: 0x01000000 is written on a driver that was never opened (measured taken 3 alone)|required||if (physicalAddress == NULL) {"
+
 )
 
 # Set by apply_branch_gate and folded into apply_gate's own failure count, so the script keeps
@@ -9190,7 +9256,7 @@ BRANCH_GATE_FAILURES=0
 # Print the BRDA records for one file suffix out of a trace, as "line block branch taken".
 #
 # Reads the trace once per file rather than once per manifest entry: several entries share a
-# file, and re-walking a trace for each of thirty-odd arms would turn a gate into a cost.
+# file, and re-walking a trace for each of a hundred-odd arms would turn a gate into a cost.
 # ------------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------------
 # WAS THIS ARM MEASURABLE BY THIS RUN?  Prints the reason it was not, or nothing at all.
@@ -9271,7 +9337,8 @@ branch_records_for_file() { # $1=trace  $2=SF path suffix
 # WHY ANY RECORD NEEDS ALTERNATIVES AT ALL, because a coordinate ought to be a property of the
 # source and mostly is.  Measured across both architectures this project builds and runs on --
 # x86-64 for the hosted L1 job, i386 for the binder-capable matrix job -- 312 of the 316
-# branch-carrying lines in the three mapped files emit an IDENTICAL arc layout.  Four do not,
+# branch-carrying lines the three mapped files then had emit an IDENTICAL arc layout; the 40 added
+# since, 356 in all on x86-64, are measured on x86-64 only.  Four do not,
 # because gcc expands some short-circuited conditions and some inlined std::string comparisons
 # into a different number of arcs per target, and one of those four -- halcompat.h:168, the
 # "notfrozen" gate -- carries mapped records.  There it is 3 block-0 arcs on x86-64 (0, 2, 3)
@@ -9298,7 +9365,7 @@ resolve_branch_alternates() {
     local field="$1" records="$2" line="$3" block="$4"
 
     # The overwhelmingly common case, kept first and kept free: a bare arc index, no ':' in it,
-    # returned untouched.  Ninety of the ninety-two records take this path.
+    # returned untouched.  117 of the 119 records take this path.
     case "$field" in
         *:*) ;;
         *) printf '%s\n' "$field"; return 0 ;;
@@ -9419,7 +9486,7 @@ apply_branch_gate() {
         # An awk numeric comparison would coerce `e0` to 0 and match the wrong record -- a
         # silent mis-identification rather than a visible error, which is the worst kind.
         # PER-ARC-LAYOUT RESOLUTION, ahead of the lookup and reported in the failure text below.
-        # A record carrying no alternatives comes back unchanged, so this costs the other ninety
+        # A record carrying no alternatives comes back unchanged, so this costs the other 117
         # records one case statement.  See resolve_branch_alternates() for why four of the 316
         # branch-carrying lines differ between the x86-64 and i386 builds and why the arc count is
         # the key.

@@ -35,13 +35,15 @@
 #
 #   THE FILE-COUNT POSITION, STATED SO A REVIEWER DOES NOT HAVE TO INFER IT.  The
 #   migration's close-out check counts the in-submodule diff against an explicit allowlist
-#   of TWENTY-FIVE paths -- 13 modified and 12 added, measured with `git diff --name-status`
-#   inside hdmicec -- plus blitzy/documentation/Project Guide.md in the superproject, which
-#   makes TWENTY-SIX logical files (14 UPDATE counting the guide, 12 CREATE, 0 DELETE).  THIS
-#   FILE IS ONE OF THOSE TWENTY-FIVE, not an extra beyond them.  What is worth saying is why
-#   it is in the set at all: the file-by-file table enumerated no root-image script, so this
-#   path is AUTHORISED by the provisioning requirement rather than by that table, and it is
-#   NOT an out-of-scope addition -- the workflow it serves cannot exist without it.
+#   of TWENTY-SIX paths -- 13 modified and 13 added, measured with `git diff --name-status`
+#   inside hdmicec, the 26th being AIDL_HAL_MIGRATION_NOTES.md, which holds the design detail
+#   review moved out of the code comments -- plus blitzy/documentation/Project Guide.md in the
+#   superproject, which makes TWENTY-SEVEN logical files (14 UPDATE counting the guide,
+#   13 CREATE, 0 DELETE).  THIS FILE IS ONE OF THOSE TWENTY-SIX, not an extra beyond them.
+#   What is worth saying is why it is in the set at all: the file-by-file table enumerated
+#   no root-image script, so this path is AUTHORISED by the provisioning requirement rather
+#   than by that table, and it is NOT an out-of-scope addition -- the workflow it serves
+#   cannot exist without it.
 #   .github/workflows/L1-tests.yml and .github/workflows/aidl-path-tests.yml state the same
 #   identity in their own headers, and the three statements are kept in step deliberately.
 #

@@ -23,8 +23,8 @@ name: L1-tests
 #
 #   D IS UNSCHEDULED HERE, NOT INCAPABLE. It is the LEGACY L2 invocation - fake service host
 #   not launched, legacy back-end selected - so it needs no Binder driver whatsoever.
-#   MEASURED on a driverless host it passes: 14 cases, 10 passed and 4 skipped by design,
-#   exit 0, the four skips being the invocation-E fixtures naming the mode they need. This
+#   MEASURED on a driverless host it passes: 17 cases, 11 passed and 6 skipped by design,
+#   exit 0, the six skips being the invocation-E fixtures naming the mode they need. This
 #   job builds the L2 runner and its out-of-process fake service host and stops there; not
 #   running D is a scheduling choice, not a platform limit.
 #
@@ -58,11 +58,13 @@ name: L1-tests
 #       divergence between them is the failure this closes: an Autotools-only check would
 #       pass on a tree whose shipping build linked no AIDL back-end at all.
 #
-# A NOTE FOR THE REVIEWER ON FILE COUNT. The close-out check counts TWENTY-FIVE in-submodule
-# paths - 13 modified and 12 added, measured with `git diff --name-status` inside hdmicec -
-# plus blitzy/documentation/Project Guide.md in the superproject, so TWENTY-SIX logical files
-# in all (counting the guide as the fourteenth update: 14 UPDATE, 12 CREATE, 0 DELETE).
-# aidl-path-tests-rootfs.sh is ONE OF THOSE TWENTY-FIVE, not an extra beyond them: the QEMU
+# A NOTE FOR THE REVIEWER ON FILE COUNT. The close-out check counts TWENTY-SIX in-submodule
+# paths - 13 modified and 13 added, measured with `git diff --name-status` inside hdmicec, the
+# 26th being AIDL_HAL_MIGRATION_NOTES.md, which holds the design detail review moved out of
+# the code comments - plus blitzy/documentation/Project Guide.md in the superproject, so
+# TWENTY-SEVEN logical files in all (counting the guide as the fourteenth update: 14 UPDATE,
+# 13 CREATE, 0 DELETE).
+# aidl-path-tests-rootfs.sh is ONE OF THOSE TWENTY-SIX, not an extra beyond them: the QEMU
 # runner's root image is required to be built by a checked-in script, the file-by-file table
 # never enumerated one, and the path is authorised by that provisioning requirement rather
 # than by the table. The only paths this migration changes under .github/ are this file,
@@ -227,12 +229,12 @@ jobs:
       # naming the mode they need. That is their design, chosen over GTEST_SKIP precisely
       # so a skipped arm cannot be mistaken for a passing one in an aggregate count. This
       # filter is therefore what makes invocation A green, and MEASURED, not assumed:
-      # without it the run on this exact tree reports 38 FAILED and exits 1. Those 38 are every
-      # case those two fixtures register and nothing besides them - DriverAidlSessionTest 26 plus
-      # DriverAidlTransmitTest 12, derived from `--gtest_list_tests` on the built binary (606 cases
-      # in 25 suites registered, 568 in 23 selected once this filter applies) - so the filter
-      # removes the failures and nothing else. Earlier revisions of this comment said 31 and then
-      # 35, each true of an earlier tree; that is precisely why the number is no longer only
+      # without it the run on this exact tree reports 44 FAILED and exits 1. Those 44 are every
+      # case those two fixtures register and nothing besides them - DriverAidlSessionTest 32 plus
+      # DriverAidlTransmitTest 12, derived from `--gtest_list_tests` on the built binary (621 cases
+      # in 25 suites registered, 577 in 23 selected once this filter applies) - so the filter
+      # removes the failures and nothing else. Earlier revisions of this comment said 31, 35 and
+      # then 38, each true of an earlier tree; that is precisely why the number is no longer only
       # written down. The `List available tests and prove the invocation-A filter arithmetic` step below
       # RE-DERIVES the census on every run and fails the job if the filter's arithmetic does not
       # close, if it selects or excludes nothing, or if it excludes anything outside those two
@@ -2246,8 +2248,8 @@ jobs:
       # written to the step summary so the run's own evidence carries it, which is what
       # replaces the comment that went stale.
       #
-      # MEASURED AT THE TIME OF WRITING, on this tree: 606 cases in 25 suites registered,
-      # 568 in 23 selected, 38 excluded - DriverAidlSessionTest 26 plus
+      # MEASURED AT THE TIME OF WRITING, on this tree: 621 cases in 25 suites registered,
+      # 577 in 23 selected, 44 excluded - DriverAidlSessionTest 32 plus
       # DriverAidlTransmitTest 12. Those figures are stated as a reader's orientation only;
       # NOTHING BELOW COMPARES AGAINST THEM, so they cannot fail the job when a case is
       # added, and the assertions above are what actually holds.

@@ -66,8 +66,8 @@ tests/L2Tests/
 │                                 #   DualPathHostLifecycleTest, the one case that proves it
 └── ccec/
     └── test_DualPathIntegration.cpp # One CCEC round trip, asserted against each
-                                     #   HAL back-end over its real transport.  14 cases,
-                                     #   the tier's 15th being DualPathHostLifecycleTest in
+                                     #   HAL back-end over its real transport.  16 cases,
+                                     #   the tier's 17th being DualPathHostLifecycleTest in
                                      #   test_main.cpp;
                                      #   the legacy arm runs anywhere, the AIDL arm needs
                                      #   a Binder-capable host and skips without one
@@ -123,25 +123,25 @@ than translation units because `ccec/test_LibCCEC.cpp` declares `LibCCECTest` an
 and `MessageDecoderTrackingTest`.
 
 Everything above is the **legacy-path baseline**: the units enumerated in this section, unmodified.
-The binary also registers the AIDL contract suite from `ccec/test_DriverAidl.cpp` -- **124 cases in
-7 fixtures**, so `run_L1Tests` now registers **607 cases in 25 fixtures** -- and the L2 tier is a
-separate binary again, with **15 cases in 4 fixtures** -- the three integration fixtures in
+The binary also registers the AIDL contract suite from `ccec/test_DriverAidl.cpp` -- **138 cases in
+7 fixtures**, so `run_L1Tests` now registers **621 cases in 25 fixtures** -- and the L2 tier is a
+separate binary again, with **17 cases in 4 fixtures** -- the three integration fixtures in
 `ccec/test_DualPathIntegration.cpp` and `DualPathHostLifecycleTest` in `test_main.cpp`.
 
-**Those 124 are counted here and nowhere else in this guide**, so that no second copy of the total
+**Those 138 are counted here and nowhere else in this guide**, so that no second copy of the total
 can drift away from this one: a passage below that splits them names this same total and points
 back here, and carries no count of its own.  Measured with `--gtest_list_tests`, the seven fixtures
 group by the back-end each one needs resolved -- `DriverAidlCompatibilityTest` (23),
-`DriverAidlPreflightTest` (28) and `DriverAidlLocalInstanceTest` (25) are back-end independent and
-run under every L1 invocation, which is 76 cases; `DriverAidlSelectionTest` (4) and
-`DriverAidlLegacyArmTest` (5) need the legacy back-end resolved, 9; `DriverAidlSessionTest` (27)
-and `DriverAidlTransmitTest` (12) need the AIDL back-end resolved, 39.  Those sum to the 124 above,
-and the 85 the default invocation selects is the first two groups: 76 + 9.
+`DriverAidlPreflightTest` (28) and `DriverAidlLocalInstanceTest` (34) are back-end independent and
+run under every L1 invocation, which is 85 cases; `DriverAidlSelectionTest` (4) and
+`DriverAidlLegacyArmTest` (5) need the legacy back-end resolved, 9; `DriverAidlSessionTest` (32)
+and `DriverAidlTransmitTest` (12) need the AIDL back-end resolved, 44.  Those sum to the 138 above,
+and the 94 the default invocation selects is the first two groups: 85 + 9.
 
 **Registered is not run, and this guide keeps the two apart everywhere.**  No single invocation
 runs the whole set, because a fixture cannot opt into a different back-end from its own `SetUp`
 -- see [Back-End Selection](#back-end-selection-the-invocation-matrix).  The default invocation
-selects **568 of the 607** and a measured run passes all 568; the other 39 are the two AIDL-only
+selects **577 of the 621** and a measured run passes all 577; the other 44 are the two AIDL-only
 fixtures.  Re-measure with `--gtest_list_tests` on your own build rather than trusting any figure
 here, per the note above.
 
@@ -315,10 +315,10 @@ before it exports the build environment, so the guest run starts from the same g
 
 **On a host with no Binder driver, expect that command to exit `1`, and expect exactly one file to
 be named.**  Measured on this tree, where only invocations A and D could run: **32 source files,
-86.0% line coverage (2405/2795), 91.6% function, 52.5% branch** — the aggregate clears the 80% bar
-— while the **per-file half fails** on `ccec/src/DriverAidlImpl.cpp` at **58.6%** (379/647).  That
-figure is a property of the host rather than of the test set: the file is reached largely from the
-deferred invocations, and the cases that reach it exist and are compiled in, but their invocations
+86.9% line coverage (2488/2862), 91.6% function, 53.8% branch** — the aggregate clears the 80% bar
+— while the **per-file half fails** on `ccec/src/DriverAidlImpl.cpp` at **64.7%** (462/714).  That
+figure is a property of the host rather than of the test set: over a third of the file is reached
+only from the deferred invocations, and the cases that reach it exist and are compiled in, but their invocations
 are **deferred** — no binary is launched for them, so GoogleTest never sees them and they move no
 counter.  That exit `1` is the expected outcome here and is **not a threshold to lower** — do not
 pass `--no-per-file-gate`, do not exempt a file and do not add an exclusion glob.  Re-run the whole
@@ -486,7 +486,7 @@ argument, for one reason: it then reaches *every* way the binary is started, inc
 ```bash
 # The default invocation's filter.  Not optional -- see above, and see
 # "Back-End Selection" below for what the other invocations are.  With it set,
-# expect 568 tests from 23 test suites, 568 passed, 0 skipped, exit 0.
+# expect 577 tests from 23 test suites, 577 passed, 0 skipped, exit 0.
 export GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'
 
 # Run all tests through automake, from the hdmicec submodule root
@@ -581,16 +581,19 @@ order -- and not the lifecycle defect described next.
 **Terminations mid-run, which are that lifecycle defect and should not be filed as a new bug.**  A
 longer unscoped repeat may not finish at all: a 100-iteration attempt stopped during iteration 8
 with a SIGSEGV (exit `139`), and a serial retest terminated during iteration 23 with exit `125`.
-Those two outcomes are the recorded legacy lifecycle defect **PERF-01**, in
-`blitzy/documentation/Project Guide.md` §4.1: `Bus::start()` spawns each worker generation through
+Those two outcomes are the legacy lifecycle defect recorded in
+`blitzy/documentation/Project Guide.md` §6 (Risk Assessment) as **"Repeated in-process HDMI-CEC
+restart is unsafe"**.  `Bus::start()` spawns each worker generation through
 a detached thread nothing can join, a `term` arriving before that generation reaches `RUNNING`
 leaves it unstoppable, and the accumulated NULL sentinels then reach the unguarded flush arm at
 `ccec/src/DriverImpl.cpp:182` (`frame = *inFrame;`).  It reproduces on the pre-migration sources at
 a **higher** incidence, so it is neither introduced nor aggravated by
-the AIDL back-end, and every root-cause file is out of scope for this migration.  Read §4.1 before
-spending time on a repeat run: it carries the thread-count and `term`-duration signatures, the
-third failure mode (`pure virtual method called` during shutdown), and the reason a quiet run is not
-evidence of repair.  For flakiness detection meanwhile, repeat a filter whose cases neither drive
+the AIDL back-end, and every root-cause file is out of scope for this migration.  Read that §6 row
+before spending time on a repeat run: it records the two detached worker threads each cycle leaves
+behind, the hang while stopping the reader, the third failure mode (an abort during shutdown after
+termination appeared clean -- here, `pure virtual method called`), and that only a constant-load
+run of at least 100 cycles, not a quiet one, is evidence of repair.  For flakiness detection
+meanwhile, repeat a filter whose cases neither drive
 the library's lifecycle nor read the driver singleton's registered-address state -- which is what
 the example above does.
 
@@ -641,32 +644,32 @@ that a later one cannot overwrite an earlier one's evidence:
 
 | Inv | Binary | Fake service | Expected selection | Cases | Has it run? |
 |--------|-------------|---------|---------|---------|---------|
-| A | `run_L1Tests` | not reachable | Legacy | 568 selected, 39 excluded | **Yes, on any host: measured 568 of 568 from 23 suites, exit `0`** |
-| B | `run_L1Tests` | in-process, compatible | AIDL, via the local interface | 423 selected, 184 excluded | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 422 of 422 from 15 suites, exit `0`, on the tree that registered 606; this tree selects 423** |
-| C | `run_L1Tests` | in-process, **incompatible** — reports interface hash `"-1"` | Legacy, with the incompatibility logged | 384 selected, 223 excluded | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 384 of 384 from 13 suites, exit `0`** |
-| D | `run_L2Tests` | host not launched | Legacy | 15 registered | **Yes, on any host: measured 11 passed, 4 skipped, exit `0`** |
-| E | `run_L2Tests` | host launched and ready | AIDL, over a real remote proxy | 15 registered | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 9 passed, 6 skipped of 15, exit `0`.  An earlier run reported 8 passed of the 14 then registered, before `DualPathHostLifecycleTest` was added; that case is mandatory here as under D, and the 9/6 figures are the measurement that confirmed it rather than an expectation** |
+| A | `run_L1Tests` | not reachable | Legacy | 577 selected, 44 excluded | **Yes, on any host: measured 577 of 577 from 23 suites, exit `0`** |
+| B | `run_L1Tests` | in-process, compatible | AIDL, via the local interface | 437 selected, 184 excluded | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 437 of 437 from 15 suites, exit `0` (2026-10-02, this tree)** |
+| C | `run_L1Tests` | in-process, **incompatible** — reports interface hash `"-1"` | Legacy, with the incompatibility logged | 393 selected, 228 excluded | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 393 of 393 from 13 suites, exit `0` (2026-10-02, this tree)** |
+| D | `run_L2Tests` | host not launched | Legacy | 17 registered | **Yes, on any host: measured 11 passed, 6 skipped, exit `0`** |
+| E | `run_L2Tests` | host launched and ready | AIDL, over a real remote proxy | 17 registered | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 11 passed, 6 skipped of 17, exit `0` (2026-10-02, this tree).  Earlier runs reported 8 passed of the 14 then registered, before `DualPathHostLifecycleTest` was added, and 9 passed of 15 before the two address cases were added; every one of those cases is mandatory here, and the 11/6 figures are the measurement that confirmed it rather than an expectation** |
 
 **Where each of the five has and has not run, stated once and exactly, because it is the fact most
 easily blurred.**  On **this** host, and on the **committed** CI runner, invocations **B, C and E
 are deferred** for want of a binder kernel driver: `run_coverage.sh` reports them as deferred,
 never attempts them, and never lets them stand in for evidence they did not produce.  **All five
-invocations have been executed green once against a real binder transport**, in a purpose-built
-binder-capable QEMU guest, and that run is recorded in `blitzy/documentation/Project Guide.md`
-§4.2 -- with the guest's kernel and SDK configuration, the per-invocation results, and the three
-test-code defects that only executing them could have found.  That guest is **not** the committed
-target of `.github/workflows/aidl-path-tests.yml`, which is a deliberately all-32-bit
-**protocol-7 i386** job, and **that committed workflow has never run** -- so nothing anywhere,
-including §4.2, may be read as a result on it.  Read §4.2 for the numbers rather than copying them
-here: a second copy of a measured figure is a second thing to go stale.
+invocations have been executed green against a real binder transport**, in purpose-built
+binder-capable QEMU guests recorded in `blitzy/documentation/Project Guide.md` §4 -- on 2026-09-01
+in an i386 protocol-7 guest, whose run found the three test-code defects that only executing them
+could have found, and B, C and E again on this tree on 2026-10-02 in an x86-64 protocol-8 guest,
+the figures in the table above.  Neither guest is the committed target of
+`.github/workflows/aidl-path-tests.yml`, which is a deliberately all-32-bit **protocol-7 i386**
+job, and **that committed workflow has never run** -- so nothing anywhere, including §4, may be
+read as a result on it.
 
 Every Cases figure in the table above is measured, because each comes from listing that
 invocation's own filter against the built binary — but a *selection* total is not a result, which
-is what the right-hand column is for.  The L2 tier's 15 registered cases divide into 4 that belong
-to neither arm, 6 legacy-arm, 4 AIDL-arm and 1 that tests the harness itself and is mandatory under
-both, which is why **D reports 11 passed and 4 skipped**: a case whose arm is not the resolved
-back-end skips rather than fails.  E's recorded 9 passed and 6 skipped are of the 15 registered
-before the harness case existed.  For why B, C and E cannot run here at all, see
+is what the right-hand column is for.  The L2 tier's 17 registered cases divide into 4 that belong
+to neither arm, 6 legacy-arm, 6 AIDL-arm and 1 that tests the harness itself and is mandatory under
+both, which is why **D reports 11 passed and 6 skipped**: a case whose arm is not the resolved
+back-end skips rather than fails.  E's 11 passed and 6 skipped are the mirror image, the six
+legacy-arm cases skipping there.  For why B, C and E cannot run here at all, see
 [Runtime prerequisites for the AIDL path](#runtime-prerequisites-for-the-aidl-path); for the job
 that is meant to produce them in CI, and its unrun state, see
 [CI/CD Integration](#cicd-integration).
@@ -683,28 +686,39 @@ records; there is no sixth of either.
 
 Some cases in the contract suite belong to one arm rather than both, and that is by design rather
 than a coverage gap -- a fixture cannot opt into a different back-end from its own `SetUp`, because
-the selection is already resolved by then.  One such case is worth naming, so it is not read as a
-defect: **physical-address retrieval is unavailable on the AIDL back-end**, pending the
-device-settings HAL contract that governs the read (tracked as blocked item **B1**).  No workaround
-is delivered and none should be added; the assertion for it therefore runs on the legacy arm only.
+the selection is already resolved by then.  One behaviour is worth naming, so it is not read as a
+defect: **the physical address differs by back-end on purpose.**  The AIDL HAL has no
+`getPhysicalAddress` interface, so the AIDL back-end reports the fixed **1.0.0.0** (`0x01000000`,
+one nibble per byte, which both plugins decode as `1.0.0.0`) in every driver state and makes no HAL
+call for it; the legacy back-end still reads `HdmiCecGetPhysicalAddress`.  The fixed value is right
+only where the device's real topology position is 1.0.0.0.  Each arm asserts its own value: the four
+`DriverAidlLocalInstanceTest.GetPhysicalAddress*` cases under every L1 invocation and
+`DriverAidlSessionTest.LibCCECReportsTheFixedPhysicalAddressWithoutAnyAidlCall` under B for the AIDL
+back-end, and `DriverAidlLegacyArmTest.PhysicalAddressIsReadThroughTheLegacyHalApi` under A for the
+legacy one.
 
-**Of the contract suite's 124 cases, 85 run under the default invocation and 39 do not** -- the
-same 124, partitioned the same way, as [Test Coverage](#test-coverage) above rather than a second
+**Of the contract suite's 138 cases, 94 run under the default invocation and 44 do not** -- the
+same 138, partitioned the same way, as [Test Coverage](#test-coverage) above rather than a second
 count of them -- and the difference is worth holding on to when reading anything below:
 
-- **Established, inside the default invocation's measured 568.**  All 28 `DriverAidlPreflightTest`
+- **Established, inside the default invocation's measured 577.**  All 28 `DriverAidlPreflightTest`
   cases, covering *every* decision arm of the bounded preflight -- the protocol-version mismatch
   and the matching driver whose context manager never answers included, plus a **positive**
   verdict, all reached through a probe seam the predicate takes as a defaulted parameter, which is
   what puts them within reach of a host with no Binder driver at all.  All 23 compatibility arms,
-  accept and reject.  All 25 local-instance arms, on a `DriverAidlImpl` whose constructor touches
-  no Binder -- every `status != OPENED` guard, the `writeAsync` prelude ordering, and
-  `getPhysicalAddress`'s B1 block.  The 4 selection cases -- the absent-service fallback, the
+  accept and reject.  All 34 local-instance arms, on a `DriverAidlImpl` whose constructor touches
+  no Binder -- every `status != OPENED` guard, the `writeAsync` prelude ordering, the fixed
+  physical address 1.0.0.0, and the enable-time logical-address registration: the PLAYBACK_DEVICE
+  candidate table (4, 8, 11, the inverse of `LogicalAddress::getType()`), exactly one address
+  registered through `addLogicalAddresses` and read back through `IHdmiCec::getLogicalAddresses()`,
+  occupied candidates skipped, a refusal moving to the next candidate and a transport failure
+  stopping, `addLogicalAddress` of a different address replacing the registered one, and `close()`
+  keeping the address until the next registration replaces it.  The 4 selection cases -- the absent-service fallback, the
   selected-path log line, the factory returning the same object on every call, and a mid-process
   registration that leaves the resolved back-end alone.  The 5 legacy arms, including a **measured
   receive-path delivery case** that drives a frame from the HAL mock through to an application
   listener, which is what makes the observation machinery the AIDL arms depend on something
-  demonstrated rather than assumed.  And, one of those 25 local-instance arms rather than a case
+  demonstrated rather than assumed.  And, one of those 34 local-instance arms rather than a case
   beyond them, a structural guard that reads the **real** HDMI CEC Sink plugin source and checks
   that the call-path shapes the AIDL session fixture models still match it.  That source is a
   **required acceptance input**, read at a reviewed revision: the case **fails** when it cannot be
@@ -723,13 +737,17 @@ count of them -- and the difference is worth holding on to when reading anything
   `/tmp/cec_log_enabled`, since that path is production's own choice and is shared by every process
   on the host — failing loudly if the level could not be raised; the synchronous listener detach
   that makes a callback after a failed close or after owner destruction a dropped callback rather
-  than a dereference of freed state, and the caller-visible half of the
-  `addLogicalAddress` failure mapping through both modelled Sink call paths.  **None of it executes
-  here**, because B is deferred on this host and on the committed runner.  All of it **has**
-  executed, once, in the binder-capable guest of `blitzy/documentation/Project Guide.md` §4.2 --
-  which is where one of that run's three test-code defects was found, in `DriverAidlSessionTest`
-  itself, so treat a green reading of these cases as owed to that guest and not to any run
-  performed here.
+  than a dereference of freed state, the caller-visible half of the
+  `addLogicalAddress` failure mapping through both modelled Sink call paths, and, through the
+  process's resolved back-end and `LibCCEC`, the enable-time registration of exactly one
+  PLAYBACK_DEVICE address, its read-back through the HAL, a re-open holding one address, the
+  `InvalidStateException` when no candidate is free, and the fixed physical address with no AIDL
+  call.  **None of it executes here**, because B is deferred on this host and on the committed
+  runner.  All of it **has** executed in binder-capable guests recorded in
+  `blitzy/documentation/Project Guide.md` §4 -- the earlier cases first on 2026-09-01, where one of
+  that run's three test-code defects was found, in `DriverAidlSessionTest` itself, and all 32
+  session and 12 transmit cases again on 2026-10-02 in an x86-64 protocol-8 guest -- so treat a
+  green reading of these cases as owed to those guests and not to any run performed here.
 
 #### `CEC_TEST_AIDL_MODE`
 
@@ -791,10 +809,11 @@ needed and neither substitutes for the other:
   at all, because its generated `onTransact` answers from compiled-in constants.
 - Only the **out-of-process** host can make the middleware hold a real proxy, cross the driver, and
   receive its listener callback on a binder threadpool thread.  That is what invocation E is for,
-  and **it is what invocation E did on 2026-09-01 — on a Binder-capable guest, and on no other
-  host.**  E is deferred on this host and on the committed CI runner alike; the runs that exist are
-  the ones recorded in `blitzy/documentation/Project Guide.md` §4.2, where 14 were registered, 8
-  passed, 6 skipped, exit `0`, with all four `DualPathAidlFlowTest` cases green.
+  and **it is what invocation E did on 2026-09-01 and again on 2026-10-02 — on Binder-capable
+  guests, and on no other host.**  E is deferred on this host and on the committed CI runner alike;
+  the runs that exist are the ones recorded in `blitzy/documentation/Project Guide.md` §4: 14
+  registered, 8 passed, 6 skipped on 2026-09-01, and 17 registered, 11 passed, 6 skipped on this
+  tree on 2026-10-02, each exit `0` with every `DualPathAidlFlowTest` case green.
 
 **Invocation E is structurally complete, its assertions are real, and a green run of it exists —
 but only where a Binder driver does, and never on this host or on the committed runner.**  The
@@ -807,13 +826,18 @@ form of "a binder threadpool thread received it"; that the outbound cases reach 
 channel — the inherited pipe *pair*, not the readiness pipe, which carries only the one readiness
 token — rather than inferred from the absence of an exception; and that a frame delivered while the
 driver is not opened is rejected by the state guard.  Those four cases **have** been exercised
-against a real transport once, in the §4.2 guest, where two of them failed on their first execution
-and were corrected -- each had derived its expected wire image from the caller's pre-header frame --
-so read them as assertions that one purpose-built guest has run, **never as evidence that this host,
+against a real transport, first in the 2026-09-01 guest of Project Guide §4, where two of them failed
+on their first execution and were corrected -- each had derived its expected wire image from the
+caller's pre-header frame -- so read them as assertions that purpose-built guests have run, **never as evidence that this host,
 or the committed binder job, has observed delivery over a real proxy or receipt on a binder
-threadpool thread.**  Under invocation D those four cases skip, which is why D reports 11 passed and
-4 skipped rather than 15 passed; under E it is the six legacy-arm cases that skip, which is why E
-reported 9 passed and 6 skipped of the 15 registered when it last ran.
+threadpool thread.**  Two further AIDL-arm cases, added since, assert that enabling the driver
+registers exactly one logical address through `IHdmiCecController::addLogicalAddresses` (read back
+with the host's `registered` verb) which `LibCCEC::getLogicalAddress` then returns through
+`IHdmiCec::getLogicalAddresses()`, and that `LibCCEC::getPhysicalAddress` reports the fixed 1.0.0.0
+with the fake service's send, open and close counts unchanged; all six AIDL-arm cases passed under
+E on 2026-10-02 in an x86-64 protocol-8 guest.  Under invocation D those six cases skip, which is
+why D reports 11 passed and 6 skipped rather than 17 passed; under E it is the six legacy-arm cases
+that skip, which is why E reports 11 passed and 6 skipped of the 17 registered.
 
 #### Runtime prerequisites for the AIDL path
 
@@ -838,12 +862,12 @@ executable.
 claim: all three are deferred on both**, for exactly the reason above.  Everything they assert —
 the adapter's translation arms, the in-process compatibility fallback, a real `Bp*` proxy carrying
 a transaction across the driver, and a listener callback arriving on a thread that is not the test
-thread — has been executed green exactly once, in the purpose-built binder-capable QEMU guest
-recorded in `blitzy/documentation/Project Guide.md` §4.2, and **that guest is not the committed
-target of the binder job described under [CI/CD Integration](#cicd-integration), which has never
-run.**  So the transport has been observed working, in one guest, once: treat a claim that *this*
-host, *this* runner or *that committed job* observed it as a documentation defect and correct it,
-and cite §4.2 for anything stronger.
+thread — has been executed green in purpose-built binder-capable QEMU guests recorded in
+`blitzy/documentation/Project Guide.md` §4, and **neither guest is the committed target of the
+binder job described under [CI/CD Integration](#cicd-integration), which has never run.**  So the
+transport has been observed working in those guests only: treat a claim that *this* host, *this*
+runner or *that committed job* observed it as a documentation defect and correct it, and cite §4
+for anything stronger.
 
 > **A driverless host is itself evidence.**  Such a host must reach the legacy back-end *without
 > aborting and without hanging*, which is the entire point of the middleware's bounded preflight:
@@ -855,7 +879,7 @@ observable through the line the factory logs once at initialisation, at `LOG_INF
 default level.  **Read it out of an invocation log rather than out of a live pipeline**, because a
 pipeline is where this evidence goes wrong: a trailing `grep` replaces the suite's exit status with
 its own, so a red run whose log happens to carry the line reports success.  **Measured:** the
-unfiltered suite is `607 tests from 25 test suites ran`, 568 passed, **39 failed, exit `1`** — while
+unfiltered suite is `621 tests from 25 test suites ran`, 577 passed, **44 failed, exit `1`** — while
 `./run_L1Tests 2>&1 | grep 'HDMI CEC HAL back-end selected'` in a default shell prints the legacy
 line and **exits `0`**.  Every invocation log `run_coverage.sh` writes belongs to a run whose exit
 status, test count and selected-path line were all checked before the run was allowed to proceed,
@@ -871,7 +895,7 @@ grep 'HDMI CEC HAL back-end selected' "$COVERAGE_DIR"/run_invocation_*.log
 # A LIVE RUN, when there is no such directory yet.  Three things are not optional here.
 # `set -o pipefail` keeps the suite's status instead of grep's; CEC_TEST_AIDL_MODE and the
 # invocation-A filter are what make the suite green in the first place (without the filter
-# this run is the red 607-case one above); and `tee` writes the log while leaving the
+# this run is the red 621-case one above); and `tee` writes the log while leaving the
 # status to be checked, which is the whole point.
 set -o pipefail
 CEC_TEST_AIDL_MODE=absent \
@@ -951,10 +975,10 @@ There are now **two** workflows, and the division of labour between them is the 
   machine**, followed by a single coverage capture and the per-branch gate.  It provisions a
   guest that can actually run binder, because a hosted runner cannot (see
   [Back-End Selection](#back-end-selection-the-invocation-matrix)).  **This committed workflow has
-  never run.**  The one execution of the matrix that exists was performed in a *different*,
-  purpose-built binder-capable QEMU guest, recorded in
-  `blitzy/documentation/Project Guide.md` §4.2; this workflow is the delivered mechanism for
-  reproducing that in CI, not a record that it has done so, and none of §4.2's results is a result
+  never run.**  The executions of the matrix that exist were performed in *different*,
+  purpose-built binder-capable QEMU guests, recorded in
+  `blitzy/documentation/Project Guide.md` §4; this workflow is the delivered mechanism for
+  reproducing that in CI, not a record that it has done so, and none of those results is a result
   on its target.
 
   The guest is a **protocol-7, all-32-bit** one end to end, and the way it reaches that is the part
@@ -1020,8 +1044,8 @@ single capture is the only way both arms of the selection branch land in one tra
 > run there.  Read the binder-capable job for that, and only that — and note that **the committed
 > binder job has never run**, so **no invocation in which a binder driver is required — B and E,
 > where the AIDL back-end is resolved, and C, whose own outcome is a legacy fallback — has produced
-> a result in CI at all.**  The one place all three have produced a result is the guest recorded in
-> `blitzy/documentation/Project Guide.md` §4.2, which is not this job's target.
+> a result in CI at all.**  The only places all three have produced a result are the guests recorded
+> in `blitzy/documentation/Project Guide.md` §4, neither of which is this job's target.
 
 ### Artifacts, and the one list that decides their names
 
@@ -1506,11 +1530,11 @@ Four notes on that example:
 1. **Integration tests**: done -- `tests/L2Tests/` is that directory.  It holds its own runner and
    an out-of-process fake AIDL service host, and it asserts one CCEC round trip against each HAL
    back-end over that back-end's real transport.  **The legacy half runs here** -- invocation D,
-   measured 11 passed and 4 skipped of 15, exit `0` -- and **the AIDL half does not**: its four
+   measured 11 passed and 6 skipped of 17, exit `0` -- and **the AIDL half does not**: its six
    cases are the ones that skip, and they need the binder-capable host described under
    [Runtime prerequisites for the AIDL path](#runtime-prerequisites-for-the-aidl-path), where they
-   have run once (`blitzy/documentation/Project Guide.md` §4.2, invocation E at 8 passed and 6
-   skipped) and not since.  Extending
+   have run in purpose-built guests (`blitzy/documentation/Project Guide.md` §4, most recently
+   invocation E at 11 passed and 6 skipped of 17 on 2026-10-02).  Extending
    it means appending to
    `run_L2Tests_SOURCES` under the same group-end rule as item 2, and reading
    [Back-End Selection](#back-end-selection-the-invocation-matrix) first, because a case there
@@ -1682,12 +1706,12 @@ The L1 unit test framework provides:
   vendor conditional** -- the choice is made at run time, so the suites are run once per selection
   outcome (see [Back-End Selection](#back-end-selection-the-invocation-matrix))
 - ⚠️ **Both back-ends have been *executed*, each under its own selection -- but not both here.**  The
-  legacy selection runs on any host and is measured green -- invocation A at 568 of 568, invocation D
-  at 11 passed and 4 skipped of 15.  The three binder-dependent invocations (B, C, E) are **deferred
+  legacy selection runs on any host and is measured green -- invocation A at 577 of 577, invocation D
+  at 11 passed and 6 skipped of 17.  The three binder-dependent invocations (B, C, E) are **deferred
   on this host and on the committed CI runner**, for want of a Binder kernel driver, and have been
   executed green against a real binder transport in purpose-built binder-capable QEMU guests,
-  recorded in `blitzy/documentation/Project Guide.md` §4.2: B 422 of 422 on the tree that then
-  registered 606 (this tree selects 423), C 384 of 384, E 9 passed with 6 skipped of 15.  Of those three only **B and E** resolve the AIDL back-end: **C resolves the legacy
+  recorded in `blitzy/documentation/Project Guide.md` §4: on this tree, B 437 of 437, C 393 of
+  393, E 11 passed with 6 skipped of 17.  Of those three only **B and E** resolve the AIDL back-end: **C resolves the legacy
   one**, because it registers an in-process service whose interface hash is `"-1"` and asserts that
   the factory falls back -- and it is deferred here because a registration needs the driver, not
   because it selects the AIDL path.  So the AIDL transport **has** been observed working, over real
