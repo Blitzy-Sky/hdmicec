@@ -776,7 +776,7 @@ protected:
 	 * rejects receive callbacks arriving during or after a close.
 	 *
 	 * @return IncomingQueue& - The queue received frames are offered onto and read() drains.
-	 * @throws InvalidStateException - The driver is not OPENED.
+	 * @pre The driver is OPENED; otherwise InvalidStateException is raised.
 	 *
 	 * @warning Reads the state without the instance lock, as the legacy accessor does.
 	 * @see offerReceivedFrame()
@@ -794,7 +794,7 @@ protected:
 	 * @return bool - Whether ownership was transferred
 	 * @retval true  - Queued; the caller must drop its pointer.
 	 * @retval false - The queue is full; the caller still owns the frame and must release it.
-	 * @throws InvalidStateException - The driver is not OPENED; the caller keeps ownership.
+	 * @pre The driver is OPENED; otherwise InvalidStateException is raised; the caller keeps ownership.
 	 *
 	 * @warning Serializes producers on queueProducerMutex, never the instance lock; not bounded-time.
 	 * @see getIncomingQueue()

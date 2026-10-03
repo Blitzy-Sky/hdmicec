@@ -9789,6 +9789,7 @@ TEST_F(DriverAidlLocalInstanceTest, AReleaseThatCannotBeReadBackRaisesIoExceptio
  * @note A raise propagates as std::bad_alloc; a failure is ignored, as on legacy.
  */
 TEST_F(DriverAidlLocalInstanceTest, ARemovalThatRaisesOrFailsIsReleasedAgainBeforeTheNextAdd) {
+    /** @brief Outcome enumeration of UnconfirmedOutcomeControllerDouble, shortened for the case. */
     typedef UnconfirmedOutcomeControllerDouble::Outcome Outcome;
     const Outcome outcomes[] = { Outcome::RAISES_UNAPPLIED, Outcome::RAISES_APPLIED,
                                  Outcome::FAILS_UNAPPLIED, Outcome::FAILS_APPLIED };
@@ -9836,6 +9837,7 @@ TEST_F(DriverAidlLocalInstanceTest, ARemovalThatRaisesOrFailsIsReleasedAgainBefo
  * @pre Runs under every invocation, on local instances whose injected controllers journal calls.
  */
 TEST_F(DriverAidlLocalInstanceTest, AnEnableTimeAddThatFailsInTransportIsReleasedBeforeTheNextAdd) {
+    /** @brief Outcome enumeration of UnconfirmedOutcomeControllerDouble, shortened for the case. */
     typedef UnconfirmedOutcomeControllerDouble::Outcome Outcome;
     const Outcome outcomes[] = { Outcome::FAILS_UNAPPLIED, Outcome::FAILS_APPLIED };
 
@@ -9872,6 +9874,7 @@ TEST_F(DriverAidlLocalInstanceTest, AnEnableTimeAddThatFailsInTransportIsRelease
  *       removal of an unheld address in between leaves the record alone.
  */
 TEST_F(DriverAidlLocalInstanceTest, AnExplicitAddThatRaisesOrFailsIsReleasedBeforeTheNextAdd) {
+    /** @brief Outcome enumeration of UnconfirmedOutcomeControllerDouble, shortened for the case. */
     typedef UnconfirmedOutcomeControllerDouble::Outcome Outcome;
     const Outcome outcomes[] = { Outcome::RAISES_UNAPPLIED, Outcome::RAISES_APPLIED,
                                  Outcome::FAILS_UNAPPLIED, Outcome::FAILS_APPLIED };
