@@ -21,15 +21,14 @@
  * @file
  * @brief L1 harness bootstrap: test environment, legacy HAL mock and the CEC_TEST_AIDL_MODE switch
  *
- * LibCCEC::init() in CecTestEnvironment::SetUp() fixes the back-end selection for the process,
- * so everything that influences it runs first. CEC_TEST_AIDL_MODE, read only here and by the L2
- * harness and never by production code, chooses what the service lookup finds:
- * - absent (also unset or empty): nothing is registered; the legacy back-end is selected.
- * - compatible: an in-process fake reporting its real frozen metadata; AIDL is selected.
- * - incompatible: the fake reports interface hash "-1"; it is rejected and legacy is selected.
- * - remote: a hard failure here, because only run_L2Tests launches the out-of-process fake host.
- * Any other value is a hard failure, never a fall back to absent. This file does not start the
- * binder client threadpool; DriverAidlImpl::open() owns it.
+ * LibCCEC::init() in CecTestEnvironment::SetUp() fixes the back-end selection for the process, so
+ * everything that influences it runs first. CEC_TEST_AIDL_MODE, read only by the test harnesses
+ * and never by production code, chooses what the service lookup finds: absent (also unset or
+ * empty; nothing registered, legacy selected), compatible (in-process fake with its real frozen
+ * metadata; AIDL selected), incompatible (fake reports interface hash "-1"; rejected, legacy
+ * selected) or remote (hard failure; only run_L2Tests launches the fake host), with any other
+ * value a hard failure. This file does not start the binder client threadpool;
+ * DriverAidlImpl::open() owns it.
  */
 
 #include <gtest/gtest.h>
@@ -41,8 +40,8 @@
 // the -I$(top_srcdir)/mocks/hdmicec that AM_CPPFLAGS already carries.
 #include "fake_hdmi_cec_aidl_service.h"
 
-// Reached by relative path, as ccec/src is not on AM_CPPFLAGS, for one symbol: the bounded
-// DriverAidlImpl::isBinderPreflightOk() that must pass before the service manager is touched.
+// Reached by relative path, as ccec/src is not on AM_CPPFLAGS, for the private bounded preflight
+// that must pass before the service manager is touched, called through BinderPreflightTestAccess.
 #include "../../ccec/src/DriverAidlImpl.hpp"
 
 // Reached the same way for the class alone: registry restoration below uses dynamic_cast to detect
@@ -55,7 +54,32 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
+
+CCEC_BEGIN_NAMESPACE
+
+/**
+ * @brief Test-only gateway to private DriverAidlImpl::isBinderPreflightOk(), which befriends it.
+ *
+ * Forwards its arguments unchanged, so the predicate's own defaults apply.
+ * ccec/test_DriverAidl.cpp defines it token-identically, as the one-definition rule requires.
+ */
+struct BinderPreflightTestAccess {
+    /**
+     * @brief Calls DriverAidlImpl::isBinderPreflightOk() with @p args, forwarded unchanged.
+     *
+     * @param [in] args - The predicate's leading arguments, in its parameter order.
+     *
+     * @return bool - The predicate's verdict.
+     */
+    template <typename... Args>
+    static bool isBinderPreflightOk(Args &&...args) {
+        return DriverAidlImpl::isBinderPreflightOk(std::forward<Args>(args)...);
+    }
+};
+
+CCEC_END_NAMESPACE
 
 // Create mock instance before main
 static HdmiCecDriverMock* g_driverMock = nullptr;
@@ -144,7 +168,14 @@ std::string renderUntrustedValue(const char *value, std::size_t length)
     return rendered;
 }
 
-/** @brief renderUntrustedValue() for a std::string. @see renderUntrustedValue(const char *, std::size_t) */
+/**
+ * @brief renderUntrustedValue() for a std::string.
+ *
+ * @param [in] value   - The string to render; any content is acceptable.
+ *
+ * @return std::string  - The rendering, double-quoted and on one line.
+ * @see renderUntrustedValue(const char *, std::size_t)
+ */
 inline std::string renderUntrustedValue(const std::string &value)
 {
     return renderUntrustedValue(value.data(), value.size());
@@ -155,6 +186,9 @@ inline std::string renderUntrustedValue(const std::string &value)
  *
  * A null pointer renders as the undelimited `<unset>`, so "unset" stays distinct from "".
  *
+ * @param [in] value   - The C string to render, or null.
+ *
+ * @return std::string  - `<unset>` for null, else the quoted rendering.
  * @see renderUntrustedValue(const char *, std::size_t)
  */
 inline std::string renderUntrustedValue(const char *value)
@@ -223,7 +257,7 @@ void failIfServiceAlreadyPublished(const std::string &serviceName) {
  * @see applyAidlModeBeforeInit(), failIfServiceAlreadyPublished()
  */
 void publishFakeForMode(const std::string &mode) {
-    ASSERT_TRUE(DriverAidlImpl::isBinderPreflightOk())
+    ASSERT_TRUE(BinderPreflightTestAccess::isBinderPreflightOk())
         << AIDL_MODE_VARIABLE << "=" << mode << " requires a usable binder transport, and this "
            "host does not have one - the driver node is absent or unopenable, its protocol "
            "version differs, or no service manager answered within the bounded timeout. "
@@ -259,7 +293,8 @@ void publishFakeForMode(const std::string &mode) {
  * @brief Reads CEC_TEST_AIDL_MODE and acts on it before the back-end selection resolves
  *
  * The modes are described in the file comment; remote is a hard failure here because only
- * run_L2Tests launches the out-of-process fake host. Absent never touches libbinder, so the default
+ * run_L2Tests launches the out-of-process fake host. Absent publishes nothing, and where no binder
+ * driver node exists the selection's preflight declines before libbinder is reached, so the default
  * invocation runs on a host without kernel binder support.
  *
  * @pre Called before LibCCEC::init() in CecTestEnvironment::SetUp(), which fixes the selection.
@@ -270,7 +305,7 @@ void publishFakeForMode(const std::string &mode) {
 void applyAidlModeBeforeInit() {
     const char *const requested = ::getenv(AIDL_MODE_VARIABLE);
 
-    // Unset and empty both mean absent, so the pre-existing behaviour is the default.
+    // An unset or empty mode selects absent.
     const std::string mode =
         (requested != nullptr && requested[0] != '\0') ? requested : AIDL_MODE_ABSENT;
 
@@ -305,11 +340,11 @@ void applyAidlModeBeforeInit() {
 }
 
 /**
- * @brief Test listener that restores the driver's logical-address registry after every case
+ * @brief Test listener that detects and reports logical addresses a case leaves registered
  *
  * The driver is a process singleton whose address list survives close(), so an address one case
- * leaves registered can fail a later case under --gtest_shuffle. After each case this removes,
- * through the driver's public interface, every address registered since the first case began.
+ * leaves registered can fail a later case under --gtest_shuffle. After each case it reports every
+ * address added since the first case began and, on the legacy back-end only, tries to remove each.
  *
  * @warning It never fails a test and issues no binder call: under an AIDL selection a leaked
  *          address is reported and left registered.
@@ -354,13 +389,13 @@ public:
     }
 
     /**
-     * @brief Returns the registry to the captured baseline after each case
+     * @brief Reports addresses added since the baseline and, on legacy, tries to remove them
      *
-     * @param [in] testInfo  - The case that just finished, named in the report so a leak is
-     *                         attributed to it.
+     * @param [in] testInfo  - The case that just finished, to which the report attributes a leak.
      *
      * @pre Runs after the case's own TearDown, so a fixture that cleans up leaves nothing to do.
-     * @post Every address added since the baseline is removed or reported; baseline ones stay.
+     * @post Added addresses were reported and, on legacy, removal attempted with failures logged;
+     *       baseline addresses are neither removed nor re-added.
      * @warning Never fails a test; each legacy removal produces one gmock warning, announced first.
      */
     void OnTestEnd(const ::testing::TestInfo &testInfo) override {
@@ -494,12 +529,7 @@ private:
     /** @brief Whether the registry the suite starts from has been captured yet. */
     bool baselineCaptured;
 
-    /**
-     * @brief The registry as the first case found it, indexed from FIRST_ASSIGNABLE_ADDRESS
-     *
-     * Captured rather than assumed empty, so an address the starting state holds is never removed:
-     * the device's registered address on the AIDL back-end, none on legacy.
-     */
+    /** @brief The registry as the first case found it, indexed from FIRST_ASSIGNABLE_ADDRESS. */
     bool baselineRegistered[ASSIGNABLE_ADDRESS_COUNT];
 };
 
@@ -518,8 +548,7 @@ public:
         ASSERT_NO_FATAL_FAILURE(applyAidlModeBeforeInit());
 
         // Initialize the Bus so it's ready for tests
-        // Fatal on failure: every driver-dependent case needs an initialized stack, and none of the
-        // exceptions init() can raise here is benign.
+        // Fatal on failure: every driver-dependent case needs an initialized stack.
         ASSERT_NO_THROW({ LibCCEC::getInstance().init("CEC_TEST"); })
             << "the CEC library could not be initialized, so not one suite in this binary "
                "has its precondition; continuing would assert against an uninitialized stack";
@@ -527,8 +556,7 @@ public:
     
     void TearDown() override {
         // Clean up
-        // Non-fatal, so the remaining cleanup still runs once results are recorded. A published
-        // fake AIDL service stays published: the pinned IServiceManager cannot remove it.
+        // Non-fatal so cleanup completes; a published fake AIDL service cannot be withdrawn.
         EXPECT_NO_THROW({ LibCCEC::getInstance().term(); })
             << "the CEC library could not be terminated cleanly; the remaining cleanup below "
                "still runs, but this process did not shut the CEC stack down properly";

@@ -92,8 +92,8 @@ permissions:
 env:
   BUILD_TYPE: Debug
 
-  # THE ACCEPTANCE TOOLCHAIN, PINNED IN ONE PLACE, AND PINNED TO THE MAJOR RATHER THAN THE
-  # PATCH - WHICH IS A STATEMENT ABOUT WHAT IS ENFORCEABLE, NOT A RELAXATION.
+  # THE ACCEPTANCE TOOLCHAIN, PINNED IN ONE PLACE: THE MAJOR BOTH JOBS SHARE, AND THE EXACT
+  # RELEASE THIS JOB BUILDS.
   #
   # WHY IT IS PINNED AT ALL. The acceptance evidence this migration rests on is
   # compiler-sensitive in two directions. The line and branch figures are gcov's reading of
@@ -104,49 +104,58 @@ env:
   # refuses to read notes files a different major produced. So "whatever the runner image
   # happens to default to" is not a toolchain choice this job is entitled to make.
   #
-  # WHY THE MAJOR AND NOT 13.4.0. The documented acceptance patch level is GCC/G++/gcov 13.4.0 -
-  # that is what the reference container provides and what blitzy/documentation/Project Guide.md
-  # §9.1 records as verified. Ubuntu noble's archive supplies the gcc-13 family at
-  # 13.3.0-6ubuntu2~24.04.1, and no distribution archive this job is allowed to use carries
-  # 13.4.0: reaching it would mean an unpinned third-party PPA, which contradicts this file's own
-  # supply-chain posture (every action a full-length SHA, every fetched artefact held to a
-  # publisher-issued digest). A gate that demanded 13.4.0 would therefore fail every run on a
-  # difference nobody can close from an archive, and a gate that CLAIMED 13.4.0 while accepting
-  # 13.3.0 would be a false statement in the one place a reader trusts. So the enforceable pin is
-  # the MAJOR, it is enforced hard, and THE EXACT PATCH LEVEL IS RECORDED WITH THE RESULTS -
-  # printed into the toolchain step's log and into the job summary by "Select and prove the
-  # acceptance toolchain" below, which is what makes a later figure attributable.
+  # WHY THIS JOB BUILDS 13.4.0 RATHER THAN INSTALLING A PACKAGE. The documented acceptance
+  # patch level is GCC/G++/gcov 13.4.0 - that is what the reference container provides and what
+  # blitzy/documentation/Project Guide.md §9.1 records as verified. This job runs on
+  # ubuntu-22.04, whose archive carries no gcc-13 family at all, and no distribution archive
+  # this job is allowed to use carries 13.4.0: reaching it through a third-party PPA would
+  # contradict this file's own supply-chain posture (every action a full-length SHA, every
+  # fetched artefact held to a publisher-issued digest). So "Build the pinned GCC toolchain from
+  # source" builds exactly CEC_TOOLCHAIN_GCC_VERSION from the GNU release tarball, and "Select
+  # and prove the acceptance toolchain" gates the exact version as well as the major and
+  # records it with the results.
   #
-  # ONE PLACE, so the two jobs cannot drift: this entry is read by every step in this file that
-  # names a compiler, and .github/workflows/aidl-path-tests.yml carries the same value under the
-  # same name for the same reason. Move them together.
+  # THE DIGEST IS THE PUBLISHER'S. CEC_TOOLCHAIN_GCC_SHA512 is GCC's own value for
+  # gcc-13.4.0.tar.xz, taken from the release manifest
+  # https://gcc.gnu.org/pub/gcc/releases/gcc-13.4.0/sha512.sum, committed here and reviewed with
+  # this file. It is valid for exactly one release, hence the _FOR_VERSION partner and the guard
+  # that refuses to check one release's tarball against another release's digest.
+  #
+  # ONE PLACE FOR THE MAJOR, so the two jobs cannot drift: CEC_TOOLCHAIN_GCC_MAJOR is read by
+  # every step in this file that names a compiler, and .github/workflows/aidl-path-tests.yml
+  # carries the same value under the same name. Move them together. That job installs noble's
+  # archive gcc-13 (13.3.0), so the major is the pin the two share and the exact release is
+  # this job's alone.
   CEC_TOOLCHAIN_GCC_MAJOR: '13'
+  CEC_TOOLCHAIN_GCC_VERSION: '13.4.0'
+  CEC_TOOLCHAIN_GCC_SHA512: '9b4b83ecf51ef355b868608b8d257b2fa435c06d2719cb86657a7c2c2a0828ff4ce04e9bac1055bbcad8ed5b4da524cafaef654785e23a50233d95d89201e35f'
+  CEC_TOOLCHAIN_GCC_SHA512_FOR_VERSION: '13.4.0'
 
 jobs:
   L1-tests:
     name: Build and run unit tests
-    # ubuntu-24.04 RATHER THAN ubuntu-22.04, AND THE ARCHIVE IS THE WHOLE REASON.
+    # ubuntu-22.04, THE HOSTED JOB THE MIGRATION PLAN NAMES, WITH THE GCC 13 FAMILY BUILT
+    # RATHER THAN INSTALLED.
     #
-    # This job used to run on ubuntu-22.04 and install an unversioned `g++`, so the compiler
-    # that produced every artefact and every coverage counter was whichever one that image
-    # defaulted to. Pinning the family (see CEC_TOOLCHAIN_GCC_MAJOR above) is only possible on a
-    # runner whose distribution archive actually carries it: jammy carries NO gcc-13 family at
-    # all, while noble carries gcc-13 and g++-13 at 13.3.0-6ubuntu2~24.04.1 for amd64 and i386
-    # alike. The alternative - staying on jammy and adding a PPA - would introduce an unpinned
-    # third-party archive into a job that pins every other input to a digest, so it is not one.
+    # This job used to install an unversioned `g++`, so the compiler that produced every
+    # artefact and every coverage counter was whichever one the image defaulted to. jammy's
+    # archive carries NO gcc-13 family at all, and a PPA would introduce an unpinned third-party
+    # archive into a job that pins every other input to a digest. So "Build the pinned GCC
+    # toolchain from source" builds exactly CEC_TOOLCHAIN_GCC_VERSION from the digest-verified
+    # GNU release and installs it as /usr/bin/gcc-13, g++-13 and gcov-13 - the names and prefix
+    # a distribution package uses - so every later step, the gate included, is the same whichever
+    # way the compiler arrived.
     #
-    # Noble's own default gcc is already the 13 family, which means the versioned install below
-    # is belt and braces rather than a change of compiler; that is deliberate. The selection must
-    # not depend on which default an image happens to carry, and the gate step proves what was
-    # selected either way.
-    runs-on: ubuntu-24.04
+    # The selection must not depend on which default an image happens to carry (jammy's is the
+    # gcc-11 family), and the gate step proves what was selected either way.
+    runs-on: ubuntu-22.04
 
     # LEAST PRIVILEGE, DECLARED AT THE JOB RATHER THAN LEFT TO INHERITANCE.
     #
     # This file already declares `permissions: contents: read` at the workflow level, and that
     # is inherited - but only for as long as nothing above overrides it. Declaring it HERE fixes
     # the scope of the token THIS job's steps receive. It matters because of what runs with that
-    # token: five actions/checkout invocations and two actions/upload-artifact invocations, each
+    # token: seven actions/checkout invocations and two actions/upload-artifact invocations, each
     # executing a pre-bundled dependency tree that the PIN AUDIT RECORD below records a residual
     # against, and then a tree handed to autoreconf, ./configure, three makes, a coverage run
     # and two build scripts from another repository.
@@ -231,8 +240,8 @@ jobs:
       # filter is therefore what makes invocation A green, and MEASURED, not assumed:
       # without it the run on this exact tree reports 44 FAILED and exits 1. Those 44 are every
       # case those two fixtures register and nothing besides them - DriverAidlSessionTest 32 plus
-      # DriverAidlTransmitTest 12, derived from `--gtest_list_tests` on the built binary (621 cases
-      # in 25 suites registered, 577 in 23 selected once this filter applies) - so the filter
+      # DriverAidlTransmitTest 12, derived from `--gtest_list_tests` on the built binary (638 cases
+      # in 25 suites registered, 594 in 23 selected once this filter applies) - so the filter
       # removes the failures and nothing else. Earlier revisions of this comment said 31, 35 and
       # then 38, each true of an earlier tree; that is precisely why the number is no longer only
       # written down. The `List available tests and prove the invocation-A filter arithmetic` step below
@@ -240,8 +249,9 @@ jobs:
       # close, if it selects or excludes nothing, or if it excludes anything outside those two
       # fixtures.
       #
-      # The filter is taken verbatim from the FIXTURE MANIFEST in
-      # tests/L1Tests/ccec/test_DriverAidl.cpp, which is where it is maintained; do not
+      # The filter is taken verbatim from the "Fixture manifest" pointer comment in
+      # tests/L1Tests/ccec/test_DriverAidl.cpp, which is where it is maintained (the per-fixture
+      # table it points to is under "### Fixture manifest" in AIDL_HAL_MIGRATION_NOTES.md); do not
       # re-derive it here. It is spelled as GTEST_FILTER rather than as a --gtest_filter
       # argument for one reason: an environment variable reaches EVERY way this job starts
       # the binary, including the make-driven valgrind run and the subshell in its
@@ -283,9 +293,8 @@ jobs:
       # that regression would present as a job consuming its whole workflow timeout at one
       # step, with no exit status to classify and no annotation to read; bounded, it presents
       # as GNU timeout's 124 (or 137 after the grace period), which the steps below classify
-      # by name. GNU semantics are what a hosted ubuntu-24.04 runner has - coreutils on any
-      # GitHub-hosted Ubuntu image, and unchanged by the runner label move - so 124 and 137
-      # are the right contract here.
+      # by name. GNU semantics are what a hosted ubuntu-22.04 runner has - coreutils, as on any
+      # GitHub-hosted Ubuntu image - so 124 and 137 are the right contract here.
       #
       # The values are generous on purpose - they cannot fire on a slow runner, only on a
       # hang. Measured on this tree, the L1 suite runs in single-digit seconds even
@@ -302,13 +311,18 @@ jobs:
       L1_VALGRIND_TIMEOUT_SECONDS: 3600
       L1_KILL_GRACE_SECONDS: 30
 
-      # THE TWO ARTEFACTS THIS JOB FETCHES FROM OUTSIDE THE DISTRIBUTION ARCHIVE, AND THE
+      # THE FIVE ARTEFACTS THIS JOB FETCHES FROM OUTSIDE THE DISTRIBUTION ARCHIVE, AND THE
       # PUBLISHER-ISSUED DIGESTS THEY ARE HELD TO.
       #
       # "Set up CMake" below fetches the JOB-WIDE CMake at exactly the version pinned by this
-      # project, and "Resolve the CMake installations" fetches a CMake pinned to the Binder
-      # SDK's documented floor when - and only when - no installed candidate satisfies it.
-      # Both archives are executable code, so both are verified before they are unpacked.
+      # project, and "Resolve the CMake installations" fetches the Binder SDK's CMake at exactly
+      # CMAKE_SDK_VERSION on every run - never an installed one. Both archives are executable
+      # code, so both are verified before they are unpacked. The third is the GCC source "Build
+      # the pinned GCC toolchain from source" compiles, held to GCC's own SHA-512 in the
+      # CEC_TOOLCHAIN_GCC_* entries at the top of this file and likewise verified before it is
+      # unpacked. The fourth and fifth are the pkgconf source "Build and assert pkgconf" compiles
+      # and the lcov release asset "Install and assert lcov" installs, held to the PKGCONF_* and
+      # LCOV_* entries below and likewise verified before they are unpacked.
       # Everything else this job installs comes from apt, which authenticates its own packages.
       #
       # A DIGEST THIS JOB MEASURES PROVES NOTHING; A DIGEST THE PUBLISHER ISSUED PROVES WHICH
@@ -318,16 +332,20 @@ jobs:
       # alongside the tarball it describes, committed here and reviewed with this file.
       #
       # A COMMITTED DIGEST IS VALID FOR EXACTLY ONE VERSION, so it is paired with the release
-      # it was published for. The step compares that against the floor it is actually resolving
-      # and fails by name when the two diverge - a floor bumped without its digest stops at that
-      # guard instead of checking one version's tarball against another version's digest, which
+      # it was published for. The step compares that against CMAKE_SDK_VERSION and fails by
+      # name when the two diverge - a version bumped without its digest stops at that guard
+      # instead of checking one version's tarball against another version's digest, which
       # would fail as a mismatch and read as tampering rather than as a stale pin.
       #
-      # aidl-path-tests.yml verifies the same tarball against the same value under the names
-      # CMAKE_SDK_SHA256 / CMAKE_SDK_SHA256_FOR_VERSION. The two jobs resolve CMake for the same
-      # reason and must not diverge on how they authenticate it; move them together.
-      CMAKE_FLOOR_SHA256: '73565c72355c6652e9db149249af36bcab44d9d478c5546fd926e69ad6b43640'
-      CMAKE_FLOOR_SHA256_FOR_VERSION: '3.22.1'
+      # 3.22.1 EXACTLY, NOT AS A FLOOR. It is the version linux_binder_idl's BUILD.md names for
+      # the 2.6.0 tag, and the SDK is built with that release and no other, whatever cmake the
+      # runner image or apt carries.
+      #
+      # aidl-path-tests.yml carries these three values under the same three names and resolves
+      # the SDK's CMake the same way; move them together.
+      CMAKE_SDK_VERSION: '3.22.1'
+      CMAKE_SDK_SHA256: '73565c72355c6652e9db149249af36bcab44d9d478c5546fd926e69ad6b43640'
+      CMAKE_SDK_SHA256_FOR_VERSION: '3.22.1'
 
       # THE JOB-WIDE CMAKE IS PINNED TO ONE EXACT RELEASE, AND THE BYTES ARE THE PUBLISHER'S.
       #
@@ -341,7 +359,7 @@ jobs:
       # bytes Kitware published: a digest can only be checked by whoever holds the file.
       #
       # SO THIS JOB FETCHES IT ITSELF, AT AN EXACT VERSION, AND VERIFIES IT BEFORE USE. The
-      # mechanism is deliberately the SAME ONE the SDK floor above already proved: version-
+      # mechanism is deliberately the SAME ONE the SDK's CMake above already proved: version-
       # coupled guard first, non-empty guard second, download to a file, measured-versus-
       # committed sha256sum, and only then extract - each arm with an ::error:: that names the
       # reason and the remedy. The prefix it unpacks into is prepended to GITHUB_PATH, which is
@@ -372,6 +390,39 @@ jobs:
       CMAKE_PINNED_VERSION: '3.16.9'
       CMAKE_PINNED_SHA256: '96d79367dcafb47d606573a4687021d3cb18dd53d83458fc1d6d9c89bf31b553'
       CMAKE_PINNED_SHA256_FOR_VERSION: '3.16.9'
+
+      # pkg-config IS PINNED TO pkgconf 1.8.1, BUILT FROM ITS RELEASE TARBALL.
+      #
+      # 1.8.1 is the pkg-config the acceptance runs are recorded with, and jammy's archive does
+      # not carry it: main has the freedesktop pkg-config 0.29.2, which libglib2.0-dev pulls in
+      # whatever this job asks for, and universe has pkgconf 1.8.0. "Build and assert pkgconf"
+      # therefore builds exactly PKGCONF_VERSION and proves it is the pkg-config configure gets.
+      #
+      # Source of the digest: the upstream release tarball
+      # https://distfiles.ariadne.space/pkgconf/pkgconf-1.8.1.tar.xz (302372 bytes) is byte-identical
+      # to Ubuntu noble's pkgconf_1.8.1.orig.tar.xz, whose SHA-256 below is the one published in
+      # noble's signed main/source/Sources index. A COMMITTED DIGEST IS VALID FOR EXACTLY ONE
+      # VERSION, hence the _FOR_VERSION partner and its guard.
+      PKGCONF_VERSION: '1.8.1'
+      PKGCONF_SHA256: '644361ada2942be05655d4452eb018791647c31bba429b287f1f68deb2dc6840'
+      PKGCONF_SHA256_FOR_VERSION: '1.8.1'
+
+      # lcov IS PINNED TO THE v2.0 RELEASE ASSET, WHICH REPORTS ITSELF AS 2.0-1.
+      #
+      # 2.0-1 is the lcov the acceptance runs are recorded with; jammy's archive ships 1.15. The
+      # release asset rather than the auto-generated source archive, because only the asset ships
+      # the .version file that stamps the installed tools with that version.
+      #
+      # Source of the digest: the value published with the linux-test-project/lcov v2.0 release
+      # for lcov-2.0.tar.gz (391695 bytes), corroborated by Gentoo's independently maintained
+      # dev-build/lcov Manifest for the same bytes. A COMMITTED DIGEST IS VALID FOR EXACTLY ONE
+      # VERSION, hence the _FOR_VERSION partner and its guard.
+      #
+      # aidl-path-tests.yml carries these three values under the same three names and installs
+      # the same asset; move them together.
+      LCOV_VERSION: '2.0'
+      LCOV_SHA256: '1857bb18e27abe8bcec701a907d5c47e01db4d4c512fc098d1a6acd29267bf46'
+      LCOV_SHA256_FOR_VERSION: '2.0'
 
       # GOOGLETEST IS PINNED TO A COMMIT, AND THE TAG SURVIVES ONLY AS THE COMMENT BESIDE IT.
       #
@@ -465,6 +516,29 @@ jobs:
       # under the same two names; move them together.
       SINK_REPOSITORY: Blitzy-Sky/entservices-hdmicecsink
       SINK_REF: 2ad7e1a4712908a4d0fb838caebcbfcaabba55d8
+
+      # THE TWO PRODUCTION HEADER SOURCES THE SHIPPING HAND BUILD COMPILES AGAINST.
+      #
+      # ccec/src/Makefile takes <telemetry_busmessage_sender.h> from TELEMETRY_PREFIX and
+      # "ccec/drivers/hdmi_cec_driver.h" from LEGACY_HAL_PREFIX, and REFUSES mocks/ and stubs/
+      # as either root, because the library a SOC vendor ships is not certified against
+      # test-scope headers. So both publishers' trees are checked out here at a commit, their
+      # HEADs are asserted by "Verify the pinned dependency checkouts", and the hand-build step
+      # stages the two roots outside the hdmicec tree from them.
+      #
+      #   TELEMETRY_COMMIT   rdkcentral/telemetry develop head when pinned, read with
+      #                      `git ls-remote`; supplies include/telemetry_busmessage_sender.h
+      #                      and the include/telemetry2_0.h it includes.
+      #   LEGACY_HAL_COMMIT  rdkcentral/rdk-halif-hdmi_cec tag 1.4.0 - an ANNOTATED tag, so this
+      #                      is `git rev-parse refs/tags/1.4.0^{}` - and the superproject
+      #                      gitlink; supplies include/hdmi_cec_driver.h.
+      #
+      # aidl-path-tests.yml carries these four values under the same four names; move them
+      # together.
+      TELEMETRY_REPOSITORY: rdkcentral/telemetry
+      TELEMETRY_COMMIT: 8a88c84d75a0dccdaf0fdfe2bf4132750eca61df # develop head; include/telemetry_busmessage_sender.h, include/telemetry2_0.h
+      LEGACY_HAL_REPOSITORY: rdkcentral/rdk-halif-hdmi_cec
+      LEGACY_HAL_COMMIT: f05a341fe525fa345decc16996ad30234b645ece # tag 1.4.0 (annotated; tag object 164bbb5c311c04db1493e7338d05ca4f5a70dd71); superproject gitlink
 
       # WHERE THE VERIFIED SOURCE TREE LIVES, AND WHY EXACTLY THERE.
       #
@@ -601,8 +675,8 @@ jobs:
       # short form is: the version is now exact, and the bytes are now checkable by this job
       # because this job is the one that holds the file.
       #
-      # ORDER OF THE GUARDS IS THE SAME AS "Resolve the CMake installations" USES FOR THE SDK
-      # FLOOR, on purpose - version coupling first, so a version bumped without its digest
+      # ORDER OF THE GUARDS IS THE SAME AS "Resolve the CMake installations" USES FOR THE SDK'S
+      # CMAKE, on purpose - version coupling first, so a version bumped without its digest
       # stops at a guard that says exactly that instead of failing later as a digest mismatch
       # that reads like tampering; then the non-empty check, so a removed value cannot pass as
       # a satisfied comparison; then measured versus committed.
@@ -631,7 +705,7 @@ jobs:
 
           # CAPITAL L. Kitware named this asset cmake-<v>-Linux-x86_64.tar.gz through the 3.19
           # series and cmake-<v>-linux-x86_64.tar.gz from 3.20 onwards, so this pin and the
-          # 3.22.1 floor below genuinely differ in case. The version appears once, here.
+          # 3.22.1 SDK pin below genuinely differ in case. The version appears once, here.
           asset="cmake-$CMAKE_PINNED_VERSION-Linux-x86_64.tar.gz"
           tarball="$GITHUB_WORKSPACE/tools/$asset"
           curl -fsSL --output "$tarball" \
@@ -664,25 +738,214 @@ jobs:
       # cannot run at all - measured, not anticipated. They belong here rather than in that
       # step because this is the one place this job installs packages.
       #
-      # gcc-13 AND g++-13 ARE NAMED EXPLICITLY, AND THE BARE `g++` IS GONE. The list used to
-      # carry `build-essential g++`, which installs whichever family the image defaults to and
-      # says nothing about which one this job then uses. Naming the versioned pair puts the
-      # acceptance family on the runner by name; the gcc-13 package is also what supplies
-      # /usr/bin/gcov-13, which the toolchain step below puts first on PATH under the name
-      # `gcov`, because tests/L1Tests/run_coverage.sh resolves gcov from PATH and has no override
-      # knob. build-essential STAYS - it is what provides make, libc6-dev and the rest of the
-      # base build environment, none of which the versioned compiler packages carry - and every
-      # other package in this list is unchanged, clang included: nothing in this job compiles
-      # with clang, but removing a package is not this correction's business.
+      # gcc-13 AND g++-13 ARE NOT IN THIS LIST, because jammy's archive does not carry them:
+      # the step after this one builds them, and that build also supplies /usr/bin/gcov-13,
+      # which the toolchain step puts first on PATH under the name `gcov` because
+      # tests/L1Tests/run_coverage.sh resolves gcov from PATH and has no override knob. What
+      # the build needs from the archive IS here: libgmp-dev, libmpfr-dev and libmpc-dev, the
+      # three libraries GCC's configure requires, and build-essential, whose gcc-11 compiles it -
+      # measured to be all it needs. build-essential also provides make, libc6-dev and the rest
+      # of the base build environment. The bare `g++` this list once carried stays gone: it
+      # installs whichever family the image defaults to and says nothing about which one this
+      # job uses.
       #
-      # The package names are DERIVED from CEC_TOOLCHAIN_GCC_MAJOR rather than spelled, so the
-      # pinned major has exactly one definition point in this file and the packages installed
-      # cannot drift from the ones the gate below then demands.
+      # libglib2.0-dev IS NAMED because configure.ac requires glib-2.0 and the ubuntu-22.04
+      # image carries it only as another package's dependency; a hard configure dependency is
+      # not left to that. Apart from the lcov change below, every other package in this list is
+      # unchanged, clang included: nothing in this job compiles with clang, but removing a
+      # package is not this correction's business.
+      #
+      # lcov IS NOT IN THIS LIST: jammy's is 1.15, and "Install and assert lcov" installs the
+      # pinned 2.0 release asset instead. perl and the five lib*-perl modules after it are that
+      # release's runtime prerequisites, the same set aidl-path-tests.yml installs. pkg-config
+      # STAYS although "Build and assert pkgconf" supersedes it for every later step: it is
+      # jammy's 0.29.2, which libglib2.0-dev pulls in regardless, and it is the reference that
+      # step checks the pinned build's answers against.
       - name: Install packages
         run: >
           sudo apt update
           &&
-          sudo apt install -y autoconf automake libtool pkg-config libgtest-dev libgmock-dev libdbus-1-dev build-essential "gcc-$CEC_TOOLCHAIN_GCC_MAJOR" "g++-$CEC_TOOLCHAIN_GCC_MAJOR" cmake valgrind lcov clang ninja-build flex bison
+          sudo apt install -y autoconf automake libtool pkg-config libgtest-dev libgmock-dev libdbus-1-dev libglib2.0-dev build-essential libgmp-dev libmpfr-dev libmpc-dev cmake valgrind clang ninja-build flex bison perl libcapture-tiny-perl libdatetime-perl libjson-xs-perl libperlio-gzip-perl libtimedate-perl
+
+      # THE PINNED GCC, BUILT FROM THE GNU RELEASE.
+      #
+      # WHAT IT PRODUCES. Exactly CEC_TOOLCHAIN_GCC_VERSION, configured with --prefix=/usr and
+      # --program-suffix=-<major>, so it is /usr/bin/gcc-13, g++-13 and gcov-13: the gate, the
+      # gcov shim and the hand build's expected compiler are unchanged, and the libstdc++
+      # headers land in /usr/include/c++/<version>, which the '/usr/include/*' removal in
+      # "Generate coverage" and the exclusion globs tests/L1Tests/run_coverage.sh carries
+      # already strip. It is C and C++ only, 64-bit only (--disable-multilib), PIE by default
+      # as distribution compilers are, with release checking and no translations, and built in
+      # one stage (--disable-bootstrap): jammy's gcc-11 compiles it once, which is enough for a
+      # compiler that builds this project rather than one that ships.
+      #
+      # THE SAME FETCH CONTRACT AS THE TWO CMAKES: version-coupled guard first, non-empty guard
+      # second, download to a file, measured-versus-committed SHA-512, and nothing is unpacked
+      # from a tarball that fails.
+      #
+      # THE INSTALL REPLACES NOTHING THE IMAGE OWNS. The build runs as the runner account into
+      # a staging directory. Every staged path that already exists on the runner is listed as
+      # an ::error:: before anything is written, and the copy into / extracts with
+      # --keep-old-files, so an existing file is refused rather than overwritten, and
+      # --no-same-owner, so the result is root-owned; directories already on the runner keep
+      # their modes and owners. No package's file is touched, so dpkg's record of the image
+      # stays true.
+      #
+      # WHY /usr/lib64 GOES FIRST FOR THE LOADER. GCC installs its libstdc++.so.6 and
+      # libgcc_s.so.1 under /usr/lib64, and every C++ binary g++-13 links needs that libstdc++:
+      # jammy's own, from gcc-12, lacks the newer symbol versions. An /etc/ld.so.conf.d entry
+      # that sorts before the multiarch ones makes the loader prefer it, and libstdc++ is
+      # backward compatible, so the image's own C++ programs keep running against it.
+      #
+      # timeout-minutes IS A BACKSTOP, set far above the measured step: about fifteen minutes
+      # on two CPUs and eight on four.
+      - name: Build the pinned GCC toolchain from source
+        timeout-minutes: 150
+        run: |
+          set -euo pipefail
+          major="${CEC_TOOLCHAIN_GCC_MAJOR:?CEC_TOOLCHAIN_GCC_MAJOR is unset. Restore it in the env block of this workflow.}"
+          version="${CEC_TOOLCHAIN_GCC_VERSION:?CEC_TOOLCHAIN_GCC_VERSION is unset. Restore it in the env block of this workflow, beside CEC_TOOLCHAIN_GCC_MAJOR.}"
+
+          # VERSION COUPLING FIRST, as for the two CMakes: a release bumped without its digest
+          # stops here by name instead of failing below as a digest mismatch.
+          if [ "$version" != "${CEC_TOOLCHAIN_GCC_SHA512_FOR_VERSION:-}" ]; then
+            echo "::error::CEC_TOOLCHAIN_GCC_VERSION is '$version' but the committed CEC_TOOLCHAIN_GCC_SHA512 was published by GCC for '${CEC_TOOLCHAIN_GCC_SHA512_FOR_VERSION:-<unset>}'. A committed digest is valid for one release only. Read the new release's own sha512.sum under https://gcc.gnu.org/pub/gcc/releases/, update CEC_TOOLCHAIN_GCC_SHA512 and CEC_TOOLCHAIN_GCC_SHA512_FOR_VERSION together with the version, and do not verify one release's tarball against another's digest."
+            exit 1
+          fi
+          [ -n "${CEC_TOOLCHAIN_GCC_SHA512:-}" ] || { echo "::error::CEC_TOOLCHAIN_GCC_SHA512 is empty, so the GCC source cannot be authenticated. This job does not build an unverified compiler: commit the digest from GCC's sha512.sum for gcc-$version."; exit 1; }
+          case "$version" in
+            "$major".*) : ;;
+            *) echo "::error::CEC_TOOLCHAIN_GCC_VERSION is '$version', which is not a release of the pinned major $major. The two are one pin spelled twice; move them together."; exit 1 ;;
+          esac
+
+          work="$RUNNER_TEMP/cec-gcc-$version"
+          tarball="$work/gcc-$version.tar.xz"
+          src="$work/src"
+          obj="$work/obj"
+          stage="$work/stage"
+          probe="$work/probe"
+          rm -rf -- "$work"
+          mkdir -p -- "$src" "$obj" "$stage" "$probe"
+
+          curl -fsSL --retry 3 --output "$tarball" \
+            "https://ftp.gnu.org/gnu/gcc/gcc-$version/gcc-$version.tar.xz"
+
+          measured="$(sha512sum "$tarball" | awk '{ print $1 }')"
+          echo "gcc tarball    : $tarball"
+          echo "measured sha512: $measured"
+          echo "committed      : $CEC_TOOLCHAIN_GCC_SHA512  (GCC gcc-$CEC_TOOLCHAIN_GCC_SHA512_FOR_VERSION sha512.sum)"
+          if [ "$measured" != "$CEC_TOOLCHAIN_GCC_SHA512" ]; then
+            echo "::error::GCC tarball digest mismatch. measured $measured, committed $CEC_TOOLCHAIN_GCC_SHA512 (published by GCC for $CEC_TOOLCHAIN_GCC_SHA512_FOR_VERSION). Either the download was tampered with or the release file was replaced; this job will not build an unverified compiler, and it will not be made to by relaxing this check or by editing the committed digest to match the download - confirm the publisher's value first."
+            exit 1
+          fi
+          echo "verified against the committed publisher digest"
+          tar -xJ --strip-components=1 -C "$src" -f "$tarball"
+          rm -f -- "$tarball"
+
+          # Each phase writes to its own log, and a failure prints that log's tail: GCC's
+          # build output is far too long to read in a step log, its last lines are not.
+          run_logged() {
+            local what="$1" logfile="$2"
+            shift 2
+            if ! "$@" > "$logfile" 2>&1; then
+              echo "::error::$what failed for GCC $version. The last 80 lines of $logfile follow."
+              tail -n 80 -- "$logfile"
+              exit 1
+            fi
+            echo "$what: done"
+          }
+          echo "build compiler : $(gcc --version | head -n 1)"
+          cd "$obj"
+          run_logged configure "$work/configure.log" "$src/configure" \
+            --build=x86_64-linux-gnu --host=x86_64-linux-gnu --target=x86_64-linux-gnu \
+            --prefix=/usr --program-suffix="-$major" --enable-languages=c,c++ \
+            --disable-multilib --disable-bootstrap --disable-nls \
+            --enable-checking=release --enable-default-pie
+          run_logged make "$work/make.log" make -j"$(nproc)"
+          run_logged "make install-strip" "$work/install.log" make install-strip DESTDIR="$stage"
+          cd "$GITHUB_WORKSPACE"
+
+          # Documentation is no part of a build toolchain. The write bits a build umask may
+          # leave for group and other are dropped, so nothing installed is writable but by root.
+          rm -rf -- "$stage/usr/share/info" "$stage/usr/share/man"
+          chmod -R go-w -- "$stage"
+
+          # EVERY COLLISION IS NAMED BEFORE ANYTHING IS WRITTEN. A staged file may not exist on
+          # the runner at all, and a staged directory may only merge into a real directory. Only
+          # usr/ is copied, so anything staged beside it is refused rather than left behind.
+          outside="$(cd "$stage" && find . -mindepth 1 -maxdepth 1 ! -name usr)"
+          if [ -n "$outside" ]; then
+            echo "::error::the GCC $version install staged paths outside usr/ ($outside), which a --prefix=/usr build does not do; nothing was installed."
+            exit 1
+          fi
+          collisions=0
+          while IFS= read -r -d '' rel; do
+            target="/${rel#./}"
+            if [ -d "$stage/$rel" ] && [ ! -L "$stage/$rel" ]; then
+              if [ -L "$target" ] || { [ -e "$target" ] && [ ! -d "$target" ]; }; then
+                echo "::error::the GCC $version install would put a directory at $target, which already exists on this runner as something other than a directory."
+                collisions=$((collisions + 1))
+              fi
+            elif [ -e "$target" ] || [ -L "$target" ]; then
+              echo "::error::the GCC $version install would replace $target, which already exists on this runner. Nothing the image owns is overwritten; find which package or earlier step installed it."
+              collisions=$((collisions + 1))
+            fi
+          done < <(cd "$stage" && find . -mindepth 1 -print0)
+          if [ "$collisions" -ne 0 ]; then
+            echo "::error::$collisions staged path(s) collide with what is already on this runner, so nothing was installed."
+            exit 1
+          fi
+          echo "staged paths   : $(cd "$stage" && find . -mindepth 1 | wc -l), none already on the runner"
+          tar -C "$stage" -cf - usr | sudo tar -C / -xf - --keep-old-files --no-same-owner
+
+          conf="/etc/ld.so.conf.d/000-cec-gcc-$version.conf"
+          if [ -e "$conf" ]; then
+            echo "::error::$conf already exists, so this step cannot tell whether the loader order it sets is its own. Nothing else creates that name."
+            exit 1
+          fi
+          printf '%s\n' /usr/lib64 | sudo tee "$conf" > /dev/null
+          sudo ldconfig
+
+          # THE INSTALLED TOOLCHAIN, PROVED: the three versioned names, each reporting exactly
+          # the release just built, and a C++17 program that runs against the new libstdc++.
+          rc=0
+          for tool in gcc g++ gcov; do
+            path="/usr/bin/$tool-$major"
+            if [ ! -x "$path" ]; then
+              echo "::error::$path is not present after the install, so the GCC $version build did not produce the name the toolchain gate selects."
+              rc=1
+              continue
+            fi
+            if [ "$tool" = gcov ]; then
+              got="$("$path" --version | head -n 1 | awk '{ print $NF }')"
+            else
+              got="$("$path" -dumpfullversion)"
+            fi
+            printf '%-15s: %s\n' "$path" "$got"
+            if [ "$got" != "$version" ]; then
+              echo "::error::$path reports '$got', not the $version this step just built and installed."
+              rc=1
+            fi
+          done
+          [ "$rc" -eq 0 ] || exit 1
+
+          cat > "$probe/probe.cpp" <<'PROBE_EOF'
+          #include <iostream>
+          #include <optional>
+          #include <string>
+          int main() { std::optional<std::string> v{"ok"}; std::cout << *v << '\n'; return 0; }
+          PROBE_EOF
+          "/usr/bin/g++-$major" -std=c++17 -o "$probe/probe" "$probe/probe.cpp"
+          out="$("$probe/probe")"
+          libstdcxx="$(ldd "$probe/probe" | awk '$1 == "libstdc++.so.6" { print $3 }')"
+          echo "C++17 probe    : printed '$out', libstdc++.so.6 => $libstdcxx"
+          if [ "$out" != 'ok' ] || [ "$libstdcxx" != '/usr/lib64/libstdc++.so.6' ]; then
+            echo "::error::a C++17 program built by g++-$major printed '$out' and loads libstdc++.so.6 from '${libstdcxx:-nothing}', not /usr/lib64/libstdc++.so.6. Binaries the pinned compiler links need its own libstdc++; check $conf and that ldconfig ran."
+            exit 1
+          fi
+
+          rm -rf -- "$src" "$obj" "$stage" "$probe"
+          echo "GCC $version installed under /usr; its build logs are kept in $work"
 
       # THE TOOLCHAIN GATE. IT RUNS BEFORE ANYTHING IS BUILT, AND IT FAILS THE JOB RATHER THAN
       # WARNING.
@@ -699,7 +962,7 @@ jobs:
       # WHAT THIS STEP ESTABLISHES, in the order it establishes it:
       #
       #   1. The three tools EXIST at the versioned names, by absolute path. A missing one is
-      #      named, with the package that provides it, rather than surfacing later as a compile
+      #      named, with the step that installs it, rather than surfacing later as a compile
       #      error about something else.
       #   2. Each REPORTS the pinned major. `-dumpversion` is used rather than parsing
       #      `--version`, because it prints the version and nothing else; gcov has no
@@ -714,11 +977,10 @@ jobs:
       #      run_coverage.sh resolves `gcov` from PATH with no override knob, so a shim is the
       #      only place the selection can be made. It is the same pattern the reference
       #      container uses (/opt/blitzy-shared/bin/gcov -> /usr/bin/gcov-13).
-      #   5. The EXACT PATCH LEVELS ARE RECORDED - in this step's log and in the job summary, so
-      #      the figures this job publishes carry the toolchain that produced them. The pin is
-      #      the major (see CEC_TOOLCHAIN_GCC_MAJOR in this file's env above, which explains why
-      #      13.4.0 is documented and 13.3.0 is what an archive supplies); the patch level is
-      #      evidence, not a gate.
+      #   5. Each EQUALS CEC_TOOLCHAIN_GCC_VERSION exactly - the release "Build the pinned GCC
+      #      toolchain from source" built - and the measured versions are RECORDED in this
+      #      step's log and in the job summary, so the figures this job publishes carry the
+      #      toolchain that produced them.
       #
       # CC and CXX ARE EXPORTED THROUGH GITHUB_ENV, which is what makes them reach every later
       # step - ./configure, the three makes and the hand build - rather than only this one. The
@@ -734,20 +996,21 @@ jobs:
           # even within double quotes, which swallows the rest of the script and surfaces as an
           # unrelated "unbound variable" line further down. Measured while writing this step.
           major="${CEC_TOOLCHAIN_GCC_MAJOR:?CEC_TOOLCHAIN_GCC_MAJOR is unset. It is the single place this workflow pins the acceptance compiler family; restore it in the env block of this workflow rather than spelling a version into a step.}"
+          version="${CEC_TOOLCHAIN_GCC_VERSION:?CEC_TOOLCHAIN_GCC_VERSION is unset. It is the exact release this job builds and gates; restore it in the env block of this workflow beside CEC_TOOLCHAIN_GCC_MAJOR.}"
           cc="/usr/bin/gcc-$major"
           cxx="/usr/bin/g++-$major"
           gcov="/usr/bin/gcov-$major"
 
           for tool in "$cc" "$cxx" "$gcov"; do
             if [ ! -x "$tool" ]; then
-              echo "::error::$tool is not present on this runner, so the pinned GCC $major acceptance toolchain cannot be selected and this job would silently build with the image default instead. gcc-$major provides gcc-$major and gcov-$major, g++-$major provides g++-$major; both are in ubuntu-24.04's archive. If this runner label was changed, check that the new image's archive carries the gcc-$major family at all - jammy does not."
+              echo "::error::$tool is not present on this runner, so the pinned GCC $major acceptance toolchain cannot be selected and this job would silently build with the image default instead. It is installed by the 'Build the pinned GCC toolchain from source' step, which must run before this one and succeed; ubuntu-22.04's archive carries no gcc-$major family to fall back on."
               exit 1
             fi
           done
 
           # -dumpfullversion IS THE ONE TO READ, AND -dumpversion IS THE TRAP. Since GCC 7
           # -dumpversion prints the MAJOR ALONE ("13"), while -dumpfullversion prints the whole
-          # thing ("13.3.0"); gcov has neither option and reports its full version as the last
+          # thing ("13.4.0"); gcov has neither option and reports its full version as the last
           # field of its first line. Reading -dumpversion for the compilers and the full value
           # for gcov, then comparing them, fails on every correct toolchain - measured while
           # writing this step, which is why the fallback below is a fallback and not the primary.
@@ -760,7 +1023,7 @@ jobs:
           printf 'CXX       : %s  -dumpfullversion -> %s\n' "$cxx" "$cxx_version"
           printf 'gcov      : %s  first line       -> %s\n' "$gcov" "$gcov_line"
           printf 'gcov      : parsed version       -> %s\n' "$gcov_version"
-          printf 'pinned    : GCC major %s (patch level recorded, not gated - see CEC_TOOLCHAIN_GCC_MAJOR in the env block)\n' "$major"
+          printf 'pinned    : GCC %s exactly, major %s (see CEC_TOOLCHAIN_GCC_VERSION and CEC_TOOLCHAIN_GCC_MAJOR in the env block)\n' "$version" "$major"
 
           rc=0
           for pair in "CC:$cc_version" "CXX:$cxx_version" "gcov:$gcov_version"; do
@@ -780,13 +1043,24 @@ jobs:
           # different installations, and gcov's compatibility check is tighter than the major:
           # the notes-file version stamp it demands is derived from GCC major AND minor, so it
           # refuses a trace written by 13.2 when it is itself 13.3, one file at a time, reporting
-          # "version 'B32*' prefer 'B33*'" and reading nothing. All three come out of the same
-          # gcc-<major>/g++-<major> package pair, so equality here is achievable as well as
-          # necessary; if it ever fails, one of the three came from somewhere else.
+          # "version 'B32*' prefer 'B33*'" and reading nothing. All three come out of the one GCC
+          # build above, so equality here is achievable as well as necessary; if it ever fails,
+          # one of the three came from somewhere else.
           if [ "$cc_version" != "$cxx_version" ] || [ "$cc_version" != "$gcov_version" ]; then
-            echo "::error::the three tools do not agree: gcc $cc_version, g++ $cxx_version, gcov $gcov_version. gcov demands a notes-file version stamp derived from the GCC major and minor that wrote it, so a mismatch here yields either no counters or counters attributed to the wrong lines. Install gcc-$major and g++-$major from one archive and re-run."
+            echo "::error::the three tools do not agree: gcc $cc_version, g++ $cxx_version, gcov $gcov_version. gcov demands a notes-file version stamp derived from the GCC major and minor that wrote it, so a mismatch here yields either no counters or counters attributed to the wrong lines. All three must come from the one build of 'Build the pinned GCC toolchain from source'; find what else installed a $major-suffixed tool."
             rc=1
           fi
+
+          # THE EXACT RELEASE, which a source build makes enforceable: the documented acceptance
+          # patch level is gated, not only recorded.
+          for pair in "CC:$cc_version" "CXX:$cxx_version" "gcov:$gcov_version"; do
+            name="${pair%%:*}"
+            value="${pair#*:}"
+            if [ "$value" != "$version" ]; then
+              echo "::error::$name reports version '$value', not the pinned CEC_TOOLCHAIN_GCC_VERSION $version. That is the release 'Build the pinned GCC toolchain from source' builds and the documented acceptance patch level; a different release is a different toolchain from the one the recorded figures came from."
+              rc=1
+            fi
+          done
           [ "$rc" -eq 0 ] || exit "$rc"
 
           # THE SHIM. One directory, one entry, prepended to PATH - because run_coverage.sh and
@@ -808,7 +1082,7 @@ jobs:
           # RECORDED WITH THE RESULTS, which is the half of this step that outlives the run. A
           # figure without the toolchain that produced it is not evidence.
           {
-            echo "### Acceptance toolchain (pinned to GCC major $major; exact patch recorded, not gated)"
+            echo "### Acceptance toolchain (pinned to GCC $version exactly, major $major; gated)"
             echo
             echo "| Tool | Path | Version |"
             echo "| --- | --- | --- |"
@@ -816,7 +1090,7 @@ jobs:
             echo "| CXX | \`$cxx\` | $cxx_version |"
             echo "| gcov | \`$gcov\` (first on PATH as \`gcov\` via \`$shim\`) | $gcov_version |"
             echo
-            echo "The documented acceptance patch level is 13.4.0; ubuntu-24.04's archive supplies 13.3.0-6ubuntu2~24.04.1, and no archive this job is permitted to use carries 13.4.0. The pin is therefore the major and the patch above is the measured value for this run."
+            echo "ubuntu-22.04's archive carries no gcc-$major family, so GCC $version is built on the runner from the GNU release tarball, verified against GCC's published SHA-512 before it is unpacked. The versions above are measured, and each must equal $version."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # THE SECOND HALF OF THE GATE, AND IT IS NOT REDUNDANT WITH THE FIRST.
@@ -863,6 +1137,284 @@ jobs:
 
           [ "$rc" -eq 0 ] || exit "$rc"
           echo "the pinned toolchain reaches this step by resolved name as well as by absolute path"
+
+      # pkgconf PKGCONF_VERSION, BUILT FROM ITS DIGEST-VERIFIED RELEASE AND PROVED TO BE THE
+      # pkg-config EVERY LATER STEP GETS.
+      #
+      # THE SAME FETCH CONTRACT AS THE CMAKES AND GCC: version-coupled guard first, non-empty
+      # guard second, download to a file, measured-versus-committed SHA-256, and nothing is
+      # unpacked from a tarball that fails.
+      #
+      # THE DISTRIBUTION'S SEARCH DEFAULTS, so configure still finds the archive's .pc files.
+      # pkgconf derives its search path and its system directories from its prefix, so a
+      # /usr/local build left to its defaults would search and filter only /usr/local. The values
+      # passed are Debian's own, from debian/rules of pkgconf 1.8.1-2build1: the six-directory
+      # pkg-config search path, the native multiarch entries of the system library directories
+      # its debian/system-libdirs.sh derives, and /usr/include, the system include directory its
+      # --prefix=/usr build defaults to. It is built static, so the one file installed is the
+      # binary.
+      #
+      # THE INSTALL REPLACES NOTHING THE IMAGE OWNS: /usr/local/bin/pkgconf, and the pkg-config
+      # -> pkgconf link Debian also ships, are refused if either already exists. It is reached
+      # by PATH, which puts /usr/local/bin ahead of /usr/bin, and deliberately NOT exported as
+      # PKG_CONFIG: a preset PKG_CONFIG makes configure skip its "checking for pkg-config" line,
+      # and that line in "Build hdmicec" is the record of which pkg-config configure used.
+      #
+      # PROVED, THEN RECORDED. A bare `pkg-config` resolves to that link and reports exactly
+      # PKGCONF_VERSION; its search path, and its --modversion, --cflags and --libs answers for
+      # glib-2.0 and gtest - the two modules configure.ac's PKG_CHECK_MODULES calls probe -
+      # equal those of jammy's /usr/bin/pkg-config, whitespace aside (pkgconf ends each answer
+      # with a space).
+      - name: Build and assert pkgconf
+        run: |
+          set -euo pipefail
+          version="${PKGCONF_VERSION:?PKGCONF_VERSION is unset. Restore it in the env block of this job.}"
+
+          if [ "$version" != "${PKGCONF_SHA256_FOR_VERSION:-}" ]; then
+            echo "::error::PKGCONF_VERSION is '$version' but the committed PKGCONF_SHA256 was published for '${PKGCONF_SHA256_FOR_VERSION:-<unset>}'. A committed digest is valid for one release only. Take the new release tarball's published digest, update PKGCONF_SHA256 and PKGCONF_SHA256_FOR_VERSION together with the version, and do not verify one release's tarball against another's digest."
+            exit 1
+          fi
+          [ -n "${PKGCONF_SHA256:-}" ] || { echo "::error::PKGCONF_SHA256 is empty, so the pkgconf source cannot be authenticated. This job does not build an unverified pkg-config: commit the digest published for pkgconf-$version.tar.xz."; exit 1; }
+
+          work="$RUNNER_TEMP/cec-pkgconf-$version"
+          tarball="$work/pkgconf-$version.tar.xz"
+          src="$work/src"
+          stage="$work/stage"
+          rm -rf -- "$work"
+          mkdir -p -- "$src" "$stage"
+          curl -fsSL --retry 3 --output "$tarball" \
+            "https://distfiles.ariadne.space/pkgconf/pkgconf-$version.tar.xz"
+
+          measured="$(sha256sum "$tarball" | awk '{ print $1 }')"
+          echo "pkgconf tarball: $tarball"
+          echo "measured sha256: $measured"
+          echo "committed      : $PKGCONF_SHA256  (pkgconf-$PKGCONF_SHA256_FOR_VERSION.tar.xz, as published in noble's main/source/Sources)"
+          if [ "$measured" != "$PKGCONF_SHA256" ]; then
+            echo "::error::pkgconf tarball digest mismatch. measured $measured, committed $PKGCONF_SHA256 (published for $PKGCONF_SHA256_FOR_VERSION). Either the download was tampered with or the release file was replaced; this job will not build an unverified pkg-config, and it will not be made to by relaxing this check or by editing the committed digest to match the download - confirm the publisher's value first."
+            exit 1
+          fi
+          echo "verified against the committed publisher digest"
+          tar -xJ --strip-components=1 -C "$src" -f "$tarball"
+          rm -f -- "$tarball"
+
+          multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+          if [ -z "$multiarch" ]; then
+            echo "::error::dpkg-architecture reported no multiarch triplet, so the distribution's pkg-config search path cannot be spelled. build-essential, which 'Install packages' installs, brings dpkg-dev with it."
+            exit 1
+          fi
+          search_path="/usr/local/lib/$multiarch/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:/usr/lib/$multiarch/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
+
+          run_logged() {
+            local what="$1" logfile="$2"
+            shift 2
+            if ! "$@" > "$logfile" 2>&1; then
+              echo "::error::$what failed for pkgconf $version. The last 40 lines of $logfile follow."
+              tail -n 40 -- "$logfile"
+              exit 1
+            fi
+            echo "$what: done"
+          }
+          echo "build compiler : ${CC:-cc} ($("${CC:-cc}" -dumpfullversion))"
+          cd "$src"
+          run_logged configure "$work/configure.log" ./configure --prefix=/usr/local --disable-shared \
+            --with-pkg-config-dir="$search_path" \
+            --with-system-libdir="/lib/$multiarch:/lib:/usr/lib/$multiarch:/usr/lib" \
+            --with-system-includedir=/usr/include
+          run_logged make "$work/make.log" make -j"$(nproc)"
+          run_logged "make install-strip" "$work/install.log" make install-strip DESTDIR="$stage"
+          cd "$GITHUB_WORKSPACE"
+
+          bindir=/usr/local/bin
+          built="$stage$bindir/pkgconf"
+          if [ ! -x "$built" ]; then
+            echo "::error::the pkgconf $version build staged no executable at $built, so there is nothing to install."
+            exit 1
+          fi
+          for target in "$bindir/pkgconf" "$bindir/pkg-config"; do
+            if [ -e "$target" ] || [ -L "$target" ]; then
+              echo "::error::$target already exists on this runner, so it was not installed. This step does not overwrite what the image or an earlier step put there; find which one did."
+              exit 1
+            fi
+          done
+          sudo install -m 0755 -- "$built" "$bindir/pkgconf"
+          sudo ln -s pkgconf "$bindir/pkg-config"
+          rm -rf -- "$src" "$stage"
+
+          # Each answer is compared with its whitespace runs collapsed and its ends trimmed.
+          norm() { printf '%s' "$1" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//'; }
+          rc=0
+          resolved="$(command -v pkg-config || true)"
+          got="$("$bindir/pkg-config" --version)"
+          printf 'pkg-config     : %s -> %s, version %s\n' "${resolved:-<none>}" "$(readlink -- "$bindir/pkg-config")" "$got"
+          if [ "$resolved" != "$bindir/pkg-config" ]; then
+            echo "::error::a bare pkg-config resolves to '${resolved:-nothing}', not the $bindir/pkg-config just installed. Something earlier on PATH shadows it."
+            rc=1
+          fi
+          if [ "$got" != "$version" ]; then
+            echo "::error::$bindir/pkg-config reports version '$got', not the pinned PKGCONF_VERSION $version."
+            rc=1
+          fi
+
+          reference=/usr/bin/pkg-config
+          if [ ! -x "$reference" ]; then
+            echo "::error::$reference is absent, so the pinned build has nothing to be checked against. 'Install packages' installs it."
+            exit 1
+          fi
+          reference_version="$("$reference" --version)"
+          echo "reference      : $reference, version $reference_version"
+          ours="$("$bindir/pkg-config" --variable=pc_path pkg-config)"
+          theirs="$("$reference" --variable=pc_path pkg-config)"
+          echo "search path    : $ours"
+          if [ "$ours" != "$search_path" ] || [ "$ours" != "$theirs" ]; then
+            echo "::error::the pinned pkg-config searches '$ours'; this step configured '$search_path' and $reference searches '$theirs'. All three must agree, or configure would resolve modules from different .pc files than the distribution's tool does."
+            rc=1
+          fi
+          for module in glib-2.0 gtest; do
+            for query in --modversion --cflags --libs; do
+              if ! ours="$("$bindir/pkg-config" "$query" "$module" 2>&1)"; then
+                echo "::error::pkg-config $query $module failed under pkgconf $version: $ours"
+                rc=1
+                continue
+              fi
+              if ! theirs="$("$reference" "$query" "$module" 2>&1)"; then
+                echo "::error::$reference $query $module failed: $theirs"
+                rc=1
+                continue
+              fi
+              printf '%-9s %-13s: %s\n' "$module" "$query" "$(norm "$ours")"
+              if [ "$(norm "$ours")" != "$(norm "$theirs")" ]; then
+                echo "::error::pkg-config $query $module answers '$(norm "$ours")' under pkgconf $version but '$(norm "$theirs")' under $reference. configure would substitute different flags from the ones the distribution's tool gives."
+                rc=1
+              fi
+            done
+          done
+          [ "$rc" -eq 0 ] || exit 1
+
+          {
+            echo "### pkg-config (pinned to pkgconf $version exactly; gated)"
+            echo
+            echo "| Tool | Path | Version |"
+            echo "| --- | --- | --- |"
+            echo "| pkg-config | \`$bindir/pkg-config\` -> \`pkgconf\` (first on PATH) | $got |"
+            echo "| reference | \`$reference\` | $reference_version |"
+            echo
+            echo "Built from pkgconf-$version.tar.xz, verified against its published SHA-256 before it was unpacked. Its search path and its --modversion, --cflags and --libs answers for glib-2.0 and gtest equal the reference's."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # lcov LCOV_VERSION, THE RELEASE ASSET, INSTALLED AND PROVED BEFORE ANYTHING IS CAPTURED.
+      #
+      # THE SAME FETCH CONTRACT AS THE STEPS ABOVE, over the same asset aidl-path-tests.yml's
+      # "Build and assert lcov 2.x" installs. The install is staged with DESTDIR as the runner
+      # account and copied under /usr/local only when no staged file already exists on the
+      # runner, extracting with --keep-old-files as the GCC install does, so nothing the image
+      # owns is replaced.
+      #
+      # PROVED, THEN RECORDED. lcov, geninfo and genhtml each resolve to the installed copy in
+      # /usr/local/bin and report exactly "LCOV version <LCOV_VERSION>-1": the asset's .version
+      # file stamps release 1, and 2.0-1 is the version the acceptance runs are recorded with.
+      # Starting each tool is also what proves the Perl modules "Install packages" provides are
+      # the ones it needs.
+      - name: Install and assert lcov
+        run: |
+          set -euo pipefail
+          version="${LCOV_VERSION:?LCOV_VERSION is unset. Restore it in the env block of this job.}"
+
+          if [ "$version" != "${LCOV_SHA256_FOR_VERSION:-}" ]; then
+            echo "::error::LCOV_VERSION is '$version' but the committed LCOV_SHA256 belongs to lcov '${LCOV_SHA256_FOR_VERSION:-<unset>}'. A committed digest is valid for one version only. Take the new release asset's published digest, update LCOV_SHA256 and LCOV_SHA256_FOR_VERSION together with the version, and do not verify one version's tarball against another's digest."
+            exit 1
+          fi
+          [ -n "${LCOV_SHA256:-}" ] || { echo "::error::LCOV_SHA256 is empty, so the lcov tarball cannot be authenticated. This job does not install an unverified coverage tool: commit the digest published with the lcov v$version release."; exit 1; }
+
+          work="$RUNNER_TEMP/cec-lcov-$version"
+          tarball="$work/lcov-$version.tar.gz"
+          src="$work/src"
+          stage="$work/stage"
+          rm -rf -- "$work"
+          mkdir -p -- "$src" "$stage"
+          curl -fsSL --retry 3 --output "$tarball" \
+            "https://github.com/linux-test-project/lcov/releases/download/v$version/lcov-$version.tar.gz"
+
+          measured="$(sha256sum "$tarball" | awk '{ print $1 }')"
+          echo "lcov tarball   : $tarball"
+          echo "measured sha256: $measured"
+          echo "committed      : $LCOV_SHA256  (lcov v$LCOV_SHA256_FOR_VERSION release asset; corroborated by Gentoo's dev-build/lcov Manifest for the same bytes)"
+          if [ "$measured" != "$LCOV_SHA256" ]; then
+            echo "::error::lcov tarball digest mismatch. measured $measured, committed $LCOV_SHA256 (published for $LCOV_SHA256_FOR_VERSION). Either the release asset was replaced or the fetch was tampered with; this job will not install an unverified coverage tool, and it will not be made to by relaxing this check or by editing the committed digest to match the download - confirm the publisher's value first."
+            exit 1
+          fi
+          echo "verified against the committed publisher digest"
+          tar -xz --strip-components=1 -C "$src" -f "$tarball"
+          rm -f -- "$tarball"
+
+          if ! make -C "$src" install PREFIX=/usr/local DESTDIR="$stage" > "$work/install.log" 2>&1; then
+            echo "::error::the staged install of lcov $version failed. The last 40 lines of $work/install.log follow."
+            tail -n 40 -- "$work/install.log"
+            exit 1
+          fi
+          chmod -R go-w -- "$stage"
+
+          # EVERY COLLISION IS NAMED BEFORE ANYTHING IS WRITTEN, as for the GCC install.
+          outside="$(cd "$stage" && find . -mindepth 1 -maxdepth 1 ! -name usr)"
+          if [ -n "$outside" ]; then
+            echo "::error::the lcov $version install staged paths outside usr/ ($outside), which a PREFIX=/usr/local install does not do; nothing was installed."
+            exit 1
+          fi
+          collisions=0
+          while IFS= read -r -d '' rel; do
+            target="/${rel#./}"
+            if [ -d "$stage/$rel" ] && [ ! -L "$stage/$rel" ]; then
+              if [ -L "$target" ] || { [ -e "$target" ] && [ ! -d "$target" ]; }; then
+                echo "::error::the lcov $version install would put a directory at $target, which already exists on this runner as something other than a directory."
+                collisions=$((collisions + 1))
+              fi
+            elif [ -e "$target" ] || [ -L "$target" ]; then
+              echo "::error::the lcov $version install would replace $target, which already exists on this runner. Nothing the image owns is overwritten; find which package or earlier step installed it."
+              collisions=$((collisions + 1))
+            fi
+          done < <(cd "$stage" && find . -mindepth 1 -print0)
+          if [ "$collisions" -ne 0 ]; then
+            echo "::error::$collisions staged path(s) collide with what is already on this runner, so nothing was installed."
+            exit 1
+          fi
+          echo "staged paths   : $(cd "$stage" && find . -mindepth 1 | wc -l), none already on the runner"
+          tar -C "$stage" -cf - usr | sudo tar -C / -xf - --keep-old-files --no-same-owner
+          rm -rf -- "$src" "$stage"
+
+          expected="LCOV version $version-1"
+          rc=0
+          rows=''
+          for tool in lcov geninfo genhtml; do
+            resolved="$(command -v "$tool" || true)"
+            if [ "$resolved" != "/usr/local/bin/$tool" ]; then
+              echo "::error::$tool resolves to '${resolved:-nothing}', not the /usr/local/bin/$tool this step installed."
+              rc=1
+              continue
+            fi
+            if ! out="$("$resolved" --version 2>&1)"; then
+              echo "::error::$resolved --version failed, so lcov $version cannot run here; its output follows. A missing Perl module is the usual cause."
+              printf '%s\n' "$out"
+              rc=1
+              continue
+            fi
+            line="${out%%$'\n'*}"
+            printf '%-15s: %s -> %s\n' "$tool" "$resolved" "$line"
+            if [ "$line" != "$tool: $expected" ]; then
+              echo "::error::$resolved reports '$line', not '$tool: $expected'."
+              rc=1
+            fi
+            rows="$rows| $tool | \`$resolved\` | ${line#"$tool": } |"$'\n'
+          done
+          [ "$rc" -eq 0 ] || exit 1
+
+          {
+            echo "### lcov (pinned to the v$version release asset, reporting $version-1; gated)"
+            echo
+            echo "| Tool | Path | Version |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$rows"
+            echo
+            echo "Installed from lcov-$version.tar.gz, verified against its published SHA-256 before it was unpacked."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout hdmicec
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
@@ -993,6 +1545,29 @@ jobs:
           ref: ${{ env.BINDER_SDK_COMMIT }}
           persist-credentials: false
 
+      # THE TWO PRODUCTION HEADER SOURCES FOR THE SHIPPING HAND BUILD, AT IMMUTABLE COMMITS.
+      #
+      # ccec/src/Makefile refuses mocks/ and stubs/ as its telemetry and legacy HAL header
+      # roots, so "Build and verify the shipping hand-written RDK library" stages both roots
+      # from these trees - see the TELEMETRY_* and LEGACY_HAL_* block in this job's env for the
+      # pins. Nothing here is executed; three headers are copied out of them as text.
+      # persist-credentials: false for the same reason as every other checkout in this job.
+      - name: Checkout the telemetry headers for the hand-written build
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
+        with:
+          repository: ${{ env.TELEMETRY_REPOSITORY }}
+          path: telemetry
+          ref: ${{ env.TELEMETRY_COMMIT }}
+          persist-credentials: false
+
+      - name: Checkout the legacy HDMI CEC HAL header for the hand-written build
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
+        with:
+          repository: ${{ env.LEGACY_HAL_REPOSITORY }}
+          path: rdk-halif-hdmi_cec
+          ref: ${{ env.LEGACY_HAL_COMMIT }}
+          persist-credentials: false
+
       # CREDENTIAL ABSENCE IS ASSERTED, NOT ASSUMED FROM AN INPUT.
       #
       # persist-credentials: false is set on every checkout above, and this step proves the
@@ -1023,7 +1598,7 @@ jobs:
           set -euo pipefail
           rc=0
           for tree in hdmicec googletest rdk-halif-aidl rdk-halif-aidl/build-tools/linux_binder_idl \
-                      entservices-hdmicecsink; do
+                      entservices-hdmicecsink telemetry rdk-halif-hdmi_cec; do
             dir="$GITHUB_WORKSPACE/$tree"
             [ -d "$dir/.git" ] || { echo "::error::$tree is not a git checkout at $dir, so this job's later steps cannot rely on it."; rc=1; continue; }
             keys="$(git -C "$dir" config --local --name-only --list 2>/dev/null || true)"
@@ -1111,6 +1686,8 @@ jobs:
           assert_pinned_head googletest "${GOOGLETEST_REF:-}" "GoogleTest"
           assert_pinned_head rdk-halif-aidl/build-tools/linux_binder_idl "${BINDER_SDK_COMMIT:-}" "Binder SDK source"
           assert_pinned_head entservices-hdmicecsink "${SINK_REF:-}" "Sink caller source (read by the L1 drift guard)"
+          assert_pinned_head telemetry "${TELEMETRY_COMMIT:-}" "Telemetry header source"
+          assert_pinned_head rdk-halif-hdmi_cec "${LEGACY_HAL_COMMIT:-}" "Legacy HAL header source"
 
           # THE TWO NAMES FOR THE SAME PIN MUST AGREE. SINK_REF is what the checkout resolves and
           # what the assertion above reads; SINK_CALLER_COMMIT is the same commit recorded beside
@@ -1253,8 +1830,8 @@ jobs:
       # The exact release "Set up CMake" above fetched and digest-verified - CMAKE_PINNED_VERSION
       # - must remain what a bare `cmake` resolves to for the rest of this job: 3.20 and later
       # break the plugin test-library configure, which is the whole reason it is pinned. The
-      # Binder SDK needs the opposite: linux_binder_idl 2.6.0 documents CMake 3.22.1 or later
-      # as its floor.
+      # Binder SDK needs a newer one: linux_binder_idl 2.6.0's BUILD.md names CMake 3.22.1, and
+      # CMAKE_SDK_VERSION pins exactly that release.
       #
       # Reaching the newer one by absolute path is NOT possible here. build_binder.sh
       # invokes a bare `cmake` at four sites and build_modules.sh at five, and neither
@@ -1264,25 +1841,21 @@ jobs:
       # calls cmake itself, as the googletest build above does, the pinned one is used and
       # no prepend appears. Please do not "simplify" this into a single CMake.
       #
-      # The candidate is MEASURED against the floor, not assumed to meet it, and the runner
-      # label move to ubuntu-24.04 is a live demonstration of why that matters: on jammy the
-      # archive cmake was expected to be 3.22.1, exactly the floor, and on noble it is newer
-      # again. Either satisfies the floor, but neither is asserted here - an expectation
-      # tied to a distribution release rots the moment the label changes, which this one did. If no installed candidate qualifies, a CMake pinned to the floor is
-      # fetched into a private prefix under the workspace and that is prepended instead -
-      # downloaded to a file, held to the publisher digest committed in this job's env block,
-      # and unpacked only after it matches. It is one of the two artefacts this job fetches
-      # from outside the distribution archive, and the other is the job-wide CMake that "Set
-      # up CMake" fetches and verifies the same way.
+      # THE SDK'S CMAKE IS ALWAYS THE PINNED RELEASE, FETCHED HERE, AND NEVER AN INSTALLED ONE.
+      # This step used to take the first of /usr/bin/cmake and /usr/local/bin/cmake that was at
+      # least 3.22.1 and fetch 3.22.1 only when neither qualified, so the SDK was built by
+      # whatever the runner image and its archive carried, and that changed with them. Both
+      # exist on this runner - apt's cmake, which "Install packages" installs, and the image's
+      # own /usr/local/bin/cmake - and neither is consulted. CMAKE_SDK_VERSION is fetched into
+      # a private prefix under the workspace on every run, downloaded to a file, held to the
+      # publisher digest committed in this job's env block and unpacked only after it matches,
+      # exactly as "Set up CMake" does for the job-wide one. Then the extracted binary must
+      # report exactly that version, and a bare `cmake` under the very prepend the two SDK
+      # steps apply must resolve to it.
       - name: Resolve the CMake installations
         run: |
           set -euo pipefail
-          CMAKE_FLOOR=3.22.1
 
-          # True when $2 is at least $1, comparing version-wise rather than lexically.
-          at_least() {
-            [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$1" ]
-          }
           cmake_version_of() {
             "$1" --version 2>/dev/null | head -n 1 | awk '{ print $3 }'
           }
@@ -1301,69 +1874,62 @@ jobs:
             exit 1
           fi
 
-          newer_cmake=""
-          newer_version=""
-          for candidate in /usr/bin/cmake /usr/local/bin/cmake; do
-            [ -x "$candidate" ] || continue
-            candidate_version="$(cmake_version_of "$candidate")"
-            [ -n "$candidate_version" ] || continue
-            echo "candidate     : $candidate ($candidate_version)"
-            if at_least "$CMAKE_FLOOR" "$candidate_version"; then
-              newer_cmake="$candidate"
-              newer_version="$candidate_version"
-              break
-            fi
-          done
+          # THE VERSION GUARD COMES FIRST, BEFORE ANYTHING IS DOWNLOADED. CMAKE_SDK_SHA256 was
+          # published for exactly one release, and checking it against a different tarball is
+          # worse than not checking at all: it would fail as a digest mismatch and read as
+          # tampering rather than as a version that moved without its digest.
+          #
+          # Both values are read through ":-" deliberately, even under `set -u`: a removed env
+          # entry then fails at the guard that names it and says what to commit, rather than at
+          # an "unbound variable" line that says neither.
+          if [ "${CMAKE_SDK_VERSION:-}" != "${CMAKE_SDK_SHA256_FOR_VERSION:-}" ]; then
+            echo "::error::CMAKE_SDK_VERSION is '${CMAKE_SDK_VERSION:-<unset>}' but the committed CMAKE_SDK_SHA256 was published by Kitware for '${CMAKE_SDK_SHA256_FOR_VERSION:-<unset>}'. A committed digest is valid for one version only. Read the new release's own cmake-<version>-SHA-256.txt manifest, update CMAKE_SDK_SHA256 and CMAKE_SDK_SHA256_FOR_VERSION together with the version, and do not verify one version's tarball against another's digest."
+            exit 1
+          fi
+          [ -n "${CMAKE_SDK_SHA256:-}" ] || { echo "::error::CMAKE_SDK_SHA256 is empty, so this tarball cannot be authenticated. This job does not extract an unverified CMake: commit the digest from Kitware's cmake-$CMAKE_SDK_VERSION-SHA-256.txt release manifest."; exit 1; }
 
-          if [ -z "$newer_cmake" ]; then
-            echo "no installed cmake satisfies the $CMAKE_FLOOR floor; fetching one into a private prefix"
-            private_prefix="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_FLOOR"
-            mkdir -p "$private_prefix"
+          private_prefix="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_SDK_VERSION"
+          mkdir -p "$private_prefix"
 
-            # THE VERSION GUARD COMES FIRST, BEFORE ANYTHING IS DOWNLOADED. CMAKE_FLOOR_SHA256
-            # was published for exactly one release, and checking it against a different
-            # tarball is worse than not checking at all: it would fail as a digest mismatch and
-            # read as tampering rather than as a floor that moved without its digest.
-            #
-            # Both values are read through ":-" deliberately, even under `set -u`: a removed env
-            # entry then fails at the guard that names it and says what to commit, rather than
-            # at an "unbound variable" line that says neither.
-            if [ "$CMAKE_FLOOR" != "${CMAKE_FLOOR_SHA256_FOR_VERSION:-}" ]; then
-              echo "::error::CMAKE_FLOOR is '$CMAKE_FLOOR' but the committed CMAKE_FLOOR_SHA256 was published by Kitware for '${CMAKE_FLOOR_SHA256_FOR_VERSION:-<unset>}'. A committed digest is valid for one version only. Read the new release's own cmake-<version>-SHA-256.txt manifest, update CMAKE_FLOOR_SHA256 and CMAKE_FLOOR_SHA256_FOR_VERSION together with the floor, and do not verify one version's tarball against another's digest."
-              exit 1
-            fi
-            [ -n "${CMAKE_FLOOR_SHA256:-}" ] || { echo "::error::CMAKE_FLOOR_SHA256 is empty, so this tarball cannot be authenticated. This job does not extract an unverified CMake: commit the digest from Kitware's cmake-$CMAKE_FLOOR-SHA-256.txt release manifest."; exit 1; }
+          # DOWNLOADED TO A FILE AND VERIFIED BEFORE IT IS EXTRACTED. A download piped straight
+          # into tar cannot be verified at all: by the time the last byte has been hashed the
+          # archive has already been unpacked, so there is nothing left to refuse. The file
+          # lands beside the private prefix, is compared against the committed publisher
+          # digest, and only then is unpacked into it.
+          tarball="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_SDK_VERSION-linux-x86_64.tar.gz"
+          curl -fsSL --output "$tarball" \
+            "https://github.com/Kitware/CMake/releases/download/v$CMAKE_SDK_VERSION/cmake-$CMAKE_SDK_VERSION-linux-x86_64.tar.gz"
 
-            # DOWNLOADED TO A FILE AND VERIFIED BEFORE IT IS EXTRACTED. A download piped straight
-            # into tar cannot be verified at all: by the time the last byte has been hashed the
-            # archive has already been unpacked, so there is nothing left to refuse. The file
-            # lands beside the private prefix, is compared against the committed publisher
-            # digest, and only then is unpacked into it.
-            tarball="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_FLOOR-linux-x86_64.tar.gz"
-            curl -fsSL --output "$tarball" \
-              "https://github.com/Kitware/CMake/releases/download/v$CMAKE_FLOOR/cmake-$CMAKE_FLOOR-linux-x86_64.tar.gz"
+          measured="$(sha256sum "$tarball" | awk '{ print $1 }')"
+          echo "cmake tarball  : $tarball"
+          echo "measured sha256: $measured"
+          echo "committed      : $CMAKE_SDK_SHA256  (Kitware cmake-$CMAKE_SDK_SHA256_FOR_VERSION-SHA-256.txt)"
+          if [ "$measured" != "$CMAKE_SDK_SHA256" ]; then
+            echo "::error::CMake tarball digest mismatch. measured $measured, committed $CMAKE_SDK_SHA256 (published by Kitware for $CMAKE_SDK_SHA256_FOR_VERSION). Either the download was tampered with or the release asset was replaced; this job will not extract an unverified CMake, and it will not be made to by relaxing this check or by editing the committed digest to match the download - confirm the publisher's value first."
+            exit 1
+          fi
+          echo "verified against the committed publisher digest"
 
-            measured="$(sha256sum "$tarball" | awk '{ print $1 }')"
-            echo "cmake tarball  : $tarball"
-            echo "measured sha256: $measured"
-            echo "committed      : $CMAKE_FLOOR_SHA256  (Kitware cmake-$CMAKE_FLOOR_SHA256_FOR_VERSION-SHA-256.txt)"
-            if [ "$measured" != "$CMAKE_FLOOR_SHA256" ]; then
-              echo "::error::CMake tarball digest mismatch. measured $measured, committed $CMAKE_FLOOR_SHA256 (published by Kitware for $CMAKE_FLOOR_SHA256_FOR_VERSION). Either the download was tampered with or the release asset was replaced; this job will not extract an unverified CMake, and it will not be made to by relaxing this check or by editing the committed digest to match the download - confirm the publisher's value first."
-              exit 1
-            fi
-            echo "verified against the committed publisher digest"
-
-            tar -xz --strip-components=1 -C "$private_prefix" -f "$tarball"
-            newer_cmake="$private_prefix/bin/cmake"
-            newer_version="$(cmake_version_of "$newer_cmake")"
-            if ! at_least "$CMAKE_FLOOR" "$newer_version"; then
-              echo "::error::the fetched cmake reports '$newer_version', which does not satisfy the $CMAKE_FLOOR floor the Binder SDK documents."
-              exit 1
-            fi
+          tar -xz --strip-components=1 -C "$private_prefix" -f "$tarball"
+          sdk_cmake="$private_prefix/bin/cmake"
+          sdk_version="$(cmake_version_of "$sdk_cmake" || true)"
+          if [ "$sdk_version" != "$CMAKE_SDK_VERSION" ]; then
+            echo "::error::the extracted cmake reports '$sdk_version', not the pinned $CMAKE_SDK_VERSION. The archive that matched the committed digest does not contain the release it is named for; do not proceed on it."
+            exit 1
           fi
 
-          echo "Binder SDK cmake: $newer_cmake ($newer_version), used only through a step-scoped PATH prepend"
-          echo "AIDL_CMAKE_BIN_DIR=$(dirname "$newer_cmake")" >> "$GITHUB_ENV"
+          # WHAT THE SDK STEPS WILL ACTUALLY RUN, resolved the way they resolve it: a bare
+          # `cmake` under PATH="$AIDL_CMAKE_BIN_DIR:$PATH". Asserting the binary alone would not
+          # catch a prefix that fails to shadow the installed cmakes.
+          resolved="$(PATH="$private_prefix/bin:$PATH"; command -v cmake || true)"
+          resolved_version="$(cmake_version_of "$resolved" || true)"
+          if [ "$resolved" != "$sdk_cmake" ] || [ "$resolved_version" != "$CMAKE_SDK_VERSION" ]; then
+            echo "::error::with $private_prefix/bin prepended, a bare cmake resolves to '$resolved' ($resolved_version), not the verified $sdk_cmake ($CMAKE_SDK_VERSION). build_binder.sh and build_modules.sh would then build the SDK with an unpinned CMake."
+            exit 1
+          fi
+
+          echo "Binder SDK cmake: $sdk_cmake ($sdk_version, digest-verified), used only through a step-scoped PATH prepend"
+          echo "AIDL_CMAKE_BIN_DIR=$private_prefix/bin" >> "$GITHUB_ENV"
 
       # THE BINDER SDK, BUILT FROM THE TREE THIS JOB VERIFIED RATHER THAN ONE THE SCRIPT
       # RESOLVES.
@@ -1534,20 +2100,24 @@ jobs:
       # list, would still leave the Autotools closure check below perfectly green. That
       # divergence is the failure this step closes.
       #
-      # THREE PROPERTIES OF THE HAND-WRITTEN FILE THAT THE COMMANDS BELOW ARE SHAPED BY.
+      # FOUR PROPERTIES OF THE HAND-WRITTEN FILE THAT THE COMMANDS BELOW ARE SHAPED BY.
       # None is a choice made here:
       #
       #   * IT HAS NO CPPFLAGS HOOK. Its recipe is `$(CXX) -c $< $(CFLAGS) -o $@`, and
       #     CFLAGS is where both its -std=c++17 and its entire INCLUDE list live, so a
-      #     command-line CFLAGS= would silently drop the dialect and every -I root. The two
-      #     test-only header roots this job needs - mocks/, for the
-      #     telemetry_busmessage_sender.h that MessageDecoder.cpp, Bus.cpp and LibCCEC.cpp
-      #     include, and stubs/, for the ccec/drivers/hdmi_cec_driver.h symlink the step
-      #     above creates and DriverImpl.cpp includes - therefore arrive through CPATH,
-      #     which gcc treats as extra -I directories, leaving every variable the file sets
-      #     exactly as written. Both are asserted before make runs, because a reordering of
-      #     these steps would otherwise surface as a missing-header error deep inside a
-      #     compile.
+      #     command-line CFLAGS= would silently drop the dialect and every -I root. Extra
+      #     roots therefore arrive as the file's own make variables or through CPATH, which
+      #     gcc treats as extra -I directories searched after every -I, leaving every
+      #     variable the file sets exactly as written.
+      #   * IT REFUSES TEST-SCOPE HEADERS. The telemetry_busmessage_sender.h that
+      #     MessageDecoder.cpp, Bus.cpp and LibCCEC.cpp include, and the
+      #     ccec/drivers/hdmi_cec_driver.h that DriverImpl.cpp includes, must come from
+      #     TELEMETRY_PREFIX and LEGACY_HAL_PREFIX; the file stops with a named error when
+      #     either is unset or resolves into mocks/ or stubs/. So this step stages both roots
+      #     under $RUNNER_TEMP from the pinned telemetry and rdk-halif-hdmi_cec checkouts and
+      #     passes them as make variables. CPATH still names mocks/ and stubs/, but the
+      #     staged -I roots win: g++ -H on these flags resolves all four includes to the
+      #     staged copies, and the build's own root report is asserted below.
       #   * ITS DEFAULT GOAL IS `all: clean library`, so it is invoked WITHOUT -j. Under -j
       #     the clean and the library goal are free to run concurrently, and the clean would
       #     be deleting the very objects the library goal had just compiled.
@@ -1587,11 +2157,10 @@ jobs:
           snap_dir="${RUNNER_TEMP:-/tmp}/hdmicec-hand-build-snapshot"
           snap="$snap_dir/ccec-src-Makefile"
 
-          # The two header roots the hand build cannot reach on its own, asserted rather
-          # than assumed: the symlink in particular is created by the "Generate stub
-          # headers" step above, and if these steps are ever reordered the compile would
-          # otherwise fail deep inside DriverImpl.cpp with a missing-header error that says
-          # nothing about the cause.
+          # The two test-only roots CPATH names below, asserted rather than assumed: the
+          # symlink in particular is created by the "Generate stub headers" step above, which
+          # the Autotools build after this step needs, so a reordering of these steps is
+          # caught here by name. The production headers are staged and asserted further down.
           for prereq in \
             "mocks/telemetry_busmessage_sender.h" \
             "stubs/ccec/drivers/hdmi_cec_driver.h"; do
@@ -1638,7 +2207,7 @@ jobs:
           fi
           echo "snapshotted $hand_makefile -> $snap"
 
-          # THE BUILD. CPATH carries the two test-only roots; the four prefixes are passed
+          # THE BUILD. CPATH carries the two test-only roots; the six prefixes are passed
           # as make variables so they win over anything ambient; no -j, for the reason in
           # the comment above. The output is captured as well as shown, because the link
           # command make echoes is itself evidence and is asserted on below.
@@ -1657,6 +2226,35 @@ jobs:
           fi
           printf 'hand build CXX: %s (%s)\n' "$CXX" "$("$CXX" -dumpversion)"
 
+          # THE TWO PRODUCTION HEADER ROOTS, STAGED OUTSIDE THE hdmicec TREE from the pinned
+          # checkouts. Each source must be a non-empty regular file - a symlink could carry a
+          # mock's bytes past the makefile's refusal as a plain copy - and each copy is compared
+          # back against it. The legacy HAL publishes its header flat, at
+          # include/hdmi_cec_driver.h, so it is staged into the ccec/drivers/ subpath
+          # DriverImpl.cpp includes it by.
+          prod_root="${RUNNER_TEMP:?}/hdmicec-production-headers"
+          telemetry_prefix="$prod_root/telemetry"
+          legacy_hal_prefix="$prod_root/legacy-hal"
+          rm -rf -- "$prod_root"
+          mkdir -p -- "$telemetry_prefix/include" "$legacy_hal_prefix/include/ccec/drivers"
+          for pair in \
+            "telemetry/include/telemetry_busmessage_sender.h=$telemetry_prefix/include/telemetry_busmessage_sender.h" \
+            "telemetry/include/telemetry2_0.h=$telemetry_prefix/include/telemetry2_0.h" \
+            "rdk-halif-hdmi_cec/include/hdmi_cec_driver.h=$legacy_hal_prefix/include/ccec/drivers/hdmi_cec_driver.h"; do
+            src="$GITHUB_WORKSPACE/${pair%%=*}"
+            dst="${pair#*=}"
+            if [ -L "$src" ] || [ ! -f "$src" ] || [ ! -s "$src" ]; then
+              echo "::error::$src is not a non-empty regular file, so the production header the shipping hand build compiles against cannot be staged from it. It comes from the pinned 'Checkout the telemetry headers for the hand-written build' or 'Checkout the legacy HDMI CEC HAL header for the hand-written build' step; restore that step rather than pointing the build at mocks/ or stubs/."
+              exit 1
+            fi
+            install -m 0644 -- "$src" "$dst"
+            if [ -L "$dst" ] || [ ! -f "$dst" ] || [ ! -s "$dst" ] || ! cmp -s -- "$src" "$dst"; then
+              echo "::error::the staged copy $dst is not a non-empty regular file identical to $src, so the hand build would not compile against the pinned header."
+              exit 1
+            fi
+            printf '  ok       %s (%s bytes, from %s)\n' "$dst" "$(stat -c '%s' -- "$dst")" "${pair%%=*}"
+          done
+
           build_log="$(mktemp)"
           CPATH="$GITHUB_WORKSPACE/hdmicec/mocks:$GITHUB_WORKSPACE/hdmicec/stubs${CPATH:+:$CPATH}" \
             make -C ccec/src \
@@ -1665,7 +2263,20 @@ jobs:
               HALIF_LIB_DIR="$HALIF_LIB_DIR" \
               BINDER_SDK_DIR="$BINDER_SDK_DIR" \
               BINDER_SDK_INCLUDE_DIR="$BINDER_SDK_INCLUDE_DIR" \
+              TELEMETRY_PREFIX="$telemetry_prefix" \
+              LEGACY_HAL_PREFIX="$legacy_hal_prefix" \
               all 2>&1 | tee "$build_log"
+
+          # The roots the makefile resolved, read back from its own report, so a build that
+          # compiled against anything but the staged headers fails here by name.
+          for root in "telemetry header root: [$telemetry_prefix/include]" \
+                      "legacy HDMI CEC HAL header root: [$legacy_hal_prefix/include]"; do
+            if ! grep -q -F -x -- "libRCEC $root" "$build_log"; then
+              echo "::error::the hand-written build did not report 'libRCEC $root', so it did not resolve the production header root this step staged."
+              exit 1
+            fi
+            printf '  ok       libRCEC %s\n' "$root"
+          done
 
           lib="ccec/src/install/lib/libRCEC.so"
           if [ ! -f "$lib" ]; then
@@ -1684,30 +2295,30 @@ jobs:
           # THE DIRECT EDGES. FOUR, because AAP 0.4.2 specifies four unconditional direct
           # edges and AAP 0.9.4 verifies the produced ELF against the expected NEEDED set.
           #
-          # The fourth is the one that needs explaining. --as-needed - the effective
-          # default in these toolchains - drops libcommon-v0.2.0.0-cpp, whose
-          # PropertyValue is reached only through the hdmicec stub library's own interface
-          # and which therefore no middleware symbol references. Requiring only the three
-          # that survive that default would make deleting -lcommon-v0.2.0.0-cpp from
-          # AIDL_LIBS a change no assertion could see. The makefile scopes
-          # -Wl,--no-as-needed to exactly these four libraries and restores --as-needed
-          # after them, so the fourth edge is genuinely in the ELF and is required here
-          # like the other three.
+          # The fourth is the one that needs explaining. --as-needed - the default of
+          # Ubuntu's gcc-13, though not of the upstream GCC this job builds - drops
+          # libcommon-v0.2.0.0-cpp, whose PropertyValue is reached only through the hdmicec
+          # stub library's own interface and which therefore no middleware symbol
+          # references. Requiring only the three that survive that default would make
+          # deleting -lcommon-v0.2.0.0-cpp from AIDL_LIBS a change no assertion could see
+          # there. The makefile scopes -Wl,--no-as-needed to exactly these four libraries
+          # and restores --as-needed after them, so the fourth edge is genuinely in the ELF
+          # and is required here like the other three.
           for soname in libhdmicec-v0.1.0.0-cpp.so libcommon-v0.2.0.0-cpp.so libbinder.so libutils.so; do
             if printf '%s\n' "$needed" | grep -q -F -x -- "$soname"; then
               printf '  ok       %-28s direct DT_NEEDED\n' "$soname"
             else
-              echo "::error::$soname is not a direct DT_NEEDED entry of the shipping $lib. Either DriverAidlImpl.o is missing from the hand-written OBJS list, or the link command no longer expands AIDL_LIBS, or AIDL_LIBS no longer wraps its four libraries in -Wl,--no-as-needed ... -Wl,--as-needed - and for libcommon-v0.2.0.0-cpp, which no middleware symbol references, that wrapping is the only thing keeping the edge in the ELF."
+              echo "::error::$soname is not a direct DT_NEEDED entry of the shipping $lib. Either DriverAidlImpl.o is missing from the hand-written OBJS list, or the link command no longer expands AIDL_LIBS, or AIDL_LIBS no longer wraps its four libraries in -Wl,--no-as-needed ... -Wl,--as-needed - and for libcommon-v0.2.0.0-cpp, which no middleware symbol references, that wrapping is the only thing keeping the edge in the ELF under an --as-needed toolchain."
               rc=1
             fi
           done
 
           # THE LINK COMMAND THAT WAS ACTUALLY EXECUTED. Belt and braces over the check
-          # above: if a future toolchain made --no-as-needed the default again, an edge
-          # deleted from AIDL_LIBS would still reach DT_NEEDED through the compiler's own
-          # defaults and the loop above would stay green. This asserts on the text of the
-          # command make echoed, so a token removed from the makefile fails whatever the
-          # linker's disposition happens to be.
+          # above: under a toolchain whose default is --no-as-needed - the upstream GCC this
+          # job builds is one - the four edges reach DT_NEEDED whether or not AIDL_LIBS still
+          # wraps them, so the loop above stays green if the wrapping goes. This asserts on
+          # the text of the command make echoed, so a token removed from the makefile fails
+          # whatever the linker's disposition happens to be.
           link_line="$(grep -F -- '-shared -o install/lib/libRCEC.so' "$build_log" | tail -n 1)"
           if [ -z "$link_line" ]; then
             echo "::error::no link command for install/lib/libRCEC.so appears in the captured build output, so the four -l edges cannot be checked against what was executed. The recipe in ccec/src/Makefile must not be silenced with a leading @."
@@ -1869,11 +2480,12 @@ jobs:
       # healthy-looking library whose closure does not resolve. Two measured facts about
       # this build are why the checks below are written the way they are:
       #
-      #   * libcommon-v0.2.0.0-cpp is a direct DT_NEEDED entry of libRCEC, and that is true
-      #     only because ccec/src/Makefile.am scopes -Wl,--no-as-needed to the four AIDL
-      #     and Binder libraries. No middleware symbol references it - PropertyValue is
-      #     reached through the hdmicec stub library's own interface - so with --as-needed
-      #     in force, which is the default in these toolchains, the linker drops the edge
+      #   * libcommon-v0.2.0.0-cpp is a direct DT_NEEDED entry of libRCEC, and under a
+      #     toolchain that links --as-needed by default - Ubuntu's gcc-13 does, the upstream
+      #     GCC this job builds does not - that is true only because ccec/src/Makefile.am
+      #     scopes -Wl,--no-as-needed to the four AIDL and Binder libraries. No middleware
+      #     symbol references it - PropertyValue is reached through the hdmicec stub
+      #     library's own interface - so with --as-needed in force the linker drops the edge
       #     from the ELF entirely. Treating that absence as the expected state would make
       #     deleting the token from AIDL_LIBS invisible to every assertion, so the library
       #     is required BOTH as a direct edge and in the closure, and both are checked
@@ -1927,7 +2539,7 @@ jobs:
             if printf '%s\n' "$needed" | grep -q -F -x -- "$soname"; then
               printf '  ok       %-28s direct DT_NEEDED\n' "$soname"
             else
-              echo "::error::$soname is not a direct DT_NEEDED entry of $lib. Check ccec/src/Makefile.am: libRCEC_la_LDFLAGS must still carry the comma-joined -Wl,--no-as-needed,<the four>,--as-needed group (it lives in LDFLAGS and not in LIBADD because Automake rejects linker flags in LIBADD outright), and libRCEC_la_LIBADD must still carry @AIDL_LIBS@ and @AIDL_LDFLAGS@. For libcommon-v0.2.0.0-cpp, which no middleware symbol references, that group is the only thing keeping the edge in the ELF."
+              echo "::error::$soname is not a direct DT_NEEDED entry of $lib. Check ccec/src/Makefile.am: libRCEC_la_LDFLAGS must still carry the comma-joined -Wl,--no-as-needed,<the four>,--as-needed group (it lives in LDFLAGS and not in LIBADD because Automake rejects linker flags in LIBADD outright), and libRCEC_la_LIBADD must still carry @AIDL_LIBS@ and @AIDL_LDFLAGS@. For libcommon-v0.2.0.0-cpp, which no middleware symbol references, that group is the only thing keeping the edge in the ELF under an --as-needed toolchain."
               rc=1
             fi
           done
@@ -2009,7 +2621,7 @@ jobs:
       # workflow-level timeout kills it: no exit status, no classification, no annotation,
       # and a build log whose last line is whatever the suite happened to print. So the run
       # is wrapped in coreutils `timeout` - GNU semantics, which is what any hosted
-      # Ubuntu runner has, ubuntu-24.04 included - and the outcome is CLASSIFIED rather than merely tested
+      # Ubuntu runner has, ubuntu-22.04 included - and the outcome is CLASSIFIED rather than merely tested
       # for zero: 124 is the bound firing, 137 is SIGKILL (timeout's own escalation after
       # the grace period, or an external killer such as the OOM killer - the elapsed time
       # printed with the message is what distinguishes them), 125/126/127 are timeout
@@ -2053,7 +2665,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/hdmicec/tests/L1Tests"
           log="$GITHUB_WORKSPACE/selected_back_end_invocation_A.log"
 
-          # `timeout` is coreutils and is therefore present on ubuntu-24.04 - but an
+          # `timeout` is coreutils and is therefore present on ubuntu-22.04 - but an
           # unbounded run is exactly what this step must not perform, so its absence is a
           # hard failure here rather than a quiet downgrade. tests/L1Tests/run_coverage.sh
           # refuses to run the suite without it for the same reason.
@@ -2248,8 +2860,8 @@ jobs:
       # written to the step summary so the run's own evidence carries it, which is what
       # replaces the comment that went stale.
       #
-      # MEASURED AT THE TIME OF WRITING, on this tree: 621 cases in 25 suites registered,
-      # 577 in 23 selected, 44 excluded - DriverAidlSessionTest 32 plus
+      # MEASURED AT THE TIME OF WRITING, on this tree: 638 cases in 25 suites registered,
+      # 594 in 23 selected, 44 excluded - DriverAidlSessionTest 32 plus
       # DriverAidlTransmitTest 12. Those figures are stated as a reader's orientation only;
       # NOTHING BELOW COMPARES AGAINST THEM, so they cannot fail the job when a case is
       # added, and the assertions above are what actually holds.
@@ -2393,9 +3005,9 @@ jobs:
           &&
           cp -rf $GITHUB_WORKSPACE/rdkL1TestResults.json $GITHUB_WORKSPACE/rdkL1TestResultsWithValgrind.json
 
-      # The removal list below carries two globs for the AIDL include roots, and this step
-      # does nothing else. Those roots mean gcov can attribute records to header-only
-      # code it finds there - halcompat.h's templates, the generated Bp*/Bn* inline
+      # The removal list below carries two globs for the AIDL include roots. Those roots
+      # mean gcov can attribute records to header-only code it finds there -
+      # halcompat.h's templates, the generated Bp*/Bn* inline
       # definitions, the Binder SDK headers - which would surface third-party entries in
       # this job's HTML report. Removing them is the same category as the '*/googletest/*'
       # entry that is already here.
@@ -2406,19 +3018,27 @@ jobs:
       # This step keeps its own lcov -c / lcov -r / genhtml shape and does not become a
       # call to run_coverage.sh. That script owns a different and larger job - the
       # five-invocation matrix, one capture read as two traces, and a per-branch gate -
-      # and none of it belongs in a workflow that runs a single invocation. Plain lcov -c,
-      # -r and genhtml also work on lcov 1.x, so the lcov apt-installed above is enough
-      # here even though run_coverage.sh itself requires lcov 2.x.
+      # and none of it belongs in a workflow that runs a single invocation. It runs the
+      # lcov 2.0-1 "Install and assert lcov" installed, and lcov 2.x turns into fatal errors
+      # conditions 1.x let pass: measured on this job's tree with gcov 13.4.0, a bare capture
+      # stops at "mismatched end line" in the first test unit, and the removal and report then
+      # have no trace to read. So each command carries the --ignore-errors list
+      # tests/L1Tests/run_coverage.sh passes to the same command - LCOV_CAPTURE_IGNORE on the
+      # capture, LCOV_FILTER_IGNORE on the removal, GENHTML_IGNORE on the report - spelled
+      # identically; move them together. A class named once still prints as a warning; the
+      # doubled deprecated is lcov's spelling for counting it in the message summary instead.
       - name: Generate coverage
         if: ${{ matrix.coverage == 'with-coverage' && !env.ACT }}
         run: >
           cd $GITHUB_WORKSPACE
           &&
           lcov -c
+          --ignore-errors mismatch,gcov,unused,empty,negative,source,graph,inconsistent,corrupt,deprecated,deprecated
           -o coverage.info
           -d hdmicec
           &&
           lcov
+          --ignore-errors unused,empty,inconsistent,deprecated,deprecated
           -r coverage.info
           '/usr/include/*'
           '*/install/usr/include/*'
@@ -2432,6 +3052,7 @@ jobs:
           -o filtered_coverage.info
           &&
           genhtml
+          --ignore-errors unused,empty,inconsistent,source,deprecated,deprecated
           -o coverage
           -t "hdmicec coverage"
           filtered_coverage.info

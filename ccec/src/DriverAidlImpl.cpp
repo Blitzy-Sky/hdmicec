@@ -57,7 +57,10 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <algorithm>
 #include <cstdint>
+#include <cxxabi.h>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -514,7 +517,7 @@ bool pingBinderContextManager(int driverFd, unsigned int timeoutMs)
 #endif /* CCEC_HAVE_BINDER_UAPI */
 
 /* The default probe operations: the real kernel-facing calls, compiled into every build so
- * isBinderPreflightOk() has the same five decision arms with or without the binder UAPI. */
+ * isBinderPreflightOk() has the same eight decision points with or without the binder UAPI. */
 
 /**
  * @brief Default probe: opens the binder driver node with the real `::open`
@@ -686,13 +689,13 @@ int defaultReadBinderProtocolVersion(int driverFd, unsigned int *protocolVersion
  * "unreachable", which yields the legacy back-end.
  *
  * @param [in] driverFd  - Descriptor whose protocol version has been verified.
- * @param [in] timeoutMs - Upper bound in milliseconds; zero means do not wait.
+ * @param [in] timeoutMs - Bound on the wait in milliseconds; zero means do not wait.
  *
  * @return bool - Whether a context manager answered
  * @retval true  - It answered.
  * @retval false - It did not within the bound, or this build cannot ask.
  *
- * @warning Never throws and never blocks past @p timeoutMs.
+ * @warning Never throws, and never blocks past @p timeoutMs plus one poll slice.
  *
  * @see pingBinderContextManager()
  */
@@ -765,10 +768,10 @@ public:
 	 * @brief Severs the link to the owner, after any in-flight callback has finished
 	 *
 	 * Takes the lock every owner-touching callback holds for its whole body, so on return no
-	 * callback is inside the owner and later callbacks drop. Idempotent.
+	 * callback is inside the owner and later received messages drop. Idempotent.
 	 *
 	 * @pre None; safe on an attached or a detached listener, from any thread.
-	 * @post The owner back pointer is null and every later callback is a logged drop.
+	 * @post The owner back pointer is null and every later received message is a logged drop.
 	 * @warning Blocks until an in-flight callback completes; no time bound is claimed.
 	 * @note Does not destroy this object, which the HAL may still reference.
 	 *
@@ -785,18 +788,14 @@ public:
 	/**
 	 * @brief Delivers one received CEC message onto the owner's incoming queue
 	 *
-	 * The AIDL counterpart of DriverImpl::DriverReceiveCallback(): copies the message into a
-	 * new CECFrame and hands it to DriverAidlImpl::offerReceivedFrame(), which applies the
-	 * OPENED-state guard. A refused or rejected frame is released, never leaked or freed twice.
+	 * Copies the message into a new CECFrame for offerReceivedFrame(), which applies the OPENED-state
+	 * guard; a refused or rejected frame is released, never leaked or freed twice.
 	 *
 	 * @param [in] message - Raw CEC message, header byte first; one shorter than
 	 *                       MIN_RECEIVED_MESSAGE_LENGTH is discarded before any allocation.
-	 *
 	 * @return ::android::binder::Status - Always ok
 	 * @retval ok - Returned unconditionally, including after a caught failure or a drop.
-	 *
 	 * @warning Runs on a binder threadpool thread and holds the listener lock throughout.
-	 *
 	 * @see detach()
 	 * @see DriverAidlImpl::offerReceivedFrame()
 	 */
@@ -837,9 +836,9 @@ public:
 					frame = 0;
 				}
 				else {
-					/* Refused at the receive limit, one below capacity for close()'s sentinel;
-					 * this callback still owns the frame and releases it. */
-					CCEC_LOG( LOG_EXP, "DriverAidlImpl::EventListener::onMessageReceived : the incoming frame queue refused the frame at its %zu entry receive limit, one below its %zu entry capacity so close()'s sentinel always fits; releasing a %zu byte frame rather than leaking it\r\n", (size_t)(DriverAidlImpl::INCOMING_QUEUE_CAPACITY - 1), (size_t)DriverAidlImpl::INCOMING_QUEUE_CAPACITY, message.size());
+					/* Refused because the queue is full; this callback still owns the frame and
+					 * releases it. */
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::EventListener::onMessageReceived : the incoming frame queue refused the frame at its %zu entry capacity; releasing a %zu byte frame rather than leaking it\r\n", (size_t)DriverAidlImpl::INCOMING_QUEUE_CAPACITY, message.size());
 
 					delete frame;
 					frame = 0;
@@ -957,10 +956,12 @@ private:
 };
 
 /**
- * @copydoc CCEC::DriverAidlImpl::DriverAidlImpl
+ * @brief Constructs the back-end in the CLOSED state without touching binder.
  *
  * Members outside the initializer list, including both session proxies, start default
  * constructed, which leaves the proxies null.
+ *
+ * @see DriverAidlImpl::isServiceAvailable()
  */
 DriverAidlImpl::DriverAidlImpl() : status(CLOSED), nativeHandle(0), rQueue(INCOMING_QUEUE_CAPACITY), availabilityReason(NULL)
 {
@@ -968,7 +969,7 @@ DriverAidlImpl::DriverAidlImpl() : status(CLOSED), nativeHandle(0), rQueue(INCOM
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::~DriverAidlImpl
+ * @brief Closes the session unless the state is CLOSED, then detaches and releases the listener.
  *
  * Catches `Exception` as the legacy destructor does, then detaches the listener on every path.
  *
@@ -998,7 +999,7 @@ DriverAidlImpl::~DriverAidlImpl()
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::open
+ * @brief Opens the AIDL session through IHdmiCec::open(), then registers this device's logical address.
  *
  * The steps up to OPENED keep the legacy order under one lock, with the `#if 0` throw carried
  * verbatim. Address registration runs last, under the same recursive lock.
@@ -1057,7 +1058,13 @@ void DriverAidlImpl::open(void) noexcept(false)
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::logicalAddressCandidates
+ * @brief Maps a DeviceType to the logical addresses it may claim, first choice first.
+ *
+ * @param [in] deviceType - A DeviceType enumerator.
+ *
+ * @return std::vector<int> - The candidates; empty for a type that has none.
+ *
+ * @see DriverAidlImpl::registerDeviceLogicalAddress()
  */
 std::vector<int> DriverAidlImpl::logicalAddressCandidates(int deviceType)
 {
@@ -1081,69 +1088,143 @@ std::vector<int> DriverAidlImpl::logicalAddressCandidates(int deviceType)
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::registerDeviceLogicalAddress
+ * @brief Runs the enable-time address allocation with every failure contained in this method
  *
- * The local list is cleared first: the previous session's address was released by its close.
+ * The local list and unconfirmedReleaseAddress are cleared first, because a session opens only
+ * after IHdmiCec::close() has removed every address. Each candidate is kept in
+ * unconfirmedReleaseAddress from just before its add until the HAL confirms the outcome: a success
+ * (spliced in without a further allocation) or a refusal clears it, a non-ok status keeps it, and a
+ * raising add keeps it unless its best-effort removal is confirmed.
+ *
+ * @post Only thread cancellation's forced unwind leaves this method as an exception.
+ * @see DriverAidlImpl::open()
  */
 void DriverAidlImpl::registerDeviceLogicalAddress(void)
 {
     {AutoLock lock_(mutex);
 		logicalAddresses.clear();
+		unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
 
 		if (hdmiCecController == 0) {
 			CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : no AIDL controller session is held; no logical address registered\r\n");
 			return;
 		}
 
-		const std::vector<int> candidates = logicalAddressCandidates(LOCAL_DEVICE_TYPE);
+		try {
+			const std::vector<int> candidates = logicalAddressCandidates(LOCAL_DEVICE_TYPE);
 
-		for (size_t index = 0; index < candidates.size(); index++) {
-			const LogicalAddress candidate(candidates[index]);
-			bool isFree = false;
+			for (size_t index = 0; index < candidates.size(); index++) {
+				const LogicalAddress candidate(candidates[index]);
+				bool isFree = false;
 
-			try {
-				poll(candidate, candidate);
-				CCEC_LOG( LOG_INFO, "DriverAidlImpl::registerDeviceLogicalAddress : logical address %d answered its poll and is taken\r\n", candidate.toInt());
-			}
-			catch (CECNoAckException &) {
-				isFree = true;
-			}
-			catch (Exception &) {
-				CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : the poll of logical address %d failed; trying the next candidate\r\n", candidate.toInt());
-			}
+				try {
+					poll(candidate, candidate);
+					CCEC_LOG( LOG_DEBUG, "DriverAidlImpl::registerDeviceLogicalAddress : logical address %d answered its poll and is taken\r\n", candidate.toInt());
+				}
+				catch (CECNoAckException &) {
+					isFree = true;
+				}
+				catch (Exception &) {
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : the poll of logical address %d failed; trying the next candidate\r\n", candidate.toInt());
+				}
+				catch (abi::__forced_unwind &) {
+					throw;
+				}
+				catch (const std::exception &) {
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : the poll of logical address %d raised a non-CEC exception; trying the next candidate\r\n", candidate.toInt());
+				}
+				catch (...) {
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : the poll of logical address %d raised an unknown exception; trying the next candidate\r\n", candidate.toInt());
+				}
 
-			if (!isFree) {
-				continue;
-			}
+				if (!isFree) {
+					continue;
+				}
 
-			bool added = false;
-			/* Synchronous, with no client-side deadline available: measured, not bounded. */
-			const int64_t addStartedMs = halCallStarted();
-			::android::binder::Status txn = hdmiCecController->addLogicalAddresses(std::vector<int32_t>{ candidate.toInt() }, &added);
+				/* Both allocations happen before the add, so nothing that can raise sits between a
+				   committed registration and its local record. */
+				std::list<LogicalAddress> record(1, candidate);
+				const std::vector<int32_t> request(1, candidate.toInt());
+				bool added = false;
+				bool addRaised = false;
+				::android::binder::Status txn;
+				/* Kept until the add's outcome is confirmed, so the next addLogicalAddress() releases it. */
+				unconfirmedReleaseAddress = candidate.toInt();
+				/* Synchronous, with no client-side deadline available: measured, not bounded. */
+				const int64_t addStartedMs = halCallStarted();
 
-			warnIfHalCallSlow("IHdmiCecController::addLogicalAddresses", addStartedMs);
+				try {
+					txn = hdmiCecController->addLogicalAddresses(request, &added);
+				}
+				catch (abi::__forced_unwind &) {
+					throw;
+				}
+				catch (...) {
+					addRaised = true;
+				}
 
-			if (!txn.isOk()) {
-				CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : IHdmiCecController::addLogicalAddresses failed [%s]; no logical address registered\r\n", txn.toString8().string());
+				warnIfHalCallSlow("IHdmiCecController::addLogicalAddresses", addStartedMs);
+
+				if (addRaised) {
+					/* The add may have taken effect before it raised, so it is withdrawn best-effort
+					   and allocation stops, as it does on a non-ok add status. */
+					const char *withdrawal = "did not report it removed";
+					bool removed = false;
+					const int64_t removeStartedMs = halCallStarted();
+
+					try {
+						if (hdmiCecController->removeLogicalAddresses(request, &removed).isOk() && removed) {
+							withdrawal = "removed it";
+							unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
+						}
+					}
+					catch (abi::__forced_unwind &) {
+						throw;
+					}
+					catch (...) {
+						withdrawal = "raised as well";
+					}
+
+					warnIfHalCallSlow("IHdmiCecController::removeLogicalAddresses", removeStartedMs);
+
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : IHdmiCecController::addLogicalAddresses raised an exception for logical address %d; the compensating IHdmiCecController::removeLogicalAddresses %s, and no logical address is recorded\r\n", candidate.toInt(), withdrawal);
+					return;
+				}
+
+				if (!txn.isOk()) {
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : IHdmiCecController::addLogicalAddresses failed [%s]; no logical address is recorded, and logical address %d is kept as unconfirmed\r\n", txn.toString8().string(), candidate.toInt());
+					return;
+				}
+
+				if (!added) {
+					unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : the HAL declined logical address %d; trying the next candidate\r\n", candidate.toInt());
+					continue;
+				}
+
+				/* splice() relinks the node allocated above; it neither allocates nor throws. */
+				logicalAddresses.splice(logicalAddresses.end(), record);
+				unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
+				CCEC_LOG( LOG_INFO, "DriverAidlImpl::registerDeviceLogicalAddress : registered logical address %d for device type %d\r\n", candidate.toInt(), LOCAL_DEVICE_TYPE);
 				return;
 			}
 
-			if (!added) {
-				CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : the HAL declined logical address %d; trying the next candidate\r\n", candidate.toInt());
-				continue;
-			}
-
-			logicalAddresses.push_back(candidate);
-			CCEC_LOG( LOG_INFO, "DriverAidlImpl::registerDeviceLogicalAddress : registered logical address %d for device type %d\r\n", candidate.toInt(), LOCAL_DEVICE_TYPE);
-			return;
+			CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : no free logical address for device type %d; none registered\r\n", LOCAL_DEVICE_TYPE);
 		}
-
-		CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : no free logical address for device type %d; none registered\r\n", LOCAL_DEVICE_TYPE);
+		catch (abi::__forced_unwind &) {
+			throw;
+		}
+		catch (const std::exception &) {
+			CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : allocation raised a standard exception; no logical address registered\r\n");
+		}
+		catch (...) {
+			CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : allocation raised an unknown exception; no logical address registered\r\n");
+		}
     }
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::close
+ * @brief Closes an OPENED AIDL session through IHdmiCec::close() and leaves this side CLOSED.
  *
  * Runs the legacy steps in order (state test, CLOSING, sentinel offer, HAL close, listener
  * detach, CLOSED before any raise), so a failed close still leaves this side fully closed.
@@ -1204,17 +1285,24 @@ void  DriverAidlImpl::close(void) noexcept(false)
 			throw IOException();
 		}
 
+		/* A successful IHdmiCec::close() removes every added address, so no release is pending. */
+		unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
 		status = CLOSED;
     }
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::read
+ * @brief Takes the next received frame from the incoming queue, exactly as DriverImpl::read() does.
  *
- * A copy of DriverImpl::read() that makes no AIDL call, with one departure: the flush loop
- * null-checks every entry it dequeues, because close() can leave more than one NULL sentinel.
+ * A copy of the legacy body with only the class name changed and no AIDL call: the entry guard,
+ * the re-check under the lock when the queue yields the NULL sentinel, and the flush-then-raise.
  *
- * @note Not observable: only a NULL entry's handling changes, and the legacy body dereferenced it.
+ * @param [out] frame - The received frame; the flush also writes it, so ignore it after a throw.
+ *
+ * @pre The driver is OPENED; otherwise InvalidStateException is raised, as it also is after the
+ *      flush when a close ends the wait.
+ * @warning The flush dereferences every entry it dequeues, as the legacy flush does, so a second
+ *          NULL sentinel queued behind the first faults on both back-ends.
  * @see DriverAidlImpl::close()
  * @see DriverImpl::read()
  */
@@ -1241,15 +1329,11 @@ void  DriverAidlImpl::read(CECFrame &frame)  noexcept(false)
 		else {AutoLock lock_(mutex);
 
 			if (status != OPENED) {
-				/* Flush and return. Every entry is null checked: a second close() sentinel may be
-				   queued, and a skipped one has nothing left to signal. */
+				/* Flush and return */
 				while (rQueue.size() > 0) {
 					inFrame = rQueue.poll();
-
-					if (inFrame != 0) {
-						frame = *inFrame;
-						delete inFrame;
-					}
+					frame = *inFrame;
+					delete inFrame;
 				}
 				throw InvalidStateException();
 			}
@@ -1261,7 +1345,7 @@ void  DriverAidlImpl::read(CECFrame &frame)  noexcept(false)
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::writeAsync
+ * @brief Raises OperationNotSupportedException once the legacy prelude and state guard have run.
  *
  * The prelude runs outside the lock and before the state guard, in DriverImpl::writeAsync()'s
  * order, so an empty frame raises from the header decode before the guard is reached.
@@ -1289,13 +1373,13 @@ void  DriverAidlImpl::writeAsync(const CECFrame &frame)  noexcept(false)
 }
 
 
-/* Only 1 write is allowed at a time. Queue the write request and wait for response. */
 /**
- * @copydoc CCEC::DriverAidlImpl::write
+ * @brief Transmits a frame through IHdmiCecController::sendMessage() under the instance lock
  *
- * Keeps DriverImpl::write()'s order: prelude, state guard, length check, then sendMessage()
- * under the lock with each status arm translated as the legacy mapping does. An undocumented
- * status raises IOException where the legacy back-end returns normally.
+ * Keeps DriverImpl::write()'s order and status mapping; an undocumented status is logged by
+ * number and returns normally, as an unrecognised legacy status does.
+ *
+ * @param [in] frame - The frame to transmit, header byte first; at most 16 bytes.
  *
  * @see DriverAidlImpl::poll()
  * @see DriverImpl::write()
@@ -1343,8 +1427,8 @@ void  DriverAidlImpl::write(const CECFrame &frame)  noexcept(false)
 			throw IOException();
 		}
 
-		/* Exhaustive over the enum with a failing default: the parcel can carry any int32_t, and
-		   falling through to success would report a suppressed frame as sent. */
+		/* One arm per documented status; any other value the parcel carries is logged by number
+		   and returns normally, as an unrecognised legacy status does. */
 		switch (sendResult) {
 			case cechal::SendMessageStatus::BUSY:
 				/* Arbitration failed after two attempts and the message was not sent, which
@@ -1360,7 +1444,8 @@ void  DriverAidlImpl::write(const CECFrame &frame)  noexcept(false)
 				break;
 
 			case cechal::SendMessageStatus::ACK_STATE_0:
-				/* CEC CTS 9-3-3 -Ensure that the DUT will accept a negatively for broadcat report physical address msg and retry atleast once */
+				/* CEC CTS 9-3-3: a rejected broadcast REPORT_PHYSICAL_ADDRESS raises CECNoAckException,
+				   so the caller retries it. */
 				if (((frame.at(0) & 0x0F) == 0x0F) && (length > 1) && ((frame.at(1) & 0xFF) == REPORT_PHYSICAL_ADDRESS )) {
 					throw CECNoAckException();
 				}
@@ -1371,8 +1456,8 @@ void  DriverAidlImpl::write(const CECFrame &frame)  noexcept(false)
 			default:
 				/* Only the numeric value is logged: the value is HAL-controlled and must never reach
 				   the log as text or as a format string. */
-				CCEC_LOG( LOG_EXP, "DriverAidlImpl::write : the HAL reported send status %d, which is not a documented SendMessageStatus value; the transmit is treated as FAILED rather than assumed successful\r\n", (int)sendResult);
-				throw IOException();
+				CCEC_LOG( LOG_EXP, "DriverAidlImpl::write : the HAL reported send status %d, which is not a documented SendMessageStatus value; the transmit returns normally, as the legacy status mapping does\r\n", (int)sendResult);
+				break;
 		}
     }
 
@@ -1380,10 +1465,10 @@ void  DriverAidlImpl::write(const CECFrame &frame)  noexcept(false)
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::getLogicalAddress
+ * @brief Returns entry 0 of a fresh IHdmiCec::getLogicalAddresses() read, or 0 when none is usable.
  *
- * Each zero outcome writes its own log line. An entry outside 0x0..0xE is rejected on the raw
- * `int32_t`, before LogicalAddress's narrowing conversion could make it look valid.
+ * Each no-address outcome writes its own log line. An entry outside 0x0..0xE is rejected on the
+ * raw `int32_t`, before LogicalAddress's narrowing conversion could make it look valid.
  *
  * @see HAL_LOGICAL_ADDRESS_MAX
  */
@@ -1436,15 +1521,17 @@ int DriverAidlImpl::getLogicalAddress(int devType)
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::getPhysicalAddress
+ * @brief Writes FIXED_PHYSICAL_ADDRESS (1.0.0.0) to a non-null out-parameter, in every state.
  *
  * Touches no service proxy and takes no lock, so the answer never waits on an AIDL call
  * another thread holds the lock across.
+ *
+ * @param [out] physicalAddress - Receives 0x01000000; a null pointer is logged and not written.
  */
 void DriverAidlImpl::getPhysicalAddress(unsigned int *physicalAddress)
 {
 	if (physicalAddress == NULL) {
-		CCEC_LOG( LOG_EXP, "DriverAidlImpl::getPhysicalAddress : null out parameter, nothing written\r\n");
+		CCEC_LOG( LOG_DEBUG, "DriverAidlImpl::getPhysicalAddress : null out parameter, nothing written\r\n");
 		return ;
 	}
 
@@ -1455,11 +1542,14 @@ void DriverAidlImpl::getPhysicalAddress(unsigned int *physicalAddress)
 
 
 /**
- * @copydoc CCEC::DriverAidlImpl::removeLogicalAddress
+ * @brief Drops @p source from the local list, then asks the HAL to release it, ignoring a HAL failure.
  *
  * Keeps DriverImpl::removeLogicalAddress()'s shape: state guard, local removal (never rolled
- * back), then the HAL call, whose false result or non-ok status is logged and ignored.
+ * back), then the HAL call, whose false result or non-ok status is logged and ignored. The held
+ * address is recorded in unconfirmedReleaseAddress before the local removal and cleared only by an
+ * ok, true release, so a release that fails or raises is still known to the next add.
  *
+ * @param [in] source - The logical address to relinquish.
  * @see DriverAidlImpl::addLogicalAddress()
  * @see DriverImpl::removeLogicalAddress()
  */
@@ -1468,6 +1558,14 @@ void DriverAidlImpl::removeLogicalAddress(const LogicalAddress &source)
     {AutoLock lock_(mutex);
 		if (status != OPENED) {
 			throw InvalidStateException();
+		}
+
+		/* Read before the local removal, so a release the HAL does not confirm is still known. */
+		const bool wasHeld = (!logicalAddresses.empty() && (logicalAddresses.front() == source)) || (unconfirmedReleaseAddress == source.toInt());
+
+		/* Recorded before anything that can raise, and cleared only by a confirmed release below. */
+		if (wasHeld) {
+			unconfirmedReleaseAddress = source.toInt();
 		}
 
 		logicalAddresses.remove(source);
@@ -1489,16 +1587,27 @@ void DriverAidlImpl::removeLogicalAddress(const LogicalAddress &source)
 			else if (!removed) {
 				CCEC_LOG( LOG_EXP, "DriverAidlImpl::removeLogicalAddress : the HAL declined to remove logical address %d; ignored, matching the legacy back-end\r\n", source.toInt());
 			}
+
+			if (txn.isOk() && removed) {
+				if (unconfirmedReleaseAddress == source.toInt()) {
+					unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
+				}
+			}
 		}
     }
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::addLogicalAddress
+ * @brief Replaces the held logical address with @p source, adding only after a confirmed release.
  *
- * The guards and the return outside the lock match DriverImpl::addLogicalAddress(); the old
- * address is released before the new one is added, so two are never held at once.
+ * The held address is the local entry, else unconfirmedReleaseAddress. A false or non-ok release
+ * is settled by one IHdmiCec::getLogicalAddresses() read: the address counts as released only when
+ * that read succeeds without it; otherwise it stays recorded, nothing is added and this raises.
+ * @p source is then kept in unconfirmedReleaseAddress until the add is confirmed: success or a
+ * refusal clears it, while a non-ok status or a raise keeps it for the next add to settle.
  *
+ * @param [in] source - The logical address to register.
+ * @return bool - true; every failure raises instead.
  * @see DriverAidlImpl::removeLogicalAddress()
  */
 bool DriverAidlImpl::addLogicalAddress(const LogicalAddress &source)
@@ -1514,30 +1623,71 @@ bool DriverAidlImpl::addLogicalAddress(const LogicalAddress &source)
 			throw IOException();
 		}
 
+		/* Refused before any release, so a request the HAL must reject cannot cost the held address.
+		 * toInt() reads one unsigned byte, so only the upper bound can be crossed. */
+		if (source.toInt() > HAL_LOGICAL_ADDRESS_MAX) {
+			CCEC_LOG( LOG_EXP, "DriverAidlImpl::addLogicalAddress : logical address %d is outside the contract range %d..%d; nothing released or added\r\n", source.toInt(), (int)HAL_LOGICAL_ADDRESS_MIN, (int)HAL_LOGICAL_ADDRESS_MAX);
+			throw AddressNotAvailableException();
+		}
+
 		if (!logicalAddresses.empty() && (logicalAddresses.front() == source)) {
 			CCEC_LOG( LOG_DEBUG, "DriverAidlImpl::addLogicalAddress : logical address %d is already registered\r\n", source.toInt());
 			return true;
 		}
 
-		if (!logicalAddresses.empty()) {
-			const LogicalAddress held = logicalAddresses.front();
+		/* The list node is allocated before any HAL call, so nothing can fail once the add commits. */
+		std::list<LogicalAddress> registered(1, source);
+
+		if (!logicalAddresses.empty() || (unconfirmedReleaseAddress != LogicalAddress::UNREGISTERED)) {
+			const int held = logicalAddresses.empty() ? unconfirmedReleaseAddress : logicalAddresses.front().toInt();
 			bool removed = false;
-
-			logicalAddresses.clear();
-
 			/* Synchronous, with no client-side deadline available: measured, not bounded. */
 			const int64_t removeStartedMs = halCallStarted();
-			::android::binder::Status removeTxn = hdmiCecController->removeLogicalAddresses(std::vector<int32_t>{ held.toInt() }, &removed);
+			::android::binder::Status removeTxn = hdmiCecController->removeLogicalAddresses(std::vector<int32_t>{ held }, &removed);
 
 			warnIfHalCallSlow("IHdmiCecController::removeLogicalAddresses", removeStartedMs);
 
-			if (!removeTxn.isOk()) {
-				CCEC_LOG( LOG_EXP, "DriverAidlImpl::addLogicalAddress : releasing logical address %d failed [%s]; ignored\r\n", held.toInt(), removeTxn.toString8().string());
+			if (!removeTxn.isOk() || !removed) {
+				if (!removeTxn.isOk()) {
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::addLogicalAddress : releasing logical address %d failed [%s]; reading back the HAL's addresses\r\n", held, removeTxn.toString8().string());
+				}
+				else {
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::addLogicalAddress : the HAL declined to release logical address %d; reading back the HAL's addresses\r\n", held);
+				}
+
+				/* A refusal can also mean the address was already gone, so the HAL's own list decides. */
+				if (hdmiCecService == 0) {
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::addLogicalAddress : no AIDL service proxy is held to confirm the release of logical address %d; nothing added\r\n", held);
+					throw IOException();
+				}
+
+				std::vector<int32_t> halAddresses;
+				/* Synchronous, with no client-side deadline available: measured, not bounded. */
+				const int64_t getStartedMs = halCallStarted();
+				::android::binder::Status getTxn = hdmiCecService->getLogicalAddresses(&halAddresses);
+
+				warnIfHalCallSlow("IHdmiCec::getLogicalAddresses", getStartedMs);
+
+				if (!getTxn.isOk()) {
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::addLogicalAddress : IHdmiCec::getLogicalAddresses failed [%s]; the release of logical address %d is unconfirmed and nothing was added\r\n", getTxn.toString8().string(), held);
+					throw IOException();
+				}
+
+				if (std::find(halAddresses.begin(), halAddresses.end(), (int32_t)held) != halAddresses.end()) {
+					CCEC_LOG( LOG_EXP, "DriverAidlImpl::addLogicalAddress : the HAL still holds logical address %d; nothing added\r\n", held);
+					if (!removeTxn.isOk()) {
+						throw IOException();
+					}
+					throw AddressNotAvailableException();
+				}
 			}
-			else if (!removed) {
-				CCEC_LOG( LOG_EXP, "DriverAidlImpl::addLogicalAddress : the HAL declined to release logical address %d; ignored\r\n", held.toInt());
-			}
+
+			logicalAddresses.clear();
 		}
+
+		/* Nothing is held now. Recorded before the add and cleared only on its confirmed outcome, so an
+		 * add that fails or raises is released, or confirmed absent, before any later add. */
+		unconfirmedReleaseAddress = source.toInt();
 
 		bool added = false;
 		/* Synchronous, with no client-side deadline available: measured, not bounded. */
@@ -1551,11 +1701,13 @@ bool DriverAidlImpl::addLogicalAddress(const LogicalAddress &source)
 			throw IOException();
 		}
 		else if (!added) {
+			unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
 			CCEC_LOG( LOG_EXP, "DriverAidlImpl::addLogicalAddress : the HAL declined logical address %d\r\n", source.toInt());
 			throw AddressNotAvailableException();
 		}
 		else {
-			logicalAddresses.push_back(source);
+			logicalAddresses.splice(logicalAddresses.end(), registered);
+			unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
 		}
     }
 
@@ -1563,10 +1715,9 @@ bool DriverAidlImpl::addLogicalAddress(const LogicalAddress &source)
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::isValidLogicalAddress
+ * @brief Reports whether @p source is in the local address list, without a HAL call.
  *
- * A copy of DriverImpl::isValidLogicalAddress(): a walk of the local address list under the
- * lock, with no HAL call.
+ * A copy of DriverImpl::isValidLogicalAddress(), walking the list under the instance lock.
  *
  * @see DriverAidlImpl::addLogicalAddress()
  * @see DriverImpl::isValidLogicalAddress()
@@ -1586,7 +1737,7 @@ bool DriverAidlImpl::isValidLogicalAddress(const LogicalAddress & source) const
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::poll
+ * @brief Pings @p to by sending the one-byte header frame from @p from through write().
  *
  * A copy of DriverImpl::poll(): a one-byte transmit through write() rather than a getState()
  * query, so the outcome arrives as write()'s exceptions. The trailing `#if 0` block is inert
@@ -1618,11 +1769,14 @@ void DriverAidlImpl::poll(const LogicalAddress &from, const LogicalAddress &to)
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::getIncomingQueue
+ * @brief Returns the incoming frame queue, but only while the driver is open
  *
- * The guard rejects a receive callback arriving during or after a close, so the listener must
- * reach the queue through here. The unlocked state read, and the race it carries, are
- * DriverImpl::getIncomingQueue()'s and are kept as they are.
+ * The guard rejects a receive callback arriving during or after a close. `status` is a plain int
+ * read without the instance lock, keeping DriverImpl::getIncomingQueue()'s unlocked read and race.
+ *
+ * @return IncomingQueue& - The queue received frames are offered onto and read() drains.
+ * @pre The driver is OPENED; otherwise InvalidStateException is raised.
+ * @see DriverAidlImpl::offerReceivedFrame()
  */
 DriverAidlImpl::IncomingQueue & DriverAidlImpl::getIncomingQueue(void)
 {
@@ -1634,50 +1788,38 @@ DriverAidlImpl::IncomingQueue & DriverAidlImpl::getIncomingQueue(void)
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::offerReceivedFrame
+ * @brief Queues a received frame unless the incoming queue is full, and reports which happened.
  *
- * Every producer (this method and close()'s sentinel offer) is serialized on queueProducerMutex,
- * so the room check cannot go stale before the offer. Refusing one below INCOMING_QUEUE_CAPACITY
- * (33) reserves the sentinel's slot and leaves received frames the legacy depth of 32.
+ * Both producers, this method and close()'s sentinel offer, hold queueProducerMutex, and
+ * consumers only remove, so an offer made after a passing room check always lands.
+ *
+ * @param [in] frame - Heap frame the caller owns; ownership passes only on true.
+ *
+ * @retval true  - Queued; the queue owns the frame.
+ * @retval false - The queue held INCOMING_QUEUE_CAPACITY entries; the caller still owns the frame.
+ * @pre The driver is OPENED; otherwise getIncomingQueue() raises InvalidStateException.
  *
  * @see DriverAidlImpl::close()
  * @see DriverAidlImpl::EventListener::onMessageReceived()
- * @see DriverAidlImpl::INCOMING_QUEUE_CAPACITY
  */
 bool DriverAidlImpl::offerReceivedFrame(CECFrame *frame)
 {
-	/* The reserved-slot rule needs a capacity of at least two: one slot for a received frame
-	   and one for close()'s sentinel. */
-	static_assert(INCOMING_QUEUE_CAPACITY >= 2,
-	              "INCOMING_QUEUE_CAPACITY must leave one slot for a received frame and one for close()'s sentinel");
-
 	IncomingQueue &queue = getIncomingQueue();
 
-	bool accepted = false;
-
     {AutoLock lock_(queueProducerMutex);
-		/* Refuse one below capacity so close()'s sentinel always has a slot; the capacity is 33
-		   so received frames still get the legacy depth of 32. */
-		const size_t occupancyBefore = queue.size();
-
-		if (occupancyBefore >= (INCOMING_QUEUE_CAPACITY - 1)) {
+		/* Refused here when full, because EventQueue::offer() would drop the frame silently. */
+		if (queue.size() >= INCOMING_QUEUE_CAPACITY) {
 			return false;
 		}
 
 		queue.offer(frame);
-
-		/* Read back, since EventQueue::offer() returns void: below capacity means accepted (a
-		   consumer may already own the frame); at capacity means discarded, so still the caller's. */
-		const size_t occupancyAfter = queue.size();
-
-		accepted = (occupancyAfter < INCOMING_QUEUE_CAPACITY);
     }
 
-	return accepted;
+	return true;
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::printFrameDetails
+ * @brief Logs the initiator, follower, opcode name and bytes of a frame that carries an opcode.
  *
  * A byte-for-byte copy of DriverImpl::printFrameDetails(). The catch names the CCEC
  * `Exception` base, so an empty frame's `std::out_of_range` escapes to the caller, and the bare
@@ -1710,7 +1852,7 @@ void  DriverAidlImpl::printFrameDetails(const CECFrame &frame)  noexcept(false) 
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::defaultBinderProbe
+ * @brief Returns the one immutable probe that isServiceAvailable() and isBinderPreflightOk() default to.
  *
  * The instance is a function-local static initialized from the six file-local wrappers
  * above, so the six real kernel-facing operations are named in exactly one place.
@@ -1732,11 +1874,9 @@ const DriverAidlImpl::BinderPreflightProbe &DriverAidlImpl::defaultBinderProbe(v
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::expectedBinderProtocolVersion
+ * @brief Returns the binder protocol version this build expects, or 0 without the binder kernel ABI.
  *
  * The `BINDER_CURRENT_PROTOCOL_VERSION` read sits under the CCEC_HAVE_BINDER_UAPI guard.
- * This is the one place in this file where the absence of the binder kernel ABI
- * definitions changes a returned value rather than only a log line.
  *
  * @see DriverAidlImpl::isBinderPreflightOk()
  */
@@ -1750,11 +1890,11 @@ unsigned int DriverAidlImpl::expectedBinderProtocolVersion(void)
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::isBinderPreflightOk
+ * @brief Runs the eight preflight decision points in order and returns false at the first that fails.
  *
- * Eight decision points run in a fixed order, each mapped to one coverage-manifest record, so
- * none may be reordered, merged or made build-conditional. Nothing here touches libbinder, since
- * reaching `ProcessState::self()` on a driverless host raises SIGABRT; every check uses the probe.
+ * The coverage manifest gates both arcs of every decision point, so none may be reordered, merged
+ * or made build-conditional. Nothing here touches libbinder, since reaching `ProcessState::self()`
+ * on a driverless host raises SIGABRT; every check uses the probe.
  *
  * @see DriverAidlImpl::isServiceAvailable()
  * @see DriverAidlImpl::BinderPreflightProbe
@@ -1854,7 +1994,7 @@ bool DriverAidlImpl::isBinderPreflightOk(const std::string &binderDriverPath,
 		return false;
 	}
 
-	/* Clamp before probing so LibCCEC::init() stays bounded; zero is left alone and means "do
+	/* Clamp before probing so the probe's wait stays bounded; zero is left alone and means "do
 	   not wait at all". */
 	unsigned int effectiveTimeoutMs = contextManagerTimeoutMs;
 
@@ -1891,8 +2031,8 @@ bool DriverAidlImpl::isBinderPreflightOk(const std::string &binderDriverPath,
 
 namespace {
 
-/* Fallback-reason phrases, assigned only by isServiceAvailable(). The first two are transcribed
-   verbatim by run_coverage.sh and the L2 dual-path test, so neither may be reworded. */
+/* Fallback-reason phrases, assigned only by isServiceAvailable(). The L1 contract suite matches the
+   first and the migration notes quote the first two verbatim, so neither may be reworded alone. */
 /** @brief Reason recorded when the preflight or the pre-lookup re-verification declines. */
 const char *const REASON_TRANSPORT_UNAVAILABLE = "the binder transport is unavailable on this platform";
 /** @brief Reason recorded when no service is registered or halcompat rejects it as incompatible. */
@@ -2059,7 +2199,7 @@ bool binderNodeIdentitiesMatch(const DriverAidlImpl::BinderNodeIdentity &validat
  *
  * @return bool - Whether the lookup may proceed
  * @retval true  - The path is still the validated node and a context manager answered in time.
- * @retval false - Otherwise; every cause is logged, none throws, and no wait exceeds the bound.
+ * @retval false - Otherwise; every cause is logged, none throws, and no wait exceeds the ping's bound.
  * @pre The preflight returned true and the caller still holds its descriptor.
  * @post The fresh descriptor is released on every path; the retained one is untouched.
  * @see binderNodeIdentitiesMatch()
@@ -2172,7 +2312,7 @@ std::string sanitizedInterfaceHash(const std::string &hash)
 } // anonymous namespace
 
 /**
- * @copydoc CCEC::DriverAidlImpl::describeObservedInterfaceHash
+ * @brief Classifies an observed interface hash as empty, "-1", "notfrozen" or a frozen digest.
  *
  * The phrases say what the observed string is, never why the rejection happened. They follow
  * halcompat's own gate order because halcompat exposes no entry point for a hash alone, and
@@ -2199,11 +2339,10 @@ const char *DriverAidlImpl::describeObservedInterfaceHash(const std::string &has
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::observedMetadataWouldBeAccepted
+ * @brief Reports whether an observed hash and version would themselves pass halcompat's rule.
  *
- * The version half calls `halcompat::detail::isCompatible()`, so it cannot drift from the real
- * rule; the hash half restates halcompat's gate order and treats an unfrozen server as rejected,
- * as the production default does.
+ * The hash half restates halcompat's gate order, rejecting an unfrozen server as the production
+ * default does; the version half calls `halcompat::detail::isCompatible()`, so it cannot drift.
  *
  * @note Uses halcompat's internal `detail` namespace deliberately: no public entry point takes an
  *       observed version or a hash, and the verdict itself stays with isCompatible().
@@ -2223,11 +2362,12 @@ bool DriverAidlImpl::observedMetadataWouldBeAccepted(const std::string &hash,
 
 
 /**
- * @copydoc CCEC::DriverAidlImpl::emitCompatibilityRejectionDiagnostic
+ * @brief Logs one post-rejection snapshot of a rejected service's hash and version as observations.
  *
  * Reads `getInterfaceHash()`/`getInterfaceVersion()` directly, which halcompat marks internal,
  * because halcompat exposes no accessor for the metadata it read; every line is labelled an
- * observation, not a cause. Being static, it cannot relabel availabilityReason.
+ * observation, not a cause. Being static and catching every failure, it cannot relabel
+ * availabilityReason.
  *
  * @see DriverAidlImpl::observedMetadataWouldBeAccepted()
  * @see DriverAidlImpl::isServiceAvailable()
@@ -2278,11 +2418,11 @@ void DriverAidlImpl::emitCompatibilityRejectionDiagnostic(
 
 
 /**
- * @copydoc CCEC::DriverAidlImpl::isServiceAvailable
+ * @brief Runs the bounded preflight and re-verification, then the service lookup and halcompat check
  *
- * The function-level catch-all makes the no-propagation guarantee unconditional: an exception
- * escaping into the factory's one-time static initializer would fail initialization where the
- * correct outcome is the legacy back-end.
+ * A function-level catch-all turns any exception into a decline, so nothing escapes into the
+ * factory's one-time static initializer. Both context-manager probes are bounded; the lookup and
+ * every metadata read after them are synchronous binder calls, timed but not bounded.
  *
  * @see DriverAidlImpl::isBinderPreflightOk()
  * @see DriverAidlImpl::open()
@@ -2363,12 +2503,11 @@ bool DriverAidlImpl::isServiceAvailable(const std::string &binderDriverPath,
 }
 
 /**
- * @copydoc CCEC::DriverAidlImpl::unavailabilityReason
+ * @brief Returns the reason the last isServiceAvailable() recorded, or NULL, without asking again.
  *
- * A pure read of the pointer isServiceAvailable() set. The body is one statement for the
- * reason the declaration gives: rebuilding the answer would re-run the bounded preflight,
- * and the record is what makes the reported condition the one that actually caused the
- * fallback.
+ * A pure read of the pointer isServiceAvailable() set: rebuilding the answer would repeat the
+ * binder query, and the record is what makes the reported condition the one that actually
+ * caused the fallback.
  *
  * @see DriverAidlImpl::isServiceAvailable()
  */

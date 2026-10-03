@@ -49,9 +49,6 @@
 #ifndef HDMI_CCEC_DRIVER_AIDL_IMPL_HPP_
 #define HDMI_CCEC_DRIVER_AIDL_IMPL_HPP_
 
-/* <atomic>: the lifecycle state is an std::atomic<int> because getIncomingQueue() reads it
- * without the instance mutex, from a binder threadpool thread. */
-#include <atomic>
 #include <list>
 #include <string>
 #include <vector>
@@ -147,7 +144,7 @@ public:
 	/**
 	 * @brief Ceiling, in milliseconds, on a caller-supplied context-manager timeout.
 	 *
-	 * Keeps LibCCEC::init() bounded whatever timeout a caller names; each clamp is logged.
+	 * Keeps each probe's wait bounded whatever timeout a caller names; each clamp is logged.
 	 * It is five times DEFAULT_CONTEXT_MANAGER_TIMEOUT_MS, so the default is never clamped.
 	 *
 	 * @warning Must remain greater than or equal to DEFAULT_CONTEXT_MANAGER_TIMEOUT_MS.
@@ -236,32 +233,28 @@ public:
 	/**
 	 * @brief Capacity of the incoming queue, passed to it explicitly by the constructor.
 	 *
-	 * The last slot is reserved for close()'s NULL sentinel: offerReceivedFrame() refuses at
-	 * one below this value, so received frames fill 32, the depth the legacy queue gets.
+	 * Received frames and close()'s NULL sentinel share these 32 slots, as in DriverImpl's queue,
+	 * so a sentinel offered to a full queue is dropped, as on the legacy path.
 	 *
-	 * @note `EventQueue::offer()` silently drops at capacity, which the reserved slot avoids.
+	 * @note `EventQueue::offer()` drops silently at capacity; offerReceivedFrame() refuses instead.
 	 *
 	 * @see offerReceivedFrame()
 	 * @see IncomingQueue
 	 */
-	static constexpr size_t INCOMING_QUEUE_CAPACITY = 33;
+	static constexpr size_t INCOMING_QUEUE_CAPACITY = 32;
 
 	/**
-	 * @brief Pins the receive depth to the legacy contract, at compile time.
+	 * @brief Pins the incoming queue's capacity to the legacy queue's, at compile time.
 	 *
-	 * The depth is pinned to the literal 32, the default capacity `CCEC_OSAL::EventQueue`
-	 * gives the legacy back-end, so a change to INCOMING_QUEUE_CAPACITY that alters the
-	 * depth received frames get fails to compile.
+	 * The literal is the default capacity `CCEC_OSAL::EventQueue` gives DriverImpl's queue.
 	 *
-	 * @warning If the OSAL default changes, re-derive the literal from the legacy depth.
+	 * @warning If the OSAL default changes, re-derive the literal from the legacy queue.
 	 *
 	 * @see INCOMING_QUEUE_CAPACITY
-	 * @see offerReceivedFrame()
 	 */
-	static_assert(INCOMING_QUEUE_CAPACITY - 1 == 32,
-	              "the depth available to received frames must equal the 32 the legacy back-end "
-	              "gets from EventQueue's default capacity; the reserved slot for close()'s "
-	              "sentinel must come out of an extra entry, never out of the caller's share");
+	static_assert(INCOMING_QUEUE_CAPACITY == 32,
+	              "the incoming queue must hold the 32 entries, close()'s sentinel included, that "
+	              "DriverImpl's queue gets from EventQueue's default capacity");
 
 	/**
 	 * @brief Constructs the AIDL back-end without touching binder
@@ -272,7 +265,7 @@ public:
 	 * a legacy-only SOC.
 	 *
 	 * @post The instance is inert until isServiceAvailable() or open() is called.
-	 * @warning Never throws, so Driver::getInstance()'s function-local static always initializes.
+	 * @warning Touches no binder; only ordinary allocation, such as the incoming queue's, can fail.
 	 *
 	 * @see isServiceAvailable()
 	 * @see DriverImpl::DriverImpl()
@@ -330,9 +323,9 @@ public:
 	/**
 	 * @brief Takes the next received CEC frame, blocking until one arrives
 	 *
-	 * Mirrors DriverImpl::read() with no AIDL call, except that the sentinel flush skips any
-	 * further NULL entries instead of dereferencing them. Throws InvalidStateException when
-	 * not OPENED on entry, or after flushing the queue when closed while blocked.
+	 * Mirrors DriverImpl::read() with no AIDL call, its flush loop included. Throws
+	 * InvalidStateException when not OPENED on entry, or after flushing the queue when closed
+	 * while blocked.
 	 *
 	 * @param [out] frame - The received frame; the flush also writes it, so ignore it after a throw.
 	 *
@@ -348,9 +341,9 @@ public:
 	 * @brief Transmits a CEC frame synchronously and reports the bus outcome
 	 *
 	 * Mirrors DriverImpl::write() with `IHdmiCecController::sendMessage()` for `HdmiCecTx()`.
-	 * Throws IOException on transport failure, `BUSY`, an over-length frame, no controller or an
-	 * undocumented status; CECNoAckException on a directed no-ack or the CEC CTS 9-3-3 broadcast
-	 * arm; InvalidStateException when not OPENED; `std::out_of_range` for an empty frame.
+	 * Throws IOException on transport failure, `BUSY`, an over-length frame or no controller;
+	 * CECNoAckException on a directed no-ack or the CEC CTS 9-3-3 broadcast arm;
+	 * InvalidStateException when not OPENED; `std::out_of_range` for an empty frame.
 	 *
 	 * @param [in] frame - The frame to transmit, header byte first; at most 16 bytes.
 	 *
@@ -381,15 +374,14 @@ public:
 	/**
 	 * @brief Relinquishes one logical address
 	 *
-	 * Mirrors DriverImpl::removeLogicalAddress(): state guard, local removal, then
-	 * `IHdmiCecController::removeLogicalAddresses()` with a one-element vector, whose
-	 * failure is logged and otherwise ignored. Throws InvalidStateException when not OPENED.
+	 * Mirrors DriverImpl::removeLogicalAddress(): state guard, local removal, then a one-element
+	 * `IHdmiCecController::removeLogicalAddresses()` whose failure is logged and ignored. The held
+	 * address stays in unconfirmedReleaseAddress until its release is confirmed or settled by an add.
 	 *
 	 * @param [in] source - The logical address to relinquish.
-	 *
+	 * @pre open() has completed successfully; otherwise InvalidStateException is raised.
 	 * @post The address is absent from the local list whether or not the HAL agreed.
 	 * @warning A synchronous binder call with no client-side deadline; see isServiceAvailable().
-	 *
 	 * @see addLogicalAddress()
 	 * @see DriverImpl::removeLogicalAddress()
 	 */
@@ -398,15 +390,17 @@ public:
 	/**
 	 * @brief Registers @p source as this device's one logical address
 	 *
-	 * Returns true with no HAL call when @p source is already held. Otherwise it releases the held
-	 * address, logging and ignoring a failed release, and adds @p source as a one-element vector.
-	 * No controller or a non-ok status raises IOException; a HAL refusal AddressNotAvailableException.
+	 * Returns true with no HAL call when @p source is already held. Otherwise the held address is
+	 * released first and @p source is added only once the HAL confirms that release. A missing proxy,
+	 * non-ok add or unconfirmable release raises IOException; @p source outside 0x0..0xE, a refusal or
+	 * a held address the HAL still lists after a declined release raises AddressNotAvailableException.
 	 *
 	 * @param [in] source - The logical address to register.
 	 * @return bool  - Acquisition result
 	 * @retval true  - The address is registered; every failure raises instead.
 	 * @pre open() has completed successfully; otherwise InvalidStateException is raised.
-	 * @post On success the local list holds exactly @p source; a failed HAL add leaves it empty.
+	 * @post On success only @p source is held. An unconfirmed release keeps the held address; an add
+	 *       that fails in transport or raises leaves @p source in unconfirmedReleaseAddress.
 	 * @warning Synchronous binder calls with no client-side deadline; see isServiceAvailable().
 	 * @see removeLogicalAddress()
 	 */
@@ -424,7 +418,8 @@ public:
 	 * @retval 0      - No proxy, a non-ok status, an empty result, an entry outside 0x0..0xE, or 0.
 	 * @retval other  - Entry 0 of the HAL's result.
 	 * @pre None; there is no state guard, matching DriverImpl::getLogicalAddress().
-	 * @warning Never throws; LibCCEC::getLogicalAddress() turns 0 into InvalidStateException.
+	 * @warning A non-ok Binder status or no usable address is reported as 0, not raised;
+	 *          LibCCEC::getLogicalAddress() turns 0 into InvalidStateException.
 	 * @see open()
 	 */
 	virtual int   getLogicalAddress(int devType);
@@ -494,8 +489,11 @@ public:
 	 */
 	virtual void printFrameDetails(const CECFrame &frame) noexcept(false);
 
-	/* Forward declared because isServiceAvailable() takes it by reference and a parameter type,
-	 * unlike a default argument, is not looked up in the complete-class context; defined below. */
+	/**
+	 * @brief Declared ahead of its definition below, because isServiceAvailable() takes it by reference
+	 *
+	 * A parameter type, unlike a default argument, is not looked up in the complete-class context.
+	 */
 	struct BinderPreflightProbe;
 
 	/**
@@ -512,11 +510,11 @@ public:
 	 * @retval true  - Every stage passed; the compatible proxy is cached for open().
 	 * @retval false - A stage failed; the reason is logged and kept for unavailabilityReason().
 	 *
-	 * @post The state stays CLOSED. Never aborts, blocks indefinitely or throws.
-	 * @warning The platform must restrict the binder node and who may register `"HdmiCec"`, and
-	 *          must bound every HAL response: synchronous AIDL calls have no client-side deadline.
+	 * @post The state stays CLOSED and nothing is thrown; each probe is bounded and declines, never aborts.
+	 * @warning Past the last probe, libbinder reopens the node and makes the lookup and metadata calls
+	 *          with no client-side deadline: the platform must keep the node unchanged, `servicemanager`
+	 *          and the HAL answering, and registration of `"HdmiCec"` restricted.
 	 * @see isBinderPreflightOk()
-	 * @see unavailabilityReason()
 	 */
 	bool isServiceAvailable(const std::string &binderDriverPath = DEFAULT_BINDER_DRIVER_PATH,
 	                        unsigned int contextManagerTimeoutMs = DEFAULT_CONTEXT_MANAGER_TIMEOUT_MS,
@@ -549,11 +547,11 @@ public:
 	 * @see isServiceAvailable()
 	 */
 	struct BinderNodeIdentity {
-		/** @brief The device the node lives on, POSIX `st_dev`. Half of the unique object identity. */
+		/** @brief The device the node lives on, POSIX `st_dev`, half of its unique object identity. */
 		unsigned long long device;
-		/** @brief The node number, POSIX `st_ino`. The other half, pinned by the retained descriptor. */
+		/** @brief The node number, POSIX `st_ino`, the other half, pinned by the retained descriptor. */
 		unsigned long long inode;
-		/** @brief The driver's major/minor pair, POSIX `st_rdev`. Meaningful only for a device node. */
+		/** @brief The driver's major/minor pair, POSIX `st_rdev`, meaningful only for a device node. */
 		unsigned long long rdev;
 		/** @brief POSIX `st_mode`: type validated once, whole value re-compared before use. */
 		unsigned int mode;
@@ -672,26 +670,30 @@ public:
 	 */
 	static unsigned int expectedBinderProtocolVersion(void);
 
+private:
+	/** @brief The L1 suite's test-only gateway to isBinderPreflightOk(); production never defines it. */
+	friend struct BinderPreflightTestAccess;
+
 	/**
 	 * @brief Decides whether a binder lookup may safely be attempted at all
 	 *
 	 * Runs before anything touches libbinder, which aborts on a bad driver node and blocks forever
 	 * without a context manager. Stops at the first failure: the node opens, is identifiable, is a
-	 * root-owned character device, reports expectedBinderProtocolVersion(), and answers on handle 0
-	 * within the timeout.
+	 * root-owned character device, reports expectedBinderProtocolVersion(), and answers on handle 0.
 	 *
 	 * @param [in]  binderDriverPath        - Driver node to inspect, injectable for tests.
 	 * @param [in]  contextManagerTimeoutMs - Bound on the handle-0 check in ms; 0 means do not wait.
 	 * @param [in]  probe                   - Kernel-facing operations; defaults to the real syscalls.
 	 * @param [out] retainedDescriptor      - Optional; on true, the validated fd still open, else -1.
-	 * @param [out] retainedIdentity        - Optional; on true, the validated node's identity.
+	 * @param [out] retainedIdentity        - Optional; on true with @p retainedDescriptor non-null,
+	 *                                        the validated node's identity; otherwise untouched.
 	 *
 	 * @return bool - Whether a binder lookup may safely be attempted
 	 * @retval true  - Every check passed.
 	 * @retval false - A check failed, or this build lacks the binder ABI; the log names which.
 	 *
 	 * @post Nothing stays initialized but a retained descriptor, which the caller closes via @p probe.
-	 * @warning Internal and test-visible, not public API. Never throws or blocks beyond the bound.
+	 * @warning Private; tests use BinderPreflightTestAccess. Never throws or blocks beyond the bound.
 	 * @see isServiceAvailable()
 	 */
 	static bool isBinderPreflightOk(const std::string &binderDriverPath = DEFAULT_BINDER_DRIVER_PATH,
@@ -700,6 +702,7 @@ public:
 	                                int *retainedDescriptor = NULL,
 	                                BinderNodeIdentity *retainedIdentity = NULL);
 
+public:
 	/**
 	 * @brief Names the category of a post-rejection interface hash, never the rejection's cause
 	 *
@@ -783,15 +786,14 @@ protected:
 	/**
 	 * @brief Hands one received frame to the incoming queue and reports whether it took it
 	 *
-	 * `EventQueue::offer()` drops silently when full, so this checks for room first, refuses at
-	 * INCOMING_QUEUE_CAPACITY - 1 to keep the last slot for close()'s wake-up sentinel, and reads
-	 * acceptance back from the queue.
+	 * `EventQueue::offer()` drops silently when full, so this refuses a frame while the queue holds
+	 * INCOMING_QUEUE_CAPACITY entries and otherwise offers it, an offer that then always lands.
 	 *
 	 * @param [in] frame - Heap frame the caller owns; ownership passes only on true.
 	 *
 	 * @return bool - Whether ownership was transferred
 	 * @retval true  - Queued; the caller must drop its pointer.
-	 * @retval false - Not queued; the caller still owns the frame and must release it.
+	 * @retval false - The queue is full; the caller still owns the frame and must release it.
 	 * @throws InvalidStateException - The driver is not OPENED; the caller keeps ownership.
 	 *
 	 * @warning Serializes producers on queueProducerMutex, never the instance lock; not bounded-time.
@@ -816,13 +818,15 @@ protected:
 	/**
 	 * @brief Discovers and registers this device's logical address on an opened session
 	 *
-	 * Polls each LOCAL_DEVICE_TYPE candidate with poll(c, c): CECNoAckException means the address is
-	 * free and it is registered with a one-element `addLogicalAddresses()` call. An acknowledged or
-	 * failed poll and a HAL refusal move to the next candidate, and a non-ok add status stops.
+	 * Polls each LOCAL_DEVICE_TYPE candidate with poll(c, c) and registers the first free one
+	 * (CECNoAckException) with a one-element `addLogicalAddresses()` call. A taken or failed poll and
+	 * a HAL refusal move to the next candidate; a non-ok or raising add stops allocation.
 	 *
-	 * @pre The state is OPENED. The instance lock is taken here; it is recursive, so open() may hold it.
-	 * @post The local list holds the one registered address, or nothing if none was registered.
-	 * @warning Never throws; every failure is logged at LOG_EXP.
+	 * @pre The state is OPENED; the recursive instance lock is taken here.
+	 * @post The local list holds the one registered address, or nothing; unconfirmedReleaseAddress
+	 *       names the candidate when its add failed in transport, or raised and its withdrawal went
+	 *       unconfirmed.
+	 * @warning Every exception but thread cancellation's forced unwind is caught and logged at LOG_EXP.
 	 * @see open()
 	 */
 	void registerDeviceLogicalAddress(void);
@@ -830,33 +834,35 @@ protected:
 	/**
 	 * @brief Lifecycle state: one of CLOSED, CLOSING or OPENED
 	 *
-	 * Atomic, unlike DriverImpl::status, so getIncomingQueue()'s unlocked read from a binder thread
-	 * is not a data race; every write still happens under the instance mutex.
+	 * A plain int, as DriverImpl::status is. Every write happens under the instance mutex, and
+	 * getIncomingQueue() reads it without the lock, deliberately reproducing the legacy unlocked read.
 	 *
 	 * @see getIncomingQueue()
 	 */
-	std::atomic<int> status;
+	int status;
 	/** @brief Legacy native handle, always 0; kept so both back-ends declare the same members. */
 	int nativeHandle;
-	/** @brief Frames received from the HAL awaiting the Bus reader; capacity INCOMING_QUEUE_CAPACITY. */
+	/** @brief Received frames awaiting the Bus reader, and close()'s sentinel; INCOMING_QUEUE_CAPACITY entries. */
 	IncomingQueue rQueue;
-        /** @brief Guards the state and the local address list. Mutable, so const methods may lock. */
+        /** @brief Guards the state and local address list, and is mutable so const methods may lock it. */
         mutable Mutex mutex;
 	/**
 	 * @brief Serializes every producer that offers onto the incoming queue
 	 *
-	 * Held by offerReceivedFrame() for its check and offer, and by close() for its sentinel offer.
-	 * Separate from the instance mutex, which write() holds across IPC; close() takes it inside the
-	 * instance lock and nothing nests the other way, so no inversion is possible.
+	 * Held by offerReceivedFrame() for its check and offer, and by close() for its sentinel offer,
+	 * so a frame that passed the room check always lands. Separate from the instance mutex, which
+	 * write() holds across IPC; close() takes it inside the instance lock and nothing nests the
+	 * other way, so no inversion is possible.
 	 *
 	 * @see offerReceivedFrame()
 	 */
 	Mutex queueProducerMutex;
 	/**
-	 * @brief The logical address this back-end has registered
+	 * @brief The local record of the one logical address this back-end has registered
 	 *
-	 * Declared as DriverImpl declares it, but never holds more than one entry: registration replaces
-	 * the entry rather than appending, and close() leaves it for the next open() to replace.
+	 * Declared as DriverImpl declares it, but never holds more than one entry: a replacement is
+	 * recorded only once the HAL has confirmed the old address released, and close() leaves the
+	 * entry for the next open() to replace. isValidLogicalAddress() answers from this list alone.
 	 */
 	std::list<LogicalAddress> logicalAddresses;
 
@@ -914,6 +920,16 @@ private:
 	 * The one place a product sets its device role on the AIDL back-end.
 	 */
 	static constexpr int LOCAL_DEVICE_TYPE = DeviceType::PLAYBACK_DEVICE;
+
+	/**
+	 * @brief An address the HAL may still hold although the local list does not, or UNREGISTERED
+	 *
+	 * Set before each HAL call that could leave an address registered without a local entry: the
+	 * release of the held address by removeLogicalAddress(), and every add. Cleared once the HAL
+	 * confirms the outcome, by a successful close() or by the next registerDeviceLogicalAddress();
+	 * addLogicalAddress() settles it before any add.
+	 */
+	int unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
 
 };
 

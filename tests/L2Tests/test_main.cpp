@@ -31,12 +31,13 @@
  * @brief Global environment of the L2 tier and parent half of the fake service host lifecycle.
  *
  * Owns the legacy HAL mock, the out-of-process fake service host, its pipes and child processes,
- * and their bring-up order. CEC_TEST_AIDL_MODE selects the run: unset or `absent` launches
- * nothing and exercises the legacy back-end (invocation D); `remote` launches the host, waits for
- * its readiness token and pings its control channel before init (AIDL, invocation E);
- * `compatible`, `incompatible` and any other value fail the run. Every setup fault is fatal.
- * The case file reaches this unit only through cecL2HostControlChannelIsOpen(),
- * cecL2HostControlRequest() and cecL2ProveEpipeDiagnosticAndChildReaping().
+ * and their bring-up order; the case file reaches this unit only through
+ * cecL2HostControlChannelIsOpen(), cecL2HostControlRequest(),
+ * cecL2ProveEpipeDiagnosticAndChildReaping() and cecL2RequestedAidlMode(). CEC_TEST_AIDL_MODE
+ * unset, empty or `absent` launches nothing and exercises the legacy back-end (invocation D);
+ * `remote` launches the host, waits for its readiness token and pings its control channel before
+ * init (AIDL, invocation E).
+ * `compatible`, `incompatible` and any other value fail the run, as does every setup fault.
  *
  * @warning LibCCEC::init() fixes the back-end selection for the process, so the host must be
  *          ready before it is called.
@@ -49,8 +50,8 @@
 #include "hdmi_cec_driver_mock.h"
 #include "ccec/LibCCEC.hpp"
 
-/* POSIX primitives for the host lifecycle; deliberately no binder or AIDL header, so this
- * runner links no libbinder symbol. */
+/* POSIX primitives for the host lifecycle; this translation unit includes no binder or AIDL
+ * header and makes no direct binder API call. */
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -68,7 +69,11 @@
 #include <string>
 #include <vector>
 
-// Create mock instance before main
+/**
+ * @brief Legacy HAL double owned by the global environment, null whenever none is allocated.
+ *
+ * SetUp allocates it and installs it with setInstance(); TearDown uninstalls and deletes it.
+ */
 static HdmiCecDriverMock* g_driverMock = nullptr;
 
 /**
@@ -199,7 +204,14 @@ std::string renderUntrustedValue(const char *value, std::size_t length)
     return rendered;
 }
 
-/** @brief renderUntrustedValue() for a std::string. @see renderUntrustedValue(const char *, std::size_t) */
+/**
+ * @brief renderUntrustedValue() for a std::string.
+ *
+ * @param [in] value                      - String to render; any content is acceptable
+ *
+ * @return std::string                            - The rendering: quoted, single-line, bounded
+ * @see renderUntrustedValue(const char *, std::size_t)
+ */
 inline std::string renderUntrustedValue(const std::string &value)
 {
     return renderUntrustedValue(value.data(), value.size());
@@ -210,6 +222,9 @@ inline std::string renderUntrustedValue(const std::string &value)
  *
  * A null pointer renders as the undelimited <unset>, so unset and empty ("") stay distinct.
  *
+ * @param [in] value                      - C string to render, or null
+ *
+ * @return std::string                            - <unset> for null, else the quoted rendering
  * @see renderUntrustedValue(const char *, std::size_t)
  */
 inline std::string renderUntrustedValue(const char *value)
@@ -292,8 +307,8 @@ const int HOST_CONTROL_REPLY_TIMEOUT_MS = 10000;
 /**
  * @brief Upper bound on bytes accepted while assembling one reply line.
  *
- * The longest reply is under a hundred characters, so reaching the cap means the stream is not
- * the host's replies; same value as HOST_READINESS_MAX_BYTES.
+ * The longest reply, `calls`, is well under a kilobyte, so reaching the cap means the stream is
+ * not the host's replies; same value as HOST_READINESS_MAX_BYTES.
  */
 const std::size_t HOST_CONTROL_MAX_REPLY_BYTES = 4096;
 
@@ -317,14 +332,15 @@ enum class ReadinessOutcome {
     Ready,              /**< @brief The token arrived, matched verbatim, and the host is serving. */
     TimedOut,           /**< @brief The bound expired with no token; the host is still alive.     */
     ClosedWithoutToken, /**< @brief The write end closed with no token; the host exited.          */
-    TokenMismatch,      /**< @brief A complete line arrived and it was not the token.             */
+    TokenMismatch,      /**< @brief A non-token line, or the byte cap reached with no newline.    */
     PipeError           /**< @brief The descriptor itself failed, which is none of the above.     */
 };
 
 /**
  * @brief Writes a buffer to a descriptor in full, tolerating short and interrupted writes.
  *
- * Used only by the child between fork() and exec(); it neither allocates nor locks.
+ * It neither allocates nor locks, so forked children use it for launch diagnostics and probe
+ * handshakes.
  *
  * @param [in] fd                         - Descriptor to write to
  * @param [in] data                       - Buffer to write. Must not be null
@@ -332,7 +348,7 @@ enum class ReadinessOutcome {
  *
  * @return None
  *
- * @warning Silent on failure by design; the caller's next act is _exit().
+ * @warning A failed write returns silently; the caller chooses its next step.
  */
 void writeRawFully(int fd, const char *data, std::size_t length)
 {
@@ -421,7 +437,7 @@ void closeDescriptorRange(unsigned int low, unsigned int high)
  *
  * @return None
  *
- * @warning Call only in a child between fork() and execve().
+ * @warning Call only in a forked child; in the parent it would close descriptors still in use.
  * @see closeDescriptorRange(), startFakeServiceHost()
  */
 void closeInheritedDescriptorsExcept(int keepFirst, int keepSecond, int keepThird)
@@ -629,7 +645,8 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
         return false;
     }
 
-    /* O_CLOEXEC on both ends atomically at creation, so no concurrent fork can inherit them. */
+    /* O_CLOEXEC sets close-on-exec atomically at creation, so a program that another thread
+     * forks and execs concurrently cannot inherit either end. */
     int readinessPipe[2] = { -1, -1 };
     if (::pipe2(readinessPipe, O_CLOEXEC) != 0) {
         failureDetail = std::string("the readiness pipe could not be created: ") +
@@ -750,7 +767,7 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
             ::_exit(CHILD_EXIT_PRE_EXEC_FAILED);
         }
 
-        /* Clear O_CLOEXEC on the two channel ends the host is told about, or they would not
+        /* Clear FD_CLOEXEC on the two channel ends the host is told about, or they would not
          * survive the exec and the host would refuse to start. */
         if (::fcntl(controlChildReadFd, F_SETFD, 0) != 0) {
             static const char controlMessage[] =
@@ -849,7 +866,7 @@ bool startFakeServiceHost(const std::string &hostPath, std::string &failureDetai
  * @retval ReadinessOutcome::Ready                - The token arrived and matched verbatim
  * @retval ReadinessOutcome::TimedOut             - The bound expired; the host has not published
  * @retval ReadinessOutcome::ClosedWithoutToken   - The write end closed with no token; host exited
- * @retval ReadinessOutcome::TokenMismatch        - A complete line arrived that was not the token
+ * @retval ReadinessOutcome::TokenMismatch        - A non-token line or an overlong unterminated one
  * @retval ReadinessOutcome::PipeError            - poll() or read() failed on the descriptor
  *
  * @pre startFakeServiceHost() succeeded and this process closed its copy of the write end.
@@ -2419,7 +2436,8 @@ bool proveHostProcessGroupTeardown(std::string &failureDetail)
 
     const pid_t runnerGroupBefore = ::getpgrp();
 
-    /* Step 2: the fork; the child's whole life is four calls and a wait. */
+    /* Step 2: the fork; the child creates its own process group, sweeps its descriptors, forks
+     * the grandchild, then sends the handshake byte and waits. */
     const pid_t child = ::fork();
 
     if (child < 0) {
@@ -2715,8 +2733,8 @@ void launchHostAndWaitUntilReady()
 /**
  * @brief Reads CEC_TEST_AIDL_MODE and does what it asks, before the selection resolves.
  *
- * The legacy mode touches neither libbinder nor a second process; the remote mode launches the
- * host and completes its handshake here, ahead of init.
+ * The legacy mode launches no second process, and this translation unit makes no direct binder
+ * call; the remote mode launches the host and completes its handshake here, ahead of init.
  *
  * @return None
  *
@@ -2771,8 +2789,8 @@ void applyAidlModeBeforeInit()
 } // namespace
 
 
-/* ==== Cross-translation-unit seam: the three functions the case file declares extern; every
- * descriptor and child stays owned here, and mangled names make signature drift a link error. */
+/* ==== Cross-translation-unit seam: the four functions the case file declares extern; every
+ * descriptor, child and mode read stays here; mangled names make parameter drift a link error. */
 
 /**
  * @brief Reports whether the fake service host's control and observation channel is usable.
@@ -2795,11 +2813,11 @@ bool cecL2HostControlChannelIsOpen()
 /**
  * @brief Sends one command to the fake service host and returns its single reply line.
  *
- * Speaks the fake host's protocol (`ping`, `listener`, `sent-count`, `last-sent`, `open-count`,
- * `close-count`, `deliver <hex>`, `shutdown`); one deadline bounds every path.
+ * Speaks the fake host's line protocol, whose verbs handleControlCommand() in the host defines;
+ * one deadline bounds every path.
  *
  * @param [in]  command                   - Command text without terminator; no newline or CR
- * @param [out] reply                     - Receives the reply line; untouched on failure
+ * @param [out] reply                     - Receives the reply; on failure, unchanged or the rejected line
  * @param [out] failureDetail             - Receives what went wrong; untouched on success
  *
  * @return bool                                   - Whether one command was exchanged for one reply
@@ -2841,6 +2859,19 @@ bool cecL2ProveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
                                               std::string &failureDetail)
 {
     return proveEpipeDiagnosticAndChildReaping(observedDiagnostic, failureDetail);
+}
+
+/**
+ * @brief Returns CEC_TEST_AIDL_MODE as this harness reads it, so no case reads the variable itself.
+ *
+ * @return std::string                            - The raw value; empty when unset or empty
+ *
+ * @see applyAidlModeBeforeInit()
+ */
+std::string cecL2RequestedAidlMode()
+{
+    const char *const requested = ::getenv(AIDL_MODE_VARIABLE);
+    return (requested != nullptr) ? std::string(requested) : std::string();
 }
 
 /**

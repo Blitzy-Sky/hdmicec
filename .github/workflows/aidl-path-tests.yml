@@ -174,10 +174,11 @@ name: aidl-path-tests
 # coverage met the bar. Exit 1 is a failure. EXIT 3 IS ADVISORY AND IS NOT A PASS - the script
 # says so in terms, and the image manifest's STATUS_FILE_FORMAT repeats it.
 #
-# ITS BRANCH_MANIFEST IS POPULATED, AND AN EMPTY ENTRY IS A REGRESSION. All 119 records - 116
-# required arms plus 3 recorded unreachable by construction, selection.reason-unrecorded,
-# compat.client-era-frozen and halcall.clock-unreadable - carry measured line, block and branch
-# coordinates, read out of a real unfiltered trace and cross-checked against `gcov -b -c -t`.
+# ITS BRANCH_MANIFEST IS POPULATED, AND AN EMPTY ENTRY IS A REGRESSION. All 156 records - 152
+# required arms plus 4 recorded unreachable by construction, selection.reason-unrecorded,
+# compat.client-era-frozen, halcall.clock-unreadable and allocate.outer-raised-unknown - carry
+# measured line, block and branch coordinates, read out of a real unfiltered trace and
+# cross-checked against `gcov -b -c -t`.
 # TWO OF THEM CARRY PER-ARC-LAYOUT ALTERNATIVES rather than a bare arc index, because gcc emits a
 # different arc count for halcompat.h:168 on x86-64 (three block arcs) than on i386 (two), and a
 # manifest holding one set reports a false ABSENT on the other architecture. The gate resolves
@@ -190,11 +191,12 @@ name: aidl-path-tests
 #
 #   * EXIT 1, THE PER-FILE LINE GATE, on any host where the binder transport turns out not to
 #     be usable. run_coverage.sh defers invocations B, C and E in that case, and
-#     ccec/src/DriverAidlImpl.cpp - over a third of whose body only those invocations reach - falls
-#     below the 80% bar, measured at 64.7% (462/714) on a driverless host. Its sibling
+#     ccec/src/DriverAidlImpl.cpp - 249 of whose 788 lines go unexecuted without them, against 81
+#     on the full matrix (89.7%, 707/788) - falls below the 80% bar, measured at 68.4% (539/788)
+#     on a driverless host. Its sibling
 #     ccec/src/Driver.cpp clears the bar there at 80.0% (12/15), because the legacy-selection
 #     arm of the factory is reached by invocations A and D; the aggregate clears it too, at
-#     86.9% (2488/2862) over 32 source files. So the per-file half is the one that fails, and
+#     87.4% (2565/2936) over 32 source files. So the per-file half is the one that fails, and
 #     it fails on one file. Per-file gating is on for an acceptance run, so that is a `die` and a
 #     1, not an advisory. It is the outcome a driverless host measures today, and it is exactly
 #     what this job's guest provisioning exists to change: binderfs, the device nodes and
@@ -202,10 +204,10 @@ name: aidl-path-tests
 #     one of those did not come up and the console log's BINDER PLATFORM RECORD says which.
 #
 #   * EXIT 3, THE DEFERRED ARMS, when those same deferrals happen while the line figures still
-#     clear the bar. 31 of the 116 required arms carry a prerequisite - 29 need invocation B, one
+#     clear the bar. 13 of the 152 required arms carry a prerequisite - 11 need invocation B, one
 #     needs invocation C, and one needs a usable binder driver with no service registered on it,
 #     which is a condition rather than an invocation letter - so a matrix that did not run them
-#     leaves those 31 unmeasured. The remaining 85 required arms carry no prerequisite at all:
+#     leaves those 13 unmeasured. The remaining 139 required arms carry no prerequisite at all:
 #     they are enforced and measured on every run, including one on a host with no binder driver,
 #     so a zero on one of those is a failure here and now rather than a deferral. The gate
 #     reports each deferred arm by name with the prerequisite it needed, never as a pass and
@@ -476,12 +478,39 @@ env:
   BINDER_SDK_TAG: '2.6.0'
   BINDER_SDK_COMMIT: e5035dc02d810d3c93e03188ca8e3fb7cb165c95 # tag 2.6.0 (annotated; tag object 1b3148a1297fd4b8ad1c5e94b9e4a7a1b46a360a)
 
-  # Two CMake installations coexist. The job-wide one stays on the project's pin because the
-  # rest of the chain depends on it; the newer one is reached ONLY by a step-scoped PATH
-  # prepend, because build_binder.sh and build_modules.sh call bare "cmake" and neither offers
-  # any override hook (no CMAKE_BIN, no CMAKE_COMMAND, no "command -v cmake", no CMAKE=), so
-  # an absolute path is not implementable for them. The floor belongs to the BINDER SDK
-  # specifically - the AIDL snapshot's own CMakeLists declares cmake_minimum_required 3.8.
+  # THE TWO PRODUCTION HEADER SOURCES THE SHIPPING HAND BUILD COMPILES AGAINST.
+  #
+  # ccec/src/Makefile takes <telemetry_busmessage_sender.h> from TELEMETRY_PREFIX and
+  # "ccec/drivers/hdmi_cec_driver.h" from LEGACY_HAL_PREFIX, and REFUSES mocks/ and stubs/ as
+  # either root, because the library a SOC vendor ships is not certified against test-scope
+  # headers. So both publishers' trees are checked out at a commit, their HEADs are asserted by
+  # "Verify the pinned dependency checkouts", and "Build and verify the shipping hand-written
+  # RDK library" stages the two roots outside the hdmicec tree from them. Neither tree reaches
+  # the guest image: the guest's Autotools build does not use them.
+  #
+  #   TELEMETRY_COMMIT   rdkcentral/telemetry develop head when pinned, read with
+  #                      `git ls-remote`; supplies include/telemetry_busmessage_sender.h and
+  #                      the include/telemetry2_0.h it includes.
+  #   LEGACY_HAL_COMMIT  rdkcentral/rdk-halif-hdmi_cec tag 1.4.0 - an ANNOTATED tag, so this is
+  #                      `git rev-parse refs/tags/1.4.0^{}` - and the superproject gitlink;
+  #                      supplies include/hdmi_cec_driver.h.
+  #
+  # L1-tests.yml carries these four values under the same four names; move them together.
+  TELEMETRY_REPOSITORY: rdkcentral/telemetry
+  TELEMETRY_COMMIT: 8a88c84d75a0dccdaf0fdfe2bf4132750eca61df # develop head; include/telemetry_busmessage_sender.h, include/telemetry2_0.h
+  LEGACY_HAL_REPOSITORY: rdkcentral/rdk-halif-hdmi_cec
+  LEGACY_HAL_COMMIT: f05a341fe525fa345decc16996ad30234b645ece # tag 1.4.0 (annotated; tag object 164bbb5c311c04db1493e7338d05ca4f5a70dd71); superproject gitlink
+
+  # Two CMake installations coexist, and BOTH ARE EXACT RELEASES. The job-wide one stays on the
+  # project's pin because the rest of the chain depends on it; the Binder SDK's one is reached
+  # ONLY by a step-scoped PATH prepend, because build_binder.sh and build_modules.sh call bare
+  # "cmake" and neither offers any override hook (no CMAKE_BIN, no CMAKE_COMMAND, no
+  # "command -v cmake", no CMAKE=), so an absolute path is not implementable for them. The SDK
+  # pin belongs to the BINDER SDK specifically: 3.22.1 is the version linux_binder_idl's BUILD.md
+  # names for the 2.6.0 tag, while the AIDL snapshot's own CMakeLists declares
+  # cmake_minimum_required 3.8. It is pinned EXACTLY, not used as a floor: "Resolve the CMake
+  # installations" always fetches and digest-verifies CMAKE_SDK_VERSION itself, so whichever
+  # cmake the runner image or apt happens to carry never builds the SDK.
   #
   # THE JOB-WIDE PIN IS AN EXACT RELEASE, NOT A SERIES. It used to read '3.16.x' and was handed
   # to a third-party setup action, which made it two problems in one line: the patch level was
@@ -493,7 +522,7 @@ env:
   # level is new; the series is unchanged and still load-bearing, because 3.20 and later break
   # the plugin test-library configure.
   CMAKE_PINNED_VERSION: '3.16.9'
-  CMAKE_SDK_FLOOR: '3.22.1'
+  CMAKE_SDK_VERSION: '3.22.1'
 
   # THIS JOB FETCHES FOUR EXECUTABLE ARTEFACTS AND VERIFIES ALL FOUR AGAINST A DIGEST
   # COMMITTED HERE, BEFORE USE, WITH NO OPTIONAL PATH THROUGH THE CHECK.
@@ -515,7 +544,7 @@ env:
   # A COMMITTED DIGEST IS VALID FOR EXACTLY ONE VERSION. Each digest is therefore paired with a
   # *_SHA256_FOR_VERSION value naming the release it was published for, and every verifying
   # step compares that against the version actually in use and fails by name when they diverge.
-  # Bumping CMAKE_PINNED_VERSION, CMAKE_SDK_FLOOR, LCOV_VERSION or GUEST_KERNEL_VERSION without
+  # Bumping CMAKE_PINNED_VERSION, CMAKE_SDK_VERSION, LCOV_VERSION or GUEST_KERNEL_VERSION without
   # its digest stops the job at the version guard rather than checking a digest against the
   # wrong artefact.
   #
@@ -524,9 +553,11 @@ env:
   # is not reproducible. See the base_expected_sha256 input above for the full reasoning and
   # for what pins that input instead.
   #
-  # CMake 3.22.1 for x86_64 Linux. Source of the digest: Kitware's own release manifest
+  # CMake 3.22.1 for x86_64 Linux - the Binder SDK's, fetched and verified on every run by
+  # "Resolve the CMake installations". Source of the digest: Kitware's own release manifest
   # cmake-3.22.1-SHA-256.txt, published as an asset of the v3.22.1 release alongside the
-  # tarball it describes.
+  # tarball it describes. L1-tests.yml carries CMAKE_SDK_VERSION and these two values under the
+  # same three names and resolves the SDK's CMake the same way; move them together.
   CMAKE_SDK_SHA256: '73565c72355c6652e9db149249af36bcab44d9d478c5546fd926e69ad6b43640'
   CMAKE_SDK_SHA256_FOR_VERSION: '3.22.1'
 
@@ -566,6 +597,9 @@ env:
   # It matters more here than for the other three: this tarball is not merely extracted, it is
   # `sudo make install`ed onto the runner and the same tarball is installed inside the guest
   # image by aidl-path-tests-rootfs.sh, so an unverified one would be root-installed twice.
+  #
+  # L1-tests.yml carries LCOV_VERSION and these two values under the same three names and
+  # installs the same asset; move them together.
   LCOV_SHA256: '1857bb18e27abe8bcec701a907d5c47e01db4d4c512fc098d1a6acd29267bf46'
   LCOV_SHA256_FOR_VERSION: '2.0'
 
@@ -819,13 +853,13 @@ jobs:
     # This file already declares `permissions: contents: read` at the workflow level, and that
     # is inherited - but only for as long as nothing above overrides it. Declaring it HERE fixes
     # the scope of the token THIS job's steps receive, which matters because of what those steps
-    # do rather than as a formality: eight actions/checkout invocations and three
+    # do rather than as a formality: ten actions/checkout invocations and three
     # actions/upload-artifact invocations run with it, each executing a pre-bundled dependency
     # tree that the PIN AUDIT RECORD below records a residual against, on the same filesystem as
     # the guest root image this job publishes as an artifact. A token that can only read
     # repository contents bounds what a defect in any of that code can reach.
     #
-    # `contents: read` IS SUFFICIENT AND NOTHING MORE IS. This job checks out five repositories,
+    # `contents: read` IS SUFFICIENT AND NOTHING MORE IS. This job checks out seven repositories,
     # builds, boots a guest and uploads artifacts. It opens no issue, writes no check, publishes
     # no package, requests no id-token and pushes nothing, and artifact upload is served by the
     # Actions artifact service rather than by a `permissions:` scope. Anything added here would
@@ -1022,10 +1056,11 @@ jobs:
     # image. Do not re-introduce the action to "simplify" that step.
     #
     # PINNING CHANGED NO STEP'S INPUTS, and one of those inputs must survive every future
-    # edit: `persist-credentials: false` appears on ALL EIGHT checkouts below - hdmicec, the
-    # hdmicec payload, googletest, the two rdk-halif-aidl stagings, the Sink caller source and
-    # the two Binder SDK source trees - and the step "Verify no Actions credential is persisted
-    # in any checkout" fails the job if any of them loses it, over that same list of eight. A
+    # edit: `persist-credentials: false` appears on ALL TEN checkouts below - hdmicec, the
+    # hdmicec payload, googletest, the two rdk-halif-aidl stagings, the Sink caller source, the
+    # two Binder SDK source trees and the telemetry and legacy HAL header sources - and the step
+    # "Verify no Actions credential is persisted in any checkout" fails the job if any of them
+    # loses it, over that same list of ten. A
     # re-pin that rewrote a checkout step wholesale and dropped that line would reintroduce a
     # token into a tree this job copies towards an uploaded image. The v4 -> v7 re-pin above
     # deliberately rewrote ONLY the `uses:` line of each step, leaving every `with:` input
@@ -1055,8 +1090,8 @@ jobs:
     # the pins above were reviewed. v7.0.1 declares node24 for both actions, read from each
     # action.yml at the pinned commit rather than inferred from the release number.
     #
-    # It is worth being explicit about why that matters HERE and not only as hygiene: eight of
-    # the thirteen checkout steps across the two files are in this one, every one of them runs
+    # It is worth being explicit about why that matters HERE and not only as hygiene: ten of
+    # the seventeen checkout steps across the two files are in this one, every one of them runs
     # before the step that asserts no credential was persisted, and every one of them runs on
     # the same filesystem as the payload tree and the guest image this job publishes - so the
     # runtime an action's own code executes under is not an incidental detail of this job. Every
@@ -1893,6 +1928,30 @@ jobs:
           ref: ${{ env.BINDER_SDK_COMMIT }}
           persist-credentials: false
 
+      # THE TWO PRODUCTION HEADER SOURCES FOR THE SHIPPING HAND BUILD, AT IMMUTABLE COMMITS.
+      #
+      # ccec/src/Makefile refuses mocks/ and stubs/ as its telemetry and legacy HAL header
+      # roots, so "Build and verify the shipping hand-written RDK library" stages both roots
+      # from these trees - see the TELEMETRY_* and LEGACY_HAL_* block in this file's env for the
+      # pins. Nothing here is executed and nothing here is staged into the guest image; three
+      # headers are copied out of them as text. persist-credentials: false for the same reason
+      # as every other checkout in this job.
+      - name: Checkout the telemetry headers for the hand-written build
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
+        with:
+          repository: ${{ env.TELEMETRY_REPOSITORY }}
+          path: telemetry
+          ref: ${{ env.TELEMETRY_COMMIT }}
+          persist-credentials: false
+
+      - name: Checkout the legacy HDMI CEC HAL header for the hand-written build
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 (v7.0.1)
+        with:
+          repository: ${{ env.LEGACY_HAL_REPOSITORY }}
+          path: rdk-halif-hdmi_cec
+          ref: ${{ env.LEGACY_HAL_COMMIT }}
+          persist-credentials: false
+
       # CREDENTIAL ABSENCE IS ASSERTED, NOT ASSUMED FROM AN INPUT.
       #
       # persist-credentials: false is set on every checkout above, and this step proves the
@@ -1921,7 +1980,8 @@ jobs:
           for tree in hdmicec hdmicec-payload googletest rdk-halif-aidl rdk-halif-aidl-i386 \
                       entservices-hdmicecsink \
                       rdk-halif-aidl/build-tools/linux_binder_idl \
-                      rdk-halif-aidl-i386/build-tools/linux_binder_idl; do
+                      rdk-halif-aidl-i386/build-tools/linux_binder_idl \
+                      telemetry rdk-halif-hdmi_cec; do
             dir="$GITHUB_WORKSPACE/$tree"
             [ -d "$dir/.git" ] || { echo "::error::$tree is not a git checkout at $dir, so this job's later steps cannot rely on it."; rc=1; continue; }
             keys="$(git -C "$dir" config --local --name-only --list 2>/dev/null || true)"
@@ -2011,6 +2071,8 @@ jobs:
           assert_pinned_head rdk-halif-aidl/build-tools/linux_binder_idl "${BINDER_SDK_COMMIT:-}" "Binder SDK source"
           assert_pinned_head rdk-halif-aidl-i386/build-tools/linux_binder_idl "${BINDER_SDK_COMMIT:-}" "Binder SDK source i386"
           assert_pinned_head entservices-hdmicecsink "${SINK_REF:-}" "Sink caller source (read by the L1 drift guard)"
+          assert_pinned_head telemetry "${TELEMETRY_COMMIT:-}" "Telemetry header source"
+          assert_pinned_head rdk-halif-hdmi_cec "${LEGACY_HAL_COMMIT:-}" "Legacy HAL header source"
 
           # THE TWO NAMES FOR THE SAME PIN MUST AGREE. SINK_REPOSITORY/SINK_REF are what the
           # checkout resolves and what the assertion above reads; SINK_CALLER_REPOSITORY/
@@ -2152,16 +2214,20 @@ jobs:
       # :279 and :289, build_modules.sh at :651, :660, :663, :700 and :723, and a grep across
       # both for CMAKE_BIN / CMAKE_COMMAND / "command -v cmake" / CMAKE= returns nothing. There
       # is no override hook, so an absolute path is not implementable for those scripts and a
-      # step-scoped PATH prepend is the only mechanism. An apt cmake on a hosted Ubuntu runner
-      # is EXPECTED to satisfy the SDK floor - it did on jammy at 3.22.1 and does by a wider
-      # margin on the ubuntu-24.04 this job now uses - which is exactly why this step MEASURES
-      # it rather than trusting it, records both versions, and downloads a known-good build if
-      # neither candidate qualifies. An expectation tied to a distribution release is one
-      # runner-label change away from being false.
+      # step-scoped PATH prepend is the only mechanism.
+      #
+      # THE SDK'S CMAKE IS ALWAYS THE PINNED RELEASE, FETCHED HERE, AND NEVER AN INSTALLED ONE.
+      # This step used to take the first of /usr/bin/cmake and /usr/local/bin/cmake that was at
+      # least 3.22.1 and fetch 3.22.1 only when neither qualified, so the SDK was built by
+      # whatever the runner image and its archive carried - apt's 3.28.3 on ubuntu-24.04 - and
+      # that changed with them. It now fetches CMAKE_SDK_VERSION unconditionally, by the same
+      # digest-verified path "Set up CMake" uses, asserts the extracted binary reports exactly
+      # that version, and asserts that a bare `cmake` under the very prepend the SDK steps apply
+      # resolves to it. The two installed cmakes stay where the image and apt put them and are
+      # never consulted.
       - name: Resolve the CMake installations
         run: |
           set -euo pipefail
-          at_least() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$2" ]; }
           cmake_version_of() { "$1" --version | head -n 1 | awk '{ print $3 }'; }
 
           job_wide="$(command -v cmake)"
@@ -2179,65 +2245,66 @@ jobs:
             exit 1
           fi
 
-          newer_cmake=''
-          for candidate in /usr/bin/cmake /usr/local/bin/cmake; do
-            [ -x "$candidate" ] || continue
-            candidate_version="$(cmake_version_of "$candidate")"
-            echo "candidate      : $candidate ($candidate_version)"
-            if at_least "$candidate_version" "$CMAKE_SDK_FLOOR"; then
-              newer_cmake="$candidate"
-              break
-            fi
-          done
+          # THE VERSION GUARD COMES FIRST. CMAKE_SDK_SHA256 was published for exactly one
+          # release, and checking it against a different tarball is worse than not checking:
+          # it would fail with a digest mismatch and read as tampering rather than as a stale
+          # pin. So the divergence is named here, before anything is downloaded. Both values
+          # are read through ":-" so a removed env entry fails at the guard that names it.
+          if [ "$CMAKE_SDK_VERSION" != "${CMAKE_SDK_SHA256_FOR_VERSION:-}" ]; then
+            echo "::error::CMAKE_SDK_VERSION is '$CMAKE_SDK_VERSION' but the committed CMAKE_SDK_SHA256 was published by Kitware for '${CMAKE_SDK_SHA256_FOR_VERSION:-<unset>}'. A committed digest is valid for one version only. Read the new release's own cmake-<version>-SHA-256.txt manifest, update CMAKE_SDK_SHA256 and CMAKE_SDK_SHA256_FOR_VERSION together with the version, and do not verify one version's tarball against another's digest."
+            exit 1
+          fi
+          [ -n "${CMAKE_SDK_SHA256:-}" ] || { echo "::error::CMAKE_SDK_SHA256 is empty, so this tarball cannot be authenticated. This job does not extract an unverified CMake: commit the digest from Kitware's cmake-$CMAKE_SDK_VERSION-SHA-256.txt release manifest."; exit 1; }
 
-          if [ -z "$newer_cmake" ]; then
-            echo "no installed cmake satisfies the Binder SDK floor of $CMAKE_SDK_FLOOR; fetching that exact version"
+          tools="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_SDK_VERSION"
+          mkdir -p "$tools"
 
-            # THE VERSION GUARD COMES FIRST. CMAKE_SDK_SHA256 was published for exactly one
-            # release, and checking it against a different tarball is worse than not checking:
-            # it would fail with a digest mismatch and read as tampering rather than as a stale
-            # pin. So the divergence is named here, before anything is downloaded.
-            if [ "$CMAKE_SDK_FLOOR" != "$CMAKE_SDK_SHA256_FOR_VERSION" ]; then
-              echo "::error::CMAKE_SDK_FLOOR is '$CMAKE_SDK_FLOOR' but the committed CMAKE_SDK_SHA256 was published by Kitware for '$CMAKE_SDK_SHA256_FOR_VERSION'. A committed digest is valid for one version only. Read the new release's own cmake-<version>-SHA-256.txt manifest, update CMAKE_SDK_SHA256 and CMAKE_SDK_SHA256_FOR_VERSION together with the floor, and do not verify one version's tarball against another's digest."
-              exit 1
-            fi
-            [ -n "$CMAKE_SDK_SHA256" ] || { echo "::error::CMAKE_SDK_SHA256 is empty, so this tarball cannot be authenticated. This job does not extract an unverified CMake: commit the digest from Kitware's cmake-$CMAKE_SDK_FLOOR-SHA-256.txt release manifest."; exit 1; }
+          # DOWNLOADED TO A FILE AND VERIFIED BEFORE IT IS EXTRACTED. A download piped straight
+          # into tar cannot be verified at all: by the time the last byte has been hashed the
+          # archive has already been unpacked, so there is nothing left to refuse. The file
+          # lands beside the private prefix, is compared against the committed publisher
+          # digest, and only then is unpacked into it.
+          tarball="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_SDK_VERSION-linux-x86_64.tar.gz"
+          curl -fsSL --output "$tarball" \
+            "https://github.com/Kitware/CMake/releases/download/v$CMAKE_SDK_VERSION/cmake-$CMAKE_SDK_VERSION-linux-x86_64.tar.gz"
 
-            tools="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_SDK_FLOOR"
-            mkdir -p "$tools"
+          measured="$(sha256sum "$tarball" | awk '{ print $1 }')"
+          echo "cmake tarball  : $tarball"
+          echo "measured sha256: $measured"
+          echo "committed      : $CMAKE_SDK_SHA256  (Kitware cmake-$CMAKE_SDK_SHA256_FOR_VERSION-SHA-256.txt)"
+          if [ "$measured" != "$CMAKE_SDK_SHA256" ]; then
+            echo "::error::CMake tarball digest mismatch. measured $measured, committed $CMAKE_SDK_SHA256 (published by Kitware for $CMAKE_SDK_SHA256_FOR_VERSION). Either the download was tampered with or the release asset was replaced; this job will not extract an unverified CMake, and it will not be made to by relaxing this check."
+            exit 1
+          fi
+          echo "verified against the committed publisher digest"
 
-            # DOWNLOADED TO A FILE AND VERIFIED BEFORE IT IS EXTRACTED. A download piped straight
-            # into tar cannot be verified at all: by the time the last byte has been hashed the
-            # archive has already been unpacked, so there is nothing left to refuse. The file
-            # lands in a scratch directory, is compared against the committed publisher digest,
-            # and only then is unpacked.
-            tarball="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_SDK_FLOOR-linux-x86_64.tar.gz"
-            curl -fsSL --output "$tarball" \
-              "https://github.com/Kitware/CMake/releases/download/v$CMAKE_SDK_FLOOR/cmake-$CMAKE_SDK_FLOOR-linux-x86_64.tar.gz"
-
-            measured="$(sha256sum "$tarball" | awk '{ print $1 }')"
-            echo "cmake tarball  : $tarball"
-            echo "measured sha256: $measured"
-            echo "committed      : $CMAKE_SDK_SHA256  (Kitware cmake-$CMAKE_SDK_SHA256_FOR_VERSION-SHA-256.txt)"
-            if [ "$measured" != "$CMAKE_SDK_SHA256" ]; then
-              echo "::error::CMake tarball digest mismatch. measured $measured, committed $CMAKE_SDK_SHA256 (published by Kitware for $CMAKE_SDK_SHA256_FOR_VERSION). Either the download was tampered with or the release asset was replaced; this job will not extract an unverified CMake, and it will not be made to by relaxing this check."
-              exit 1
-            fi
-            echo "verified against the committed publisher digest"
-
-            tar -xz --strip-components=1 -C "$tools" -f "$tarball"
-            newer_cmake="$tools/bin/cmake"
+          tar -xz --strip-components=1 -C "$tools" -f "$tarball"
+          sdk_cmake="$tools/bin/cmake"
+          got="$(cmake_version_of "$sdk_cmake" 2>/dev/null || true)"
+          if [ "$got" != "$CMAKE_SDK_VERSION" ]; then
+            echo "::error::the extracted cmake reports '$got', not the pinned $CMAKE_SDK_VERSION. The archive that matched the committed digest does not contain the release it is named for; do not proceed on it."
+            exit 1
           fi
 
-          echo "SDK cmake      : $newer_cmake ($(cmake_version_of "$newer_cmake"))"
-          echo "AIDL_CMAKE_BIN_DIR=$(dirname "$newer_cmake")" >> "$GITHUB_ENV"
+          # WHAT THE SDK STEPS WILL ACTUALLY RUN, resolved the way they resolve it: a bare
+          # `cmake` under PATH="$AIDL_CMAKE_BIN_DIR:$PATH". Asserting the binary alone would not
+          # catch a prefix that does not shadow the installed cmakes.
+          resolved="$(PATH="$tools/bin:$PATH"; command -v cmake || true)"
+          resolved_version="$(cmake_version_of "$resolved" 2>/dev/null || true)"
+          if [ "$resolved" != "$sdk_cmake" ] || [ "$resolved_version" != "$CMAKE_SDK_VERSION" ]; then
+            echo "::error::with $tools/bin prepended, a bare cmake resolves to '$resolved' ($resolved_version), not the verified $sdk_cmake ($CMAKE_SDK_VERSION). build_binder.sh and build_modules.sh would then build the SDK with an unpinned CMake."
+            exit 1
+          fi
 
-      # THE PREREQUISITE L1-tests.yml DOES NOT NEED AND THIS JOB DOES.
+          echo "SDK cmake      : $sdk_cmake ($got, digest-verified), reached only through a step-scoped PATH prepend"
+          echo "AIDL_CMAKE_BIN_DIR=$tools/bin" >> "$GITHUB_ENV"
+
+      # THE PREREQUISITE BOTH JOBS PIN, AND THIS ONE CANNOT RUN WITHOUT.
       #
-      # L1-tests.yml gets away with the distribution's lcov because it only ever calls plain
-      # "lcov -c", "lcov -r" and "genhtml", all of which work on 1.x. This job runs
-      # run_coverage.sh, which CANNOT work on 1.x: it uses --fail-under-lines and
-      # --rc branch_coverage=1, and it parses record spellings that are 2.x behaviour.
+      # L1-tests.yml installs this same release asset, digest-verified, because 2.0-1 is the
+      # lcov the acceptance runs are recorded with. This job runs run_coverage.sh, which CANNOT
+      # work on 1.x: it uses --fail-under-lines and --rc branch_coverage=1, and it parses record
+      # spellings that are 2.x behaviour.
       #
       # It is built here as well as in the guest for a reason worth stating: it proves the
       # pinned tarball is sane and installable BEFORE the lengthy kernel and image builds, so a
@@ -2509,6 +2576,16 @@ jobs:
       # /usr/lib/x86_64-linux-gnu, which an i386 gcc and ld never search. Measured inside the
       # chroot: flex 2.6.4, bison 3.8.2 and m4 1.4.19 all run.
       #
+      # THE SAME RUNTIME RUNS THE TWO PINNED CMAKES, SO THE CHROOT INSTALLS NO CMAKE OF ITS OWN.
+      # The Kitware x86_64 releases "Set up CMake" and "Resolve the CMake installations" fetched
+      # and digest-verified need only that loader plus libc, libm, libdl, libpthread and librt,
+      # and the workspace that holds them is bind-mounted at its own path. So the staging builds
+      # put CMAKE_SDK_VERSION (the SDK and both snapshots) or CMAKE_PINNED_VERSION (GoogleTest)
+      # first on the chroot's PATH with --env, exactly as the x86_64 builds prepend theirs, and
+      # this step proves each executes in here at exactly its version. With no distribution
+      # cmake in the root, a lost --env PATH fails at the first cmake call, which finds none,
+      # instead of building with an unpinned one.
+      #
       # NO 32-BIT PERSONALITY IS SET, DELIBERATELY. uname -m inside this chroot reports x86_64,
       # so CMAKE_HOST_SYSTEM_PROCESSOR does too, and linux_binder_idl's CMakeLists.txt:82-87
       # therefore stages the AOSP kernel-UAPI headers from build-tools/sysroots/x86_64-linux-musl
@@ -2712,7 +2789,6 @@ jobs:
           # required by something in the three staging builds; none is speculative:
           #
           #   build-essential   gcc, g++, make, libc6-dev and dpkg-dev
-          #   cmake             build_binder.sh and build_modules.sh both invoke bare `cmake`
           #   ninja-build       the generator the googletest staging asks for with -G Ninja
           #   flex, bison       find_package(FLEX)/(BISON) in linux_binder_idl (:856-857)
           #   pkg-config        find_package(PkgConfig) in linux_binder_idl (:103)
@@ -2720,10 +2796,13 @@ jobs:
           #   python3           build_modules.sh's manifest pass
           #   ca-certificates   the AOSP clone is https
           #   libc6-amd64,      the loader and 64-bit runtime the AOSP prebuilt flex and bison
-          #   lib64gcc-s1,        need in order to exec at all - see the comment block above
-          #   lib64stdc++6
+          #   lib64gcc-s1,        need in order to exec at all - see the comment block above;
+          #   lib64stdc++6        libc6-amd64 is also all the two pinned x86_64 cmakes need
+          #
+          # cmake is deliberately ABSENT: the builds use the two pinned releases, never one of
+          # this archive's.
           # ---------------------------------------------------------------------------------
-          chroot_packages='build-essential cmake ninja-build flex bison pkg-config git python3 ca-certificates libc6-amd64 lib64gcc-s1 lib64stdc++6'
+          chroot_packages='build-essential ninja-build flex bison pkg-config git python3 ca-certificates libc6-amd64 lib64gcc-s1 lib64stdc++6'
           sudo "$helper" --env DEBIAN_FRONTEND=noninteractive --env CHROOT_PACKAGES="$chroot_packages" -- \
             /bin/sh -c 'apt-get -qq update && apt-get -qq -y --no-install-recommends install $CHROOT_PACKAGES'
 
@@ -2734,7 +2813,7 @@ jobs:
           # ---------------------------------------------------------------------------------
           echo "================ i386 BUILD CHROOT ================"
           echo "root                 : $chroot_root"
-          sudo "$helper" -- /bin/sh -c 'gcc --version | head -n 1; g++ --version | head -n 1; ldd --version | head -n 1; cmake --version | head -n 1; ninja --version; git --version; python3 --version'
+          sudo "$helper" -- /bin/sh -c 'gcc --version | head -n 1; g++ --version | head -n 1; ldd --version | head -n 1; ninja --version; git --version; python3 --version'
           echo "================ END i386 BUILD CHROOT ================"
 
           staging_gcc="$(sudo "$helper" -- /bin/sh -c 'gcc -dumpfullversion 2>/dev/null || gcc -dumpversion' | tr -d '[:space:]')"
@@ -2774,16 +2853,37 @@ jobs:
             echo "  instrumentation remain on the pinned major $CEC_TOOLCHAIN_GCC_MAJOR, unchanged."
           fi
 
-          # The CMake floor is the SDK's own, asserted against the chroot's cmake rather than
-          # against the runner's: the runner's cmake never runs these builds now. googletest's
-          # own floor is lower than the SDK's, so clearing this clears both.
-          chroot_cmake="$(sudo "$helper" -- /bin/sh -c 'cmake --version | head -n 1' | awk '{ print $3 }')"
-          lowest="$(printf '%s\n%s\n' "$chroot_cmake" "$CMAKE_SDK_FLOOR" | sort -V | head -n 1)"
-          if [ "$lowest" != "$CMAKE_SDK_FLOOR" ] && [ "$chroot_cmake" != "$CMAKE_SDK_FLOOR" ]; then
-            echo "::error::the build chroot's cmake is $chroot_cmake, below the $CMAKE_SDK_FLOOR floor the Binder SDK requires (its BUILD.md states 3.22.1 or later). $GUEST_DEBIAN_SUITE was expected to ship a cmake at or above it; check what the pinned snapshot actually serves."
+          # THE TWO PINNED CMAKES, EXECUTED IN HERE AT EXACTLY THEIR VERSIONS. The staging steps
+          # reach them as "$bin:$CEC_I386_CHROOT_PATH" with --env PATH, so that is the form run
+          # here; CEC_I386_CHROOT_PATH is the helper's own PATH, read out of the chroot rather
+          # than restated. Each must resolve to its verified binary and report its pin, and a
+          # bare cmake on the helper's own PATH must resolve to nothing at all.
+          chroot_path="$(sudo "$helper" -- /usr/bin/printenv PATH)"
+          [ -n "$chroot_path" ] || { echo "::error::could not read the build chroot helper's PATH, so the pinned cmakes cannot be put first on it."; exit 1; }
+          sdk_cmake_bin="${AIDL_CMAKE_BIN_DIR:?AIDL_CMAKE_BIN_DIR is unset. It is exported by the Resolve the CMake installations step, which must run before this one.}"
+          pinned_cmake_bin="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_PINNED_VERSION/bin"
+          chroot_cmake_sdk=''
+          chroot_cmake_pinned=''
+          for pair in "sdk:$CMAKE_SDK_VERSION:$sdk_cmake_bin" "pinned:$CMAKE_PINNED_VERSION:$pinned_cmake_bin"; do
+            role="${pair%%:*}"; rest="${pair#*:}"; want="${rest%%:*}"; bin="${rest#*:}"
+            if ! out="$(sudo "$helper" --env PATH="$bin:$chroot_path" -- /bin/sh -c 'command -v cmake && cmake --version' 2>&1)"; then
+              echo "::error::the pinned cmake $want at $bin/cmake does not execute inside the i386 build chroot, so the staging builds below cannot run it. Its output:"
+              printf '%s\n' "$out"
+              exit 1
+            fi
+            where="$(printf '%s\n' "$out" | head -n 1)"
+            got="$(printf '%s\n' "$out" | awk '/^cmake version / { print $3; exit }')"
+            if [ "$where" != "$bin/cmake" ] || [ "$got" != "$want" ]; then
+              echo "::error::inside the i386 build chroot a bare cmake under PATH=$bin:... resolves to '$where' reporting '${got:-<no version>}', not the verified $bin/cmake at exactly $want."
+              exit 1
+            fi
+            echo "chroot cmake         : $where ($got, pinned, executes in the chroot)"
+            if [ "$role" = 'sdk' ]; then chroot_cmake_sdk="$got"; else chroot_cmake_pinned="$got"; fi
+          done
+          if stray="$(sudo "$helper" -- /bin/sh -c 'command -v cmake')"; then
+            echo "::error::the build chroot carries a cmake of its own at '$stray'. The staging builds must only ever run the two pinned releases; remove the package that installed it from chroot_packages."
             exit 1
           fi
-          echo "chroot cmake         : $chroot_cmake (SDK floor $CMAKE_SDK_FLOOR)"
 
           # ---------------------------------------------------------------------------------
           # The guest's symbol-version ceiling, MEASURED. This map is what the fail-fast check
@@ -2839,6 +2939,7 @@ jobs:
           {
             echo "CEC_I386_CHROOT=$chroot_root"
             echo "CEC_I386_CHROOT_RUN=$helper"
+            echo "CEC_I386_CHROOT_PATH=$chroot_path"
             echo "CEC_GUEST_SYMBOL_VERSIONS=$symbol_map"
             echo "CEC_GUEST_GLIBCXX_CEILING=$glibcxx_ceiling"
             echo "CEC_GUEST_GLIBC_CEILING=$glibc_ceiling"
@@ -2857,7 +2958,8 @@ jobs:
             echo "| What | Pin | Measured | State |"
             echo "| --- | --- | --- | --- |"
             echo "| staging gcc/g++ (i386 build chroot) | major $CEC_TOOLCHAIN_GCC_MAJOR | $staging_gcc | $staging_state |"
-            echo "| chroot cmake | >= $CMAKE_SDK_FLOOR (Binder SDK floor) | $chroot_cmake | gated |"
+            echo "| chroot cmake, Binder SDK and snapshots | exactly $CMAKE_SDK_VERSION (digest-verified x86_64 release) | $chroot_cmake_sdk | gated |"
+            echo "| chroot cmake, GoogleTest | exactly $CMAKE_PINNED_VERSION (digest-verified x86_64 release) | $chroot_cmake_pinned | gated |"
             echo "| guest symbol-version ceiling | measured, not pinned | $glibcxx_ceiling / $glibc_ceiling | recorded |"
             echo
             echo "The three i386 staging builds - GoogleTest, the Binder SDK and the AIDL client stub snapshots - are compiled inside a \`$GUEST_DEBIAN_SUITE\`/\`$GUEST_ARCH\` chroot debootstrapped from the same pinned snapshot as the guest image, because artefacts built by the runner's newer compiler require symbol versions (\`GLIBCXX_3.4.32\`, \`__isoc23_*@GLIBC_2.38\`) that the guest's runtime does not define. \`$GUEST_DEBIAN_SUITE\` cannot serve the pinned GCC $CEC_TOOLCHAIN_GCC_MAJOR family, so this deviation is unavoidable and is recorded rather than gated - the same trade the image builder makes for the guest's own compiler. **The host build and the coverage instrumentation remain on the pinned major $CEC_TOOLCHAIN_GCC_MAJOR and are unaffected.** These two values are passed to the image builder as \`--staging-gcc-version\` and \`--staging-toolchain-state\`, so the guest's own SDK build-flags record names the compiler family that built what it is running."
@@ -2880,10 +2982,11 @@ jobs:
       # THIS BUILD RUNS INSIDE THE GUEST-MATCHED i386 CHROOT, for the reason the chroot step
       # sets out at length: these archives are copied into the guest image and linked there, and
       # a libgtest.a compiled by the runner's g++-13 carries references to GLIBCXX_3.4.32 that
-      # the guest's libstdc++ cannot resolve. The cmake that runs is the chroot's 3.25.1, whose
-      # floor clears both this project's and the SDK's; the runner's AIDL_CMAKE_BIN_DIR is
-      # deliberately NOT on the path, because that is an x86_64 binary and could not run against
-      # an i386 userspace anyway.
+      # the guest's libstdc++ cannot resolve. The cmake that runs is the job-wide pin,
+      # CMAKE_PINNED_VERSION - the same digest-verified x86_64 release the runner's GoogleTest
+      # build uses - put first on the chroot's PATH with --env; "Create the guest-matched i386
+      # build chroot" has proved it executes there at exactly that version, and the chroot has
+      # no cmake of its own to fall back on.
       #
       # --chdir keeps the working directory at the workspace so `-B build/googletest-i386` still
       # resolves to the same relative path it did before, and the workspace is bind-mounted at
@@ -2901,7 +3004,9 @@ jobs:
         run: |
           set -euo pipefail
           in_chroot() {
-            sudo "$CEC_I386_CHROOT_RUN" --chdir "$GITHUB_WORKSPACE" "$@"
+            sudo "$CEC_I386_CHROOT_RUN" --chdir "$GITHUB_WORKSPACE" \
+              --env PATH="$GITHUB_WORKSPACE/tools/cmake-$CMAKE_PINNED_VERSION/bin:$CEC_I386_CHROOT_PATH" \
+              "$@"
           }
 
           in_chroot -- cmake -G Ninja -S "$GITHUB_WORKSPACE/googletest" -B build/googletest-i386 \
@@ -3050,13 +3155,10 @@ jobs:
       # build_binder.sh configures with a fixed argument list and offers no way to pass -D, and
       # it removes a stale CMakeCache.txt before configuring, so pre-seeding the cache does not
       # survive either. CMake reads CMAKE_TOOLCHAIN_FILE FROM THE ENVIRONMENT from 3.21
-      # onwards, and the CMake that now runs these two staging builds is the i386 build chroot's
-      # own - asserted against the same CMAKE_SDK_FLOOR by "Create the guest-matched i386 build
-      # chroot" and well past 3.21 - so a toolchain file is reachable where a -D is not. It used
-      # to be the runner's AIDL_CMAKE_BIN_DIR, prepended per step; that binary is x86_64 and
-      # cannot execute against an i386 userspace, so the prepend was dropped when the staging
-      # moved into the chroot. The file itself is unaffected: it is read by whichever cmake
-      # configures the build.
+      # onwards, and the CMake that runs these two staging builds is the pinned CMAKE_SDK_VERSION
+      # in AIDL_CMAKE_BIN_DIR, put first on the i386 build chroot's PATH per step - "Create the
+      # guest-matched i386 build chroot" proves it executes there at exactly that version, which
+      # is past 3.21 - so a toolchain file is reachable where a -D is not.
       #
       # It sets exactly two things and nothing more:
       #
@@ -3169,16 +3271,18 @@ jobs:
           #
           # env -i inside the helper means nothing of the runner's environment reaches
           # build_binder.sh by accident, so every variable it needs is named explicitly below -
-          # the five this step's `env:` block overrides, plus the three the script's own hooks
-          # read. The HEAD assertions stay OUTSIDE the chroot and run as the runner account, so
-          # what governs which commit is built has not moved.
+          # the five this step's `env:` block overrides, the three the script's own hooks read,
+          # and the PATH that selects its cmake. The HEAD assertions stay OUTSIDE the chroot and
+          # run as the runner account, so what governs which commit is built has not moved.
           #
-          # AIDL_CMAKE_BIN_DIR IS DELIBERATELY NOT PREPENDED ANY MORE. It holds an x86_64 cmake,
-          # which cannot execute against an i386 userspace; the chroot's own cmake is used and
-          # "Create the guest-matched i386 build chroot" asserts it against CMAKE_SDK_FLOOR
-          # before this step runs. CMAKE_TOOLCHAIN_FILE still reaches cmake from the
-          # environment, which is supported from 3.21 and the chroot's cmake is well past it.
+          # AIDL_CMAKE_BIN_DIR IS PREPENDED HERE TOO, as the chroot's PATH, because
+          # build_binder.sh calls a bare cmake: it holds the digest-verified x86_64
+          # CMAKE_SDK_VERSION, reachable through the bind-mounted workspace, and "Create the
+          # guest-matched i386 build chroot" proves it executes in the chroot at exactly that
+          # version. CMAKE_TOOLCHAIN_FILE still reaches cmake from the environment, which is
+          # supported from 3.21.
           sudo "$CEC_I386_CHROOT_RUN" --chdir "$HALIF_PREFIX_I386" \
+            --env PATH="$AIDL_CMAKE_BIN_DIR:$CEC_I386_CHROOT_PATH" \
             --env HALIF_PREFIX="$HALIF_PREFIX" \
             --env HALIF_LIB_DIR="$HALIF_LIB_DIR" \
             --env BINDER_SDK_DIR="$BINDER_SDK_DIR" \
@@ -3235,8 +3339,9 @@ jobs:
       # two stub libraries are staged into the guest image and loaded there, and the common pin
       # stays at 0.2.0.0 because that is the ABI the released hdmicec snapshot was generated
       # against. common goes first because build_modules.sh pre-checks each dependency's shared
-      # object. The chroot's cmake is used rather than AIDL_CMAKE_BIN_DIR, which is an x86_64
-      # binary; the toolchain file still reaches cmake through the environment.
+      # object. The pinned CMAKE_SDK_VERSION in AIDL_CMAKE_BIN_DIR is put first on the chroot's
+      # PATH, as for the SDK above; the toolchain file still reaches cmake through the
+      # environment.
       - name: Build the AIDL client stub snapshots for the guest (i386)
         env:
           HALIF_PREFIX: ${{ github.workspace }}/rdk-halif-aidl-i386
@@ -3247,6 +3352,7 @@ jobs:
           set -euo pipefail
           in_chroot() {
             sudo "$CEC_I386_CHROOT_RUN" --chdir "$HALIF_PREFIX_I386" \
+              --env PATH="$AIDL_CMAKE_BIN_DIR:$CEC_I386_CHROOT_PATH" \
               --env HALIF_PREFIX="$HALIF_PREFIX" \
               --env HALIF_LIB_DIR="$HALIF_LIB_DIR" \
               --env BINDER_SDK_DIR="$BINDER_SDK_DIR" \
@@ -3512,17 +3618,18 @@ jobs:
       #   * NO CPPFLAGS HOOK. Its recipe is `$(CXX) -c $< $(CFLAGS) -o $@`, and CFLAGS is where
       #     both -std=c++17 and the whole INCLUDE list live. A command-line CFLAGS= would
       #     REPLACE it, dropping -fPIC, the dialect and every -I root, and the resulting failure
-      #     would read as a source defect. So the two test-only header roots arrive through
-      #     CPATH, which gcc treats as additional -I directories and which leaves every variable
-      #     the file sets exactly as written.
-      #   * TWO HEADER ROOTS IT CANNOT REACH ON ITS OWN. mocks/ supplies
-      #     telemetry_busmessage_sender.h and safec_lib.h, which MessageDecoder.cpp and Util.cpp
-      #     include and which no root in the file names; stubs/ supplies the
-      #     ccec/drivers/hdmi_cec_driver.h symlink the step above creates, standing in for the
-      #     staged SOC HAL that ../drivers/include would carry on a device (ccec/drivers does
-      #     not exist in this repository at all). Both are asserted before the build, because a
-      #     reordering of these steps would otherwise fail deep inside a compile with a
-      #     missing-header message that names neither cause.
+      #     would read as a source defect. So extra roots arrive as the file's own make
+      #     variables or through CPATH, which gcc treats as additional -I directories searched
+      #     after every -I and which leaves every variable the file sets exactly as written.
+      #   * IT REFUSES TEST-SCOPE HEADERS. The telemetry_busmessage_sender.h that
+      #     MessageDecoder.cpp, Bus.cpp and LibCCEC.cpp include, and the
+      #     ccec/drivers/hdmi_cec_driver.h that DriverImpl.cpp includes, must come from
+      #     TELEMETRY_PREFIX and LEGACY_HAL_PREFIX; the file stops with a named error when either
+      #     is unset or resolves into mocks/ or stubs/. So this step stages both roots under
+      #     $RUNNER_TEMP from the pinned telemetry and rdk-halif-hdmi_cec checkouts and passes
+      #     them as make variables. CPATH still names mocks/ and stubs/, but the staged -I roots
+      #     win: g++ -H on these flags resolves all four includes to the staged copies, and the
+      #     build's own root report is asserted in step 4.
       #   * ITS DEFAULT GOAL IS `all: clean library`, so it is invoked WITHOUT -j: under -j the
       #     clean and the library goal may run concurrently and the clean would be deleting the
       #     objects the library goal just compiled.
@@ -3594,9 +3701,10 @@ jobs:
           echo "HAND_MAKEFILE_SNAPSHOT=$snap" >> "$GITHUB_ENV"
           echo "snapshotted $hand_makefile -> $snap ($(sha256sum -- "$snap" | cut -d' ' -f1))"
 
-          # 4. THE BUILD. CPATH carries the two test-only roots; the four prefixes are passed as
-          #    make variables so they win over anything ambient (the file declares the last two
-          #    with ?=, so an exported value wins and the derived default is not used); no -j,
+          # 4. THE BUILD. CPATH carries the two test-only roots; the six prefixes are passed as
+          #    make variables so they win over anything ambient (the file declares
+          #    HALIF_LIB_DIR and BINDER_SDK_INCLUDE_DIR with ?=, so an exported value wins and
+          #    the derived default is not used); no -j,
           #    for the reason in the comment above. The output is captured as well as shown,
           #    because the link command make echoes is itself evidence and step 6b asserts on
           #    it.
@@ -3613,6 +3721,35 @@ jobs:
           fi
           printf '  hand build CXX: %s (%s)\n' "$CXX" "$("$CXX" -dumpfullversion)"
 
+          #    THE TWO PRODUCTION HEADER ROOTS, STAGED OUTSIDE THE hdmicec TREE from the pinned
+          #    checkouts. Each source must be a non-empty regular file - a symlink could carry a
+          #    mock's bytes past the makefile's refusal as a plain copy - and each copy is
+          #    compared back against it. The legacy HAL publishes its header flat, at
+          #    include/hdmi_cec_driver.h, so it is staged into the ccec/drivers/ subpath
+          #    DriverImpl.cpp includes it by.
+          prod_root="${RUNNER_TEMP:?}/hdmicec-production-headers"
+          telemetry_prefix="$prod_root/telemetry"
+          legacy_hal_prefix="$prod_root/legacy-hal"
+          rm -rf -- "$prod_root"
+          mkdir -p -- "$telemetry_prefix/include" "$legacy_hal_prefix/include/ccec/drivers"
+          for pair in \
+            "telemetry/include/telemetry_busmessage_sender.h=$telemetry_prefix/include/telemetry_busmessage_sender.h" \
+            "telemetry/include/telemetry2_0.h=$telemetry_prefix/include/telemetry2_0.h" \
+            "rdk-halif-hdmi_cec/include/hdmi_cec_driver.h=$legacy_hal_prefix/include/ccec/drivers/hdmi_cec_driver.h"; do
+            src="$GITHUB_WORKSPACE/${pair%%=*}"
+            dst="${pair#*=}"
+            if [ -L "$src" ] || [ ! -f "$src" ] || [ ! -s "$src" ]; then
+              echo "::error::$src is not a non-empty regular file, so the production header the shipping hand build compiles against cannot be staged from it. It comes from the pinned 'Checkout the telemetry headers for the hand-written build' or 'Checkout the legacy HDMI CEC HAL header for the hand-written build' step; restore that step rather than pointing the build at mocks/ or stubs/."
+              exit 1
+            fi
+            install -m 0644 -- "$src" "$dst"
+            if [ -L "$dst" ] || [ ! -f "$dst" ] || [ ! -s "$dst" ] || ! cmp -s -- "$src" "$dst"; then
+              echo "::error::the staged copy $dst is not a non-empty regular file identical to $src, so the hand build would not compile against the pinned header."
+              exit 1
+            fi
+            printf '  ok  %s (%s bytes, from %s)\n' "$dst" "$(stat -c '%s' -- "$dst")" "${pair%%=*}"
+          done
+
           build_log="$(mktemp)"
           CPATH="$GITHUB_WORKSPACE/hdmicec/mocks:$GITHUB_WORKSPACE/hdmicec/stubs${CPATH:+:$CPATH}" \
             make -C ccec/src \
@@ -3621,7 +3758,20 @@ jobs:
               HALIF_LIB_DIR="$HALIF_LIB_DIR" \
               BINDER_SDK_DIR="$BINDER_SDK_DIR" \
               BINDER_SDK_INCLUDE_DIR="$BINDER_SDK_INCLUDE_DIR" \
+              TELEMETRY_PREFIX="$telemetry_prefix" \
+              LEGACY_HAL_PREFIX="$legacy_hal_prefix" \
               all 2>&1 | tee "$build_log"
+
+          #    The roots the makefile resolved, read back from its own report, so a build that
+          #    compiled against anything but the staged headers fails here by name.
+          for root in "telemetry header root: [$telemetry_prefix/include]" \
+                      "legacy HDMI CEC HAL header root: [$legacy_hal_prefix/include]"; do
+            if ! grep -q -F -x -- "libRCEC $root" "$build_log"; then
+              echo "::error::the hand-written build did not report 'libRCEC $root', so it did not resolve the production header root this step staged."
+              exit 1
+            fi
+            printf '  ok  libRCEC %s\n' "$root"
+          done
 
           lib="ccec/src/install/lib/libRCEC.so"
           if [ ! -f "$lib" ] || [ ! -s "$lib" ]; then

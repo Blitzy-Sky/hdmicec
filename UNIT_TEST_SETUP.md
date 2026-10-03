@@ -123,25 +123,25 @@ than translation units because `ccec/test_LibCCEC.cpp` declares `LibCCECTest` an
 and `MessageDecoderTrackingTest`.
 
 Everything above is the **legacy-path baseline**: the units enumerated in this section, unmodified.
-The binary also registers the AIDL contract suite from `ccec/test_DriverAidl.cpp` -- **138 cases in
-7 fixtures**, so `run_L1Tests` now registers **621 cases in 25 fixtures** -- and the L2 tier is a
+The binary also registers the AIDL contract suite from `ccec/test_DriverAidl.cpp` -- **155 cases in
+7 fixtures**, so `run_L1Tests` now registers **638 cases in 25 fixtures** -- and the L2 tier is a
 separate binary again, with **17 cases in 4 fixtures** -- the three integration fixtures in
 `ccec/test_DualPathIntegration.cpp` and `DualPathHostLifecycleTest` in `test_main.cpp`.
 
-**Those 138 are counted here and nowhere else in this guide**, so that no second copy of the total
+**Those 155 are counted here and nowhere else in this guide**, so that no second copy of the total
 can drift away from this one: a passage below that splits them names this same total and points
 back here, and carries no count of its own.  Measured with `--gtest_list_tests`, the seven fixtures
-group by the back-end each one needs resolved -- `DriverAidlCompatibilityTest` (23),
-`DriverAidlPreflightTest` (28) and `DriverAidlLocalInstanceTest` (34) are back-end independent and
-run under every L1 invocation, which is 85 cases; `DriverAidlSelectionTest` (4) and
+group by the back-end each one needs resolved -- `DriverAidlCompatibilityTest` (28),
+`DriverAidlPreflightTest` (28) and `DriverAidlLocalInstanceTest` (46) are back-end independent and
+run under every L1 invocation, which is 102 cases; `DriverAidlSelectionTest` (4) and
 `DriverAidlLegacyArmTest` (5) need the legacy back-end resolved, 9; `DriverAidlSessionTest` (32)
-and `DriverAidlTransmitTest` (12) need the AIDL back-end resolved, 44.  Those sum to the 138 above,
-and the 94 the default invocation selects is the first two groups: 85 + 9.
+and `DriverAidlTransmitTest` (12) need the AIDL back-end resolved, 44.  Those sum to the 155 above,
+and the 111 the default invocation selects is the first two groups: 102 + 9.
 
 **Registered is not run, and this guide keeps the two apart everywhere.**  No single invocation
 runs the whole set, because a fixture cannot opt into a different back-end from its own `SetUp`
 -- see [Back-End Selection](#back-end-selection-the-invocation-matrix).  The default invocation
-selects **577 of the 621** and a measured run passes all 577; the other 44 are the two AIDL-only
+selects **594 of the 638** and a measured run passes all 594; the other 44 are the two AIDL-only
 fixtures.  Re-measure with `--gtest_list_tests` on your own build rather than trusting any figure
 here, per the note above.
 
@@ -315,10 +315,11 @@ before it exports the build environment, so the guest run starts from the same g
 
 **On a host with no Binder driver, expect that command to exit `1`, and expect exactly one file to
 be named.**  Measured on this tree, where only invocations A and D could run: **32 source files,
-86.9% line coverage (2488/2862), 91.6% function, 53.8% branch** — the aggregate clears the 80% bar
-— while the **per-file half fails** on `ccec/src/DriverAidlImpl.cpp` at **64.7%** (462/714).  That
-figure is a property of the host rather than of the test set: over a third of the file is reached
-only from the deferred invocations, and the cases that reach it exist and are compiled in, but their invocations
+87.4% line coverage (2565/2936), 91.6% function, 55.7% branch** — the aggregate clears the 80% bar
+— while the **per-file half fails** on `ccec/src/DriverAidlImpl.cpp` at **68.4%** (539/788).  That
+figure is a property of the host rather than of the test set: 249 of the file's 788 lines go
+unexecuted there, against 81 when the whole matrix runs on a Binder-capable guest (89.7%, 707/788),
+and the cases that reach those lines on the guest exist and are compiled in, but their invocations
 are **deferred** — no binary is launched for them, so GoogleTest never sees them and they move no
 counter.  That exit `1` is the expected outcome here and is **not a threshold to lower** — do not
 pass `--no-per-file-gate`, do not exempt a file and do not add an exclusion glob.  Re-run the whole
@@ -486,7 +487,7 @@ argument, for one reason: it then reaches *every* way the binary is started, inc
 ```bash
 # The default invocation's filter.  Not optional -- see above, and see
 # "Back-End Selection" below for what the other invocations are.  With it set,
-# expect 577 tests from 23 test suites, 577 passed, 0 skipped, exit 0.
+# expect 594 tests from 23 test suites, 594 passed, 0 skipped, exit 0.
 export GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'
 
 # Run all tests through automake, from the hdmicec submodule root
@@ -644,11 +645,11 @@ that a later one cannot overwrite an earlier one's evidence:
 
 | Inv | Binary | Fake service | Expected selection | Cases | Has it run? |
 |--------|-------------|---------|---------|---------|---------|
-| A | `run_L1Tests` | not reachable | Legacy | 577 selected, 44 excluded | **Yes, on any host: measured 577 of 577 from 23 suites, exit `0`** |
-| B | `run_L1Tests` | in-process, compatible | AIDL, via the local interface | 437 selected, 184 excluded | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 437 of 437 from 15 suites, exit `0` (2026-10-02, this tree)** |
-| C | `run_L1Tests` | in-process, **incompatible** — reports interface hash `"-1"` | Legacy, with the incompatibility logged | 393 selected, 228 excluded | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 393 of 393 from 13 suites, exit `0` (2026-10-02, this tree)** |
+| A | `run_L1Tests` | not reachable | Legacy | 594 selected, 44 excluded | **Yes, on any host: measured 594 of 594 from 23 suites, exit `0`** |
+| B | `run_L1Tests` | in-process, compatible | AIDL, via the local interface | 454 selected, 184 excluded | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 454 of 454 from 15 suites, exit `0` (2026-10-03, this tree)** |
+| C | `run_L1Tests` | in-process, **incompatible** — reports interface hash `"-1"` | Legacy, with the incompatibility logged | 410 selected, 228 excluded | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 410 of 410 from 13 suites, exit `0` (2026-10-03, this tree)** |
 | D | `run_L2Tests` | host not launched | Legacy | 17 registered | **Yes, on any host: measured 11 passed, 6 skipped, exit `0`** |
-| E | `run_L2Tests` | host launched and ready | AIDL, over a real remote proxy | 17 registered | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 11 passed, 6 skipped of 17, exit `0` (2026-10-02, this tree).  Earlier runs reported 8 passed of the 14 then registered, before `DualPathHostLifecycleTest` was added, and 9 passed of 15 before the two address cases were added; every one of those cases is mandatory here, and the 11/6 figures are the measurement that confirmed it rather than an expectation** |
+| E | `run_L2Tests` | host launched and ready | AIDL, over a real remote proxy | 17 registered | **Deferred on a driverless host and on the committed CI runner; measured green on a Binder-capable guest — 11 passed, 6 skipped of 17, exit `0` (2026-10-03, this tree).  Earlier runs reported 8 passed of the 14 then registered, before `DualPathHostLifecycleTest` was added, and 9 passed of 15 before the two address cases were added; every one of those cases is mandatory here, and the 11/6 figures are the measurement that confirmed it rather than an expectation** |
 
 **Where each of the five has and has not run, stated once and exactly, because it is the fact most
 easily blurred.**  On **this** host, and on the **committed** CI runner, invocations **B, C and E
@@ -657,8 +658,8 @@ never attempts them, and never lets them stand in for evidence they did not prod
 invocations have been executed green against a real binder transport**, in purpose-built
 binder-capable QEMU guests recorded in `blitzy/documentation/Project Guide.md` §4 -- on 2026-09-01
 in an i386 protocol-7 guest, whose run found the three test-code defects that only executing them
-could have found, and B, C and E again on this tree on 2026-10-02 in an x86-64 protocol-8 guest,
-the figures in the table above.  Neither guest is the committed target of
+could have found, B, C and E again on 2026-10-02 in an x86-64 protocol-8 guest, and all five on this tree on
+2026-10-03 in the same guest, the figures in the table above.  Neither guest is the committed target of
 `.github/workflows/aidl-path-tests.yml`, which is a deliberately all-32-bit **protocol-7 i386**
 job, and **that committed workflow has never run** -- so nothing anywhere, including §4, may be
 read as a result on it.
@@ -697,16 +698,16 @@ only where the device's real topology position is 1.0.0.0.  Each arm asserts its
 back-end, and `DriverAidlLegacyArmTest.PhysicalAddressIsReadThroughTheLegacyHalApi` under A for the
 legacy one.
 
-**Of the contract suite's 138 cases, 94 run under the default invocation and 44 do not** -- the
-same 138, partitioned the same way, as [Test Coverage](#test-coverage) above rather than a second
+**Of the contract suite's 155 cases, 111 run under the default invocation and 44 do not** -- the
+same 155, partitioned the same way, as [Test Coverage](#test-coverage) above rather than a second
 count of them -- and the difference is worth holding on to when reading anything below:
 
-- **Established, inside the default invocation's measured 577.**  All 28 `DriverAidlPreflightTest`
+- **Established, inside the default invocation's measured 594.**  All 28 `DriverAidlPreflightTest`
   cases, covering *every* decision arm of the bounded preflight -- the protocol-version mismatch
   and the matching driver whose context manager never answers included, plus a **positive**
   verdict, all reached through a probe seam the predicate takes as a defaulted parameter, which is
-  what puts them within reach of a host with no Binder driver at all.  All 23 compatibility arms,
-  accept and reject.  All 34 local-instance arms, on a `DriverAidlImpl` whose constructor touches
+  what puts them within reach of a host with no Binder driver at all.  All 28 compatibility arms,
+  accept and reject.  All 46 local-instance arms, on a `DriverAidlImpl` whose constructor touches
   no Binder -- every `status != OPENED` guard, the `writeAsync` prelude ordering, the fixed
   physical address 1.0.0.0, and the enable-time logical-address registration: the PLAYBACK_DEVICE
   candidate table (4, 8, 11, the inverse of `LogicalAddress::getType()`), exactly one address
@@ -718,7 +719,7 @@ count of them -- and the difference is worth holding on to when reading anything
   registration that leaves the resolved back-end alone.  The 5 legacy arms, including a **measured
   receive-path delivery case** that drives a frame from the HAL mock through to an application
   listener, which is what makes the observation machinery the AIDL arms depend on something
-  demonstrated rather than assumed.  And, one of those 34 local-instance arms rather than a case
+  demonstrated rather than assumed.  And, one of those 46 local-instance arms rather than a case
   beyond them, a structural guard that reads the **real** HDMI CEC Sink plugin source and checks
   that the call-path shapes the AIDL session fixture models still match it.  That source is a
   **required acceptance input**, read at a reviewed revision: the case **fails** when it cannot be
@@ -792,9 +793,9 @@ either yourself:
   means no channel, and one without the other is a hard failure that writes no readiness token at
   all.  Traffic is line-oriented — one `\n`-terminated command per line, exactly one reply line per
   command, every reply beginning `OK ` or `ERR ` — and the vocabulary is `ping`,
-  `deliver <lowercase-hex>`, `sent-count`, `last-sent`, `open-count`, `close-count`, `listener` and
-  `shutdown`.  This is how a case observes what the host actually saw; it is **not** the readiness
-  pipe.
+  `deliver <lowercase-hex>`, `sent-count`, `last-sent`, `open-count`, `close-count`, `listener`,
+  `registered`, `calls` and `shutdown`.  This is how a case observes what the host actually saw;
+  it is **not** the readiness pipe.
 
 #### Why an out-of-process host exists at all
 
@@ -809,11 +810,12 @@ needed and neither substitutes for the other:
   at all, because its generated `onTransact` answers from compiled-in constants.
 - Only the **out-of-process** host can make the middleware hold a real proxy, cross the driver, and
   receive its listener callback on a binder threadpool thread.  That is what invocation E is for,
-  and **it is what invocation E did on 2026-09-01 and again on 2026-10-02 — on Binder-capable
-  guests, and on no other host.**  E is deferred on this host and on the committed CI runner alike;
-  the runs that exist are the ones recorded in `blitzy/documentation/Project Guide.md` §4: 14
-  registered, 8 passed, 6 skipped on 2026-09-01, and 17 registered, 11 passed, 6 skipped on this
-  tree on 2026-10-02, each exit `0` with every `DualPathAidlFlowTest` case green.
+  and **it is what invocation E did on 2026-09-01, on 2026-10-02 and again on 2026-10-03 — on
+  Binder-capable guests, and on no other host.**  E is deferred on this host and on the committed CI
+  runner alike; the runs that exist are the ones recorded in `blitzy/documentation/Project Guide.md`
+  §4: 14 registered, 8 passed, 6 skipped on 2026-09-01, 17 registered, 11 passed, 6 skipped on the
+  tree of 2026-10-02, and the same 17/11/6 on this tree on 2026-10-03, each exit `0` with every
+  `DualPathAidlFlowTest` case green.
 
 **Invocation E is structurally complete, its assertions are real, and a green run of it exists —
 but only where a Binder driver does, and never on this host or on the committed runner.**  The
@@ -832,12 +834,13 @@ caller's pre-header frame -- so read them as assertions that purpose-built guest
 or the committed binder job, has observed delivery over a real proxy or receipt on a binder
 threadpool thread.**  Two further AIDL-arm cases, added since, assert that enabling the driver
 registers exactly one logical address through `IHdmiCecController::addLogicalAddresses` (read back
-with the host's `registered` verb) which `LibCCEC::getLogicalAddress` then returns through
-`IHdmiCec::getLogicalAddresses()`, and that `LibCCEC::getPhysicalAddress` reports the fixed 1.0.0.0
-with the fake service's send, open and close counts unchanged; all six AIDL-arm cases passed under
-E on 2026-10-02 in an x86-64 protocol-8 guest.  Under invocation D those six cases skip, which is
-why D reports 11 passed and 6 skipped rather than 17 passed; under E it is the six legacy-arm cases
-that skip, which is why E reports 11 passed and 6 skipped of the 17 registered.
+with the host's `registered` verb) which `LibCCEC::getLogicalAddress` then returns through exactly
+one `IHdmiCec::getLogicalAddresses()` transaction, and that `LibCCEC::getPhysicalAddress` reports
+the fixed 1.0.0.0 with every per-method transaction count of the host's `calls` verb unchanged;
+all six AIDL-arm cases passed under E on 2026-10-02 in an x86-64 protocol-8 guest.  Under
+invocation D those six cases skip, which is why D reports 11 passed and 6 skipped rather than 17
+passed; under E it is the six legacy-arm cases that skip, which is why E reports 11 passed and 6
+skipped of the 17 registered.
 
 #### Runtime prerequisites for the AIDL path
 
@@ -879,7 +882,7 @@ observable through the line the factory logs once at initialisation, at `LOG_INF
 default level.  **Read it out of an invocation log rather than out of a live pipeline**, because a
 pipeline is where this evidence goes wrong: a trailing `grep` replaces the suite's exit status with
 its own, so a red run whose log happens to carry the line reports success.  **Measured:** the
-unfiltered suite is `621 tests from 25 test suites ran`, 577 passed, **44 failed, exit `1`** — while
+unfiltered suite is `638 tests from 25 test suites ran`, 594 passed, **44 failed, exit `1`** — while
 `./run_L1Tests 2>&1 | grep 'HDMI CEC HAL back-end selected'` in a default shell prints the legacy
 line and **exits `0`**.  Every invocation log `run_coverage.sh` writes belongs to a run whose exit
 status, test count and selected-path line were all checked before the run was allowed to proceed,
@@ -895,7 +898,7 @@ grep 'HDMI CEC HAL back-end selected' "$COVERAGE_DIR"/run_invocation_*.log
 # A LIVE RUN, when there is no such directory yet.  Three things are not optional here.
 # `set -o pipefail` keeps the suite's status instead of grep's; CEC_TEST_AIDL_MODE and the
 # invocation-A filter are what make the suite green in the first place (without the filter
-# this run is the red 621-case one above); and `tee` writes the log while leaving the
+# this run is the red 638-case one above); and `tee` writes the log while leaving the
 # status to be checked, which is the whole point.
 set -o pipefail
 CEC_TEST_AIDL_MODE=absent \
@@ -1149,11 +1152,12 @@ permissions:
 
 jobs:
   test:
-    # ubuntu-24.04, NOT 22.04, and the reason is the compiler and nothing else.
-    # The acceptance toolchain is the GCC 13 family (see below); jammy carries no
-    # gcc-13 package at all, while noble carries gcc-13/g++-13.  Everything else
-    # about this job would work on either label.
-    runs-on: ubuntu-24.04
+    # ubuntu-22.04, with the GCC 13 family BUILT rather than installed: jammy
+    # carries no gcc-13 package at all, and a PPA would be an unpinned
+    # third-party archive.  "Build the pinned GCC toolchain from source" below
+    # builds exactly CEC_TOOLCHAIN_GCC_VERSION as /usr/bin/gcc-13, g++-13 and
+    # gcov-13, the names a package would use.
+    runs-on: ubuntu-22.04
 
     # The two AIDL/Binder staging prefixes, plus the two split-staging overrides:
     # build_binder.sh stages its runtime under out/target and its headers under
@@ -1163,16 +1167,28 @@ jobs:
     # filter; as an environment variable it reaches every way this job starts the
     # binary, which a --gtest_filter argument would not.
     #
-    # CEC_TOOLCHAIN_GCC_MAJOR is the acceptance toolchain, named ONCE so it cannot
-    # drift between the steps that consume it.  It pins the MAJOR, not the patch:
-    # gcov refuses a notes file written by a different compiler family, so build
-    # and capture must agree -- but no Ubuntu archive supplies the 13.4.0 the
-    # workspace container happens to have (noble ships 13.3.0), and reaching it
-    # would take an unpinned third-party PPA.  So the major is gated and the exact
-    # patch is RECORDED with the results.  Do not write a gate here that claims to
-    # enforce 13.4.0 while accepting 13.3.0.
+    # CEC_TOOLCHAIN_GCC_MAJOR and CEC_TOOLCHAIN_GCC_VERSION are the acceptance
+    # toolchain, named ONCE so they cannot drift between the steps that consume
+    # them: gcov refuses a notes file written by a different compiler family, so
+    # build and capture must agree, and the gate below demands exactly 13.4.0.
+    # The five digests are the publishers' own -- GCC's sha512.sum, Kitware's
+    # cmake-<version>-SHA-256.txt, the pkgconf 1.8.1 tarball's as noble's
+    # Sources index publishes it, and the lcov v2.0 release asset's -- and
+    # nothing fetched is unpacked unverified.  Every pin is an EXACT release,
+    # never a floor: pkg-config 1.8.1 and lcov 2.0-1 included, which jammy's
+    # archive does not carry.
     env:
       CEC_TOOLCHAIN_GCC_MAJOR: '13'
+      CEC_TOOLCHAIN_GCC_VERSION: '13.4.0'
+      CEC_TOOLCHAIN_GCC_SHA512: '9b4b83ecf51ef355b868608b8d257b2fa435c06d2719cb86657a7c2c2a0828ff4ce04e9bac1055bbcad8ed5b4da524cafaef654785e23a50233d95d89201e35f'
+      CMAKE_PINNED_VERSION: '3.16.9'
+      CMAKE_PINNED_SHA256: '96d79367dcafb47d606573a4687021d3cb18dd53d83458fc1d6d9c89bf31b553'
+      CMAKE_SDK_VERSION: '3.22.1'
+      CMAKE_SDK_SHA256: '73565c72355c6652e9db149249af36bcab44d9d478c5546fd926e69ad6b43640'
+      PKGCONF_VERSION: '1.8.1'
+      PKGCONF_SHA256: '644361ada2942be05655d4452eb018791647c31bba429b287f1f68deb2dc6840'
+      LCOV_VERSION: '2.0'
+      LCOV_SHA256: '1857bb18e27abe8bcec701a907d5c47e01db4d4c512fc098d1a6acd29267bf46'
       HALIF_PREFIX: ${{ github.workspace }}/rdk-halif-aidl
       HALIF_LIB_DIR: ${{ github.workspace }}/rdk-halif-aidl/out/target/lib/halif
       BINDER_SDK_DIR: ${{ github.workspace }}/rdk-halif-aidl/out/target
@@ -1185,18 +1201,32 @@ jobs:
         with:
           path: hdmicec
 
-      # TWO CMAKE INSTALLATIONS, AND BOTH HAVE TO STAY.  The pinned 3.16.x must
+      # TWO CMAKE INSTALLATIONS, BOTH EXACT, AND BOTH HAVE TO STAY.  3.16.9 must
       # remain what a bare `cmake` resolves to for the plugin and test chain,
-      # which 3.20 and later break.  The Binder SDK needs the opposite: its
-      # documented floor is 3.22.1.  Reaching the newer one by absolute path is
-      # not possible, because build_binder.sh and build_modules.sh invoke a bare
-      # `cmake` and offer no override -- so it is reached by a STEP-SCOPED PATH
-      # prepend instead, leaving the job-wide pin intact.  Simplify this and one
-      # of the two chains breaks.
+      # which 3.20 and later break.  The Binder SDK is built with exactly 3.22.1,
+      # the release linux_binder_idl 2.6.0's BUILD.md names -- never whichever
+      # newer cmake apt or the runner image carries.  build_binder.sh and
+      # build_modules.sh invoke a bare `cmake` and offer no override, so 3.22.1 is
+      # reached by a STEP-SCOPED PATH prepend of AIDL_CMAKE_BIN_DIR, leaving the
+      # job-wide pin intact.  Simplify this and one of the two chains breaks.
+      # Kitware spells the platform `Linux` in assets before 3.20 and `linux`
+      # after, hence the two asset names.
       - name: Set up CMake
-        uses: jwlawson/actions-setup-cmake@v1.13
-        with:
-          cmake-version: '3.16.x'
+        run: |
+          set -euo pipefail
+          fetch() {  # fetch VERSION ASSET SHA256 -> $GITHUB_WORKSPACE/tools/cmake-VERSION
+            local dir="$GITHUB_WORKSPACE/tools/cmake-$1"
+            mkdir -p "$dir"
+            curl -fsSL -o "$dir.tar.gz" \
+              "https://github.com/Kitware/CMake/releases/download/v$1/$2"
+            echo "$3  $dir.tar.gz" | sha256sum -c -
+            tar -xz --strip-components=1 -C "$dir" -f "$dir.tar.gz"
+            test "$("$dir/bin/cmake" --version | awk 'NR == 1 { print $3 }')" = "$1"
+          }
+          fetch "$CMAKE_PINNED_VERSION" "cmake-$CMAKE_PINNED_VERSION-Linux-x86_64.tar.gz" "$CMAKE_PINNED_SHA256"
+          fetch "$CMAKE_SDK_VERSION" "cmake-$CMAKE_SDK_VERSION-linux-x86_64.tar.gz" "$CMAKE_SDK_SHA256"
+          echo "$GITHUB_WORKSPACE/tools/cmake-$CMAKE_PINNED_VERSION/bin" >> "$GITHUB_PATH"
+          echo "AIDL_CMAKE_BIN_DIR=$GITHUB_WORKSPACE/tools/cmake-$CMAKE_SDK_VERSION/bin" >> "$GITHUB_ENV"
 
       # libgtest-dev/libgmock-dev are what put gtest.pc and gmock.pc on
       # pkg-config's path, which is the only thing configure's PKG_CHECK_MODULES
@@ -1204,24 +1234,63 @@ jobs:
       # are Binder SDK prerequisites, not extras: build_binder.sh configures a
       # host AIDL compiler that needs both.
       #
-      # gcc-13/g++-13 are named VERSIONED rather than as a bare `g++`, which would
-      # install whatever the image defaults to.  gcc-13 is pulled in as well as
-      # g++-13 because it is what carries gcov-13, and gcov is the half of the
-      # toolchain the coverage evidence depends on.
+      # No gcc-13/g++-13 here: jammy does not carry them, and the next step
+      # builds them -- gcov-13 included, the half of the toolchain the coverage
+      # evidence depends on.  libgmp-dev, libmpfr-dev and libmpc-dev are what
+      # that build needs, and build-essential's gcc-11 compiles it.
+      #
+      # No lcov either: jammy's is 1.15, and the pinned 2.0 release asset is
+      # installed below; the perl modules are its prerequisites.  pkg-config is
+      # jammy's 0.29.2, kept as the reference the pinned pkgconf is checked
+      # against.
       - name: Install packages
         run: |
           sudo apt-get update
           sudo apt-get install -y autoconf automake libtool pkg-config make \
-                                  gcc-13 g++-13 \
-                                  libglib2.0-dev libgtest-dev libgmock-dev lcov \
-                                  cmake ninja-build flex bison
+                                  build-essential libgmp-dev libmpfr-dev libmpc-dev \
+                                  libglib2.0-dev libgtest-dev libgmock-dev \
+                                  cmake ninja-build flex bison \
+                                  perl libcapture-tiny-perl libdatetime-perl \
+                                  libjson-xs-perl libperlio-gzip-perl libtimedate-perl
+
+      # THE PINNED GCC, BUILT FROM THE GNU RELEASE and checked against GCC's own
+      # SHA-512 before it is unpacked.  --prefix=/usr with --program-suffix=-13
+      # gives the /usr/bin/gcc-13, g++-13 and gcov-13 the gate below selects, and
+      # puts the libstdc++ headers under /usr/include, which the coverage removal
+      # globs already strip.  The install refuses to overwrite any file already on
+      # the runner, and /usr/lib64 goes first for the loader because binaries
+      # g++-13 links need its libstdc++, not jammy's.  `.github/workflows/L1-tests.yml`
+      # carries the full step: its version guards, collision listing and
+      # post-install proofs.
+      - name: Build the pinned GCC toolchain from source
+        timeout-minutes: 150
+        run: |
+          set -euo pipefail
+          v="$CEC_TOOLCHAIN_GCC_VERSION"; major="$CEC_TOOLCHAIN_GCC_MAJOR"; w="$RUNNER_TEMP/gcc"
+          mkdir -p "$w/src" "$w/obj" "$w/stage"
+          curl -fsSL -o "$w/gcc.tar.xz" "https://ftp.gnu.org/gnu/gcc/gcc-$v/gcc-$v.tar.xz"
+          echo "$CEC_TOOLCHAIN_GCC_SHA512  $w/gcc.tar.xz" | sha512sum -c -
+          tar -xJ --strip-components=1 -C "$w/src" -f "$w/gcc.tar.xz"
+          cd "$w/obj"
+          "$w/src/configure" --build=x86_64-linux-gnu --host=x86_64-linux-gnu \
+            --target=x86_64-linux-gnu --prefix=/usr --program-suffix="-$major" \
+            --enable-languages=c,c++ --disable-multilib --disable-bootstrap \
+            --disable-nls --enable-checking=release --enable-default-pie > "$w/configure.log"
+          make -j"$(nproc)" > "$w/make.log" 2>&1 || { tail -n 80 "$w/make.log"; exit 1; }
+          make install-strip DESTDIR="$w/stage" > "$w/install.log"
+          rm -rf "$w/stage/usr/share/info" "$w/stage/usr/share/man"
+          chmod -R go-w "$w/stage"
+          tar -C "$w/stage" -cf - usr | sudo tar -C / -xf - --keep-old-files --no-same-owner
+          echo /usr/lib64 | sudo tee "/etc/ld.so.conf.d/000-cec-gcc-$v.conf" > /dev/null
+          sudo ldconfig
 
       # PROVE THE TOOLCHAIN BEFORE BUILDING ANYTHING, and fail the job rather than
-      # producing a trace whose provenance nobody can state.  Three things are
+      # producing a trace whose provenance nobody can state.  Four things are
       # asserted: all three tools are present, all three report the pinned major,
-      # and all three report the SAME FULL VERSION -- the last because gcov's
-      # notes-file stamp is derived from the major AND minor, and all three come
-      # from one package pair so agreement is achievable.
+      # all three report the SAME FULL VERSION -- because gcov's notes-file stamp
+      # is derived from the major AND minor, and all three come from the one build
+      # above so agreement is achievable -- and that version is exactly
+      # CEC_TOOLCHAIN_GCC_VERSION.
       #
       # The gcov shim is not decoration.  run_coverage.sh invokes a BARE `gcov`
       # and has no override knob, so the only way to select gcov-13 for it is to
@@ -1237,7 +1306,7 @@ jobs:
           major="${CEC_TOOLCHAIN_GCC_MAJOR:?pin missing from the job env block}"
           cc="/usr/bin/gcc-$major"; cxx="/usr/bin/g++-$major"; gcov="/usr/bin/gcov-$major"
           for t in "$cc" "$cxx" "$gcov"; do
-            test -x "$t" || { echo "::error::$t absent - install gcc-$major g++-$major"; exit 1; }
+            test -x "$t" || { echo "::error::$t absent - the GCC build step must run first"; exit 1; }
           done
           # -dumpfullversion, not -dumpversion: since GCC 7 the latter prints the
           # major alone, so comparing it against gcov's full version fails on every
@@ -1252,14 +1321,76 @@ jobs:
           done
           [ "$v_cc" = "$v_cxx" ] && [ "$v_cc" = "$v_gcov" ] || {
             echo "::error::gcc/g++/gcov disagree: $v_cc / $v_cxx / $v_gcov"; exit 1; }
+          [ "$v_cc" = "$CEC_TOOLCHAIN_GCC_VERSION" ] || {
+            echo "::error::$v_cc is not the pinned $CEC_TOOLCHAIN_GCC_VERSION"; exit 1; }
           shim="${RUNNER_TEMP:-/tmp}/toolchain-shim"; mkdir -p "$shim"
           ln -sfn "$gcov" "$shim/gcov"
           { echo "CC=$cc"; echo "CXX=$cxx"; } >> "$GITHUB_ENV"
           echo "$shim" >> "$GITHUB_PATH"
-          # The exact patch is RECORDED with the results, which is the honest half
-          # of a major-only pin.
+          # The exact version is gated above and RECORDED with the results here.
           printf 'toolchain: gcc %s, g++ %s, gcov %s\n' "$v_cc" "$v_cxx" "$v_gcov" \
             >> "$GITHUB_STEP_SUMMARY"
+
+      # pkg-config 1.8.1 IS pkgconf, BUILT: jammy carries pkg-config 0.29.2 and
+      # pkgconf 1.8.0.  The configure flags are Debian's own search defaults, so
+      # configure still finds the archive's .pc files, and the answers for the two
+      # modules configure.ac probes must equal jammy's /usr/bin/pkg-config.
+      # Nothing already on the runner is overwritten.  It is reached by PATH
+      # rather than a PKG_CONFIG export, so configure's "checking for pkg-config"
+      # line still records which one it used.
+      - name: Build and assert pkgconf
+        run: |
+          set -euo pipefail
+          v="$PKGCONF_VERSION"; w="$RUNNER_TEMP/pkgconf"
+          ma="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+          mkdir -p "$w/src" "$w/stage"
+          curl -fsSL -o "$w/pkgconf.tar.xz" \
+            "https://distfiles.ariadne.space/pkgconf/pkgconf-$v.tar.xz"
+          echo "$PKGCONF_SHA256  $w/pkgconf.tar.xz" | sha256sum -c -
+          tar -xJ --strip-components=1 -C "$w/src" -f "$w/pkgconf.tar.xz"
+          cd "$w/src"
+          ./configure --prefix=/usr/local --disable-shared \
+            --with-pkg-config-dir="/usr/local/lib/$ma/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:/usr/lib/$ma/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig" \
+            --with-system-libdir="/lib/$ma:/lib:/usr/lib/$ma:/usr/lib" \
+            --with-system-includedir=/usr/include > "$w/configure.log"
+          make -j"$(nproc)" > "$w/make.log" 2>&1 || { tail -n 40 "$w/make.log"; exit 1; }
+          make install-strip DESTDIR="$w/stage" > "$w/install.log"
+          for t in /usr/local/bin/pkgconf /usr/local/bin/pkg-config; do
+            if [ -e "$t" ] || [ -L "$t" ]; then echo "::error::$t already exists"; exit 1; fi
+          done
+          sudo install -m 0755 "$w/stage/usr/local/bin/pkgconf" /usr/local/bin/pkgconf
+          sudo ln -s pkgconf /usr/local/bin/pkg-config
+          test "$(command -v pkg-config)" = /usr/local/bin/pkg-config
+          test "$(pkg-config --version)" = "$v"
+          norm() { printf '%s' "$1" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//'; }
+          for m in glib-2.0 gtest; do
+            for q in --modversion --cflags --libs; do
+              test "$(norm "$(pkg-config "$q" "$m")")" = "$(norm "$(/usr/bin/pkg-config "$q" "$m")")"
+            done
+          done
+          printf 'pkg-config: pkgconf %s\n' "$v" >> "$GITHUB_STEP_SUMMARY"
+
+      # lcov 2.0-1 IS THE v2.0 RELEASE ASSET, checked against its published
+      # SHA-256 -- jammy's lcov is 1.15 -- and staged, so nothing already on the
+      # runner is overwritten.  The asset's .version file is what makes all three
+      # tools report 2.0-1.  This example captures no coverage itself (see the
+      # notes below), but tests/L1Tests/run_coverage.sh needs this lcov too.
+      - name: Install and assert lcov
+        run: |
+          set -euo pipefail
+          v="$LCOV_VERSION"; w="$RUNNER_TEMP/lcov"
+          mkdir -p "$w/src" "$w/stage"
+          curl -fsSL -o "$w/lcov.tar.gz" \
+            "https://github.com/linux-test-project/lcov/releases/download/v$v/lcov-$v.tar.gz"
+          echo "$LCOV_SHA256  $w/lcov.tar.gz" | sha256sum -c -
+          tar -xz --strip-components=1 -C "$w/src" -f "$w/lcov.tar.gz"
+          make -C "$w/src" install PREFIX=/usr/local DESTDIR="$w/stage" > "$w/install.log"
+          tar -C "$w/stage" -cf - usr | sudo tar -C / -xf - --keep-old-files --no-same-owner
+          for t in lcov geninfo genhtml; do
+            test "$(command -v "$t")" = "/usr/local/bin/$t"
+            test "$("$t" --version)" = "$t: LCOV version $v-1"
+          done
+          printf 'lcov: %s\n' "$(lcov --version)" >> "$GITHUB_STEP_SUMMARY"
 
       # The suite is compiled against GoogleTest v1.15.0, matching the CI pin.
       # CPPFLAGS/LDFLAGS below point the compiler and linker at this prefix.
@@ -1319,7 +1450,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/rdk-halif-aidl"
-          PATH="/usr/bin:$PATH" ./build_binder.sh       # the >=3.22.1 cmake, step-scoped
+          PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_binder.sh   # exactly 3.22.1, step-scoped
           test -f "$BINDER_SDK_DIR/.sdk_ready"
 
       # common is built FIRST because build_modules.sh pre-checks that each
@@ -1332,8 +1463,8 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/rdk-halif-aidl"
-          PATH="/usr/bin:$PATH" ./build_modules.sh common --version 0.2.0.0
-          PATH="/usr/bin:$PATH" ./build_modules.sh hdmicec --version 0.1.0.0
+          PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_modules.sh common --version 0.2.0.0
+          PATH="$AIDL_CMAKE_BIN_DIR:$PATH" ./build_modules.sh hdmicec --version 0.1.0.0
 
       # Stub the IARM bus headers the middleware includes but does not ship, and
       # symlink the GoogleMock HDMI-CEC driver over the driver header.  Both are
@@ -1394,8 +1525,33 @@ jobs:
         working-directory: hdmicec
         run: |
           set -euo pipefail
+          # ccec/src/Makefile refuses mocks/ and stubs/ as its telemetry and legacy
+          # HAL header roots, so both production headers are fetched at the commits
+          # L1-tests.yml pins (TELEMETRY_COMMIT, LEGACY_HAL_COMMIT) and staged OUTSIDE
+          # the tree, the HAL one into the ccec/drivers/ subpath DriverImpl.cpp uses.
+          hdr="$RUNNER_TEMP/hdmicec-production-headers"
+          fetch_at() {  # fetch_at REPOSITORY COMMIT DIR
+            git init -q "$3"
+            git -C "$3" fetch -q --depth 1 "https://github.com/$1" "$2"
+            git -C "$3" checkout -q FETCH_HEAD
+            test "$(git -C "$3" rev-parse HEAD)" = "$2"
+          }
+          stage() {  # stage SRC DST: a non-empty regular file, copied byte-for-byte
+            if [ -L "$1" ] || [ ! -f "$1" ] || [ ! -s "$1" ]; then
+              echo "::error::$1 is not a non-empty regular file"; exit 1
+            fi
+            install -D -m 0644 -- "$1" "$2" && cmp -s -- "$1" "$2"
+          }
+          fetch_at rdkcentral/telemetry 8a88c84d75a0dccdaf0fdfe2bf4132750eca61df "$hdr/src/telemetry"
+          fetch_at rdkcentral/rdk-halif-hdmi_cec f05a341fe525fa345decc16996ad30234b645ece "$hdr/src/legacy-hal"
+          for h in telemetry_busmessage_sender.h telemetry2_0.h; do
+            stage "$hdr/src/telemetry/include/$h" "$hdr/telemetry/include/$h"
+          done
+          stage "$hdr/src/legacy-hal/include/hdmi_cec_driver.h" \
+                "$hdr/legacy-hal/include/ccec/drivers/hdmi_cec_driver.h"
           export CPATH="$GITHUB_WORKSPACE/hdmicec/mocks:$GITHUB_WORKSPACE/hdmicec/stubs"
-          make -C ccec/src all          # no -j; see the note above
+          make -C ccec/src TELEMETRY_PREFIX="$hdr/telemetry" \
+               LEGACY_HAL_PREFIX="$hdr/legacy-hal" all     # no -j; see the note above
           lib=ccec/src/install/lib/libRCEC.so
           test -f "$lib"
           readelf -d "$lib" | grep NEEDED
@@ -1408,7 +1564,9 @@ jobs:
               || { echo "::error::$soname is not a DT_NEEDED entry of the hand-built $lib"; exit 1; }
           done
           rm -f "$needed"
-          ! ldd "$lib" | grep -q 'not found'
+          if ldd "$lib" | grep -q 'not found'; then
+            echo "::error::$lib has an unresolved shared-library dependency"; exit 1
+          fi
           make -C ccec/src clean
 
       # Three make passes.  The top-level Makefile.am declares SUBDIRS = osal ccec,
@@ -1534,7 +1692,7 @@ Four notes on that example:
    cases are the ones that skip, and they need the binder-capable host described under
    [Runtime prerequisites for the AIDL path](#runtime-prerequisites-for-the-aidl-path), where they
    have run in purpose-built guests (`blitzy/documentation/Project Guide.md` §4, most recently
-   invocation E at 11 passed and 6 skipped of 17 on 2026-10-02).  Extending
+   invocation E at 11 passed and 6 skipped of 17 on 2026-10-03).  Extending
    it means appending to
    `run_L2Tests_SOURCES` under the same group-end rule as item 2, and reading
    [Back-End Selection](#back-end-selection-the-invocation-matrix) first, because a case there
@@ -1706,12 +1864,12 @@ The L1 unit test framework provides:
   vendor conditional** -- the choice is made at run time, so the suites are run once per selection
   outcome (see [Back-End Selection](#back-end-selection-the-invocation-matrix))
 - ⚠️ **Both back-ends have been *executed*, each under its own selection -- but not both here.**  The
-  legacy selection runs on any host and is measured green -- invocation A at 577 of 577, invocation D
+  legacy selection runs on any host and is measured green -- invocation A at 594 of 594, invocation D
   at 11 passed and 6 skipped of 17.  The three binder-dependent invocations (B, C, E) are **deferred
   on this host and on the committed CI runner**, for want of a Binder kernel driver, and have been
   executed green against a real binder transport in purpose-built binder-capable QEMU guests,
-  recorded in `blitzy/documentation/Project Guide.md` §4: on this tree, B 437 of 437, C 393 of
-  393, E 11 passed with 6 skipped of 17.  Of those three only **B and E** resolve the AIDL back-end: **C resolves the legacy
+  recorded in `blitzy/documentation/Project Guide.md` §4: on this tree, B 454 of 454, C 410 of
+  410, E 11 passed with 6 skipped of 17.  Of those three only **B and E** resolve the AIDL back-end: **C resolves the legacy
   one**, because it registers an in-process service whose interface hash is `"-1"` and asserts that
   the factory falls back -- and it is deferred here because a registration needs the driver, not
   because it selects the AIDL path.  So the AIDL transport **has** been observed working, over real

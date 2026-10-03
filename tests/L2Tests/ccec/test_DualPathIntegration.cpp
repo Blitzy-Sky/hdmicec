@@ -48,6 +48,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <vector>
 #include <string>
@@ -55,8 +56,7 @@
 /* <thread>: std::this_thread::get_id(), so an inbound case can prove the frame was delivered on a
  * thread other than the test thread. */
 #include <thread>
-/* <cstdlib>: std::getenv, used only to assert that the resolved back-end matches
- * CEC_TEST_AIDL_MODE; tests/L2Tests/test_main.cpp is what acts on the variable. */
+/* <cstdlib>: std::strtol, for the host-reply parsers. */
 #include <cstdlib>
 /* <cstring>: std::memset and std::strerror, for the broken-pipe case. */
 #include <cstring>
@@ -77,8 +77,8 @@
 #include "ccec/MessageProcessor.hpp"
 #include "ccec/Messages.hpp"
 #include "ccec/Driver.hpp"
-/* Named explicitly although Connection.hpp includes it: LibCCEC::init resolves the back-end every
- * case depends on, and one case cycles term() and init() itself. */
+/* Named explicitly although Connection.hpp includes it: one case cycles LibCCEC's term() and init(),
+ * and two call its getLogicalAddress() and getPhysicalAddress() directly. */
 #include "ccec/LibCCEC.hpp"
 
 /* The non-installed concrete back-ends, by relative path because ccec/src is not an include root;
@@ -95,7 +95,7 @@ using ::testing::Invoke;
 using ::testing::SetArgPointee;
 
 /* Cross-translation-unit seam, defined in tests/L2Tests/test_main.cpp: the pipe channel to the
- * out-of-process fake service host, and the harness's own broken-pipe probe. */
+ * out-of-process fake service host, the harness's own broken-pipe probe, and the requested mode. */
 
 /**
  * @brief Reports whether the fake service host's control and observation channel is usable.
@@ -119,7 +119,7 @@ extern bool cecL2HostControlChannelIsOpen();
  * The write and the read share one deadline taken at entry, so the call never blocks indefinitely.
  *
  * @param [in]  command                   - Non-blank command, no newline or CR, e.g. "sent-count"
- * @param [out] reply                     - Receives the reply line; untouched on failure
+ * @param [out] reply                     - Receives the reply; on failure, unchanged or the rejected line
  * @param [out] failureDetail             - Receives what went wrong; untouched on success
  *
  * @return bool                                   - Whether one command was exchanged for one reply
@@ -152,6 +152,13 @@ extern bool cecL2HostControlRequest(const std::string &command, std::string &rep
  */
 extern bool cecL2ProveEpipeDiagnosticAndChildReaping(std::string &observedDiagnostic,
                                                      std::string &failureDetail);
+
+/**
+ * @brief Returns CEC_TEST_AIDL_MODE as the harness reads it, so this file never reads it itself.
+ *
+ * @return std::string                            - The raw value; empty when unset or empty
+ */
+extern std::string cecL2RequestedAidlMode();
 
 /**
  * @brief Re-installs DriverImpl's own HAL receive callback on the process-global legacy mock.
@@ -429,6 +436,98 @@ bool askHostForRegisteredAddresses(std::vector<long>& addresses, std::string& fa
 }
 
 /**
+ * @brief Asks the host how many binder transactions each AIDL method of the fake has received.
+ *
+ * Counted in the host process as transactions arrive, so neither a cached answer nor a stray call hides.
+ *
+ * @param [out] counts                    - Receives "<interface>.<method>" -> count for exactly the
+ *                                          16 keys the `calls` reply defines.  Untouched on failure
+ * @param [out] failureDetail             - Receives a diagnostic when this reports failure
+ *
+ * @return bool                                   - Whether the counts were obtained
+ * @retval true                                   - counts holds the fake's per-method transaction counts
+ * @retval false                                  - The channel failed, or the reply was not a
+ *                                                  well-formed "OK calls <key>=<n> ..."
+ */
+bool askHostForCallCounts(std::map<std::string, long>& counts, std::string& failureDetail)
+{
+    static const char* const EXPECTED_KEYS[] = {
+        "IHdmiCec.getState", "IHdmiCec.getProperty", "IHdmiCec.getLogicalAddresses",
+        "IHdmiCec.open", "IHdmiCec.close", "IHdmiCec.registerEventListener",
+        "IHdmiCec.unregisterEventListener", "IHdmiCec.getInterfaceVersion",
+        "IHdmiCec.getInterfaceHash", "IHdmiCec.other",
+        "IHdmiCecController.addLogicalAddresses", "IHdmiCecController.removeLogicalAddresses",
+        "IHdmiCecController.sendMessage", "IHdmiCecController.getInterfaceVersion",
+        "IHdmiCecController.getInterfaceHash", "IHdmiCecController.other",
+    };
+    const size_t expectedKeyCount = sizeof(EXPECTED_KEYS) / sizeof(EXPECTED_KEYS[0]);
+
+    std::string reply;
+    if (!cecL2HostControlRequest("calls", reply, failureDetail)) {
+        return false;
+    }
+
+    std::string field;
+    if (!parseOkReplyValue(reply, "calls", field, failureDetail)) {
+        return false;
+    }
+
+    std::map<std::string, long> parsedCounts;
+    size_t start = 0;
+
+    while (start <= field.size()) {
+        const size_t space = field.find(' ', start);
+        const std::string token = field.substr(start, (space == std::string::npos) ? std::string::npos
+                                                                                   : space - start);
+        const size_t equals = token.find('=');
+        const std::string key = (equals == std::string::npos) ? std::string() : token.substr(0, equals);
+        const std::string value = (equals == std::string::npos) ? std::string() : token.substr(equals + 1);
+
+        bool known = false;
+        for (size_t index = 0; index < expectedKeyCount; ++index) {
+            if (key == EXPECTED_KEYS[index]) {
+                known = true;
+                break;
+            }
+        }
+
+        if (!known || (parsedCounts.count(key) != 0)) {
+            failureDetail = "the fake service host answered \"calls\" with \"" + field + "\", whose token \"" +
+                            token + "\" is not one of the 16 defined <interface>.<method>=<n> fields, or "
+                            "repeats one";
+            return false;
+        }
+
+        errno = 0;
+        char* parseEnd = nullptr;
+        const long parsed = std::strtol(value.c_str(), &parseEnd, 10);
+
+        if (value.empty() || (value.find_first_not_of("0123456789") != std::string::npos) || (errno != 0) ||
+            (parseEnd == nullptr) || (*parseEnd != '\0') || (parsed < 0)) {
+            failureDetail = "the fake service host reported \"" + key + "\" as \"" + value +
+                            "\", which is not a non-negative decimal number";
+            return false;
+        }
+
+        parsedCounts[key] = parsed;
+
+        if (space == std::string::npos) {
+            break;
+        }
+        start = space + 1;
+    }
+
+    if (parsedCounts.size() != expectedKeyCount) {
+        failureDetail = "the fake service host answered \"calls\" with \"" + field + "\", which carries " +
+                        std::to_string(parsedCounts.size()) + " of the 16 defined fields";
+        return false;
+    }
+
+    counts = parsedCounts;
+    return true;
+}
+
+/**
  * @brief Asks the host to invoke onMessageReceived on the middleware's listener with these bytes.
  *
  * The callback is oneway, so the reply says only that it was invoked; the case asserts the rest.
@@ -503,7 +602,8 @@ std::string toLowercaseHex(const unsigned char* bytes, std::size_t length)
 class RecordingProcessor : public MessageProcessor {
 public:
     /**
-     * @brief Starts every counter at zero and every captured value at -1, meaning unset.
+     * @brief Starts every counter at zero, the captured address text empty and every numeric
+     *        capture at -1, meaning unset.
      */
     RecordingProcessor()
         : imageViewOnCount(0)
@@ -817,7 +917,7 @@ private:
 };
 
 /**
- * @brief An open Connection whose listener is detached and closed on every exit path.
+ * @brief Holds an open Connection, which it closes on every exit path after detaching its listener.
  *
  * A fatal assertion returns from the body at once and the Connection destructor removes nothing, so
  * cleanup lives here; a failed close is reported through ADD_FAILURE() rather than thrown.
@@ -846,7 +946,7 @@ public:
      * @return None
      *
      * @post The Bus holds no pointer to this connection or to the listener that was registered
-     *       through this guard.
+     *       through this guard, or the run carries an ADD_FAILURE() recording that cleanup raised.
      */
     ~ScopedConnection()
     {
@@ -884,7 +984,7 @@ public:
      * @return None
      *
      * @post The Bus holds no pointer to this connection or to the listener that was registered
-     *       through this guard.
+     *       through this guard, or the run carries an ADD_FAILURE() recording that cleanup raised.
      */
     void release()
     {
@@ -1080,10 +1180,11 @@ protected:
     }
 
     /**
-     * @brief The resolved singleton viewed as each concrete back-end, nullptr for the one it is not.
+     * @brief The resolved singleton viewed as each concrete back-end, nullptr for the one it
+     *        is not.
      *
-     * Populated by SetUp and read by every case in this fixture, so no case calls
-     * Driver::getInstance() itself and none can observe a different object than the others.
+     * SetUp caches these views once for the selection cases to read; the stability case
+     * deliberately repeats Driver::getInstance() calls, then checks a fresh result against them.
      */
     DriverImpl *legacyBackEnd = nullptr;
     DriverAidlImpl *aidlBackEnd = nullptr;
@@ -1221,9 +1322,7 @@ protected:
 
 
 // ---------------------------------------------------------------------------------------------
-// Selection - which back-end resolved, that it is stable and the one requested - plus the one
-// harness guarantee that must hold on both arms.  All four run under every invocation.
-// ---------------------------------------------------------------------------------------------
+// Selection: resolved back-end, stable and as requested, plus a harness check (every invocation).
 
 /**
  * @brief The factory resolved to exactly one of the two back-ends.
@@ -1276,20 +1375,20 @@ TEST_F(DualPathSelectionTest, RepeatedGetInstanceCallsReturnTheSameObject)
 /**
  * @brief The back-end that resolved is the one CEC_TEST_AIDL_MODE asked for.
  *
- * Makes a green invocation D or E mean the intended arm ran.  The variable is read only to observe,
- * since tests/L2Tests/test_main.cpp acts on it before LibCCEC::init; an unset or empty value skips.
+ * Makes a green invocation D or E mean the intended arm ran.  The mode comes through the harness
+ * seam cecL2RequestedAidlMode(), since tests/L2Tests/test_main.cpp reads it and acts on it before
+ * LibCCEC::init; an unset or empty value skips.
  */
 TEST_F(DualPathSelectionTest, TheResolvedBackEndMatchesTheModeTheHarnessWasGiven)
 {
-    const char *const requestedMode = std::getenv("CEC_TEST_AIDL_MODE");
-    if ((requestedMode == nullptr) || (requestedMode[0] == '\0')) {
+    const std::string mode = cecL2RequestedAidlMode();
+    if (mode.empty()) {
         GTEST_SKIP() << "CEC_TEST_AIDL_MODE is unset or empty, so no back-end was requested and "
                         "there is no request for this case to hold the outcome against; the "
                         "harness treats that as the legacy arm, and the invocation matrix sets the "
                         "variable explicitly - absent for invocation D, remote for invocation E";
     }
 
-    const std::string mode(requestedMode);
     if (mode == "absent") {
         EXPECT_NE(legacyBackEnd, nullptr)
             << "CEC_TEST_AIDL_MODE=absent asked for the legacy back-end, but the factory resolved "
@@ -1424,9 +1523,7 @@ TEST_F(DualPathSelectionTest,
 
 
 // ---------------------------------------------------------------------------------------------
-// Flow A on the legacy back-end - inbound, from the HAL Rx callback to the typed process()
-// overload.  Invocation D.
-// ---------------------------------------------------------------------------------------------
+// Flow A, legacy back-end: inbound HAL Rx callback to the typed process() overload (invocation D).
 
 /**
  * @brief A directed <Image View On> injected at the legacy HAL arrives decoded, at the right
@@ -1519,8 +1616,8 @@ TEST_F(DualPathLegacyFlowTest, InboundBroadcastActiveSourceCarriesItsOperandsThr
  * @brief A frame addressed to a different logical address is filtered out before any decode happens.
  *
  * The negative control for the two inbound cases above: frame { 0x43, 0x36 } goes to address 3
- * while the Connection is on 0.  The wait runs its full bound, since a negative needs the same
- * chance to arrive as a positive.
+ * while the Connection is on 0.  The wait runs its full 1200-ms bound rather than checking at
+ * once, so its verdict is not decided by a race with the Bus reader thread.
  */
 TEST_F(DualPathLegacyFlowTest, InboundFrameForAnotherAddressIsFilteredBeforeDecodingOnTheLegacyBackEnd)
 {
@@ -1546,9 +1643,7 @@ TEST_F(DualPathLegacyFlowTest, InboundFrameForAnotherAddressIsFilteredBeforeDeco
 }
 
 // ---------------------------------------------------------------------------------------------
-// Flow B on the legacy back-end - outbound, from a typed message to the exact bytes the HAL is
-// handed.  Invocation D.
-// ---------------------------------------------------------------------------------------------
+// Flow B, legacy back-end: outbound typed message to the exact bytes the HAL gets (invocation D).
 
 /**
  * @brief <Image View On> encoded and sent reaches the legacy HAL as exactly the bytes CEC defines.
@@ -1571,8 +1666,8 @@ TEST_F(DualPathLegacyFlowTest, OutboundImageViewOnReachesTheLegacyHalAsExactByte
             SetArgPointee<3>(HDMI_CEC_IO_SUCCESS),
             Return(HDMI_CEC_IO_SUCCESS)));
 
-    // RAII, because every assertion below is fatal: an ASSERT_* returns from this body at once,
-    // and a trailing close() would then never run while the Bus still held this connection.
+    // RAII, because a fatal length/size ASSERT_* below returns from this body at once and would
+    // bypass a trailing close() while the Bus still held this connection.
     ScopedConnection scoped(LogicalAddress::PLAYBACK_DEVICE_1, "L2-Legacy-FlowB-ImageViewOn");
 
     CECFrame frame;
@@ -1655,19 +1750,17 @@ TEST_F(DualPathLegacyFlowTest, OutboundTransmitFailureFromTheLegacyHalSurfacesAs
 
 
 // ---------------------------------------------------------------------------------------------
-// Logical-address registration on the AIDL back-end, across the binder driver.  Invocation E.
-// ---------------------------------------------------------------------------------------------
+// Logical-address registration, AIDL back-end: across the binder driver (invocation E).
 
 /**
  * @brief Enabling the driver registered exactly one PLAYBACK_DEVICE address at the out-of-process
- *        fake, and LibCCEC reads that address back through the HAL.
+ *        fake, and LibCCEC reads it back with exactly one IHdmiCec.getLogicalAddresses transaction.
  *
- * Requires invocation E with the hosted fake at its defaults, under which every allocation poll is
- * answered not acknowledged, so the first PLAYBACK_DEVICE candidate (4) is free.
+ * Requires invocation E with the hosted fake at its defaults, so the first PLAYBACK_DEVICE candidate
+ * (4) is free; every other per-method transaction count must stay unchanged across the read.
  *
  * @pre LibCCEC::init has opened the AIDL back-end against the hosted fake.
- * @see DriverAidlImpl::open()
- * @see DriverAidlImpl::getLogicalAddress()
+ * @see DriverAidlImpl::open(), DriverAidlImpl::getLogicalAddress()
  */
 TEST_F(DualPathAidlFlowTest, EnablingTheDriverRegistersOneAddressThatLibCcecReadsBackThroughTheHal)
 {
@@ -1682,17 +1775,31 @@ TEST_F(DualPathAidlFlowTest, EnablingTheDriverRegistersOneAddressThatLibCcecRead
     EXPECT_EQ(registered[0], static_cast<long>(LogicalAddress::PLAYBACK_DEVICE_1))
         << "the registered address is not the first free PLAYBACK_DEVICE candidate";
 
+    std::map<std::string, long> callsBefore;
+    ASSERT_TRUE(askHostForCallCounts(callsBefore, detail)) << detail;
+
     int address = -1;
     ASSERT_NO_THROW({ address = LibCCEC::getInstance().getLogicalAddress(1); })
         << "LibCCEC::getLogicalAddress raised, so the HAL reported no registered address";
+
+    std::map<std::string, long> callsAfter;
+    ASSERT_TRUE(askHostForCallCounts(callsAfter, detail)) << detail;
+
     EXPECT_EQ(address, static_cast<int>(LogicalAddress::PLAYBACK_DEVICE_1))
         << "LibCCEC::getLogicalAddress did not return the address registered at enable";
+
+    for (std::map<std::string, long>::const_iterator before = callsBefore.begin(); before != callsBefore.end();
+         ++before) {
+        const long expected = before->second + ((before->first == "IHdmiCec.getLogicalAddresses") ? 1 : 0);
+        EXPECT_EQ(expected, callsAfter[before->first])
+            << "across LibCCEC::getLogicalAddress the fake's " << before->first << " count went from "
+            << before->second << " to " << callsAfter[before->first] << "; the read must cross the binder "
+               "driver as exactly one IHdmiCec.getLogicalAddresses transaction and nothing else";
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
-// Flow B on the AIDL back-end - outbound, across the binder driver to the hosted fake service,
-// observed through the host's pipe channel rather than over binder.  Invocation E.
-// ---------------------------------------------------------------------------------------------
+// Flow B, AIDL back-end: outbound across the binder driver to the hosted fake (invocation E).
 
 /**
  * @brief <Image View On> encoded and sent arrives at the out-of-process fake as exactly the bytes
@@ -1845,9 +1952,7 @@ TEST_F(DualPathAidlFlowTest, OutboundActiveSourceWithOperandsCrossesRealBinderIp
 }
 
 // ---------------------------------------------------------------------------------------------
-// Flow A on the AIDL back-end - inbound, from the hosted fake service to the typed process()
-// overload, triggered through the host's control channel.  Invocation E.
-// ---------------------------------------------------------------------------------------------
+// Flow A, AIDL back-end: inbound fake-service frame to the typed process() overload (invocation E).
 
 /**
  * @brief A frame delivered by the fake service arrives on a thread that is not the test's, and
@@ -2094,27 +2199,30 @@ TEST_F(DualPathAidlFlowTest, AFrameDeliveredWhileTheDriverIsNotOpenedIsRejectedB
         << listener.Notifications() << " arrived, so the closed-window frame was delivered too";
 }
 
+// ---------------------------------------------------------------------------------------------
+// Physical address, AIDL back-end: the fixed 1.0.0.0, no session or transmit call (invocation E).
+
 /**
- * @brief LibCCEC::getPhysicalAddress reports 1.0.0.0 on the remote AIDL back-end, and no session
- *        or transmit call crosses the binder driver to the fake service.
+ * @brief LibCCEC::getPhysicalAddress reports 1.0.0.0 on the remote AIDL back-end, and no IHdmiCec
+ *        or IHdmiCecController transaction crosses the binder driver to the fake service.
+ *
+ * All 16 per-method transaction counts the host reports must be unchanged across the query.
  *
  * @pre Invocation E; skips with its fixture when the legacy back-end resolved.
- *
  * @note 0x01000000 is 1.0.0.0 as both plugins decode it, one nibble per byte.
  */
 TEST_F(DualPathAidlFlowTest, LibCCECReportsTheFixedPhysicalAddressWithoutCrossingBinder)
 {
     std::string detail;
 
-    long sentBefore = -1;
-    long openBefore = -1;
-    long closeBefore = -1;
-    ASSERT_TRUE(askHostForSentCount(sentBefore, detail)) << detail;
-    ASSERT_TRUE(askHostForSessionCount("open-count", openBefore, detail)) << detail;
-    ASSERT_TRUE(askHostForSessionCount("close-count", closeBefore, detail)) << detail;
+    std::map<std::string, long> callsBefore;
+    ASSERT_TRUE(askHostForCallCounts(callsBefore, detail)) << detail;
 
     unsigned int physicalAddress = 0x0F0F0F0Fu;
     ASSERT_NO_THROW(LibCCEC::getInstance().getPhysicalAddress(&physicalAddress));
+
+    std::map<std::string, long> callsAfter;
+    ASSERT_TRUE(askHostForCallCounts(callsAfter, detail)) << detail;
 
     EXPECT_EQ(0x01000000u, physicalAddress)
         << "LibCCEC did not report the fixed 1.0.0.0 encoding 0x01000000 on the AIDL back-end";
@@ -2122,16 +2230,13 @@ TEST_F(DualPathAidlFlowTest, LibCCECReportsTheFixedPhysicalAddressWithoutCrossin
               PhysicalAddress((uint8_t)((physicalAddress >> 24) & 0xFF), (uint8_t)((physicalAddress >> 16) & 0xFF),
                               (uint8_t)((physicalAddress >> 8) & 0xFF), (uint8_t)(physicalAddress & 0xFF)).toString());
 
-    long sentAfter = -1;
-    long openAfter = -1;
-    long closeAfter = -1;
-    ASSERT_TRUE(askHostForSentCount(sentAfter, detail)) << detail;
-    ASSERT_TRUE(askHostForSessionCount("open-count", openAfter, detail)) << detail;
-    ASSERT_TRUE(askHostForSessionCount("close-count", closeAfter, detail)) << detail;
-
-    EXPECT_EQ(sentBefore, sentAfter) << "the physical-address query sent a message to the fake service";
-    EXPECT_EQ(openBefore, openAfter) << "the physical-address query opened a session at the fake service";
-    EXPECT_EQ(closeBefore, closeAfter) << "the physical-address query closed a session at the fake service";
+    for (std::map<std::string, long>::const_iterator before = callsBefore.begin(); before != callsBefore.end();
+         ++before) {
+        EXPECT_EQ(before->second, callsAfter[before->first])
+            << "across LibCCEC::getPhysicalAddress the fake's " << before->first << " count went from "
+            << before->second << " to " << callsAfter[before->first] << "; the physical-address query must "
+               "make no AIDL call";
+    }
 }
 
 /** @} */ // End of HDMI_CEC_L2_DUALPATH

@@ -508,18 +508,18 @@ dnl it, and no test suite reveals it - the legacy path stays green.  A missing U
 dnl is therefore a configuration error, and it fails here.
 dnl
 dnl The probe exercises the two things the source actually uses rather than mere
-dnl header presence: BINDER_CURRENT_PROTOCOL_VERSION, which is the constant the
-dnl preflight compares the driver against, and struct binder_write_read, which is
-dnl the structure it marshals.  A sysroot carrying a stub or truncated header would
-dnl pass a presence test and fail this one.
+dnl header presence: BINDER_CURRENT_PROTOCOL_VERSION and struct binder_write_read.
+dnl A sysroot carrying a stub or truncated header would pass a presence test and
+dnl fail this one.  <sys/types.h> comes first, as in every real includer: 5.15-era
+dnl UAPI headers (Ubuntu 22.04's) declare binder_transaction_data with pid_t, uid_t.
 AC_MSG_CHECKING([for the Binder kernel UAPI in linux/android/binder.h])
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+#include <sys/types.h>
 #undef VERSION
 #include <linux/android/binder.h>
 ]], [[
 struct binder_write_read exchange;
 struct binder_version reported;
-
 exchange.write_size = 0;
 exchange.write_buffer = (binder_uintptr_t)0;
 reported.protocol_version = BINDER_CURRENT_PROTOCOL_VERSION;

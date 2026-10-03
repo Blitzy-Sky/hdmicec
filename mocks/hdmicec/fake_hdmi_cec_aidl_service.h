@@ -92,10 +92,11 @@
 /**
  * @brief Test-scope fake of the com.rdk.hal.hdmicec IHdmiCecController AIDL interface.
  *
- * The controller FakeHdmiCecService::open() hands out.  Each method counts the call and captures
- * its arguments, and its answer is set through the setters below, each with a deterministic default.
- * Its one piece of CEC reasoning answers allocation polls as not acknowledged unless
- * setLogicalAddressOccupied() marks the address taken, and it tracks the addresses registered through it.
+ * The controller FakeHdmiCecService::open() hands out: its add, remove and send methods count and
+ * capture calls, validate and track registrations, and answer from setters with fixed defaults.
+ * An allocation poll bypasses getSendMessageCallCount(), getLastSentMessage() and
+ * setSendMessageResult(): it is recorded in getAllocationPolls() and answers ACK_STATE_1 (free)
+ * unless setAllocationPollResult() or setLogicalAddressOccupied() says otherwise.
  *
  * @warning Test scope only - never reference this class from a production source list.
  * @see FakeHdmiCecService
@@ -103,58 +104,44 @@
 class FakeHdmiCecController : public ::com::rdk::hal::hdmicec::BnHdmiCecController {
 public:
     /**
-     * @brief Adds logical addresses on the fake HAL.
+     * @brief Adds logical addresses on the fake HAL, validating them as IHdmiCecController does.
      *
      * @param [in]  logicalAddresses          - Addresses the client marshalled, captured verbatim
-     * @param [out] _aidl_return              - Receives the canned result; untouched on a non-ok
-     *                                          status or a null pointer
+     * @param [out] _aidl_return              - By default true only if all are in 0..14 and unregistered
      *
-     * @return ::android::binder::Status              - The canned binder status, returned verbatim
-     * @retval ok                                     - Default, or whatever ok status was installed
-     *
-     * @post getAddLogicalAddressesCallCount() has advanced and getLastAddedLogicalAddresses()
-     *       reports this call's vector, whatever the outcome; an ok status with a true result also
-     *       registers the addresses.
-     * @see setAddLogicalAddressesResult(), setAddLogicalAddressesBinderStatus(),
-     *      getRegisteredLogicalAddresses()
+     * @return ::android::binder::Status              - The canned binder status; non-ok writes nothing
+     * @post Only an ok status with a true result adds them to getRegisteredLogicalAddresses().
+     * @see setAddLogicalAddressesResult(), setAddLogicalAddressesBinderStatus()
      */
     ::android::binder::Status addLogicalAddresses(const ::std::vector<int32_t>& logicalAddresses,
                                                  bool* _aidl_return) override;
 
     /**
-     * @brief Removes logical addresses on the fake HAL.
+     * @brief Removes logical addresses on the fake HAL, validating them as IHdmiCecController does.
      *
      * @param [in]  logicalAddresses          - Addresses the client marshalled, captured verbatim
-     * @param [out] _aidl_return              - Receives the canned result; untouched on a non-ok
-     *                                          status or a null pointer
+     * @param [out] _aidl_return              - Receives the result, by default true only when every
+     *                                          address is in 0..14 and currently registered
      *
-     * @return ::android::binder::Status              - The canned binder status, returned verbatim
-     * @retval ok                                     - Default, or whatever ok status was installed
+     * @return ::android::binder::Status              - The canned binder status; a non-ok one leaves
+     *                                                  the out-parameter and registrations untouched
      *
-     * @post getRemoveLogicalAddressesCallCount() has advanced and getLastRemovedLogicalAddresses()
-     *       reports this call's vector, whatever the outcome; an ok status with a true result also
-     *       deregisters the addresses.
+     * @post The call count and capture have advanced; only a true result deregisters the addresses.
      * @see setRemoveLogicalAddressesResult(), setRemoveLogicalAddressesBinderStatus()
      */
     ::android::binder::Status removeLogicalAddresses(const ::std::vector<int32_t>& logicalAddresses,
                                                     bool* _aidl_return) override;
 
     /**
-     * @brief Transmits a CEC message through the fake HAL.
+     * @brief Transmits a CEC frame through the fake HAL, answering one-byte self-addressed polls itself.
      *
-     * An allocation poll (a one-byte frame whose initiator equals its destination) is recorded only
-     * through getAllocationPolls() and answered from the occupancy setters, ACK_STATE_1 (free) by default.
+     * @param [in]  message                   - Raw frame; a poll is recorded in getAllocationPolls(), any
+     *                                          other frame is captured whole for getLastSentMessage()
+     * @param [out] _aidl_return              - Receives the poll answer or the canned send status;
+     *                                          untouched on a non-ok status
      *
-     * @param [in]  message                   - Raw CEC frame the client marshalled, captured verbatim
-     * @param [out] _aidl_return              - Receives the reported SendMessageStatus; untouched on
-     *                                          a non-ok status or a null pointer
-     *
-     * @return ::android::binder::Status              - Ok for an allocation poll; otherwise the
-     *                                                  canned binder status, returned verbatim
-     *
-     * @post For any other frame getSendMessageCallCount() has advanced and getLastSentMessage()
-     *       reports it.  No length limit applies here; a frame the adapter rejects leaves both unchanged.
-     * @see setSendMessageResult(), setSendMessageBinderStatus(), getAllocationPolls()
+     * @return ::android::binder::Status              - The canned binder status, polls included
+     * @see setSendMessageResult(), setAllocationPollResult(), getTotalSendMessageCallCount()
      */
     ::android::binder::Status sendMessage(const ::std::vector<uint8_t>& message,
                                           ::com::rdk::hal::hdmicec::SendMessageStatus* _aidl_return) override;
@@ -183,28 +170,55 @@ public:
      */
     std::string getInterfaceHash() override;
 
+    /**
+     * @brief Counts one incoming binder transaction by code, then dispatches it as generated.
+     *
+     * @param [in]  code                      - Transaction code, TRANSACTION_* for an interface method
+     * @param [in]  data                      - Marshalled request, passed through unread
+     * @param [out] reply                     - Reply parcel the generated dispatch writes
+     * @param [in]  flags                     - Transaction flags, passed through
+     *
+     * @return ::android::status_t                    - What BnHdmiCecController::onTransact() returns
+     *
+     * @post getTransactionCounts() reports one more transaction under code.
+     * @see getTransactionCounts()
+     */
+    ::android::status_t onTransact(uint32_t code, const ::android::Parcel& data, ::android::Parcel* reply,
+                                   uint32_t flags) override;
+
+    /**
+     * @brief Returns the incoming binder transactions by code since construction or reset().
+     *
+     * @return ::std::map<uint32_t, int32_t>          - Count per code; a code never received is absent
+     *
+     * @note Transactions BBinder::transact() answers itself, PING_TRANSACTION among them, are never
+     *       counted, and local (in-process) dispatch bypasses onTransact(), so nothing is counted there.
+     * @see onTransact(), reset()
+     */
+    ::std::map<uint32_t, int32_t> getTransactionCounts() const;
+
     // Canned responses for test access
 
     /**
-     * @brief Selects the boolean addLogicalAddresses() reports.
+     * @brief Forces the boolean addLogicalAddresses() reports, in place of its contract validation.
      *
      * Reaches the address-unavailable arm, where the adapter must raise AddressNotAvailableException.
      *
      * @param [in] result                     - Value addLogicalAddresses() writes to its out-parameter
      *
-     * @post Default is true, so an unconfigured fake reports a successful address acquisition.
+     * @post false registers nothing and true registers every address not yet registered, until reset().
      * @see addLogicalAddresses()
      */
     void setAddLogicalAddressesResult(bool result);
 
     /**
-     * @brief Selects the boolean removeLogicalAddresses() reports.
+     * @brief Forces the boolean removeLogicalAddresses() reports, in place of its contract validation.
      *
      * Reaches the ignored-failure arm, where the adapter must log a false result and raise nothing.
      *
      * @param [in] result                     - Value removeLogicalAddresses() writes to its out-parameter
      *
-     * @post Default is true.
+     * @post false deregisters nothing and true deregisters every address given, until reset().
      * @see removeLogicalAddresses()
      */
     void setRemoveLogicalAddressesResult(bool result);
@@ -224,14 +238,14 @@ public:
     void setAddLogicalAddressesDelayMs(int32_t delayMs);
 
     /**
-     * @brief Selects the SendMessageStatus sendMessage() reports.
+     * @brief Selects the SendMessageStatus sendMessage() reports for an application frame.
      *
      * Reaches every arm of the adapter's status translation, whose sense inverts for broadcasts.
      *
-     * @param [in] status                     - Value sendMessage() writes to its out-parameter
+     * @param [in] status                     - Value sendMessage() writes for every non-poll frame
      *
-     * @post Default is ACK_STATE_0, which for a directed message is the acknowledged case.
-     * @see sendMessage()
+     * @post Default is ACK_STATE_0, acknowledged for a directed frame; polls default to ACK_STATE_1.
+     * @see sendMessage(), setAllocationPollResult()
      */
     void setSendMessageResult(::com::rdk::hal::hdmicec::SendMessageStatus status);
 
@@ -260,9 +274,10 @@ public:
     void setRemoveLogicalAddressesBinderStatus(const ::android::binder::Status& status);
 
     /**
-     * @brief Installs the binder status sendMessage() returns.
+     * @brief Installs the binder status sendMessage() returns, allocation polls included.
      *
-     * Reaches the transmit transport-failure arm: IOException whatever SendMessageStatus is set.
+     * Reaches the transmit transport-failure arm (IOException whatever SendMessageStatus is set)
+     * and the failed-poll arm of the middleware's allocation.
      *
      * @param [in] status                     - Status to return, ok or non-ok
      *
@@ -292,7 +307,7 @@ public:
      * @param [in] address                    - Logical address whose allocation poll is answered
      * @param [in] status                     - Send status that poll reports
      *
-     * @post Cleared by reset().
+     * @post That poll reports @p status, not the default ACK_STATE_1 (free), until reset().
      *
      * @see sendMessage(), setLogicalAddressOccupied()
      */
@@ -349,14 +364,14 @@ public:
     ::std::vector<int32_t> getLastRemovedLogicalAddresses() const;
 
     /**
-     * @brief Returns the message bytes the last sendMessage() call carried.
+     * @brief Returns the last application frame sendMessage() was given, allocation polls excluded.
      *
      * The assertion target for frame marshalling and the length boundary: a frame at the limit
      * arrives byte for byte, and an over-length frame never arrives, truncated or otherwise.
      *
-     * @return ::std::vector<uint8_t>                 - The captured frame, empty if never called
+     * @return ::std::vector<uint8_t>                 - The captured frame, empty when none was captured
      *
-     * @see sendMessage(), getSendMessageCallCount()
+     * @see sendMessage(), getSendMessageCallCount(), getAllocationPolls()
      */
     ::std::vector<uint8_t> getLastSentMessage() const;
 
@@ -379,15 +394,24 @@ public:
     int32_t getRemoveLogicalAddressesCallCount() const;
 
     /**
-     * @brief Returns how many times sendMessage() has been called.
+     * @brief Returns how many application frames sendMessage() has been given, allocation polls excluded.
      *
      * A frame the adapter rejects before the HAL call leaves it unchanged, unlike a failed transmit.
      *
-     * @return int32_t                                - Call count since construction or the last reset()
+     * @return int32_t                                - Frame count since construction or the last reset()
      *
-     * @see sendMessage(), reset()
+     * @see sendMessage(), getTotalSendMessageCallCount(), getAllocationPolls()
      */
     int32_t getSendMessageCallCount() const;
+
+    /**
+     * @brief Returns how many times sendMessage() has been called, allocation polls included.
+     *
+     * @return int32_t                                - Call count since construction or the last reset()
+     *
+     * @see sendMessage(), getSendMessageCallCount(), getAllocationPolls()
+     */
+    int32_t getTotalSendMessageCallCount() const;
 
     /**
      * @brief Returns the addresses allocation polls asked about, in the order they arrived.
@@ -422,8 +446,8 @@ public:
      *
      * Called from fixture set-up, so the one long-lived registered fake leaks nothing between cases.
      *
-     * @post Canned responses hold their documented defaults; captures, allocation-poll answers and
-     *       registrations are empty; counters are zero.
+     * @post Canned responses hold their documented defaults and no add or remove result is forced;
+     *       captures, allocation-poll answers and registrations are empty; counters are zero.
      * @see FakeHdmiCecService::reset()
      */
     void reset();
@@ -432,26 +456,26 @@ private:
     /** @brief Guards every canned response and capture below; held only for short sections. */
     mutable ::std::mutex mutex;
 
-    /** @brief Canned addLogicalAddresses() result.  Default: address acquired. */
-    bool addLogicalAddressesResult = true;
+    /** @brief Forced addLogicalAddresses() result; ::std::nullopt (default) validates each request. */
+    ::std::optional<bool> addLogicalAddressesResult;
 
-    /** @brief Canned removeLogicalAddresses() result.  Default: address removed. */
-    bool removeLogicalAddressesResult = true;
+    /** @brief Forced removeLogicalAddresses() result; ::std::nullopt (default) validates each request. */
+    ::std::optional<bool> removeLogicalAddressesResult;
 
-    /** @brief Milliseconds addLogicalAddresses() sleeps, unlocked, before answering.  Default: 0. */
+    /** @brief Milliseconds addLogicalAddresses() sleeps, unlocked, before answering (default 0). */
     int32_t addLogicalAddressesDelayMs = 0;
 
-    /** @brief Canned sendMessage() status.  Default: ACK_STATE_0, acknowledged for a directed frame. */
+    /** @brief Canned application-frame send status (default ACK_STATE_0, acknowledged when directed). */
     ::com::rdk::hal::hdmicec::SendMessageStatus sendMessageResult =
         ::com::rdk::hal::hdmicec::SendMessageStatus::ACK_STATE_0;
 
-    /** @brief Canned addLogicalAddresses() binder status.  Default: ok. */
+    /** @brief Canned addLogicalAddresses() binder status (default ok). */
     ::android::binder::Status addLogicalAddressesBinderStatus;
 
-    /** @brief Canned removeLogicalAddresses() binder status.  Default: ok. */
+    /** @brief Canned removeLogicalAddresses() binder status (default ok). */
     ::android::binder::Status removeLogicalAddressesBinderStatus;
 
-    /** @brief Canned sendMessage() binder status.  Default: ok. */
+    /** @brief Canned sendMessage() binder status, allocation polls included (default ok). */
     ::android::binder::Status sendMessageBinderStatus;
 
     ::std::vector<int32_t> lastAddedLogicalAddresses;
@@ -462,19 +486,25 @@ private:
     int32_t removeLogicalAddressesCallCount = 0;
     int32_t sendMessageCallCount = 0;
 
+    /** @brief Count of every sendMessage() call, allocation polls included. */
+    int32_t sendMessageTotalCallCount = 0;
+
     /** @brief Allocation-poll answers by address; an absent address answers ACK_STATE_1 (free). */
     ::std::map<int32_t, ::com::rdk::hal::hdmicec::SendMessageStatus> allocationPollResults;
 
     /** @brief Addresses allocation polls asked about, in arrival order. */
     ::std::vector<int32_t> allocationPolls;
 
+    /** @brief Incoming binder transactions by code, counted by onTransact(). */
+    ::std::map<uint32_t, int32_t> transactionCounts;
+
     /** @brief Addresses registered through this controller and not since removed. */
     ::std::vector<int32_t> registeredLogicalAddresses;
 
-    /** @brief Interface version getInterfaceVersion() reports.  Default: the frozen version. */
+    /** @brief Interface version getInterfaceVersion() reports (default the frozen version). */
     int32_t interfaceVersionResult = ::com::rdk::hal::hdmicec::IHdmiCecController::VERSION;
 
-    /** @brief Interface hash getInterfaceHash() reports.  Default: the frozen hash. */
+    /** @brief Interface hash getInterfaceHash() reports (default the frozen hash). */
     ::std::string interfaceHashResult = ::com::rdk::hal::hdmicec::IHdmiCecController::HASHVALUE;
 };
 
@@ -491,14 +521,7 @@ private:
  */
 class FakeHdmiCecService : public ::com::rdk::hal::hdmicec::BnHdmiCec {
 public:
-    /**
-     * @brief The one state getState() reports, fixed at STARTED.
-     *
-     * Fixed rather than settable because the middleware never calls getState().  This two-valued
-     * AIDL enum is unrelated to the middleware's own closed, closing and opened states.
-     *
-     * @see getState()
-     */
+    /** @brief The one state getState() reports, fixed at State::STARTED. */
     static constexpr ::com::rdk::hal::hdmicec::State DEFAULT_STATE =
         ::com::rdk::hal::hdmicec::State::STARTED;
 
@@ -646,6 +669,33 @@ public:
      * @see setInterfaceHash(), reset()
      */
     std::string getInterfaceHash() override;
+
+    /**
+     * @brief Counts one incoming binder transaction by code, then dispatches it as generated.
+     *
+     * @param [in]  code                      - Transaction code, TRANSACTION_* for an interface method
+     * @param [in]  data                      - Marshalled request, passed through unread
+     * @param [out] reply                     - Reply parcel the generated dispatch writes
+     * @param [in]  flags                     - Transaction flags, passed through
+     *
+     * @return ::android::status_t                    - What BnHdmiCec::onTransact() returns
+     *
+     * @post getTransactionCounts() reports one more transaction under code.
+     * @see getTransactionCounts()
+     */
+    ::android::status_t onTransact(uint32_t code, const ::android::Parcel& data, ::android::Parcel* reply,
+                                   uint32_t flags) override;
+
+    /**
+     * @brief Returns the incoming binder transactions by code since construction or reset().
+     *
+     * @return ::std::map<uint32_t, int32_t>          - Count per code; a code never received is absent
+     *
+     * @note Transactions BBinder::transact() answers itself, PING_TRANSACTION among them, are never
+     *       counted, and local (in-process) dispatch bypasses onTransact(), so nothing is counted there.
+     * @see onTransact(), reset(), FakeHdmiCecController::getTransactionCounts()
+     */
+    ::std::map<uint32_t, int32_t> getTransactionCounts() const;
 
     // Canned responses for test access
 
@@ -886,8 +936,9 @@ public:
      * @retval false                                  - No listener captured, so nothing was delivered
      *
      * @pre open() must have captured a listener, otherwise this is a silent no-op.
-     * @warning For a remote (oneway) listener true means only that the transaction was accepted, not
-     *          that the callback ran.  No lock is held across the call, so the callback may re-enter.
+     * @warning true means only that the captured listener was invoked, whatever Status it returned,
+     *          not that a transport accepted the call or the callback completed.  No lock is held
+     *          across the call, so the callback may re-enter.
      * @see open(), getListener()
      */
     bool fireOnMessageReceived(const ::std::vector<uint8_t>& message);
@@ -903,7 +954,7 @@ public:
      * @retval false                                  - No listener captured, so nothing was delivered
      *
      * @pre open() must have captured a listener, otherwise this is a silent no-op.
-     * @warning Delivery and locking are as for fireOnMessageReceived().
+     * @warning What true means, and locking, are as for fireOnMessageReceived().
      * @note Used in process only; the separate-process host exposes no command for this trigger.
      */
     bool fireOnStateChanged(::com::rdk::hal::hdmicec::State oldState,
@@ -920,7 +971,7 @@ public:
      * @retval false                                  - No listener captured, so nothing was delivered
      *
      * @pre open() must have captured a listener, otherwise this is a silent no-op.
-     * @warning Delivery and locking are as for fireOnMessageReceived().
+     * @warning What true means, and locking, are as for fireOnMessageReceived().
      * @note Used in process only, exactly as fireOnStateChanged().
      */
     bool fireOnMessageSent(const ::std::vector<uint8_t>& message,
@@ -954,31 +1005,34 @@ private:
     /** @brief Guards every canned response and capture below; never held while a callback runs. */
     mutable ::std::mutex mutex;
 
+    /** @brief Incoming binder transactions by code, counted by onTransact(). */
+    ::std::map<uint32_t, int32_t> transactionCounts;
+
     /** @brief The controller handed out by open(), created with this service and never replaced. */
     ::android::sp<FakeHdmiCecController> controller = ::android::sp<FakeHdmiCecController>::make();
 
-    /** @brief Event listener captured by open().  Default: none, so the triggers are no-ops. */
+    /** @brief Event listener captured by open() (default none, so the triggers are no-ops). */
     ::android::sp<::com::rdk::hal::hdmicec::IHdmiCecEventListener> listener;
 
-    /** @brief Controller captured by close().  Default: none. */
+    /** @brief Controller captured by close() (default none). */
     ::android::sp<::com::rdk::hal::hdmicec::IHdmiCecController> lastClosedController;
 
-    /** @brief Canned getLogicalAddresses() result.  Default: none, so the registrations are reported. */
+    /** @brief Canned getLogicalAddresses() result (default none, so the registrations are reported). */
     ::std::optional<::std::vector<int32_t>> logicalAddressesResult;
 
-    /** @brief Canned close() result.  Default: session closed. */
+    /** @brief Canned close() result (default true, session closed). */
     bool closeResult = true;
 
-    /** @brief Whether open() reports a null controller.  Default: false, a valid controller. */
+    /** @brief Whether open() reports a null controller (default false, a valid controller). */
     bool openReturnsNullController = false;
 
-    /** @brief Canned open() binder status.  Default: ok. */
+    /** @brief Canned open() binder status (default ok). */
     ::android::binder::Status openBinderStatus;
 
-    /** @brief Canned close() binder status.  Default: ok. */
+    /** @brief Canned close() binder status (default ok). */
     ::android::binder::Status closeBinderStatus;
 
-    /** @brief Canned getLogicalAddresses() binder status.  Default: ok. */
+    /** @brief Canned getLogicalAddresses() binder status (default ok). */
     ::android::binder::Status getLogicalAddressesBinderStatus;
 
     int32_t openCallCount = 0;
@@ -997,13 +1051,13 @@ private:
     /** @brief unregisterEventListener() invocation count; expected to stay zero. */
     int32_t unregisterEventListenerCallCount = 0;
 
-    /** @brief Interface version getInterfaceVersion() reports.  Default: the frozen version. */
+    /** @brief Interface version getInterfaceVersion() reports (default the frozen version). */
     int32_t interfaceVersionResult = ::com::rdk::hal::hdmicec::IHdmiCec::VERSION;
 
-    /** @brief Interface hash getInterfaceHash() reports.  Default: the frozen hash. */
+    /** @brief Interface hash getInterfaceHash() reports (default the frozen hash). */
     ::std::string interfaceHashResult = ::com::rdk::hal::hdmicec::IHdmiCec::HASHVALUE;
 
-    /** @brief The fake published for this process, or nullptr.  Cleared by the destructor. */
+    /** @brief The fake published for this process, or nullptr; cleared when that fake is destroyed. */
     static FakeHdmiCecService* instance;
 };
 

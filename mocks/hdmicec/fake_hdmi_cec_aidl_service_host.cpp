@@ -60,6 +60,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <map>
 #include <poll.h>
 #include <string>
 #include <time.h>
@@ -138,7 +139,14 @@ static std::string renderUntrustedValue(const char *value, std::size_t length)
     return rendered;
 }
 
-/** @brief renderUntrustedValue() for a std::string. @see renderUntrustedValue(const char *, std::size_t) */
+/**
+ * @brief renderUntrustedValue() for a std::string.
+ *
+ * @param [in] value                      - String to render; any content is acceptable
+ *
+ * @return std::string                            - The rendering: quoted, single-line, bounded
+ * @see renderUntrustedValue(const char *, std::size_t)
+ */
 static inline std::string renderUntrustedValue(const std::string &value)
 {
     return renderUntrustedValue(value.data(), value.size());
@@ -149,6 +157,9 @@ static inline std::string renderUntrustedValue(const std::string &value)
  *
  * A null pointer renders as the undelimited `<unset>`, so "unset" and "empty" stay distinct.
  *
+ * @param [in] value                      - C string to render, or null
+ *
+ * @return std::string                            - `<unset>` for null, else the quoted rendering
  * @see renderUntrustedValue(const char *, std::size_t)
  */
 static inline std::string renderUntrustedValue(const char *value)
@@ -304,10 +315,10 @@ static const int EXIT_CONTROL_CHANNEL_FAILED = 9;
 /** @brief Signal number that asked this program to stop, or 0 while none has. */
 static volatile std::sig_atomic_t g_shutdownSignalNumber = 0;
 
-/** @brief Write end of the self-pipe, or -1 before it exists.  Written by main, read by the handler. */
+/** @brief Write end of the self-pipe, or -1 before it exists; written by main, read by the handler. */
 static volatile std::sig_atomic_t g_shutdownPipeWriteFd = -1;
 
-/** @brief Read end of the self-pipe, or -1 before it exists.  Never touched by the handler. */
+/** @brief Read end of the self-pipe, or -1 before it exists; never touched by the handler. */
 static int g_shutdownPipeReadFd = -1;
 
 extern "C" {
@@ -786,19 +797,12 @@ enum class ReplyOutcome {
     /** @brief The parent closed its end of the observation pipe; the session ends cleanly. */
     PARENT_GONE,
 
-    /**
-     * @brief The reply could not be delivered and the parent has not gone away.
-     *
-     * The caller exits EXIT_CONTROL_CHANNEL_FAILED rather than continue a desynchronised session.
-     */
+    /** @brief Undelivered while the parent is still there; the caller exits EXIT_CONTROL_CHANNEL_FAILED. */
     FAILED
 };
 
 /**
  * @brief Writes exactly one reply line to the observation descriptor within one whole-call deadline.
- *
- * Appends the newline, refuses lines over MAX_REPLY_LINE_LENGTH, and writes nonblocking against one
- * CLOCK_MONOTONIC deadline, retrying EINTR and EAGAIN; original flags are restored on every path.
  *
  * @param [in] observeFd                  - Observation descriptor to write to
  * @param [in] reply                      - Reply text without terminator; begins "OK " or "ERR "
@@ -1072,11 +1076,62 @@ static std::vector<std::string> tokenizeCommandLine(const std::string &line)
     return tokens;
 }
 
+/** @brief One named AIDL method of a `calls` reply: its field name and its transaction code. */
+struct TransactionMethod {
+    /** @brief Method name as the reply field spells it, e.g. "getLogicalAddresses". */
+    const char *name;
+
+    /** @brief Generated TRANSACTION_* code the method is dispatched under. */
+    uint32_t code;
+};
+
+/**
+ * @brief Renders one interface's transaction counts as the `calls` reply fields.
+ *
+ * @param [in] interfaceName              - Field prefix, "IHdmiCec" or "IHdmiCecController"
+ * @param [in] methods                    - The interface's named methods, in reply order
+ * @param [in] counts                     - Transactions by code, from the fake's getTransactionCounts()
+ *
+ * @return std::string                            - " <interface>.<method>=<n>" per method, then
+ *                                                  " <interface>.other=<n>" summing every other code
+ * @see handleControlCommand()
+ */
+static std::string renderTransactionCounts(const std::string &interfaceName,
+                                           const std::vector<TransactionMethod> &methods,
+                                           const std::map<uint32_t, int32_t> &counts)
+{
+    std::string fields;
+    long long other = 0;
+
+    for (std::map<uint32_t, int32_t>::const_iterator entry = counts.begin(); entry != counts.end();
+         ++entry) {
+        bool named = false;
+
+        for (size_t index = 0; index < methods.size(); ++index) {
+            if (methods[index].code == entry->first) {
+                named = true;
+                break;
+            }
+        }
+
+        if (!named) {
+            other += entry->second;
+        }
+    }
+
+    for (size_t index = 0; index < methods.size(); ++index) {
+        const std::map<uint32_t, int32_t>::const_iterator found = counts.find(methods[index].code);
+        const int32_t count = (found != counts.end()) ? found->second : 0;
+
+        fields += " " + interfaceName + "." + methods[index].name + "=" + std::to_string(count);
+    }
+
+    fields += " " + interfaceName + ".other=" + std::to_string(other);
+    return fields;
+}
+
 /**
  * @brief Executes one command line against the hosted fake and composes its reply.
- *
- * Verbs: `ping`, `deliver <hex>`, `sent-count`, `last-sent`, `open-count`, `close-count`,
- * `listener`, `registered` and `shutdown`; any other is answered `ERR unknown-command <verb>`.
  *
  * @param [in]  line                      - Command line, stripped of its terminator and trailing CR
  * @param [in]  fake                      - Hosted fake the command acts on
@@ -1200,6 +1255,50 @@ static bool handleControlCommand(const std::string &line, FakeHdmiCecService &fa
         return true;
     }
 
+    if (verb == "calls") {
+        if (argumentCount != 0) {
+            reply = "ERR bad-args calls";
+            return true;
+        }
+
+        const ::android::sp<FakeHdmiCecController> controller = fake.getController();
+        if (controller == nullptr) {
+            reply = "ERR no-controller";
+            return true;
+        }
+
+        /** @brief Generated IHdmiCec server base, source of its method TRANSACTION_* codes. */
+        typedef ::com::rdk::hal::hdmicec::BnHdmiCec Service;
+        /** @brief Generated IHdmiCecController server base, source of its method TRANSACTION_* codes. */
+        typedef ::com::rdk::hal::hdmicec::BnHdmiCecController Controller;
+
+        static const std::vector<TransactionMethod> SERVICE_METHODS = {
+            { "getState", Service::TRANSACTION_getState },
+            { "getProperty", Service::TRANSACTION_getProperty },
+            { "getLogicalAddresses", Service::TRANSACTION_getLogicalAddresses },
+            { "open", Service::TRANSACTION_open },
+            { "close", Service::TRANSACTION_close },
+            { "registerEventListener", Service::TRANSACTION_registerEventListener },
+            { "unregisterEventListener", Service::TRANSACTION_unregisterEventListener },
+            { "getInterfaceVersion", Service::TRANSACTION_getInterfaceVersion },
+            { "getInterfaceHash", Service::TRANSACTION_getInterfaceHash },
+        };
+
+        static const std::vector<TransactionMethod> CONTROLLER_METHODS = {
+            { "addLogicalAddresses", Controller::TRANSACTION_addLogicalAddresses },
+            { "removeLogicalAddresses", Controller::TRANSACTION_removeLogicalAddresses },
+            { "sendMessage", Controller::TRANSACTION_sendMessage },
+            { "getInterfaceVersion", Controller::TRANSACTION_getInterfaceVersion },
+            { "getInterfaceHash", Controller::TRANSACTION_getInterfaceHash },
+        };
+
+        reply = "OK calls" +
+                renderTransactionCounts("IHdmiCec", SERVICE_METHODS, fake.getTransactionCounts()) +
+                renderTransactionCounts("IHdmiCecController", CONTROLLER_METHODS,
+                                        controller->getTransactionCounts());
+        return true;
+    }
+
     if (verb == "shutdown") {
         if (argumentCount != 0) {
             reply = "ERR bad-args shutdown";
@@ -1216,9 +1315,6 @@ static bool handleControlCommand(const std::string &line, FakeHdmiCecService &fa
 
 /**
  * @brief Serves the control and observation channel until the session ends.
- *
- * Polls the shutdown self-pipe and the control descriptor together so neither starves the other,
- * frames commands on newlines, and answers an overlong line `ERR command-too-long` unparsed.
  *
  * @param [in]  controlFd                 - Descriptor commands are read from
  * @param [in]  observeFd                 - Descriptor replies are written to
@@ -1376,8 +1472,8 @@ static int serveControlChannel(int controlFd, int observeFd, FakeHdmiCecService 
 /**
  * @brief Hosts the fake com.rdk.hal.hdmicec AIDL service until asked to stop.
  *
- * Runs the startup sequence in order; every failure traces, returns its own code and writes no
- * readiness line.  Configuration comes from the environment only.
+ * Each startup failure traces and returns its own code with no readiness line written; serving
+ * and shutdown-wait failures return after it.  Configuration comes from the environment only.
  *
  * @param [in] argc                       - Argument count.  Unused
  * @param [in] argv                       - Argument vector.  Unused
