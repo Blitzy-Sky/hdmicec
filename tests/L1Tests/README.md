@@ -408,7 +408,7 @@ tests/L1Tests/
 ├── .lcovrc_l1            # lcov configuration with branch collection enabled
 ├── test_main.cpp         # Test runner entry point; installs the single global
 │                         #   testing::Environment that creates the driver mock
-├── ccec/                 # CCEC library tests (611: 456 pre-existing + 155 new)
+├── ccec/                 # CCEC library tests (616: 456 pre-existing + 160 new)
 │   ├── test_CECFrame.cpp        # 31 tests - frame construction, accessors, boundary sizes
 │   ├── test_Connection.cpp      # 66 tests - listener registration, address filtering,
 │   │                            #            plus the 6 cross-layer flow cases
@@ -422,7 +422,7 @@ tests/L1Tests/
 │   ├── test_Driver.cpp          # 22 tests - open/close, write, address management
 │   ├── test_DriverImpl_Async.cpp# 26 tests - async transmit, invalid state, error paths
 │   ├── test_Util.cpp            # 12 tests - log-level configuration, buffer dump
-│   └── test_DriverAidl.cpp      # 155 tests in 7 fixtures - back-end selection, the
+│   └── test_DriverAidl.cpp      # 160 tests in 7 fixtures - back-end selection, the
 │                                #            compatibility rule, the binder preflight,
 │                                #            single-element array marshalling, status
 │                                #            translation, the frame-size boundary, the
@@ -448,8 +448,8 @@ they cannot cross), which is why 18 fixtures come from 15 translation units.
 
 **That figure is the pre-existing inventory, and it is kept as it was measured.**  The 483 and the
 18 are the suite as it stood before `ccec/test_DriverAidl.cpp` was added; every one of those cases
-is still present, unmodified.  The binary now registers **638 cases in 25 fixtures — 483 + the
-contract suite's 155 in 7 fixtures**, measured the same way, with
+is still present, unmodified.  The binary now registers **643 cases in 25 fixtures — 483 + the
+contract suite's 160 in 7 fixtures**, measured the same way, with
 `./run_L1Tests --gtest_list_tests`.  Where a group total in the tree above has moved it names both
 parts rather than presenting a new sum as though it had always been one, and nowhere below is an
 older figure silently adjusted upwards to match: where this file quotes 483 it means the
@@ -511,14 +511,14 @@ can never overwrite an earlier one's artifact:
 
 | Inv | Binary | `CEC_TEST_AIDL_MODE` | Expected selection | What it runs |
 | --- | --- | --- | --- | --- |
-| A | `run_L1Tests` | `absent` | Legacy | Everything in the binary except the two AIDL-only contract fixtures — the whole pre-existing 483 plus 111 contract cases, **measured green at 594 from 23 suites** |
-| B | `run_L1Tests` | `compatible` | AIDL (local interface) | The contract suite less its legacy-only fixtures (146 cases), plus the 308 back-end-neutral cases — **selects 454 from 15 suites on this tree, and measured green at 454 of 454** |
-| C | `run_L1Tests` | `incompatible` | Legacy, rejection logged | The three back-end-independent contract fixtures (102 cases), plus the same 308 — **selects 410 from 13 suites on this tree, and measured green at 410 of 410** |
+| A | `run_L1Tests` | `absent` | Legacy | Everything in the binary except the two AIDL-only contract fixtures — the whole pre-existing 483 plus 116 contract cases, **measured green at 599 from 23 suites** |
+| B | `run_L1Tests` | `compatible` | AIDL (local interface) | The contract suite less its legacy-only fixtures (151 cases), plus the 308 back-end-neutral cases — **selects 459 from 15 suites on this tree, and measured green at 459 of 459** |
+| C | `run_L1Tests` | `incompatible` | Legacy, rejection logged | The three back-end-independent contract fixtures (107 cases), plus the same 308 — **selects 415 from 13 suites on this tree, and measured green at 415 of 415** |
 | D | `run_L2Tests` | `absent` | Legacy | The `DualPath*` tier, end to end through the legacy in-process mock — **measured green: 17 registered, 11 passed, 6 skipped, exit `0`** |
 | E | `run_L2Tests` | `remote` | AIDL (remote proxy) | The same `DualPath*` tier over real Binder IPC, inbound delivery included.  Authored and compiled; **never executed on this host or on the committed CI target**, though it has run green in purpose-built Binder-capable guests that are neither — **17 registered, 11 passed, 6 skipped, exit `0`**, the six skips being the legacy-arm cases that skip when the resolved back-end is not theirs.  Earlier runs reported 14 registered and 8 passed **before `DualPathHostLifecycleTest` was added**, and 15 registered and 9 passed before the two enable-time-address and fixed-physical-address cases were added; every one of those cases is mandatory under E, and the 17/11/6 figures above are the measurement that confirmed it rather than an expectation.  See [What invocation E does and does not yet evidence](#what-invocation-e-does-and-does-not-yet-evidence) |
 
 **A run total appears above only where a run produced it.**  Invocation A's is a green run of
-exactly that filter — `594 tests from 23 test suites ran`, `594 passed`, exit `0` — cross-read
+exactly that filter — `599 tests from 23 test suites ran`, `599 passed`, exit `0` — cross-read
 against `./run_L1Tests --gtest_list_tests` and the per-fixture table under
 [Fixture manifest](../../AIDL_HAL_MIGRATION_NOTES.md#fixture-manifest) in
 `AIDL_HAL_MIGRATION_NOTES.md`, to which `ccec/test_DriverAidl.cpp`'s two-line `Fixture manifest`
@@ -541,15 +541,16 @@ than coverage capture: B `437 passed` from 15 suites with the AIDL back-end reso
 was rejected, and E `11 passed`, `6 skipped` of 17 over real Binder IPC, each
 exit `0` and each logging its back-end selection exactly once.  On 2026-10-03 all five ran in the
 same guest, instrumented for coverage capture, first on an earlier tree (A `583`, B `443`, C `399`),
-then on a later one (A `588 passed` from 23 suites, B `448 passed` from 15, C `404 passed` from 13,
-D and E `11 passed`, `6 skipped` of 17 each, every one exit `0`), and then on the integrated tree
-this file describes: A `594 passed` from 23 suites, B `454 passed` from 15 with the AIDL back-end
-resolved, C `410 passed` from 13 with the legacy back-end resolved after the rejection, and D and E
+then on later ones (A `588 passed` from 23 suites, B `448 passed` from 15, C `404 passed` from 13,
+D and E `11 passed`, `6 skipped` of 17 each, every one exit `0`; then A `594`, B `454`, C `410`),
+and then on the integrated tree this file describes: A `599 passed` from 23 suites, B `459 passed`
+from 15 with the AIDL back-end resolved, C `415 passed` from 13 with the legacy back-end resolved
+after the rejection, and D and E
 `11 passed`, `6 skipped` of 17 each, E over real Binder IPC, every one exit `0` with its back-end
 selection logged exactly once and all four of its checks passed.  **No host without a Binder driver can
 reproduce those three**, so on such a host `run_coverage.sh` reports them DEFERRED and never as
 passes; a registration count is still not a result, and where this file quotes one it says so.  The
-308, the 102 and the 111 are measured suite-group figures and are attributed where they are listed
+308, the 107 and the 116 are measured suite-group figures and are attributed where they are listed
 below.
 
 **Those counts are documentation, not the gate.**  `run_coverage.sh` asks the binary itself how many
@@ -638,12 +639,12 @@ is the obvious thing to want:
   unused.
 
 Their behavioural content is not dropped: it is re-asserted back-end-agnostically by
-`ccec/test_DriverAidl.cpp`, whose 7 fixtures — 155 cases, measured with `--gtest_list_tests` — are
+`ccec/test_DriverAidl.cpp`, whose 7 fixtures — 160 cases, measured with `--gtest_list_tests` — are
 partitioned by the back-end each needs.  `DriverAidlCompatibilityTest` 28,
-`DriverAidlPreflightTest` 28 and `DriverAidlLocalInstanceTest` 46 under A, B and C;
+`DriverAidlPreflightTest` 29 and `DriverAidlLocalInstanceTest` 50 under A, B and C;
 `DriverAidlSelectionTest` 4 and `DriverAidlLegacyArmTest` 5 under A only;
-`DriverAidlSessionTest` 32 and `DriverAidlTransmitTest` 12 under B only.  So 111 of the 155 run under
-invocation A — 102 + 9 — which with the 483 pre-existing cases is A's measured 594.  That file's
+`DriverAidlSessionTest` 32 and `DriverAidlTransmitTest` 12 under B only.  So 116 of the 160 run under
+invocation A — 107 + 9 — which with the 483 pre-existing cases is A's measured 599.  That file's
 fixture manifest — the per-fixture table under
 [Fixture manifest](../../AIDL_HAL_MIGRATION_NOTES.md#fixture-manifest) in
 `AIDL_HAL_MIGRATION_NOTES.md`, which the file's own two-line `Fixture manifest` comment names beside
@@ -661,7 +662,7 @@ One environment variable distinguishes one invocation from the next.  It is read
 
 | Value | Effect |
 | --- | --- |
-| `absent` | Register nothing.  The lookup finds no service, the legacy back-end is selected, and libbinder is not touched at all.  **Unset and empty both mean this**, so the *selection* a plain `./run_L1Tests` makes is exactly the one it made before the AIDL back-end existed — but the binary is not the same binary, and a plain run now fails on the 44 AIDL-only cases, which is why invocation A carries a filter |
+| `absent` | Register nothing; the harness makes no binder call.  The back-end selection `init` runs then picks the legacy back-end: its own lookup finds no service, and on a host without a binder driver its preflight refuses before any binder call.  **Unset and empty both mean this**, so the *selection* a plain `./run_L1Tests` makes is exactly the one it made before the AIDL back-end existed — but the binary is not the same binary, and a plain run now fails on the 44 AIDL-only cases, which is why invocation A carries a filter |
 | `compatible` | Register an in-process fake reporting its real, frozen metadata.  The AIDL back-end is selected |
 | `incompatible` | Register an in-process fake whose interface hash is `"-1"`.  The service is *present* and rejected, so the legacy back-end is selected and the rejection is logged |
 | `remote` | Launch the out-of-process fake service host.  `run_L2Tests` only — in `run_L1Tests` it is a hard failure naming the other runner |
@@ -673,6 +674,10 @@ Three rules go with it, and each exists to stop a green run that proves nothing:
   never happened.
 - **A service already registered under the production service name when a run starts is a hard
   failure**, not a condition to work around: the outcome would then depend on a stale process.
+  `compatible` and `incompatible` look the name up before registering the fake, `remote`'s host
+  refuses a taken name and never reports ready, and `absent`, which looks nothing up, fails in
+  the global set-up when the back-end `init` selected (read by `dynamic_cast`, no binder call) is
+  not the legacy one.
   Nothing is ever deregistered either, because the pinned C++ `IServiceManager` exposes no
   service-removal API — so a leftover registration is reported, not cleaned up.
 - **The harness does not start the Binder client threadpool.**  `DriverAidlImpl::open()` owns that,
@@ -885,15 +890,15 @@ GTEST_FILTER="-DriverAidlSessionTest.*:DriverAidlTransmitTest.*" \
   ./run_L1Tests
 ```
 
-Measured on this tree: `594 tests from 23 test suites ran`, `594 passed`, exit `0`.
+Measured on this tree: `599 tests from 23 test suites ran`, `599 passed`, exit `0`.
 
 Two halves, and neither is decoration.  `CEC_TEST_AIDL_MODE=absent` is the *default* rather than a
 change — unset and empty both mean `absent` — and it is spelled out so the command names the
 invocation it is instead of depending on a variable being unset.  **The filter is the half that is
-mandatory.**  The binary registers 638 cases, and the two AIDL-only fixtures among them —
+mandatory.**  The binary registers 643 cases, and the two AIDL-only fixtures among them —
 `DriverAidlSessionTest` 32 and `DriverAidlTransmitTest` 12, 44 cases — assert in `SetUp` that the
 AIDL back-end is the resolved one and **fail rather than skip** when it is not.  So a bare
-`./run_L1Tests` runs all 638 and exits `1` with exactly those 44 failures; that is measured, and it
+`./run_L1Tests` runs all 643 and exits `1` with exactly those 44 failures; that is measured, and it
 is deliberate, because a skipped arm is indistinguishable from a passing one in an aggregate count.
 `--gtest_filter='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'` is the same filter spelled as a
 flag and behaves identically (measured on the earlier 588-case selection: 588 / 588, exit `0`);
@@ -963,7 +968,7 @@ CEC_TEST_AIDL_MODE=absent GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTrans
 # on a fixed ConnectionTest pair 7 runs out of 7 on the 567-case selection that preceded the
 # logical-address registry guard, and passed every case in 24 runs out of 24 on the 577-case
 # selection that preceded the allocation cases, one of them then hanging in teardown (measured;
-# see Test Order Dependence).  This command selects 594 today.  Without the filter the 44 AIDL-only
+# see Test Order Dependence).  This command selects 599 today.  Without the filter the 44 AIDL-only
 # failures bury anything you are looking for
 CEC_TEST_AIDL_MODE=absent GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*' \
   ./run_L1Tests --gtest_shuffle --gtest_random_seed=2
@@ -1035,8 +1040,8 @@ Then, before you call it done:
   symlinking `mocks/hdmicec/hdmi_cec_driver.h` over `stubs/ccec/drivers/hdmi_cec_driver.h`.
   No test requires real CEC hardware, and none is skipped for the want of it.
 - **Disabled tests**: there are none.  No test name in `ccec/` or `osal/` carries GoogleTest's
-  disable prefix, all 638 registered cases are enabled, and
-  `./run_L1Tests --gtest_also_run_disabled_tests --gtest_list_tests` lists the same 638 as a
+  disable prefix, all 643 registered cases are enabled, and
+  `./run_L1Tests --gtest_also_run_disabled_tests --gtest_list_tests` lists the same 643 as a
   plain listing.  See [Known Issues](#known-issues-and-notes).
 
 ## Common Assertions
@@ -1054,7 +1059,7 @@ EXPECT_THROW({code}, ex)  // code throws exception ex
 
 ## Test Coverage Details
 
-### CCEC Library Tests (611 tests — 456 pre-existing, plus the contract suite's 155)
+### CCEC Library Tests (616 tests — 456 pre-existing, plus the contract suite's 160)
 
 - **test_CECFrame.cpp** (31 tests): Frame construction, copy operations, serialization, hex dump, boundary sizes
 - **test_Connection.cpp** (66 tests): Connection lifecycle, open/close, listener registration, address filtering, broadcast handling, and the `IntegrationFlowTest` cross-layer flow cases (HAL Rx callback through to the typed `process()` overload, and a typed message through to the exact bytes the HAL is handed)
@@ -1066,7 +1071,7 @@ EXPECT_THROW({code}, ex)  // code throws exception ex
 - **test_Operands.cpp** (75 tests): All operand classes (PhysicalAddress, LogicalAddress, DeviceType, Version, PowerStatus, AbortReason, OSDString, OSDName, Language, VendorID, UICommand, SystemAudioStatus, AudioStatus, RequestAudioFormat, ShortAudioDescriptor, AllDeviceTypes, RcProfile, DeviceFeatures, LatencyInfo)
 - **test_Driver.cpp** (22 tests) / **test_Driver_Mock.cpp** (10 tests): Open/close and reopen, synchronous write including NACK and transmit-failure returns, address management, frame-detail printing, asynchronous write with both its success and failure returns, and direct mock verification
 - **test_DriverImpl_Async.cpp** (26 tests): Asynchronous transmit, the transmit-completion callback, invalid-state guards, error-injection paths
-- **test_DriverAidl.cpp** (155 tests in 7 fixtures): The AIDL/Binder back-end, the runtime selection between it and the legacy back-end, and the compatibility rule the selection rests on — including the enable-time registration of exactly one PLAYBACK_DEVICE logical address (candidates 4, 8, 11, read back through `IHdmiCec::getLogicalAddresses()`) and the fixed physical address 1.0.0.0 (`0x01000000`) the back-end reports without a HAL call.  Three routes, because no single route reaches all of it: the compatibility predicate and the Binder preflight by direct call against locally constructed doubles, which need no registered service and no Binder driver; the back-end's closed-state behaviour on a *local* `DriverAidlImpl` instance, whose constructor touches no Binder at all, which is what makes every `status != OPENED` guard and the `writeAsync` prelude ordering reachable without a HAL of any kind; and the back-end actually resolved for the process, through `Driver::getInstance()`.  Fixtures are partitioned by the back-end each requires and assert that precondition in `SetUp` rather than adapting to whatever they find, which is why the file is spread across the invocation matrix instead of running as one block — see [Which cases run under which invocation](#which-cases-run-under-which-invocation)
+- **test_DriverAidl.cpp** (160 tests in 7 fixtures): The AIDL/Binder back-end, the runtime selection between it and the legacy back-end, and the compatibility rule the selection rests on — including the enable-time registration of exactly one PLAYBACK_DEVICE logical address (candidates 4, 8, 11, read back through `IHdmiCec::getLogicalAddresses()`) and the fixed physical address 1.0.0.0 (`0x01000000`) the back-end reports without a HAL call.  Three routes, because no single route reaches all of it: the compatibility predicate and the Binder preflight by direct call against locally constructed doubles, which need no registered service and no Binder driver; the back-end's closed-state behaviour on a *local* `DriverAidlImpl` instance, whose constructor touches no Binder at all, which is what makes every `status != OPENED` guard and the `writeAsync` prelude ordering reachable without a HAL of any kind; and the back-end actually resolved for the process, through `Driver::getInstance()`.  Fixtures are partitioned by the back-end each requires and assert that precondition in `SetUp` rather than adapting to whatever they find, which is why the file is spread across the invocation matrix instead of running as one block — see [Which cases run under which invocation](#which-cases-run-under-which-invocation)
 - **test_Util.cpp** (12 tests): Log-level configuration parsing and the debug buffer dump.  Production `check_cec_log_status()` hardcodes `fopen("/tmp/cec_log_enabled")`, so this suite cannot be pointed at a private temporary without a production change.  One guard therefore owns every access to that fixed path: it is classified with `lstat` and refused unless it is absent or a regular file this process owns, reads open `O_RDONLY|O_NOFOLLOW|O_CLOEXEC`, and a write goes to a fresh `O_EXCL|O_NOFOLLOW` temporary in the same directory that is `rename()`d over the path with the original mode, owner and group reapplied — so a planted link is replaced rather than written through.  Because the path is fixed, the guard also takes an advisory `flock` on `/tmp/cec_log_enabled.testlock` **before** it captures anything and releases it only after it has restored, which makes the capture-mutate-restore window exclusive against another copy of this suite on the same host; a lock it cannot obtain is a hard failure rather than a warning, because proceeding without it is precisely the race.  Restoration runs on ordinary control flow only — `TearDown()` plus one `atexit` backstop, and **no signal handlers**.  The case bodies run in this process: `cec_log_level` is a non-atomic file-static with internal linkage that `check_cec_log_status()` writes and `CCEC_LOG()`/`dump_buffer()` read, and that residual exposure is stated rather than engineered around, because the fix — make the level atomic, or expose a seam for setting and reading it — is a production change and is reported as a blocked gap.  The file header carries the full rationale, including why an earlier forked-child design was withdrawn: `fork()` in a process that already has the Bus reader and writer threads left the child holding their locks and then ran GoogleTest, stdio and libgcov inside it, which bought a formal data race and paid for it with a deadlock
 
 ### OSAL Library Tests (27 tests)
@@ -1145,8 +1150,8 @@ and they are worth having in front of you before reading a coverage figure from 
   them.  CI's seven exclusion globs are untouched, so `filtered_coverage.info` still means exactly
   what it always meant.
 
-The per-branch gate ships **fully populated — 156 records: 152 required arms, every one with a real
-gcov coordinate read out of a real trace, plus 4 recorded unreachable by construction with their
+The per-branch gate ships **fully populated — 171 records: 168 required arms, every one with a real
+gcov coordinate read out of a real trace, plus 3 recorded unreachable by construction with their
 proof.**
 A coordinate is a property of the *compiled* source rather than of execution: gcov writes a
 `BRDA:<line>,<block>,<branch>,<taken>` record for every branch in an instrumented file that was
@@ -1168,41 +1173,42 @@ the arc count in the very trace it is judging, so the selector can never disagre
 nothing has to be passed in from outside; a layout no record anticipates matches no key and is
 reported `ABSENT`, which asks for a measurement rather than crediting the nearest arc.  Measured
 across both targets: **312 of the 316** branch-carrying lines the three mapped files then had emit an
-identical layout, and only `halcompat.h:168` both diverges *and* carries mapped records.  The 70
-added after that comparison (386 in all on x86-64, as counted on an earlier tree) are measured on
-x86-64 only.
+identical layout, and only `halcompat.h:168` both diverges *and* carries mapped records.  The 91
+added after that comparison (407 in all on x86-64, counted on this tree) are measured on x86-64
+only.
 
 What execution *does* decide is **takenness**, so the gate separates the two and enforces each as
 far as it is knowable:
 
-- **Presence is enforced for all 152 required arms, on any host.**  A mapped arm missing from
+- **Presence is enforced for all 168 required arms, on any host.**  A mapped arm missing from
   the trace is a failure — that is the condition that catches a refactor silently deleting an arm,
   or a coordinate gone stale because a line moved above it.  Measured here: **0 absent**.
 - **Takenness is enforced for every arm whose reacher actually ran.**  On a driverless host that is
-  **139** of the 152, derived per record rather than hardcoded, and all 139 come back taken — with 0
+  **155** of the 168, derived per record rather than hardcoded, and all 155 come back taken — with 0
   never taken and 0 left unchecked for want of coordinates.
 - **The remaining 13 are reported DEFERRED with the missing resource named per arm.**  Deferred is
   **not** a pass: each is listed inline with the invocation or the driver it needed, and each pushes
   an advisory reason, which is what stops the run producing an acceptance verdict.  It is not a
   failure of the test set either — the cases exist and were not run — and the gate says which.
-- **The 4 unreachable-by-construction records are printed on every run with the proof that makes
+- **The 3 unreachable-by-construction records are printed on every run with the proof that makes
   them unreachable**, and are scored on neither count.  They are the factory's NULL-reason defensive
   report, which no path that exists can produce because `isServiceAvailable()` assigns a reason on
   every one of its false exits; `halcompat.h`'s client-era arm, which `IHdmiCec::VERSION` being 1000
   falsifies for every server value; and the slow-call diagnostic's clock-unreadable arm, which needs
   `clock_gettime(CLOCK_MONOTONIC)` to fail on a stack `timespec` — something Linux does not do — and
   whose helper sits in an anonymous namespace with no dynamic symbol, so no test can substitute for
-  it either; and the enable-time allocation's outer catch-all, which nothing reaches because every
-  call inside its `try` that can raise a non-standard exception has its own catch-all.  All four are
-  recorded rather than deleted, so a reader can see why they are not counted instead of finding four
-  arms quietly missing.
+  it either.  All three are recorded rather than deleted, so a reader can see why they are not
+  counted instead of finding three arms quietly missing.  The enable-time allocation's outer
+  catch-all, once a fourth, is now required: a re-open's release of an address a failed `close()`
+  left registered runs inside that `try` without a handler of its own, and a local-instance case
+  raises a non-standard exception through it.
 
 **The 13 deferrals are 11 that need invocation B, one that needs invocation C, and one that needs a
 usable binder driver with no service registered on it.**  The last is `availability.service-absent`,
 the service-NOT-FOUND arm that invocation A reaches on a Binder-capable host and cannot reach at all
 without one; it is the only record carrying the `binder` token, because the preflight's own
 protocol-version and context-manager arms reach their decisions through the `BinderPreflightProbe`
-seam rather than through a real node and are therefore enforced here, among the 139.  Every one of
+seam rather than through a real node and are therefore enforced here, among the 155.  Every one of
 the three kinds is satisfied by the Binder-capable job that runs the whole matrix on one host, so
 **full branch coverage of the selection code is established by that job and by no driverless run**,
 this one included.
@@ -1245,7 +1251,7 @@ an argument for putting a path in it.
 
 **The current measurement, and what it does:** on a driverless host — where invocations B, C and E
 are deferred — `./run_coverage.sh --build --run` after a full clean measures the line-gate trace at
-**87.4% lines (2565/2936), 91.6% functions (470/513), 55.7% branches (1657/2974)
+**87.6% lines (2601/2969), 91.6% functions (470/513), 56.2% branches (1704/3034)
 across 32 source files**.  The aggregate **passes** the 80% bar.  **Expect the aggregate to move by
 one line and two branches between runs, and expect it in one file.**  Two consecutive runs of this
 command on an earlier tree, compared file by file, agreed on 31 of the 32 and differed only in
@@ -1258,29 +1264,29 @@ every other file measured byte-identically across both runs, and the figures abo
 measured run's on this tree.  So read a one-line or two-branch difference as this property
 rather than as a regression, and read a difference anywhere else as something to investigate.  The
 per-file half **fails**, on exactly one file:
-`ccec/src/DriverAidlImpl.cpp` at **68.4% (539/788)**.  The script therefore **exits 1**, and that
+`ccec/src/DriverAidlImpl.cpp` at **70.0% (575/821)**.  The script therefore **exits 1**, and that
 exit is the gate working rather than a defect: that file holds the AIDL back-end, and invocation A
 measures its driverless code — the binder preflight, the compatibility checks and the locally
 constructed back-ends the local-instance cases drive, the logical- and physical-address cases among
-them — which is where its 539 covered lines come from.  The 249 lines it leaves uncovered, about a
-third of the file, are almost all live-Binder-dependent (the binder context-manager ping, the
+them — which is where its 575 covered lines come from.  The 246 lines it leaves uncovered, about
+30% of the file, are almost all live-Binder-dependent (the binder context-manager ping, the
 service lookup, a session opened through a resolved service and the event-listener callbacks),
 which only the deferred invocations reach, so on this host they cannot be covered at all.
 The way to close it is to run the full matrix on the Binder-capable job — **not** to exempt a file,
 not to lower the threshold, not to add an exclusion glob, and not to pass `--no-per-file-gate`.
 `ccec/src/Driver.cpp`, the other file this migration adds lines to, **clears the bar at exactly
 80.0% (12/15)** — on the bar rather than above it, so a single newly uncovered line there would put
-it below, which is worth knowing before adding one.  `halcompat.h` is retained in that trace; on an
-earlier tree's driverless run it sat at 85.7% lines (18/21), 80.0% functions (4/5) and 60.0%
-branches (24/40).
+it below, which is worth knowing before adding one.  `halcompat.h` is retained in that trace; on this
+tree's driverless run it sat at 85.7% lines (18/21), 80.0% functions (4/5) and 60.0% branches
+(24/40).
 
 **The full matrix, measured:** with all five invocations run against one instrumented build in the
 x86-64 protocol-8 guest under TCG named in [The five invocations](#the-five-invocations)
 (`./run_coverage.sh --run` after `--build`), the integrated tree measured on 2026-10-03
-**93.4% lines (2741/2936), 93.8% functions (481/513), 60.4% branches (1796/2974)**, with every one
-of the 32 files at or above 80%: `ccec/src/DriverAidlImpl.cpp` at **89.7% (707/788)** and
-`ccec/src/Driver.cpp` at **93.3% (14/15)**.  All 152 required arms came back taken, 0 deferred and
-0 absent, with the 4 unreachable records present and exempt, and the run exited `0` on
+**93.5% lines (2777/2969), 93.8% functions (481/513), 60.7% branches (1843/3034)**, with every one
+of the 32 files at or above 80%: `ccec/src/DriverAidlImpl.cpp` at **90.5% (743/821)** and
+`ccec/src/Driver.cpp` at **93.3% (14/15)**.  All 168 required arms came back taken, 0 deferred and
+0 absent, with the 3 unreachable records present and exempt, and the run exited `0` on
 *"COVERAGE GATE PASSED"*; `./run_coverage.sh --selftest` reported *"SELF-TEST PASSED"*.
 
 Three files that *are* above the bar are worth naming, because they were not always: the
@@ -1355,8 +1361,8 @@ beside it, and `git clean` never removes a tracked file.
 **This suite has no disabled tests**, and that has been true throughout: it was true of the
 pre-migration legacy-path suite, which reported **483 tests run, 483 passed, 0 disabled** — a
 *historical* figure, quoted here because older notes quote it — and it is true of the suite as it
-stands, where invocation A reports **594 run, 594 passed, exit `0`** and its XML output carries
-`disabled="0"`.  A bare `./run_L1Tests` is not the command to check this with: it runs all 638
+stands, where invocation A reports **599 run, 599 passed, exit `0`** and its XML output carries
+`disabled="0"`.  A bare `./run_L1Tests` is not the command to check this with: it runs all 643
 registered cases and exits `1` on the 44 AIDL-only ones, which is a filter matter and not a
 disabled-test matter — see
 [The one command for running this suite](#the-one-command-for-running-this-suite).
@@ -1568,7 +1574,7 @@ in `DriverImpl::read` is the sentinel dereference, frame `#0` in
 
 ### Test Order Dependence (diagnostic)
 
-The suite is green in its default order — invocation A, measured at 594 of 594, exit `0`.  **Under a
+The suite is green in its default order — invocation A, measured at 599 of 599, exit `0`.  **Under a
 randomised order it is not**, and a single green seed proves nothing either way, so run more than
 one.  A shuffle is a full run, so it carries the invocation-A environment; without the filter the 44
 AIDL-only failures bury the order-dependent ones this is looking for:
@@ -1581,12 +1587,12 @@ CEC_TEST_AIDL_MODE=absent GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTrans
 **Every figure in the two tables below is HISTORICAL: it was measured on the pre-contract-suite
 inventory** — 483 cases in 18 fixtures, before `ccec/test_DriverAidl.cpp` was added — and they are
 kept exactly as they were measured, because their value is provenance.  **None of them describes the
-594-case selection a shuffle runs today**, and the seeds have since been re-measured against later
+599-case selection a shuffle runs today**, and the seeds have since been re-measured against later
 selections and moved outright — see
 [Later-inventory re-measurement of seed 12345](#later-inventory-re-measurement-of-seed-12345).
 Read `483 / 483` in them as "the whole suite as it then
 was", and `483 / 481` as "that suite less the fixed pair".  The same sweep under invocation A
-reports that invocation's whole selection in place of each 483 — 594 cases today, and 539 when the
+reports that invocation's whole selection in place of each 483 — 599 cases today, and 539 when the
 seed-2 sweep was measured: `539 tests ran`, `537 passed`, exit `1`, the two failures being the same
 fixed pair named below.  Re-measure the total rather than adjusting it, because the selection grows
 with every case added to the contract suite and the fixed pair does not.
@@ -1643,7 +1649,7 @@ inheriting the process-global logical-address registry from whichever case ran b
 each case sees the baseline the default order gives it. Re-measured across every seed the tables
 below name as a reliable reproducer of the pair — 2, 42, 100, 15 and 12345 — each was
 `588 passed` on the earlier 588-case selection (one run per seed on 2026-10-03), and none has been
-re-measured on the current 594-case one; see
+re-measured on the current 599-case one; see
 [Later-inventory re-measurement of seed 12345](#later-inventory-re-measurement-of-seed-12345).
 Six further legacy cases that used to fail under a shuffle — `BusTest.ListenerFiltering`,
 `BusTest.UnregisteredConnectionReceivesAll`, `ConnectionTest.MultipleListenersNotification`,
@@ -1764,7 +1770,7 @@ were inheriting from whichever case ran before them.  **Re-measured across every
 tables name as a reliable reproducer of that pair — 2, 42, 100 and 15 — each was `577 passed`,
 exit `0`, on that selection, and each, with 12345, was `588 passed`, exit `0`, on the
 588-case selection that followed it (one run per seed, 2026-10-03); none has been re-measured on
-the current 594-case selection.**  So the assertion half of the order dependence is addressed at its cause rather than
+the current 599-case selection.**  So the assertion half of the order dependence is addressed at its cause rather than
 worked around by ordering, and the per-seed *figures* below still do not survive an inventory change
 — which is why every one carries its era, why no rate is quoted without one, and why the paragraph
 above naming seeds 2, 42 and 100 as assertion reproducers is now historical rather than current.
@@ -1811,7 +1817,7 @@ consequences for anyone adding tests:
 `"Mock is nullptr - test environment not initialized"` and one
 `"Driver not in valid state for this test"`.  Measurement shows **none of them ever fires**: the
 default run, and every shuffled run in the tables above that reached its summary, reported the whole
-inventory run and zero skipped — 483 of 483 when those tables were measured, and 594 of 594 under
+inventory run and zero skipped — 483 of 483 when those tables were measured, and 599 of 599 under
 invocation A today — green seeds and failing seeds alike.  They are dead defensive code
 rather than silent skips, so the suite's pass count is its real pass count.  New tests deliberately
 do not copy that idiom — if a precondition genuinely cannot be met, the test is not written and

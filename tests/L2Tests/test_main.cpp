@@ -50,6 +50,10 @@
 #include "hdmi_cec_driver_mock.h"
 #include "ccec/LibCCEC.hpp"
 
+/* Reached by relative path, as ccec/src is not on AM_CPPFLAGS, as a dynamic_cast target alone;
+ * it includes no binder or AIDL header. */
+#include "../../ccec/src/DriverImpl.hpp"
+
 /* POSIX primitives for the host lifecycle; this translation unit includes no binder or AIDL
  * header and makes no direct binder API call. */
 #include <fcntl.h>
@@ -2731,6 +2735,22 @@ void launchHostAndWaitUntilReady()
 }
 
 /**
+ * @brief Returns CEC_TEST_AIDL_MODE as this harness acts on it, an unset or empty value as absent.
+ *
+ * Unset and empty both mean absent, so the legacy arm is what a bare run does.
+ *
+ * @return std::string                            - The mode, not yet validated
+ *
+ * @see applyAidlModeBeforeInit(), failUnlessSelectedBackEndMatchesMode(), cecL2RequestedAidlMode()
+ */
+std::string resolvedAidlMode()
+{
+    const char *const requested = ::getenv(AIDL_MODE_VARIABLE);
+    return (requested != nullptr && requested[0] != '\0') ? std::string(requested)
+                                                          : std::string(AIDL_MODE_ABSENT);
+}
+
+/**
  * @brief Reads CEC_TEST_AIDL_MODE and does what it asks, before the selection resolves.
  *
  * The legacy mode launches no second process, and this translation unit makes no direct binder
@@ -2745,16 +2765,12 @@ void launchHostAndWaitUntilReady()
  */
 void applyAidlModeBeforeInit()
 {
-    const char *const requested = ::getenv(AIDL_MODE_VARIABLE);
-
-    // Unset and empty both mean absent, so the legacy arm is what a bare run does.
-    const std::string mode =
-        (requested != nullptr && requested[0] != '\0') ? requested : AIDL_MODE_ABSENT;
+    const std::string mode = resolvedAidlMode();
 
     if (mode == AIDL_MODE_ABSENT) {
         std::cout << TRACE_PREFIX << AIDL_MODE_VARIABLE << "=" << mode
                   << ": launching no fake service host, so the legacy back-end is expected and "
-                     "this process touches libbinder not at all" << std::endl;
+                     "this harness makes no binder call" << std::endl;
         return;
     }
 
@@ -2784,6 +2800,41 @@ void applyAidlModeBeforeInit()
            << "; " << AIDL_MODE_COMPATIBLE << " and " << AIDL_MODE_INCOMPATIBLE << " belong to "
               "run_L1Tests. Refusing to fall back to " << AIDL_MODE_ABSENT << ", because a typo "
               "must not quietly downgrade the run to the legacy back-end and report it as a pass";
+}
+
+/**
+ * @brief Fails the run unless LibCCEC::init() selected the back-end that @p mode requires.
+ *
+ * Absent requires the legacy back-end and remote the only other one, read by dynamic_cast so this
+ * unit still makes no binder call; under absent any other selection is a stale registration.
+ *
+ * @param [in] mode                       - The mode applyAidlModeBeforeInit() accepted
+ *
+ * @return None
+ *
+ * @pre LibCCEC::init() has returned, so Driver::getInstance() is resolved for the process.
+ *
+ * @warning Raises fatal GoogleTest failures; call it through ASSERT_NO_FATAL_FAILURE.
+ */
+void failUnlessSelectedBackEndMatchesMode(const std::string &mode)
+{
+    const bool legacySelected = (dynamic_cast<DriverImpl *>(&Driver::getInstance()) != nullptr);
+
+    if (mode == AIDL_MODE_ABSENT) {
+        ASSERT_TRUE(legacySelected)
+            << AIDL_MODE_VARIABLE << "=" << mode << " launched no fake service host, yet the "
+               "factory selected a back-end other than the legacy one, so a service is already "
+               "published under \"HdmiCec\" by another process: a stale registration. This run's "
+               "outcome would depend on a process this suite does not own; stop that process and "
+               "run again";
+        return;
+    }
+
+    ASSERT_FALSE(legacySelected)
+        << AIDL_MODE_VARIABLE << "=" << mode << " requires the AIDL back-end, but the factory "
+           "selected the legacy back-end although the fake service host reported ready; the "
+           "factory's \"not usable\" line above names why, and no case result in this run is "
+           "evidence for the mode it was given";
 }
 
 } // namespace
@@ -2903,7 +2954,7 @@ public:
      * @brief Brings the process to the state every L2 case assumes, in a load-bearing order.
      *
      * Ignores SIGPIPE, installs the legacy HAL double, applies the requested mode (launching the
-     * host on remote), and only then initializes the CEC library.
+     * host on remote), only then initializes the CEC library, and finally checks its selection.
      *
      * @return None
      *
@@ -2912,7 +2963,7 @@ public:
      * @warning init() resolves the back-end selection once, so mode handling must precede it.
      * @warning A fatal failure skips every case, and TearDown still runs.
      *
-     * @see applyAidlModeBeforeInit()
+     * @see applyAidlModeBeforeInit(), failUnlessSelectedBackEndMatchesMode()
      */
     void SetUp() override {
         /* First, before any descriptor exists: a write that could kill this process would lose
@@ -2939,6 +2990,9 @@ public:
         ASSERT_NO_THROW({ LibCCEC::getInstance().init("CEC_TEST"); })
             << "the CEC library could not be initialized, so not one case in this binary has "
                "its precondition; continuing would assert against an uninitialized stack";
+
+        // init() has fixed the selection; a back-end the mode did not ask for stops the run.
+        ASSERT_NO_FATAL_FAILURE(failUnlessSelectedBackEndMatchesMode(resolvedAidlMode()));
     }
 
     /**

@@ -1090,11 +1090,9 @@ std::vector<int> DriverAidlImpl::logicalAddressCandidates(int deviceType)
 /**
  * @brief Runs the enable-time address allocation with every failure contained in this method
  *
- * The local list and unconfirmedReleaseAddress are cleared first, because a session opens only
- * after IHdmiCec::close() has removed every address. Each candidate is kept in
- * unconfirmedReleaseAddress from just before its add until the HAL confirms the outcome: a success
- * (spliced in without a further allocation) or a refusal clears it, a non-ok status keeps it, and a
- * raising add keeps it unless its best-effort removal is confirmed.
+ * Replaces the local list, first releasing any address unconfirmedReleaseAddress records (adopted
+ * instead while the HAL still lists it, nothing registered while that cannot be read), then keeps
+ * each candidate in unconfirmedReleaseAddress until the HAL confirms its add's outcome.
  *
  * @post Only thread cancellation's forced unwind leaves this method as an exception.
  * @see DriverAidlImpl::open()
@@ -1103,7 +1101,6 @@ void DriverAidlImpl::registerDeviceLogicalAddress(void)
 {
     {AutoLock lock_(mutex);
 		logicalAddresses.clear();
-		unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
 
 		if (hdmiCecController == 0) {
 			CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : no AIDL controller session is held; no logical address registered\r\n");
@@ -1111,6 +1108,58 @@ void DriverAidlImpl::registerDeviceLogicalAddress(void)
 		}
 
 		try {
+			/* Only a failed close() or an unconfirmed add or removal leaves a record. It is settled
+			   before any add, so the HAL never holds a second address. */
+			if (unconfirmedReleaseAddress != LogicalAddress::UNREGISTERED) {
+				const int held = unconfirmedReleaseAddress;
+				const std::vector<int32_t> release(1, held);
+				bool released = false;
+				/* Synchronous, with no client-side deadline available: measured, not bounded. */
+				const int64_t releaseStartedMs = halCallStarted();
+				::android::binder::Status releaseTxn = hdmiCecController->removeLogicalAddresses(release, &released);
+
+				warnIfHalCallSlow("IHdmiCecController::removeLogicalAddresses", releaseStartedMs);
+
+				if (!releaseTxn.isOk() || !released) {
+					if (!releaseTxn.isOk()) {
+						CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : releasing the recorded logical address %d failed [%s]; reading back the HAL's addresses\r\n", held, releaseTxn.toString8().string());
+					}
+					else {
+						CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : the HAL declined to release the recorded logical address %d; reading back the HAL's addresses\r\n", held);
+					}
+
+					/* A refusal can also mean the address was already gone, so the HAL's own list decides. */
+					if (hdmiCecService == 0) {
+						CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : no AIDL service proxy is held to confirm the release of logical address %d; no logical address registered\r\n", held);
+						return;
+					}
+
+					std::vector<int32_t> halAddresses;
+					/* Synchronous, with no client-side deadline available: measured, not bounded. */
+					const int64_t getStartedMs = halCallStarted();
+					::android::binder::Status getTxn = hdmiCecService->getLogicalAddresses(&halAddresses);
+
+					warnIfHalCallSlow("IHdmiCec::getLogicalAddresses", getStartedMs);
+
+					if (!getTxn.isOk()) {
+						CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : IHdmiCec::getLogicalAddresses failed [%s]; the release of logical address %d is unconfirmed and no logical address is registered\r\n", getTxn.toString8().string(), held);
+						return;
+					}
+
+					if (std::find(halAddresses.begin(), halAddresses.end(), (int32_t)held) != halAddresses.end()) {
+						/* Adopted rather than joined by a second address, since the HAL keeps it either way. */
+						std::list<LogicalAddress> adopted(1, LogicalAddress(held));
+						logicalAddresses.splice(logicalAddresses.end(), adopted);
+						unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
+						CCEC_LOG( LOG_EXP, "DriverAidlImpl::registerDeviceLogicalAddress : the HAL still holds logical address %d; adopted as this device's address, nothing added\r\n", held);
+						return;
+					}
+				}
+
+				unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
+				CCEC_LOG( LOG_INFO, "DriverAidlImpl::registerDeviceLogicalAddress : the recorded logical address %d is released; allocating\r\n", held);
+			}
+
 			const std::vector<int> candidates = logicalAddressCandidates(LOCAL_DEVICE_TYPE);
 
 			for (size_t index = 0; index < candidates.size(); index++) {
@@ -1226,8 +1275,8 @@ void DriverAidlImpl::registerDeviceLogicalAddress(void)
 /**
  * @brief Closes an OPENED AIDL session through IHdmiCec::close() and leaves this side CLOSED.
  *
- * Runs the legacy steps in order (state test, CLOSING, sentinel offer, HAL close, listener
- * detach, CLOSED before any raise), so a failed close still leaves this side fully closed.
+ * Runs the legacy steps in order with CLOSED set before any raise, so a failed close still leaves
+ * this side closed; it also records the held address for the next registration to release.
  *
  * @note Pending owner confirmation (B2): IHdmiCec::close() stands in for HdmiCecClose().
  *
@@ -1281,6 +1330,10 @@ void  DriverAidlImpl::close(void) noexcept(false)
 		CCEC_LOG( LOG_DEBUG, "DriverAidlImpl:: call IHdmiCec::close DONE %s, result %s\r\n", txn.toString8().string(), closed ? "true" : "false");
 
 		if (!txn.isOk() || !closed) {
+			/* The HAL may still hold the address, so the next registration releases it first. */
+			if (!logicalAddresses.empty()) {
+				unconfirmedReleaseAddress = logicalAddresses.front().toInt();
+			}
             status = CLOSED;
 			throw IOException();
 		}
@@ -1966,10 +2019,10 @@ bool DriverAidlImpl::isBinderPreflightOk(const std::string &binderDriverPath,
 		return false;
 	}
 
-	/* An observation, not a decision point: a node writable beyond its owner is logged, never
-	   refused, because a binder node must be openable by every binder client process. */
+	/* An observation, not a decision point: a node writable beyond its owner, as every standard
+	   binder node is, is logged at INFO and never refused, since every binder client must open it. */
 	if (0u != (identity.mode & (BINDER_NODE_MODE_GROUP_WRITE | BINDER_NODE_MODE_WORLD_WRITE))) {
-		CCEC_LOG( LOG_WARN, "DriverAidlImpl preflight: binder driver [%s] is writable beyond its owner, permission bits 0%o; continuing, because a binder node must be openable by every binder client and restrictive modes are NOT a property this middleware can require. On a platform that also leaves service registration unauthorized this is the precondition of HAL impersonation - see the service-authorization prerequisite on isServiceAvailable()\r\n", binderDriverPath.c_str(), (identity.mode & BINDER_NODE_MODE_PERMISSION_MASK));
+		CCEC_LOG( LOG_INFO, "DriverAidlImpl preflight: binder driver [%s] is writable beyond its owner, permission bits 0%o; continuing, because a binder node must be openable by every binder client and restrictive modes are NOT a property this middleware can require. On a platform that also leaves service registration unauthorized this is the precondition of HAL impersonation - see the service-authorization prerequisite on isServiceAvailable()\r\n", binderDriverPath.c_str(), (identity.mode & BINDER_NODE_MODE_PERMISSION_MASK));
 	}
 
 	/* Decision point 6 of 8: the node will tell us which protocol it speaks. */

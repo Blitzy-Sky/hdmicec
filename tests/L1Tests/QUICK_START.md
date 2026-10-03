@@ -17,7 +17,7 @@ tests/
     ├── run_coverage.sh           # coverage runner with 80% line gate
     ├── .lcovrc_l1                # lcov configuration (branch collection enabled)
     ├── .gitignore                # Ignore build artifacts
-    ├── ccec/                     # CCEC library tests (13 files, 611 tests)
+    ├── ccec/                     # CCEC library tests (13 files, 616 tests)
     │   ├── test_CECFrame.cpp
     │   ├── test_Connection.cpp
     │   ├── test_Bus.cpp
@@ -30,7 +30,7 @@ tests/
     │   ├── test_Driver.cpp
     │   ├── test_DriverImpl_Async.cpp
     │   ├── test_Util.cpp
-    │   └── test_DriverAidl.cpp    # AIDL back-end + runtime selection (155 tests)
+    │   └── test_DriverAidl.cpp    # AIDL back-end + runtime selection (160 tests)
     └── osal/                     # OSAL library tests (3 files, 27 tests)
         ├── test_ConditionVariable.cpp
         ├── test_Mutex.cpp
@@ -232,15 +232,15 @@ make
 cd tests/L1Tests
 # INVOCATION A -- the legacy back-end.  The mode is spelled out even though unset means
 # `absent`, and the negative filter is the one part that is NOT optional.
-# Measured: 594 tests from 23 suites ran (the elapsed time varies from run to run;
-# the counts do not), 594 PASSED, exit 0.
+# Measured: 599 tests from 23 suites ran (the elapsed time varies from run to run;
+# the counts do not), 599 PASSED, exit 0.
 CEC_TEST_AIDL_MODE=absent \
   ./run_L1Tests --gtest_filter='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*' \
                 --gtest_print_time=1
 ```
 
 `./run_L1Tests` is the libtool wrapper in this directory, **not** `.libs/run_L1Tests`.  Run it bare
-and it **exits 1** — measured: `638 tests from 25 test suites ran`, `594 PASSED`, **`44 FAILED`**.
+and it **exits 1** — measured: `643 tests from 25 test suites ran`, `599 PASSED`, **`44 FAILED`**.
 The 44 are the two AIDL-only fixtures, which assert in `SetUp` that the AIDL back-end is the
 resolved one and **fail rather than skip** when it is not, deliberately, because a skipped arm is
 indistinguishable from a passing one in an aggregate count.  They are `DriverAidlSessionTest` 32 and
@@ -373,21 +373,22 @@ selection is already on legacy and a green run proves nothing.
 
 | Inv | Binary | `CEC_TEST_AIDL_MODE` | Selection | Cases |
 |--------|-------------|---------|---------|---------|
-| A | `run_L1Tests` | `absent` | Legacy | 594, measured — the pre-existing 483 plus 111 contract cases |
-| B | `run_L1Tests` | `compatible` | AIDL (local interface) | the AIDL contract arms (146) plus the 308 back-end-neutral cases — 454, measured green |
-| C | `run_L1Tests` | `incompatible` | Legacy, rejection logged | 102 contract cases plus the same 308 — 410, measured green |
+| A | `run_L1Tests` | `absent` | Legacy | 599, measured — the pre-existing 483 plus 116 contract cases |
+| B | `run_L1Tests` | `compatible` | AIDL (local interface) | the AIDL contract arms (151) plus the 308 back-end-neutral cases — 459, measured green |
+| C | `run_L1Tests` | `incompatible` | Legacy, rejection logged | 107 contract cases plus the same 308 — 415, measured green |
 | D | `run_L2Tests` | `absent` | Legacy | the `DualPath*` round trip through the in-process legacy mock — 17, measured 11 passed and 6 permitted skips |
 | E | `run_L2Tests` | `remote` | AIDL (remote proxy) | the same round trip over real Binder IPC — 17, measured 11 passed and 6 permitted skips |
 
-**483 is the pre-existing legacy-path baseline**, and the binary now registers 638 cases in 25
+**483 is the pre-existing legacy-path baseline**, and the binary now registers 643 cases in 25
 fixtures.  Every total above is measured: A and D on any host, and B, C and E on a Binder-capable
 guest.  All five invocations ran green on 2026-09-01 on the guest that
 `.github/workflows/aidl-path-tests.yml` provisions, and again in the acceptance runs of 2026-09-02
 (E: 15 registered, 9 passed, 6 skipped, which discharged the earlier 14-registered run's 8-passed
 figure); on 2026-10-02 B, C and E were re-run on the tree of that date in an x86-64 protocol-8 guest and
 reported 437 of 437, 393 of 393 and 11 passed with 6 skipped of 17, each exit 0; on 2026-10-03 all
-five ran in the same guest on two earlier trees (A 583, B 443, C 399; then A 588, B 448, C 404) and
-then on this one, reporting A 594 of 594, B 454 of 454, C 410 of 410, and D and E 11 passed with
+five ran in the same guest on three earlier trees (A 583, B 443, C 399; then A 588, B 448, C 404;
+then A 594, B 454, C 410) and then on this one, reporting A 599 of 599, B 459 of 459, C 415 of
+415, and D and E 11 passed with
 6 skipped of 17 each, every one exit 0.  A host without a Binder driver cannot
 reproduce B, C or E at all — `run_coverage.sh` reports those three DEFERRED there, never as passes.  The counts are documentation, not the gate — `run_coverage.sh` asks the binary how many
 cases each filter selects, every time.
@@ -402,16 +403,16 @@ both name are `CECFrameTest`, `MessageDecoderTest`, `MessageDecoderTrackingTest`
 
 ```bash
 cd tests/L1Tests
-# A -- measured: 594 selected / 44 excluded / 638 registered; 594 passed, 0 skipped; exit 0.
+# A -- measured: 599 selected / 44 excluded / 643 registered; 599 passed, 0 skipped; exit 0.
 CEC_TEST_AIDL_MODE=absent ./run_L1Tests \
   --gtest_filter='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'
 
 # B -- DEFERRED here; needs a Binder driver.  No pass count is claimed.  The filter itself is
-# valid and selects 454 cases from 15 suites here, measured with --gtest_list_tests.
+# valid and selects 459 cases from 15 suites here, measured with --gtest_list_tests.
 CEC_TEST_AIDL_MODE=compatible ./run_L1Tests \
   --gtest_filter='DriverAidl*:CECFrameTest.*:MessageDecoderTest.*:MessageDecoderTrackingTest.*:MessageEncoderTest.*:OpCodeTest.*:OperandsTest.*:UtilTest.*:ConditionVariableTest.*:MutexTest.*:ThreadTest.*-DriverAidlSelectionTest.*:DriverAidlLegacyArmTest.*'
 
-# C -- DEFERRED here; needs a Binder driver.  No pass count is claimed on this host.  It selects 410
+# C -- DEFERRED here; needs a Binder driver.  No pass count is claimed on this host.  It selects 415
 # cases from 13 suites here, measured the same way.
 CEC_TEST_AIDL_MODE=incompatible ./run_L1Tests \
   --gtest_filter='DriverAidlCompatibilityTest.*:DriverAidlPreflightTest.*:DriverAidlLocalInstanceTest.*:CECFrameTest.*:MessageDecoderTest.*:MessageDecoderTrackingTest.*:MessageEncoderTest.*:OpCodeTest.*:OperandsTest.*:UtilTest.*:ConditionVariableTest.*:MutexTest.*:ThreadTest.*'
@@ -500,10 +501,10 @@ claimed for this host**; the B, C and E results quoted above come from Binder-ca
 - **Sources**: 16 test translation units + test_main.cpp + the two mock sources (all listed in
   `run_L1Tests_SOURCES`, which is the only gate on what gets compiled — and the order in that
   list is significant, so append at the end of a group rather than inserting)
-- **Total Tests**: 638 cases registered in 25 fixtures, none disabled — measured with
+- **Total Tests**: 643 cases registered in 25 fixtures, none disabled — measured with
   `./run_L1Tests --gtest_list_tests`.  That is the pre-existing **483 in 18 fixtures**, still
-  unmodified, plus the 155 contract cases in `ccec/test_DriverAidl.cpp`.  No single invocation runs
-  all 638: see [Back-End Selection](#back-end-selection-five-invocations).  There are more fixtures
+  unmodified, plus the 160 contract cases in `ccec/test_DriverAidl.cpp`.  No single invocation runs
+  all 643: see [Back-End Selection](#back-end-selection-five-invocations).  There are more fixtures
   than translation units because some files declare more than one — `ccec/test_LibCCEC.cpp`
   (`LibCCECTest` and `LibCCECUninitializedTest`) and `ccec/test_MessageDecoder.cpp`
   (`MessageDecoderTest` and `MessageDecoderTrackingTest`) among them
@@ -546,12 +547,12 @@ build, so `configure` fails naming the roots it tried when a prefix does not res
    `tests/L1Tests` looks for a nested `tests/L1Tests` and stops with exit 2:
    - **from `tests/L1Tests`**, the runner directly:
      `CEC_TEST_AIDL_MODE=absent ./run_L1Tests --gtest_filter='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'`
-     — measured **594 of 594 passed, exit 0**, and the case counts are the runner's own
+     — measured **599 of 599 passed, exit 0**, and the case counts are the runner's own
    - **from the submodule root**, through automake:
      `export GTEST_FILTER='-DriverAidlSessionTest.*:DriverAidlTransmitTest.*'` and then
      `CEC_TEST_AIDL_MODE=absent make -C tests/L1Tests check` — measured `PASS: run_L1Tests`,
      `# TOTAL: 1  # PASS: 1`, exit 0.  Automake counts **one test, the whole binary**; it does not
-     report the 594, so do not expect the runner's figures from this form
+     report the 599, so do not expect the runner's figures from this form
 
    **A bare `./run_L1Tests` exits 1** — see [Run Tests Manually](#run-tests-manually)
 6. Test the L2 tier — **invocation D**.  Same two forms, same working-directory rule:

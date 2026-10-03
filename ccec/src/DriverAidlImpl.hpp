@@ -306,10 +306,10 @@ public:
 	/**
 	 * @brief Closes the AIDL HDMI CEC session
 	 *
-	 * Reproduces DriverImpl::close() in order: a silent return unless OPENED, then CLOSING,
-	 * the NULL sentinel, `IHdmiCec::close()`, listener release, CLOSED, and only then
-	 * IOException if the close failed or reported false. The local logical-address list
-	 * is not cleared, as on the legacy path.
+	 * Reproduces DriverImpl::close() in order: a silent return unless OPENED, then CLOSING, the NULL
+	 * sentinel, `IHdmiCec::close()`, listener release, CLOSED, and only then IOException if the close
+	 * failed or reported false. The local list is kept, as on the legacy path; a failure records its
+	 * address in unconfirmedReleaseAddress for the next registration to release.
 	 *
 	 * @post CLOSED, with no controller or listener held, whether or not IOException is raised.
 	 * @warning A synchronous binder call with no client-side deadline; see isServiceAvailable().
@@ -818,14 +818,14 @@ protected:
 	/**
 	 * @brief Discovers and registers this device's logical address on an opened session
 	 *
-	 * Polls each LOCAL_DEVICE_TYPE candidate with poll(c, c) and registers the first free one
-	 * (CECNoAckException) with a one-element `addLogicalAddresses()` call. A taken or failed poll and
-	 * a HAL refusal move to the next candidate; a non-ok or raising add stops allocation.
+	 * Releases any address unconfirmedReleaseAddress records (adopted while the HAL still lists it),
+	 * then registers the first LOCAL_DEVICE_TYPE candidate poll(c, c) finds free (CECNoAckException)
+	 * with a one-element `addLogicalAddresses()` call. A taken or failed poll and a HAL refusal move
+	 * to the next candidate; a non-ok or raising add, or an unreadable HAL, stops allocation.
 	 *
 	 * @pre The state is OPENED; the recursive instance lock is taken here.
-	 * @post The local list holds the one registered address, or nothing; unconfirmedReleaseAddress
-	 *       names the candidate when its add failed in transport, or raised and its withdrawal went
-	 *       unconfirmed.
+	 * @post The local list holds the one registered or adopted address, or nothing;
+	 *       unconfirmedReleaseAddress names any address whose release or add went unconfirmed.
 	 * @warning Every exception but thread cancellation's forced unwind is caught and logged at LOG_EXP.
 	 * @see open()
 	 */
@@ -925,9 +925,9 @@ private:
 	 * @brief An address the HAL may still hold although the local list does not, or UNREGISTERED
 	 *
 	 * Set before each HAL call that could leave an address registered without a local entry: the
-	 * release of the held address by removeLogicalAddress(), and every add. Cleared once the HAL
-	 * confirms the outcome, by a successful close() or by the next registerDeviceLogicalAddress();
-	 * addLogicalAddress() settles it before any add.
+	 * release of the held address by removeLogicalAddress(), and every add. A failed close() also
+	 * records the held address. Cleared once the HAL confirms the outcome or by a successful close();
+	 * addLogicalAddress() and registerDeviceLogicalAddress() settle it before any add.
 	 */
 	int unconfirmedReleaseAddress = LogicalAddress::UNREGISTERED;
 

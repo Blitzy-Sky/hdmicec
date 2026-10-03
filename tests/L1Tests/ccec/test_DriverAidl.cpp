@@ -5018,6 +5018,78 @@ TEST_F(DriverAidlPreflightTest, AcceptsAWorldWritableNodeAndReportsItsPermission
 }
 
 /**
+ * @brief The permissive-node line is informational: at the WARN level it is suppressed and the
+ *        verdict stays positive, so a healthy start on a standard 0666 node logs no warning.
+ * @pre Runs under every invocation, through the substituted probe; the level is set to WARN with
+ *      ScopedCecLogLevel and its restoration asserted.
+ * @note The non-root-owner refusal, a WARN line, is the positive control that WARN still prints.
+ */
+TEST_F(DriverAidlPreflightTest, ThePermissiveNodeObservationLogsNoWarning) {
+    bool acceptedVerdict = false;
+    bool refusedVerdict = true;
+    std::string accepted;
+    std::string refused;
+    bool levelWasSet = false;
+    std::string levelRefusal;
+
+    {
+        // Set before the captures open, so the guard's own level probes stay out of them.
+        ScopedCecLogLevel warnLevel("WARN");
+        levelWasSet = warnLevel.isRaised();
+        levelRefusal = warnLevel.failureReason();
+
+        {
+            StdoutCapture capture;
+            ASSERT_TRUE(capture.isValid())
+                << "stdout could not be redirected, so the absence of the permissive-node line "
+                   "cannot be told from an empty capture";
+
+            resetSyntheticProbe(kSyntheticBinderFd, 0, DriverAidlImpl::expectedBinderProtocolVersion(),
+                                true);
+            g_syntheticProbe.answerDescriptorIdentity = kWorldWritableNodeIdentity;
+            acceptedVerdict = BinderPreflightTestAccess::isBinderPreflightOk(
+                DriverAidlImpl::DEFAULT_BINDER_DRIVER_PATH,
+                DriverAidlImpl::DEFAULT_CONTEXT_MANAGER_TIMEOUT_MS, syntheticProbe());
+            accepted = capture.read();
+        }
+
+        {
+            StdoutCapture capture;
+            ASSERT_TRUE(capture.isValid())
+                << "stdout could not be redirected, so the positive control cannot be read";
+
+            resetSyntheticProbe(kSyntheticBinderFd, 0, DriverAidlImpl::expectedBinderProtocolVersion(),
+                                true);
+            g_syntheticProbe.answerDescriptorIdentity = kWorldWritableNodeIdentity;
+            g_syntheticProbe.answerDescriptorIdentity.uid = 1000u;
+            refusedVerdict = BinderPreflightTestAccess::isBinderPreflightOk(
+                DriverAidlImpl::DEFAULT_BINDER_DRIVER_PATH,
+                DriverAidlImpl::DEFAULT_CONTEXT_MANAGER_TIMEOUT_MS, syntheticProbe());
+            refused = capture.read();
+        }
+
+        // Restoration is asserted under the custody lock; the destructor is only a backstop.
+        std::string restoreDetail;
+        ASSERT_TRUE(warnLevel.restoreAndVerify(restoreDetail)) << restoreDetail;
+    }
+
+    ASSERT_TRUE(levelWasSet)
+        << "the middleware log level could not be set to WARN, so whether the permissive-node line "
+           "is a warning cannot be observed. Reported reason: [" << levelRefusal << "]";
+
+    EXPECT_TRUE(acceptedVerdict)
+        << "the preflight declined a root-owned character device because its mode was permissive";
+    EXPECT_EQ(accepted.find("is writable beyond its owner"), std::string::npos)
+        << "the permissive-node line printed at the WARN level, so every healthy AIDL start on a "
+           "standard 0666 binder node reports a warning. Captured: [" << accepted << "]";
+
+    EXPECT_FALSE(refusedVerdict) << "the positive control's node, owned by uid 1000, was accepted";
+    EXPECT_THAT(refused, ::testing::HasSubstr("is owned by uid 1000"))
+        << "the non-root-owner refusal did not print at the WARN level, so the absence asserted "
+           "above proves nothing about the permissive-node line's level. Captured: [" << refused << "]";
+}
+
+/**
  * @brief The resolved selection under invocation A: legacy, once, and stable thereafter.
  *
  * SetUp asserts that the resolved back-end is the legacy DriverImpl rather than adapting to
@@ -6202,7 +6274,8 @@ public:
  * @brief A JournalingControllerDouble whose next add or removal ends without a confirmed outcome.
  *
  * The call raises std::bad_alloc or returns FAILED_TRANSACTION, before or after the fake applies it,
- * and is journalled with "!" after its operation, so "remove!{4}" is a call the adapter saw fail.
+ * or raises an int before it, and is journalled with "!" after its operation, so "remove!{4}" is a
+ * call the adapter saw fail.
  */
 class UnconfirmedOutcomeControllerDouble : public JournalingControllerDouble {
 public:
@@ -6212,7 +6285,8 @@ public:
         RAISES_UNAPPLIED, /**< Raises std::bad_alloc without reaching the fake. */
         RAISES_APPLIED,   /**< Reaches the fake, then raises std::bad_alloc. */
         FAILS_UNAPPLIED,  /**< Returns FAILED_TRANSACTION without reaching the fake. */
-        FAILS_APPLIED     /**< Reaches the fake, then returns FAILED_TRANSACTION. */
+        FAILS_APPLIED,    /**< Reaches the fake, then returns FAILED_TRANSACTION. */
+        RAISES_NON_STANDARD_UNAPPLIED /**< Raises an int, not a std::exception, without reaching the fake. */
     };
 
     using JournalingControllerDouble::JournalingControllerDouble;
@@ -6247,7 +6321,8 @@ public:
 private:
     /** @brief Whether @p outcome lets the call reach the fake. */
     static bool applies(Outcome outcome) {
-        return (outcome != Outcome::RAISES_UNAPPLIED) && (outcome != Outcome::FAILS_UNAPPLIED);
+        return (outcome != Outcome::RAISES_UNAPPLIED) && (outcome != Outcome::FAILS_UNAPPLIED) &&
+               (outcome != Outcome::RAISES_NON_STANDARD_UNAPPLIED);
     }
 
     /** @brief Journals a call that never reached the fake, then raises or fails as @p outcome says. */
@@ -6256,6 +6331,9 @@ private:
         journal.push_back({ std::string(operation) + "!", addresses, target->getRegisteredLogicalAddresses() });
         if (outcome == Outcome::RAISES_UNAPPLIED) {
             throw std::bad_alloc();
+        }
+        if (outcome == Outcome::RAISES_NON_STANDARD_UNAPPLIED) {
+            throw static_cast<int>(addresses.size());
         }
         return ::android::binder::Status::fromStatusT(::android::FAILED_TRANSACTION);
     }
@@ -9420,7 +9498,7 @@ TEST_F(DriverAidlLocalInstanceTest, AnAddThatRaisesAfterRegisteringIsWithdrawnBy
  *        add's candidate for the next add to release first, so the HAL never holds two addresses.
  * @pre Runs under every invocation, on local instances whose injected controllers journal calls.
  * @note Covers a candidate the HAL kept, one it never registered (settled by the read-back), and a
- *       fresh registration discarding the previous session's record.
+ *       successful close() discarding the record before the next registration.
  */
 TEST_F(DriverAidlLocalInstanceTest, AnUnconfirmedCompensatingRemovalIsSettledBeforeTheNextAddressIsAdded) {
     const char *const failures[] = { "raises", "reports false", "fails with DEAD_OBJECT" };
@@ -9494,7 +9572,7 @@ TEST_F(DriverAidlLocalInstanceTest, AnUnconfirmedCompensatingRemovalIsSettledBef
         }
     }
 
-    // A fresh registration drops the record, because the previous session's close removed every address.
+    // A successful close drops the record, because IHdmiCec::close() removed every address.
     {
         const ::android::sp<RaisingAddControllerDouble> controller =
             ::android::sp<RaisingAddControllerDouble>::make();
@@ -9508,6 +9586,7 @@ TEST_F(DriverAidlLocalInstanceTest, AnUnconfirmedCompensatingRemovalIsSettledBef
         probe.injectOpenSession(::android::sp<FakeHdmiCecService>::make(), controller);
         ASSERT_NO_THROW({ probe.registerAddress(); });
         ASSERT_EQ(controller->getRegisteredLogicalAddresses(), std::vector<int32_t>({ 4 }));
+        ASSERT_NO_THROW({ probe.close(); });
 
         reopened->getController()->setLogicalAddressOccupied(4, true);
         reopened->getController()->setLogicalAddressOccupied(8, true);
@@ -10004,6 +10083,239 @@ TEST_F(DriverAidlLocalInstanceTest, CloseKeepsTheAddressAndTheNextRegistrationRe
     EXPECT_EQ(probe.heldAddresses(), std::vector<int>({ 8 }))
         << "the re-registration appended instead of replacing";
     EXPECT_EQ(controller->getRegisteredLogicalAddresses(), std::vector<int32_t>({ 8 }));
+}
+
+/**
+ * @brief A re-open after a failed close() releases the address the HAL kept before allocating, so
+ *        exactly one address is registered and every view of it agrees.
+ * @pre Runs under every invocation, on local instances whose injected controllers journal calls;
+ *      the fake's close() reports false, so it keeps its registrations.
+ * @note Covers the first candidate free or occupied at re-open, and an enable-time add left
+ *       unconfirmed before the failed close.
+ */
+TEST_F(DriverAidlLocalInstanceTest, AReopenAfterAFailedCloseReleasesTheKeptAddressBeforeAllocating) {
+    /** @brief Outcome enumeration of UnconfirmedOutcomeControllerDouble, shortened for the case. */
+    typedef UnconfirmedOutcomeControllerDouble::Outcome Outcome;
+    /** @brief One arm: how the first enable-time add ends, whether 4 is taken at re-open, the result. */
+    struct Arm {
+        const char *name;       /**< @brief Names the arm in every failure message. */
+        Outcome firstAdd;       /**< @brief How the first session's enable-time add ends. */
+        bool occupiedAtReopen;  /**< @brief Whether logical address 4 answers its poll at re-open. */
+        int expected;           /**< @brief The one address the re-open must leave registered. */
+    };
+    const Arm arms[] = {
+        { "first candidate free at re-open", Outcome::CONFIRMED, false, LogicalAddress::PLAYBACK_DEVICE_1 },
+        { "first candidate occupied at re-open", Outcome::CONFIRMED, true, LogicalAddress::PLAYBACK_DEVICE_2 },
+        { "enable-time add unconfirmed before the failed close", Outcome::FAILS_APPLIED, false,
+          LogicalAddress::PLAYBACK_DEVICE_1 },
+    };
+
+    for (size_t i = 0; i < sizeof(arms) / sizeof(arms[0]); i++) {
+        const ::android::sp<FakeHdmiCecService> service = ::android::sp<FakeHdmiCecService>::make();
+        const ::android::sp<FakeHdmiCecController> controller = service->getController();
+        const ::android::sp<UnconfirmedOutcomeControllerDouble> journalling =
+            ::android::sp<UnconfirmedOutcomeControllerDouble>::make(controller);
+        const bool confirmed = (arms[i].firstAdd == Outcome::CONFIRMED);
+        const std::string arm = arms[i].name;
+        AllocationProbe probe;
+
+        journalling->nextAdd = arms[i].firstAdd;
+        probe.injectOpenSession(service, journalling);
+        probe.registerAddress();
+        ASSERT_EQ(journalling->sequenceSince(0), confirmed ? "add{4}" : "add!{4}") << arm;
+        ASSERT_EQ(probe.heldAddresses(), confirmed ? std::vector<int>({ 4 }) : std::vector<int>()) << arm;
+
+        service->setCloseResult(false);
+        EXPECT_THROW({ probe.close(); }, IOException) << arm;
+        ASSERT_EQ(controller->getRegisteredLogicalAddresses(), std::vector<int32_t>({ 4 }))
+            << arm << ": the failed close was expected to leave the HAL holding logical address 4";
+
+        controller->setLogicalAddressOccupied(4, arms[i].occupiedAtReopen);
+        const size_t mark = journalling->journal.size();
+        probe.injectOpenSession(service, journalling);
+        ASSERT_NO_THROW({ probe.registerAddress(); }) << arm;
+
+        EXPECT_EQ(journalling->sequenceSince(mark), "remove{4} add{" + std::to_string(arms[i].expected) + "}")
+            << arm << ": the re-open did not release the kept address before adding";
+        expectRegistrationState(service, probe, { arms[i].expected }, { arms[i].expected },
+                                arm + ", after the re-open");
+        EXPECT_LE(journalling->mostRegisteredAtOnce(), 1u)
+            << arm << ": the HAL held more than one address after a call in: " << journalling->sequenceSince(0);
+    }
+}
+
+/**
+ * @brief A re-open whose release of the kept address the HAL declines follows the HAL's own list:
+ *        an address it still holds is adopted with nothing added, one it no longer holds is released.
+ * @pre Runs under every invocation, on local instances whose injected controllers journal calls;
+ *      the fake's close() reports false.
+ * @note The adopted address is then replaced by the next add like any registered one.
+ */
+TEST_F(DriverAidlLocalInstanceTest, AReopenWhoseReleaseIsDeclinedFollowsTheHalsOwnAddressList) {
+    for (int stillListed = 1; stillListed >= 0; stillListed--) {
+        const ::android::sp<FakeHdmiCecService> service = ::android::sp<FakeHdmiCecService>::make();
+        const ::android::sp<FakeHdmiCecController> controller = service->getController();
+        const ::android::sp<JournalingControllerDouble> journalling =
+            ::android::sp<JournalingControllerDouble>::make(controller);
+        const std::string arm = stillListed ? "declined release, still listed" : "declined release, no longer listed";
+        AllocationProbe probe;
+
+        probe.injectOpenSession(service, journalling);
+        probe.registerAddress();
+        ASSERT_EQ(journalling->sequenceSince(0), "add{4}") << arm;
+        service->setCloseResult(false);
+        EXPECT_THROW({ probe.close(); }, IOException) << arm;
+
+        if (stillListed) {
+            controller->setRemoveLogicalAddressesResult(false);
+        } else {
+            // The HAL dropped the address on its own, so releasing it reports false, as its contract says.
+            controller->clearRegisteredLogicalAddresses();
+        }
+        const size_t mark = journalling->journal.size();
+        const int32_t readsBefore = service->getGetLogicalAddressesCallCount();
+        const int32_t pollsBefore = controller->getTotalSendMessageCallCount();
+        probe.injectOpenSession(service, journalling);
+        ASSERT_NO_THROW({ probe.registerAddress(); }) << arm;
+
+        EXPECT_EQ(service->getGetLogicalAddressesCallCount(), readsBefore + 1)
+            << arm << ": the declined release was not settled by one read of the HAL's addresses";
+        if (stillListed) {
+            EXPECT_EQ(journalling->sequenceSince(mark), "remove{4}")
+                << arm << ": an address was added although the HAL kept the previous one";
+            EXPECT_EQ(controller->getTotalSendMessageCallCount(), pollsBefore)
+                << arm << ": a candidate was polled although the HAL's address was adopted";
+            expectRegistrationState(service, probe, { 4 }, { 4 }, arm + ", after the re-open");
+
+            controller->setRemoveLogicalAddressesResult(true);
+            const size_t replaceMark = journalling->journal.size();
+            EXPECT_TRUE(probe.addLogicalAddress(LogicalAddress(LogicalAddress::AUDIO_SYSTEM))) << arm;
+            EXPECT_EQ(journalling->sequenceSince(replaceMark), "remove{4} add{5}")
+                << arm << ": the adopted address was not replaced like a registered one";
+            expectRegistrationState(service, probe, { 5 }, { 5 }, arm + ", after the next add");
+        } else {
+            EXPECT_EQ(journalling->sequenceSince(mark), "remove{4} add{4}")
+                << arm << ": an address the HAL no longer holds was not treated as released";
+            expectRegistrationState(service, probe, { 4 }, { 4 }, arm + ", after the re-open");
+        }
+        EXPECT_LE(journalling->mostRegisteredAtOnce(), 1u)
+            << arm << ": the HAL held more than one address after a call in: " << journalling->sequenceSince(0);
+    }
+}
+
+/**
+ * @brief A re-open whose release of the kept address cannot be confirmed registers nothing and keeps
+ *        the address recorded, so the next add releases it first and one address remains.
+ * @pre Runs under every invocation, on local instances whose injected controllers journal calls;
+ *      the fake's close() reports false.
+ * @note The arms: a DEAD_OBJECT release whose read-back fails, a declined release with no service
+ *       proxy to read back from, and a release that raises std::bad_alloc or an int.
+ */
+TEST_F(DriverAidlLocalInstanceTest, AReopenWhoseReleaseCannotBeConfirmedRegistersNothingUntilTheNextAdd) {
+    /** @brief Outcome enumeration of UnconfirmedOutcomeControllerDouble, shortened for the case. */
+    typedef UnconfirmedOutcomeControllerDouble::Outcome Outcome;
+    const char *const names[] = { "release fails and the read-back fails",
+                                  "release declined with no service proxy", "release raises std::bad_alloc",
+                                  "release raises a non-standard exception" };
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        const ::android::sp<FakeHdmiCecService> service = ::android::sp<FakeHdmiCecService>::make();
+        const ::android::sp<FakeHdmiCecController> controller = service->getController();
+        const ::android::sp<UnconfirmedOutcomeControllerDouble> journalling =
+            ::android::sp<UnconfirmedOutcomeControllerDouble>::make(controller);
+        const std::string arm = names[i];
+        AllocationProbe probe;
+
+        probe.injectOpenSession(service, journalling);
+        probe.registerAddress();
+        ASSERT_EQ(journalling->sequenceSince(0), "add{4}") << arm;
+        service->setCloseResult(false);
+        EXPECT_THROW({ probe.close(); }, IOException) << arm;
+
+        if (i == 0) {
+            controller->setRemoveLogicalAddressesBinderStatus(
+                ::android::binder::Status::fromStatusT(::android::DEAD_OBJECT));
+            service->setGetLogicalAddressesBinderStatus(
+                ::android::binder::Status::fromStatusT(::android::DEAD_OBJECT));
+        } else if (i == 1) {
+            controller->setRemoveLogicalAddressesResult(false);
+        } else {
+            journalling->nextRemove = (i == 2) ? Outcome::RAISES_UNAPPLIED : Outcome::RAISES_NON_STANDARD_UNAPPLIED;
+        }
+        const size_t mark = journalling->journal.size();
+        const int32_t pollsBefore = controller->getTotalSendMessageCallCount();
+        probe.injectOpenSession((i == 1) ? ::android::sp<FakeHdmiCecService>() : service, journalling);
+        ASSERT_NO_THROW({ probe.registerAddress(); }) << arm << ": the unconfirmed release escaped the allocation";
+
+        EXPECT_EQ(journalling->sequenceSince(mark), (i >= 2) ? "remove!{4}" : "remove{4}")
+            << arm << ": allocation went ahead although the kept address was not confirmed released";
+        EXPECT_EQ(controller->getTotalSendMessageCallCount(), pollsBefore) << arm << ": a candidate was polled";
+        EXPECT_EQ(probe.currentStatus(), probe.openedState()) << arm;
+        EXPECT_TRUE(probe.heldAddresses().empty()) << arm;
+        EXPECT_EQ(controller->getRegisteredLogicalAddresses(), std::vector<int32_t>({ 4 })) << arm;
+
+        // The HAL recovers; the next add finds the kept address still recorded and releases it first.
+        controller->setRemoveLogicalAddressesBinderStatus(::android::binder::Status::ok());
+        controller->setRemoveLogicalAddressesResult(true);
+        service->setGetLogicalAddressesBinderStatus(::android::binder::Status::ok());
+        probe.injectOpenSession(service, journalling);
+        expectRegistrationState(service, probe, { 4 }, { }, arm + ", after the re-open");
+
+        const size_t addMark = journalling->journal.size();
+        EXPECT_TRUE(probe.addLogicalAddress(LogicalAddress(LogicalAddress::AUDIO_SYSTEM))) << arm;
+        EXPECT_EQ(journalling->sequenceSince(addMark), "remove{4} add{5}")
+            << arm << ": the next add did not release the address the re-open left recorded";
+        expectRegistrationState(service, probe, { 5 }, { 5 }, arm + ", after the next add");
+        EXPECT_LE(journalling->mostRegisteredAtOnce(), 1u)
+            << arm << ": the HAL held more than one address after a call in: " << journalling->sequenceSince(0);
+    }
+}
+
+/**
+ * @brief A re-open with nothing recorded releases nothing and reads nothing back: neither after a
+ *        successful close(), which removed every address, nor after a failed one that held none.
+ * @pre Runs under every invocation, on local instances whose injected controllers journal calls.
+ */
+TEST_F(DriverAidlLocalInstanceTest, AReopenWithNothingRecordedReleasesNothingBeforeAllocating) {
+    for (int closeFails = 0; closeFails <= 1; closeFails++) {
+        const ::android::sp<FakeHdmiCecService> service = ::android::sp<FakeHdmiCecService>::make();
+        const ::android::sp<FakeHdmiCecController> controller = service->getController();
+        const ::android::sp<JournalingControllerDouble> journalling =
+            ::android::sp<JournalingControllerDouble>::make(controller);
+        const std::string arm = closeFails ? "failed close holding no address" : "successful close";
+        AllocationProbe probe;
+
+        // A failed close holds no address only when enabling registered none.
+        if (closeFails) {
+            controller->setLogicalAddressOccupied(4, true);
+            controller->setLogicalAddressOccupied(8, true);
+            controller->setLogicalAddressOccupied(11, true);
+        }
+        probe.injectOpenSession(service, journalling);
+        probe.registerAddress();
+        ASSERT_EQ(journalling->sequenceSince(0), closeFails ? "" : "add{4}") << arm;
+
+        service->setCloseResult(closeFails == 0);
+        if (closeFails) {
+            EXPECT_THROW({ probe.close(); }, IOException) << arm;
+            controller->setLogicalAddressOccupied(4, false);
+        } else {
+            ASSERT_NO_THROW({ probe.close(); }) << arm;
+        }
+        ASSERT_TRUE(controller->getRegisteredLogicalAddresses().empty()) << arm;
+
+        const size_t mark = journalling->journal.size();
+        const int32_t readsBefore = service->getGetLogicalAddressesCallCount();
+        probe.injectOpenSession(service, journalling);
+        probe.registerAddress();
+
+        EXPECT_EQ(journalling->sequenceSince(mark), "add{4}")
+            << arm << ": the re-open released an address although nothing was recorded";
+        EXPECT_EQ(controller->getRemoveLogicalAddressesCallCount(), 0) << arm;
+        EXPECT_EQ(service->getGetLogicalAddressesCallCount(), readsBefore)
+            << arm << ": the re-open read the HAL's addresses although there was nothing to settle";
+        expectRegistrationState(service, probe, { 4 }, { 4 }, arm + ", after the re-open");
+    }
 }
 
 /**

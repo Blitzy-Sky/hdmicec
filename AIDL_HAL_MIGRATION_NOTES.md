@@ -226,6 +226,7 @@ kept only where it is marked as superseded.
 - The NULL sentinel wakes a blocked reader so it unwinds, and it is offered before the HAL transaction, which is the observable legacy order. It shares the incoming queue's 32 slots with received frames, so a full queue drops it, as on the legacy path.
 - The failure is raised only after the state is CLOSED, so a caller that swallows the exception still sees a consistently closed object; DriverImpl::close() likewise sets the state before raising on an `HdmiCecClose()` failure. `IOException` is raised for a non-ok binder status or for success with a false result.
 - The local logical-address list is not cleared because DriverImpl::close() does not clear it either, so isValidLogicalAddress() can remain true across a close on the legacy path, and the HAL removes the addresses on its own side; clearing would be an unauthorized improvement.
+- A failed close gives no such removal: the HAL may still hold the registered address. The failure arm therefore writes the local entry, when there is one, to `unconfirmedReleaseAddress` before it raises, and leaves an existing record alone when the list is empty. The next open()'s registration releases that address before it allocates, so a HAL that accepts the re-open while keeping the old address never ends up holding two.
 - Safe on a closed instance, which returns silently.
 - The listener detach sits before the failure check and must stay there. A failed `IHdmiCec::close()` leaves the HAL entitled to keep calling the listener, because the AIDL no-further-callbacks guarantee attaches only to a close that succeeded; detaching only on the success arm would leave a listener holding a back pointer into an owner about to be destroyed (CWE-416).
 - Blocked item B2: `IHdmiCec.close()` is a high-confidence candidate for the legacy `HdmiCecClose()`, pending confirmation by the HAL mapping-table owners, whose table has no entry for `HdmiCecClose()`. The candidate is used because a back-end that cannot close is not deliverable — every `LibCCEC::term()` would leak an open session and the next open() would fail with `EX_ILLEGAL_STATE`. If the owners reject it, only this method's body changes.
@@ -260,7 +261,7 @@ kept only where it is marked as superseded.
 - The legacy shape is the specification: the guard, the local removal, and only then the HAL call, whose result legacy ignores. Both a false result and a non-ok binder status are logged and otherwise ignored, because raising where legacy returns silently would be an unregistered behaviour change.
 - The address is marshalled as a one-element `std::vector<int32_t>`; no multi-address state is introduced.
 - Nothing is reported about HAL-side failure, by design; a caller that needs to know an address was released must re-query.
-- The local removal forgets the address while the HAL may still hold it, so the address this back-end held is written to the private `unconfirmedReleaseAddress` record before the local removal, and only an ok `true` release clears it. A release that reports false or fails is logged and ignored, and an exception from the request allocation or the proxy propagates; each leaves the record set. The next addLogicalAddress() settles that record before adding anything; a successful close() or the next open()'s registration also clears it.
+- The local removal forgets the address while the HAL may still hold it, so the address this back-end held is written to the private `unconfirmedReleaseAddress` record before the local removal, and only an ok `true` release clears it. A release that reports false or fails is logged and ignored, and an exception from the request allocation or the proxy propagates; each leaves the record set. The next addLogicalAddress() settles that record before adding anything; a successful close() clears it, and the next open()'s registration settles it before allocating.
 - A stall is reported naming `IHdmiCecController::removeLogicalAddresses`.
 
 ### `CCEC::DriverAidlImpl::poll()`
@@ -349,7 +350,7 @@ Detail moved out of the Doxygen comments from `unavailabilityReason()` to the en
 
 - The file-type bits are extracted with `BINDER_NODE_MODE_TYPE_MASK` and validated once inside the preflight.
 - The whole value is compared across the check-to-use window, so a `chmod` of the validated inode cannot pass as unchanged.
-- Permission bits broader than owner-only are observed and reported. This is a diagnostic and never a verdict; see `isBinderPreflightOk()`.
+- Permission bits broader than owner-only are observed and reported at `LOG_INFO`. This is a diagnostic and never a verdict; see `isBinderPreflightOk()`.
 
 ### DriverAidlImpl::BinderNodeIdentity::uid
 
@@ -429,7 +430,7 @@ Detail moved out of the Doxygen comments from `unavailabilityReason()` to the en
   6. Binder handle 0 (the context manager) resolves within a bounded timeout instead of being waited on without limit.
 
   Only when all of them pass may the caller go on to the service lookup and the compatibility check. Any failure means "AIDL absent" and the legacy back-end is used.
-- **Observed but not required: permissive node mode.** A node writable beyond its owner is logged once, with its permission bits, and the verdict is unchanged. The middleware cannot require restrictive permissions, because every client process that uses binder must be able to open the node. AOSP-derived platforms publish it broadly accessible by design, and a binderfs deployment takes whatever mode binderfs assigns. Refusing a permissive mode would decline the AIDL path on conformant platforms while passing in a root-only CI guest. The enforceable node-level controls are therefore:
+- **Observed but not required: permissive node mode.** A node writable beyond its owner is logged once at `LOG_INFO`, with its permission bits, and the verdict is unchanged. It is not a warning, because every standard binder node is `0666` and a WARN on every healthy start would teach integrators to ignore WARN. The middleware cannot require restrictive permissions, because every client process that uses binder must be able to open the node. AOSP-derived platforms publish it broadly accessible by design, and a binderfs deployment takes whatever mode binderfs assigns. Refusing a permissive mode would decline the AIDL path on conformant platforms while passing in a root-only CI guest. The enforceable node-level controls are therefore:
   - the character-device and root-owner checks;
   - the five-attribute identity comparison the caller makes just before the lookup, which catches the mode or owner changing inside the check-to-use window even though neither value is dictated.
 - **Who may register `"HdmiCec"`.** Who may register and resolve the name is decided by `servicemanager` add and find policy in the platform image. It is recorded as a hard prerequisite on `isServiceAvailable()`, and no client-side code substitutes for it.
@@ -645,9 +646,10 @@ destructor and `close()`.
   - `open()`: after the legacy state guard it raises `IOException` if no service proxy is held,
     calls `startThreadPool()`, then calls `IHdmiCec::open()` with the event listener, which
     replaces both legacy callback registrations. A non-ok status or a null controller detaches
-    the listener and raises `IOException`. After OPENED, `registerDeviceLogicalAddress()` polls
-    the candidate addresses for `LOCAL_DEVICE_TYPE` and registers the first free one, at most
-    one, through `addLogicalAddresses()`. It catches and logs every failure; only thread
+    the listener and raises `IOException`. After OPENED, `registerDeviceLogicalAddress()` first
+    releases any address `unconfirmedReleaseAddress` records (after a failed close, for one),
+    then polls the candidate addresses for `LOCAL_DEVICE_TYPE` and registers the first free one,
+    at most one, through `addLogicalAddresses()`. It catches and logs every failure; only thread
     cancellation's forced unwind escapes. See
     [Logical-address allocation and registration (AIDL back-end)](#logical-address-allocation-and-registration-aidl-back-end).
   - `addLogicalAddress()`: after the state guard and a no-controller `IOException`, an address
@@ -680,7 +682,8 @@ destructor and `close()`.
     `queueProducerMutex`. `IHdmiCec::close()` stands in for `HdmiCecClose()`, pending owner
     confirmation (B2). Whatever the outcome, the controller is released and the listener
     detached, and `CLOSED` is set before any raise. A successful close clears
-    `unconfirmedReleaseAddress`. As on the legacy back-end, the local list is not cleared.
+    `unconfirmedReleaseAddress`; a failed one writes the held address to it. As on the legacy
+    back-end, the local list is not cleared.
     `~DriverAidlImpl()` keeps the legacy shape and also detaches the listener on every path.
   - Receive path: `EventListener::onMessageReceived()` replaces `DriverReceiveCallback()`. It
     discards a message shorter than `MIN_RECEIVED_MESSAGE_LENGTH`, drops one that arrives after
@@ -1278,6 +1281,9 @@ The value is one byte, and it matters in both directions.
 - **Sentinel before the HAL transaction.** This is the legacy order, and it is relied upon.
 - **A failed close still closes this side.** No controller is held, no listener is attached, and
   the state is CLOSED before the exception is raised. B2 concerns only which HAL call step 4 makes.
+- **A failed close records the held address.** The HAL removed nothing, so the local entry, if
+  any, is written to `unconfirmedReleaseAddress` before the raise; the next registration releases
+  it first.
 - **Sentinel under `queueProducerMutex`.**
   - `close()` is a producer on the queue, not merely its terminator.
   - The receive path establishes that there is room before it parts with a frame. That occupancy
@@ -1491,7 +1497,9 @@ holds what the source comment no longer carries; the source keeps the contract i
   in CI, whose guest node is root-owned with everything running as root. What carries a verdict
   is the two checks before it and the five-attribute identity comparison immediately before the
   lookup, which catches the mode changing inside the check-to-use window. The mode is printed in
-  octal.
+  octal, at `LOG_INFO`: the standard node is `0666`, so the line describes every healthy start
+  and is information, not a fault; the platform faults the decision points report stay at
+  `LOG_WARN`.
 - **Decision point 6.** Logged at `LOG_WARN`: a missing node is a legacy-only SOC behaving as
   designed and alone stays at `LOG_INFO`, whereas here the node existed and opened, then refused
   the one ioctl every binder client issues first. No correctly provisioned platform does that;
@@ -1775,12 +1783,37 @@ not part of the installed API, because `DriverAidlImpl.hpp` is not installed.
 instance lock. A call to `open()` while the driver is already OPENED returns silently before
 reaching this step, so `Bus::start()`'s second `open()` does not allocate again.
 
-The helper first clears the local list and `unconfirmedReleaseAddress`. A session opens only from
-CLOSED (`IHdmiCec.open()` fails with `EX_ILLEGAL_STATE` otherwise), and `IHdmiCec.close()` removes
-every added address, so nothing from the previous session can still be registered. It then takes
-each candidate `c` of `LOCAL_DEVICE_TYPE` in order and polls it with this back-end's own
-`poll(c, c)`. That call sends a one-byte frame whose initiator equals its destination, which is
-the HDMI 1.4b §10.2.1 allocation poll.
+The helper first clears the local list, which the new registration replaces. It then settles any
+address `unconfirmedReleaseAddress` records. After a successful `close()` there is none, because
+`IHdmiCec.close()` removes every added address and `close()` clears the record, so the conforming
+path makes no extra HAL call. A record survives only a failed `close()`, which writes the held
+address to it, or an add or removal whose outcome the HAL never confirmed. A HAL that accepts the
+next `IHdmiCec.open()` may still hold that address, and allocating without releasing it would
+leave two registered (the self-poll of a held address goes unanswered, so it reads as free, the
+add of it is declined as already added, and the next candidate is added beside it).
+
+| Release step outcome                                             | Action                                                    |
+|------------------------------------------------------------------|-----------------------------------------------------------|
+| no record                                                        | allocate, with no release and no read-back                |
+| `removeLogicalAddresses({held})` ok status, `true`               | record cleared, `LOG_INFO`, allocate                      |
+| removal `false` or non-ok, no service proxy held                 | `LOG_EXP`, record kept, nothing registered                |
+| removal `false` or non-ok, `IHdmiCec::getLogicalAddresses()` non-ok | `LOG_EXP`, record kept, nothing registered             |
+| removal `false` or non-ok, read-back does not list `held`        | treated as released: record cleared, `LOG_INFO`, allocate |
+| removal `false` or non-ok, read-back lists `held`                | adopted: local list becomes `{held}`, record cleared, `LOG_EXP`, no poll and no add |
+| the removal or the read-back raises                              | the outer handler's `LOG_EXP`, record kept, nothing registered |
+
+Adoption keeps the one-address invariant when the HAL will not let the address go: the HAL holds
+exactly that one, `getLogicalAddress()` reads it back, and `isValidLogicalAddress()` agrees. It is
+reached only by a HAL that breaks the `IHdmiCec.close()` contract and then refuses the release, so
+the adopted address can be one this device's DeviceType would not have chosen; the next
+`addLogicalAddress()` replaces it like any registered address. A kept record is settled by the
+next `addLogicalAddress()` under the confirmed-release rule, before it adds anything. The removal
+and the read-back are timed with the same slow-call diagnostic as every other synchronous AIDL
+call.
+
+Allocation then takes each candidate `c` of `LOCAL_DEVICE_TYPE` in order and polls it with this
+back-end's own `poll(c, c)`. That call sends a one-byte frame whose initiator equals its
+destination, which is the HDMI 1.4b §10.2.1 allocation poll.
 
 | Poll or add outcome                                              | Meaning   | Action                                                    |
 |------------------------------------------------------------------|-----------|-----------------------------------------------------------|
@@ -1796,7 +1829,7 @@ the HDMI 1.4b §10.2.1 allocation poll.
 
 **Containment.** Only thread cancellation leaves this step as an exception, so allocation never
 makes `open()` raise. Every call that can raise sits inside a handler: the poll's own, the add's
-own, and an outer `std::exception`/catch-all pair around the candidate loop. Each handler's
+own, and an outer `std::exception`/catch-all pair around the release step and the candidate loop. Each handler's
 diagnostic is a constant-format `LOG_EXP` line that allocates nothing, and each catch-all is
 preceded by an `abi::__forced_unwind` rethrow so a cancelled thread still unwinds.
 
@@ -1818,7 +1851,7 @@ The pre-OPENED failure arms of `open()` are unchanged: no proxy, a failed `IHdmi
 a null controller. When allocation leaves the HAL holding no address, `getLogicalAddress()`
 reports 0, and `LibCCEC::getLogicalAddress()` then raises its existing `InvalidStateException`.
 After a failed add the HAL nonetheless applied, the HAL-backed query reports that address until
-the next add releases it or `close()` removes it.
+the next add or the next registration releases it, or `close()` removes it.
 
 The add call and the compensating removal are timed with the same slow-call diagnostic as every
 other synchronous AIDL call.
@@ -1946,9 +1979,12 @@ legacy, whatever the HAL then answers.
   already held, so an uncertain address is never overwritten by another.
 - `addLogicalAddress()` treats it as the held address when the local list is empty, and releases
   or confirms it under the confirmed-release rule before adding anything.
-- Besides those confirmed outcomes, it is cleared by a successful `close()` and at the start of
-  `registerDeviceLogicalAddress()`. Both hold because `IHdmiCec.close()` removes every added
-  address and a session opens only from CLOSED.
+- A failed `close()` writes the local entry, when there is one, before it raises: the HAL removed
+  nothing, so it may still hold that address. With the list empty it leaves the record as it is.
+- Besides those confirmed outcomes, it is cleared by a successful `close()`, because
+  `IHdmiCec.close()` removes every added address. `registerDeviceLogicalAddress()` settles it
+  before allocating, by the same release and read-back as `addLogicalAddress()`, and adopts the
+  address instead when the HAL declines the release and still lists it.
 - A stale record is self-healing. Releasing an address the HAL no longer holds returns `false`, and
   the read-back then confirms the address absent.
 
@@ -1992,7 +2028,7 @@ legacy, whatever the HAL then answers.
     compensating removal that raises as well;
   - a compensating removal that raises, reports false or fails with DEAD_OBJECT, whether the HAL
     kept the candidate or never registered it. In each case the next add releases the candidate,
-    or confirms it absent through the read-back, before adding, and a fresh registration drops the
+    or confirms it absent through the read-back, before adding, and a successful close drops the
     record (`AnUnconfirmedCompensatingRemovalIsSettledBeforeTheNextAddressIsAdded`);
   - replace-on-add and the same-address no-op. These run through `JournalingControllerDouble`, a
     test-local controller that journals each add and remove in order and forwards it to the
@@ -2027,7 +2063,18 @@ legacy, whatever the HAL then answers.
     list is empty or equal to it, and an address the HAL kept without a local entry is released by
     the next add before it adds; the failures before any add are the ones the outer
     `std::exception` handler contains (`AnAllocationFailureAnywhereInEnableTimeAllocationIsContained`);
-  - close followed by re-registration.
+  - close followed by re-registration;
+  - a re-open after a failed close, whose fake keeps its registrations. The kept address is
+    released before allocating, whether 4 is then free or occupied and whether it was registered
+    or left by an unconfirmed enable-time add, so the journal reads `remove{4} add{c}` and the HAL
+    holds only `{c}` (`AReopenAfterAFailedCloseReleasesTheKeptAddressBeforeAllocating`). A
+    declined release is adopted when the HAL still lists it and released when it does not
+    (`AReopenWhoseReleaseIsDeclinedFollowsTheHalsOwnAddressList`). A release that fails with a
+    failed read-back, lacks a service proxy, or raises registers nothing and keeps the record for
+    the next add (`AReopenWhoseReleaseCannotBeConfirmedRegistersNothingUntilTheNextAdd`). With
+    nothing recorded, after a successful close or a failed one holding no address, the re-open
+    makes no removal and no read-back
+    (`AReopenWithNothingRecordedReleasesNothingBeforeAllocating`).
 - **`DriverAidlSessionTest`** (invocation B). Covers:
   - enable registering exactly `{4}`;
   - `LibCCEC::getLogicalAddress(1)` returning 4 through the HAL;
@@ -3572,6 +3619,15 @@ Detail moved out of the source comments of the separate-process fake-service hos
 - `setInstance` ordering (function body): `SetUp` runs before any `TEST_F` body, which lets a case
   configure or observe a fake registered long before it ran.
 
+### resolvedAidlMode
+
+- The single spelling of the "unset or empty means `absent`" rule. `applyAidlModeBeforeInit()`
+  acts on its result before `init()`, and `failUnlessSelectedBackEndMatchesMode()` checks the
+  selection against the same result after it, so the two cannot disagree about which mode the run
+  was given.
+- It does not validate: an unrecognised value is returned as given, and
+  `applyAidlModeBeforeInit()` is where it fails the run.
+
 ### applyAidlModeBeforeInit
 
 - The one place in `run_L1Tests` that acts on the four modes.
@@ -3592,6 +3648,21 @@ Detail moved out of the source comments of the separate-process fake-service hos
   `$'bogus\n::error::FORGED'` ended the message and began a standalone GitHub workflow command;
   `renderUntrustedValue()` leaves no newline, bounds the length and keeps the sentence's own words
   in front of the value.
+
+### failUnlessSelectedBackEndMatchesMode
+
+- The hard failure for a stale registration in mode `absent`. `compatible` and `incompatible`
+  detect one before publishing, through `failIfServiceAlreadyPublished()`; `absent` publishes
+  nothing and so performs no lookup, which left a stale "HdmiCec" service free to win the
+  selection: the run then executed on the AIDL back-end and, under any filter that excluded the
+  legacy-bound suites, reported green. Reading the outcome after `init()` closes that gap without
+  this harness reaching the service manager itself.
+- Identity is a `dynamic_cast` against `DriverImpl` and `DriverAidlImpl`, the two concrete types
+  `Driver::getInstance()` can return. That is a vtable lookup, never a binder call, and it needs no
+  production introspection API. Every arm also catches a selection that contradicts its mode for
+  any other reason, naming the mode, the back-end required and the back-end selected.
+- The failure is raised in the global environment's `SetUp()`, so no case body runs and the binary
+  exits non-zero; `TearDown()` still runs and already tolerates a partial setup.
 
 ### LogicalAddressRegistryGuard
 
@@ -3714,6 +3785,9 @@ Detail moved out of the source comments of the separate-process fake-service hos
   which a once-per-process `SetUp` never reaches, and the exceptions it can raise
   (`Driver::getInstance().open()` refused by the HAL, `Bus::getInstance().start()` failing) are
   real failures.
+- Immediately after `init()`, `failUnlessSelectedBackEndMatchesMode()` holds the resolved selection
+  to the mode, so a stale registration under `absent`, or any selection the mode did not ask for,
+  fails the run before a case executes.
 
 ### CecTestEnvironment::TearDown
 
@@ -3951,19 +4025,19 @@ file-scope constants and the helpers through `ScopedCecLogLevel`.
   Fixture                      Cases  Back-end  Invocation  CEC_TEST_AIDL_MODE  Binder driver
   ------------------------------------------------------------------------------------------
   DriverAidlCompatibilityTest     28  any       A, B, C     any                 no
-  DriverAidlPreflightTest         28  any       A, B, C     any                 no
+  DriverAidlPreflightTest         29  any       A, B, C     any                 no
   DriverAidlSelectionTest          4  legacy    A           absent              no
-  DriverAidlLocalInstanceTest     46  any       A, B, C     any                 no
+  DriverAidlLocalInstanceTest     50  any       A, B, C     any                 no
   DriverAidlLegacyArmTest          5  legacy    A           absent              no
   DriverAidlSessionTest           32  AIDL      B           compatible          yes
   DriverAidlTransmitTest          12  AIDL      B           compatible          yes
   ------------------------------------------------------------------------------------------
-                                 155  of which 111 run under invocation A
+                                 160  of which 116 run under invocation A
 
   Invocation  Registered  Selected  Excluded
-  A                  638       594        44
-  B                  638       454       184
-  C                  638       410       228
+  A                  643       599        44
+  B                  643       459       184
+  C                  643       415       228
 ```
 
 - The selection resolves once per process, inside the `LibCCEC::init()` call in
@@ -3975,20 +4049,20 @@ file-scope constants and the helpers through `ScopedCecLogLevel`.
   back-end-specific fixture run where the other back-end resolved fails there and never skips.
   `DriverAidlSelectionTest` under invocation C, where legacy also resolves, is kept out by the
   filter instead (see the invocation C entry below).
-- The 111 run under invocation A are the first five fixtures, 28 + 28 + 4 + 46 + 5. Invocation A
+- The 116 run under invocation A are the first five fixtures, 28 + 29 + 4 + 50 + 5. Invocation A
   excludes `DriverAidlSessionTest` (32) and `DriverAidlTransmitTest` (12), the 44 excluded,
   because both require the AIDL back-end to be the resolved one.
 - The runner's per-invocation gate reconciles selected plus excluded against registered, so all
-  three numbers matter and a stale one fails the invocation. Registered is 638 = 483 pre-existing
-  + 155, in 25 suites; selected and excluded are 594 and 44 under A, 454 and 184 under B, and
-  410 and 228 under C. Every figure was measured on the host with the runner's own filters, by
+  three numbers matter and a stale one fails the invocation. Registered is 643 = 483 pre-existing
+  + 160, in 25 suites; selected and excluded are 599 and 44 under A, 459 and 184 under B, and
+  415 and 228 under C. Every figure was measured on the host with the runner's own filters, by
   `./run_L1Tests --gtest_list_tests --gtest_filter=<filter> | grep -cE '^  [A-Za-z]'`, with the
   filters taken verbatim from `run_coverage.sh`'s `INVOCATION_MATRIX`. Listing is a registration
   query needing no binder driver, so B's and C's counts are measurable on a driverless host; they
   are measured rather than derived because arithmetic over the table misses a renamed or
   unclassified suite.
-- Invocation A was executed on the host (594 selected from 23 suites, 594 passed, exit 0).
-  B (454 of 454 passed) and C (410 of 410 passed) were executed in a binder-capable guest; a
+- Invocation A was executed on the host (599 selected from 23 suites, 599 passed, exit 0).
+  B (459 of 459 passed) and C (415 of 415 passed) were executed in a binder-capable guest; a
   count mismatch there means a filter or classification drifted, not that a test failed.
 - Invocation A's filter is written in the source block's pointer, because the fixtures' `SetUp`
   diagnostics and the L1 workflow (`.github/workflows/L1-tests.yml`) cite it from there; it
@@ -4017,7 +4091,8 @@ file-scope constants and the helpers through `ScopedCecLogLevel`.
   this file's three back-end-independent fixtures, `DriverAidlCompatibilityTest`,
   `DriverAidlPreflightTest` and `DriverAidlLocalInstanceTest`. The pattern only proves the
   results file came from this suite; a partial run is caught by the per-invocation count
-  reconciliation, which is why widening it is safe. The count gate in `verify_results` reconciles
+  reconciliation, which is why widening it is safe, and that reconciliation runs before the name
+  check, so a narrowed run is reported on its count. The count gate in `verify_results` reconciles
   the executed count against `--gtest_list_tests` rather than a hardcoded number, so added cases
   need no expected-count edit.
 - Superseded: an earlier comment held that `EXPECTED_SUITE_PATTERN` needed no edit for this file
@@ -5423,6 +5498,17 @@ file-scope constants and the helpers through `ScopedCecLogLevel`.
   middleware reports what it cannot require. What it does require (character device, root
   owner) is asserted by the cases above, and what it enforces across the window by the
   re-permissioned/re-owned cases.
+- The line is logged at `LOG_INFO`, which the default level prints, so this case reads it
+  without moving the level.
+
+### DriverAidlPreflightTest.ThePermissiveNodeObservationLogsNoWarning
+
+- Pins the level of the permissive-node line. Every standard binder node is `0666`, so a
+  `LOG_WARN` line here fired on every healthy AIDL start and taught integrators to ignore WARN.
+- The case sets the level to WARN with `ScopedCecLogLevel`, runs the same accepted preflight and
+  asserts the line absent with the verdict still true. A non-root-owned node, refused at
+  `LOG_WARN`, is run under the same level as the positive control: its line must print, so the
+  absence is evidence about the line's level and not about a silenced capture.
 
 ### DriverAidlSelectionTest
 
@@ -7293,7 +7379,10 @@ Detail moved out of the condensed comments in the first part of the L2 runner's 
   without a readiness line, which the bounded wait reports. Checking here would mean this process
   reaching the service manager, which on the pinned binder stack aborts the process when no driver
   node exists and blocks indefinitely when no service manager runs; neither may be risked in a
-  runner that also executes the legacy invocation on a host without binder.
+  runner that also executes the legacy invocation on a host without binder. On `absent`, where no
+  host runs, it is detected from the resolved selection instead: after `init()`,
+  `failUnlessSelectedBackEndMatchesMode()` fails the run when the factory did not select the
+  legacy back-end, by `dynamic_cast` and with no binder call.
 - This translation unit includes no binder or AIDL header and makes no direct binder API call.
   On the legacy (`absent`) invocation it launches no host and hosts no fake; only the `remote`
   invocation launches the separate host binary, `fake_hdmi_cec_aidl_host`, named by
@@ -8242,6 +8331,15 @@ the global environment and `main()`.
   after it would not run, and the reap supplies the host's exit status, the single most informative
   fact about why no token arrived.
 
+### resolvedAidlMode()
+
+- The single spelling of the "unset or empty means `absent`" rule. `applyAidlModeBeforeInit()`
+  acts on its result before `init()`, and `failUnlessSelectedBackEndMatchesMode()` checks the
+  selection against the same result after it. It does not validate; `applyAidlModeBeforeInit()`
+  fails the run on an unrecognised value.
+- It differs from the seam `cecL2RequestedAidlMode()`, which hands the case file the raw value so
+  the selection case can tell "unset or empty" from an explicit `absent`.
+
 ### applyAidlModeBeforeInit()
 
 - The one place the tier's two invocations diverge. The legacy mode launching no second process and
@@ -8255,6 +8353,24 @@ the global environment and `main()`.
   in the binary naming an unvalidated value, the boundary the log-injection contract applies at.
   Streamed raw, a mode of `$'bogus\n::error::FORGED'` ended the message and began a standalone
   GitHub workflow command on the next line.
+- The `absent` trace says this harness makes no binder call, not that the process avoids
+  libbinder: on a host with a binder driver node, `init()`'s production selection reaches
+  libbinder whatever the mode.
+
+### failUnlessSelectedBackEndMatchesMode()
+
+- The hard failure for a stale registration in mode `absent`. On `remote` the host refuses a taken
+  name; `absent` launches no host and performs no lookup, which left a stale "HdmiCec" service free
+  to win the selection, the run then failing only through case-level mismatches. Reading the
+  outcome after `init()` closes that gap with no binder call from this translation unit.
+- Identity is a `dynamic_cast` against `DriverImpl`, whose header includes no binder or AIDL
+  header. `Driver::getInstance()` returns only `DriverImpl` or `DriverAidlImpl`, so "not
+  `DriverImpl`" is the AIDL back-end; `remote` requires exactly that, and its failure points at the
+  factory's "not usable" line, which records why the AIDL back-end was declined.
+- The service name is a literal in the diagnostic because this translation unit cannot include
+  the generated interface that spells it.
+- The failure is raised in the global environment's `SetUp()`, so no case body runs and the binary
+  exits non-zero; `TearDown()` still runs and reaps any host.
 
 ### Cross-translation-unit seam (section banner)
 
@@ -8393,6 +8509,9 @@ the global environment and `main()`.
   `Driver::getInstance().open()` refused by the selected HAL, or `Bus::start()` failing. Swallowing
   either reports a green suite for a process that never initialized, every case then asserting
   against an unopened stack.
+- **Checked selection.** Immediately after init, `failUnlessSelectedBackEndMatchesMode()` holds the
+  resolved selection to the mode, so a stale registration under `absent`, or a legacy selection
+  under `remote`, fails the run before a case executes rather than through case-level mismatches.
 
 ### CecL2TestEnvironment::TearDown()
 

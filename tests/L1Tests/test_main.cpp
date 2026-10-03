@@ -290,6 +290,18 @@ void publishFakeForMode(const std::string &mode) {
 }
 
 /**
+ * @brief Returns CEC_TEST_AIDL_MODE as this harness acts on it, an unset or empty value as absent
+ *
+ * @return std::string  - The mode, not yet validated; applyAidlModeBeforeInit() refuses unknowns.
+ * @see applyAidlModeBeforeInit(), failUnlessSelectedBackEndMatchesMode()
+ */
+std::string resolvedAidlMode() {
+    const char *const requested = ::getenv(AIDL_MODE_VARIABLE);
+    return (requested != nullptr && requested[0] != '\0') ? std::string(requested)
+                                                          : std::string(AIDL_MODE_ABSENT);
+}
+
+/**
  * @brief Reads CEC_TEST_AIDL_MODE and acts on it before the back-end selection resolves
  *
  * The modes are described in the file comment; remote is a hard failure here because only
@@ -303,11 +315,7 @@ void publishFakeForMode(const std::string &mode) {
  * @see publishFakeForMode()
  */
 void applyAidlModeBeforeInit() {
-    const char *const requested = ::getenv(AIDL_MODE_VARIABLE);
-
-    // An unset or empty mode selects absent.
-    const std::string mode =
-        (requested != nullptr && requested[0] != '\0') ? requested : AIDL_MODE_ABSENT;
+    const std::string mode = resolvedAidlMode();
 
     if (mode == AIDL_MODE_ABSENT) {
         std::cout << "[CecTestEnvironment] " << AIDL_MODE_VARIABLE << "=" << mode
@@ -337,6 +345,44 @@ void applyAidlModeBeforeInit() {
            << AIDL_MODE_REMOTE << ". Refusing to fall back to " << AIDL_MODE_ABSENT
            << ", because a typo must not quietly downgrade the run to the legacy back-end and "
               "report it as a pass";
+}
+
+/**
+ * @brief Fails the run unless LibCCEC::init() selected the back-end that @p mode requires
+ *
+ * Absent and incompatible require the legacy back-end, compatible the AIDL one. Identity is read
+ * by dynamic_cast, so no binder call is made; under absent an AIDL selection means another process
+ * already publishes the production service name.
+ *
+ * @param [in] mode  - The mode applyAidlModeBeforeInit() accepted, from resolvedAidlMode().
+ *
+ * @pre LibCCEC::init() has returned, so Driver::getInstance() is resolved for the process.
+ * @warning Fatal assertions return without unwinding the caller; call via ASSERT_NO_FATAL_FAILURE.
+ * @see failIfServiceAlreadyPublished()
+ */
+void failUnlessSelectedBackEndMatchesMode(const std::string &mode) {
+    Driver &driver = Driver::getInstance();
+    const bool legacySelected = (dynamic_cast<DriverImpl *>(&driver) != NULL);
+    const bool aidlSelected = (dynamic_cast<DriverAidlImpl *>(&driver) != NULL);
+    const char *const selected = legacySelected ? "the legacy back-end"
+                                 : aidlSelected ? "the AIDL back-end"
+                                                : "a back-end of neither concrete type";
+
+    if (mode == AIDL_MODE_ABSENT) {
+        ASSERT_TRUE(legacySelected)
+            << AIDL_MODE_VARIABLE << "=" << mode << " registered no AIDL service, yet the factory "
+               "selected " << selected << ", so \""
+            << ::com::rdk::hal::hdmicec::IHdmiCec::serviceName() << "\" is already published by "
+               "another process: a stale registration. This run's outcome would depend on a "
+               "process this suite does not own; stop that process and run again";
+        return;
+    }
+
+    const bool aidlRequired = (mode == AIDL_MODE_COMPATIBLE);
+    ASSERT_TRUE(aidlRequired ? aidlSelected : legacySelected)
+        << AIDL_MODE_VARIABLE << "=" << mode << " requires the "
+        << (aidlRequired ? "AIDL" : "legacy") << " back-end, but the factory selected "
+        << selected << ", so no case result in this run is evidence for the mode it was given";
 }
 
 /**
@@ -552,6 +598,9 @@ public:
         ASSERT_NO_THROW({ LibCCEC::getInstance().init("CEC_TEST"); })
             << "the CEC library could not be initialized, so not one suite in this binary "
                "has its precondition; continuing would assert against an uninitialized stack";
+
+        // init() has fixed the selection; a back-end the mode did not ask for stops the run.
+        ASSERT_NO_FATAL_FAILURE(failUnlessSelectedBackEndMatchesMode(resolvedAidlMode()));
     }
     
     void TearDown() override {
