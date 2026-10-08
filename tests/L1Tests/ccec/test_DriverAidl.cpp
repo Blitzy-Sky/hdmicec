@@ -9315,6 +9315,8 @@ TEST_F(DriverAidlLocalInstanceTest, AllocationTriesTheNextCandidateOnRefusalAndS
 
         EXPECT_EQ(probe.heldAddresses(), std::vector<int>({ 4 }))
             << "a poll that failed with BUSY was not treated as free";
+        EXPECT_EQ(controller->getAddLogicalAddressesCallCount(), 1)
+            << "the candidate whose poll failed with BUSY was not offered to the HAL exactly once";
         EXPECT_EQ(controller->getLastAddedLogicalAddresses(), std::vector<int32_t>({ 4 }));
         EXPECT_EQ(controller->getAllocationPolls(), std::vector<int32_t>({ 4 }))
             << "allocation polled another candidate after registering the one whose poll failed";
